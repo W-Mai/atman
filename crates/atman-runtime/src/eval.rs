@@ -83,7 +83,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let name = tool_name(path);
             let tool = match ctx.tools.get(&name) {
                 Some(t) => t,
-                None => return Value::Err(RuntimeError::UndefinedTool(name)),
+                None => {
+                    if is_type_annotation(path) {
+                        return Value::Unit;
+                    }
+                    return Value::Err(RuntimeError::UndefinedTool(name));
+                }
             };
             let mut positional = Vec::new();
             let mut named = Vec::new();
@@ -132,8 +137,10 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut model: Option<String> = None;
             let mut prompt: Option<String> = None;
             let mut input: Value = Value::Unit;
-            let mut schema: Option<String> = None;
             for (k, v) in kwargs {
+                if k.name == "schema" {
+                    continue;
+                }
                 let val = eval_expr(v, env, ctx).await;
                 if val.is_err() {
                     return val;
@@ -158,10 +165,6 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         }
                     },
                     "input" => input = val,
-                    "schema" => match val {
-                        Value::Str(s) => schema = Some(s),
-                        _ => schema = None,
-                    },
                     _ => {}
                 }
             }
@@ -180,7 +183,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 model,
                 prompt,
                 input,
-                schema,
+                schema: None,
             };
             match provider.call(req).await {
                 Ok(v) => v,
@@ -240,6 +243,17 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
 fn tool_name(path: &[atman_dsl::ast::Ident]) -> String {
     let parts: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
     parts.join(".")
+}
+
+// Bare primitive names inside `schema: { valid: bool, ... }` parse as tool calls; treat as Unit.
+fn is_type_annotation(path: &[atman_dsl::ast::Ident]) -> bool {
+    if path.len() != 1 {
+        return false;
+    }
+    matches!(
+        path[0].name.as_str(),
+        "bool" | "int" | "float" | "string" | "path" | "bytes" | "duration"
+    )
 }
 
 fn eval_literal(lit: &Literal) -> Value {
