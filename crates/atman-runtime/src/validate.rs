@@ -69,6 +69,7 @@ fn walk_expr(
             walk_expr(left, scope, tools, errors);
             walk_expr(right, scope, tools, errors);
         }
+        Expr::Unary { operand, .. } => walk_expr(operand, scope, tools, errors),
         Expr::List(items) => {
             for item in items {
                 walk_expr(item, scope, tools, errors);

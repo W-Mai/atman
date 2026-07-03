@@ -1,4 +1,4 @@
-use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node};
+use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
 use crate::env::Env;
 use crate::error::RuntimeError;
@@ -53,6 +53,13 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
                 return r;
             }
             eval_binop(*op, &l, &r)
+        }
+        Expr::Unary { op, operand } => {
+            let v = eval_expr(operand, env, ctx).await;
+            if v.is_err() {
+                return v;
+            }
+            eval_unop(*op, &v)
         }
         Expr::List(items) => {
             let mut acc = Vec::with_capacity(items.len());
@@ -719,6 +726,52 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Value {
                 l,
                 r,
             ),
+        },
+        BinOp::Sub => match (l, r) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(a - b),
+            (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
+            _ => type_mismatch("int-int | float-float", l, r),
+        },
+        BinOp::Mul => match (l, r) {
+            (Value::Int(a), Value::Int(b)) => Value::Int(a * b),
+            (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
+            _ => type_mismatch("int*int | float*float", l, r),
+        },
+        BinOp::Div => match (l, r) {
+            (Value::Int(_), Value::Int(0)) => {
+                Value::Err(RuntimeError::ToolFailed("integer div by zero".into()))
+            }
+            (Value::Int(a), Value::Int(b)) => Value::Int(a / b),
+            (Value::Float(a), Value::Float(b)) => Value::Float(a / b),
+            _ => type_mismatch("int/int | float/float", l, r),
+        },
+        BinOp::Mod => match (l, r) {
+            (Value::Int(_), Value::Int(0)) => {
+                Value::Err(RuntimeError::ToolFailed("integer mod by zero".into()))
+            }
+            (Value::Int(a), Value::Int(b)) => Value::Int(a % b),
+            (Value::Float(a), Value::Float(b)) => Value::Float(a % b),
+            _ => type_mismatch("int%int | float%float", l, r),
+        },
+    }
+}
+
+fn eval_unop(op: UnOp, v: &Value) -> Value {
+    match op {
+        UnOp::Not => match v {
+            Value::Bool(b) => Value::Bool(!b),
+            other => Value::Err(RuntimeError::TypeMismatch {
+                expected: "bool".into(),
+                actual: other.kind_name().into(),
+            }),
+        },
+        UnOp::Neg => match v {
+            Value::Int(n) => Value::Int(-n),
+            Value::Float(n) => Value::Float(-n),
+            other => Value::Err(RuntimeError::TypeMismatch {
+                expected: "int or float".into(),
+                actual: other.kind_name().into(),
+            }),
         },
     }
 }

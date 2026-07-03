@@ -238,6 +238,14 @@ fn peek_binop(input: ParseStream) -> Option<(BinOp, u8)> {
         Some((BinOp::Gt, 3))
     } else if input.peek(Token![+]) {
         Some((BinOp::Add, 4))
+    } else if input.peek(Token![-]) {
+        Some((BinOp::Sub, 4))
+    } else if input.peek(Token![*]) {
+        Some((BinOp::Mul, 5))
+    } else if input.peek(Token![/]) {
+        Some((BinOp::Div, 5))
+    } else if input.peek(Token![%]) {
+        Some((BinOp::Mod, 5))
     } else {
         None
     }
@@ -272,11 +280,39 @@ fn consume_binop(input: ParseStream, op: BinOp) -> Result<()> {
         BinOp::Add => {
             input.parse::<Token![+]>()?;
         }
+        BinOp::Sub => {
+            input.parse::<Token![-]>()?;
+        }
+        BinOp::Mul => {
+            input.parse::<Token![*]>()?;
+        }
+        BinOp::Div => {
+            input.parse::<Token![/]>()?;
+        }
+        BinOp::Mod => {
+            input.parse::<Token![%]>()?;
+        }
     }
     Ok(())
 }
 
 fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
+    if input.peek(Token![!]) && !input.peek(Token![!=]) {
+        input.parse::<Token![!]>()?;
+        let operand = parse_expr_primary(input)?;
+        return Ok(Expr::Unary {
+            op: UnOp::Not,
+            operand: Box::new(operand),
+        });
+    }
+    if input.peek(Token![-]) {
+        input.parse::<Token![-]>()?;
+        let operand = parse_expr_primary(input)?;
+        return Ok(Expr::Unary {
+            op: UnOp::Neg,
+            operand: Box::new(operand),
+        });
+    }
     if input.peek(Token![@]) {
         input.parse::<Token![@]>()?;
         let s: LitStr = input.parse()?;

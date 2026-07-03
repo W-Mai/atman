@@ -49,6 +49,10 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    Unary {
+        op: UnOp,
+        operand: Box<Expr>,
+    },
     Call {
         func: Ident,
         args: Vec<Expr>,
@@ -69,6 +73,16 @@ pub enum BinOp {
     And,
     Or,
     Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnOp {
+    Not,
+    Neg,
 }
 
 #[derive(Debug, Clone)]

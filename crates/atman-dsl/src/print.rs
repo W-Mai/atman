@@ -189,6 +189,10 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
             write!(out, " {} ", binop_str(*op)).unwrap();
             write_expr(out, right, indent);
         }
+        Expr::Unary { op, operand } => {
+            out.push_str(unop_str(*op));
+            write_expr(out, operand, indent);
+        }
         Expr::Call { func, args } => {
             write!(out, "{}(", func.name).unwrap();
             for (i, a) in args.iter().enumerate() {
@@ -335,5 +339,16 @@ fn binop_str(op: BinOp) -> &'static str {
         BinOp::And => "&&",
         BinOp::Or => "||",
         BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+    }
+}
+
+fn unop_str(op: UnOp) -> &'static str {
+    match op {
+        UnOp::Not => "!",
+        UnOp::Neg => "-",
     }
 }
