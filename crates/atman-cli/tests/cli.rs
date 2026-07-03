@@ -241,7 +241,12 @@ fn repl_slash_command_runs_flow_from_config_dir() {
         .spawn()
         .unwrap();
     use std::io::Write;
-    child.stdin.as_mut().unwrap().write_all(b"/greet atman\n:exit\n").unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/greet atman\n:exit\n")
+        .unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("hi atman"), "stdout: {stdout}");
@@ -261,7 +266,12 @@ fn repl_slash_command_unknown_reports_error() {
         .spawn()
         .unwrap();
     use std::io::Write;
-    child.stdin.as_mut().unwrap().write_all(b"/missing\n:exit\n").unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/missing\n:exit\n")
+        .unwrap();
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no such command"), "stderr: {stderr}");
@@ -282,7 +292,11 @@ fn repl_help_and_exit_via_stdin() {
     let stdin = child.stdin.as_mut().unwrap();
     stdin.write_all(b":help\n:session\n:exit\n").unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains(":help"));
     assert!(stdout.contains("session_id:"));

@@ -263,6 +263,79 @@ fn count_lines(path: &std::path::Path) -> usize {
     }
 }
 
+enum RouteOutcome {
+    Handled(Value),
+    HandledErr(anyhow::Error),
+    Unmatched,
+}
+
+async fn route_input(line: &str, executor: &Executor) -> RouteOutcome {
+    let cfg = match config_dir() {
+        Ok(c) => c,
+        Err(_) => return RouteOutcome::Unmatched,
+    };
+    let routes_path = cfg.join("routes.toml");
+    if !routes_path.exists() {
+        return RouteOutcome::Unmatched;
+    }
+    let contents = match std::fs::read_to_string(&routes_path) {
+        Ok(c) => c,
+        Err(_) => return RouteOutcome::Unmatched,
+    };
+    for (i, raw_line) in contents.lines().enumerate() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((prefix, command)) = trimmed.split_once("->") else {
+            eprintln!(
+                "[atman] routes.toml:{}: expected `<prefix> -> <command>`",
+                i + 1
+            );
+            continue;
+        };
+        let prefix = prefix.trim().trim_matches('"');
+        let command = command.trim();
+        if line.starts_with(prefix) {
+            let rest = line[prefix.len()..].trim();
+            let call = if rest.is_empty() {
+                command.to_string()
+            } else {
+                format!("{command} {rest}")
+            };
+            return match run_slash_command(&call, executor).await {
+                Ok(v) => RouteOutcome::Handled(v),
+                Err(e) => RouteOutcome::HandledErr(e),
+            };
+        }
+    }
+    RouteOutcome::Unmatched
+}
+
+async fn run_boot_flow(executor: &Executor) -> Result<()> {
+    let cfg = match config_dir() {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let path = cfg.join("on_session_start.at");
+    if !path.exists() {
+        return Ok(());
+    }
+    let source =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let parsed = parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
+    if parsed.flows.is_empty() {
+        return Ok(());
+    }
+    let flow_name = parsed.flows[0].name.name.clone();
+    let value = executor.run(&parsed, &flow_name, vec![]).await?;
+    let rendered = render_value(&value);
+    if !rendered.is_empty() {
+        println!("{rendered}");
+    }
+    Ok(())
+}
+
 async fn run_slash_command(line: &str, executor: &Executor) -> Result<Value> {
     let mut parts = line.split_whitespace();
     let name = parts.next().context("empty slash command")?;
@@ -271,8 +344,8 @@ async fn run_slash_command(line: &str, executor: &Executor) -> Result<Value> {
     if !path.exists() {
         bail!("no such command: {} (looked for {})", name, path.display());
     }
-    let source = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let source =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let parsed = parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
     if parsed.flows.len() != 1 {
         bail!("{} must contain exactly one flow", path.display());
@@ -287,14 +360,23 @@ async fn run_slash_command(line: &str, executor: &Executor) -> Result<Value> {
         if let Some((k, v)) = tok.split_once('=') {
             kv.push((k.to_string(), Value::Str(v.to_string())));
         } else if positional_index < params.len() {
-            kv.push((params[positional_index].clone(), Value::Str(tok.to_string())));
+            kv.push((
+                params[positional_index].clone(),
+                Value::Str(tok.to_string()),
+            ));
             positional_index += 1;
         } else {
-            bail!("extra positional argument `{tok}` (flow expects {} params)", params.len());
+            bail!(
+                "extra positional argument `{tok}` (flow expects {} params)",
+                params.len()
+            );
         }
     }
 
-    executor.run(&parsed, &flow_name, kv).await.map_err(Into::into)
+    executor
+        .run(&parsed, &flow_name, kv)
+        .await
+        .map_err(Into::into)
 }
 
 async fn cmd_repl() -> Result<()> {
@@ -316,6 +398,10 @@ async fn cmd_repl() -> Result<()> {
 
     let mut executor = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&mut executor.tools);
+
+    if let Err(e) = run_boot_flow(&executor).await {
+        eprintln!("[atman] boot flow error: {e}");
+    }
 
     let config = Config::builder().auto_add_history(true).build();
     let mut editor: DefaultEditor = DefaultEditor::with_config(config)?;
