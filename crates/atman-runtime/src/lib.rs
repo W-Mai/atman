@@ -6,6 +6,7 @@ pub mod event;
 pub mod event_writer;
 pub mod exec;
 pub mod executor;
+pub mod injection;
 pub mod memory;
 pub mod message;
 pub mod provider;
@@ -24,9 +25,8 @@ pub use eval::{EvalCtx, eval_expr};
 pub use event::{
     Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable, TurnId,
 };
-pub use event_writer::EventWriter;
-pub use exec::{exec_flow, exec_stmts};
 pub use executor::Executor;
+pub use injection::{Injection, InjectionId, InjectionState};
 pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
 pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
 pub use session::{Session, SessionId};

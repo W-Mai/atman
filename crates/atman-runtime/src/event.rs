@@ -90,6 +90,11 @@ pub enum Event {
         message: crate::message::Message,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    UserInject {
+        turn_id: TurnId,
+        injection: crate::injection::Injection,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
