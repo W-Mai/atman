@@ -40,6 +40,19 @@ const REVIEW_FLOW: &str = r#"flow review_code(file: path) -> Review {
 }
 "#;
 
+#[test]
+fn examples_review_code_at_parses() {
+    let src = std::fs::read_to_string("../../examples/review_code.at").unwrap();
+    let file = parse_file(&src).unwrap();
+    assert_eq!(file.flows.len(), 1);
+    assert_eq!(file.flows[0].name.name, "review_code");
+    let contract = file.flows[0]
+        .contract
+        .as_ref()
+        .expect("upgraded flow must declare contract");
+    assert!(contract.blocks.iter().any(|b| b.name.name == "scope"));
+}
+
 #[tokio::test]
 async fn end_to_end_review_flow_produces_structured_output() {
     let file = parse_file(REVIEW_FLOW).unwrap();
