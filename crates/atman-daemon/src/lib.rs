@@ -5,6 +5,7 @@ use serde_json::json;
 
 pub mod http;
 pub mod state;
+pub mod unix;
 
 pub use state::DaemonState;
 
