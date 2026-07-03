@@ -5,20 +5,10 @@ use atman_dsl::ast::{File, FlowDecl};
 use crate::error::RuntimeError;
 use crate::event::{Event, EventSink, FlowRunId, FlowStatus, TurnId};
 use crate::exec::exec_flow_with_siblings;
-use crate::message::Message;
 use crate::provider::ProviderRegistry;
+use crate::session::Session;
 use crate::tool::{ToolCtx, ToolRegistry};
 use crate::value::Value;
-
-pub trait MessageSink: Send + Sync {
-    fn append(&self, msg: Message, flow_run_id: Option<FlowRunId>);
-}
-
-impl MessageSink for crate::session::Session {
-    fn append(&self, msg: Message, flow_run_id: Option<FlowRunId>) {
-        self.append_message(msg, flow_run_id);
-    }
-}
 
 pub struct Executor {
     pub tools: ToolRegistry,
@@ -61,7 +51,7 @@ impl Executor {
         flow_name: &str,
         args: Vec<(String, Value)>,
         turn_id: Option<TurnId>,
-        message_sink: Option<&dyn MessageSink>,
+        session: Option<&Session>,
     ) -> Result<Value, RuntimeError> {
         let flows: HashMap<_, _> = file
             .flows
@@ -71,8 +61,7 @@ impl Executor {
         let flow = flows
             .get(flow_name)
             .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{flow_name}`")))?;
-        self.run_flow(flow, args, &flows, turn_id, message_sink)
-            .await
+        self.run_flow(flow, args, &flows, turn_id, session).await
     }
 
     async fn run_flow(
@@ -81,7 +70,7 @@ impl Executor {
         args: Vec<(String, Value)>,
         flows: &HashMap<String, FlowDecl>,
         turn_id: Option<TurnId>,
-        message_sink: Option<&dyn MessageSink>,
+        session: Option<&Session>,
     ) -> Result<Value, RuntimeError> {
         let run_id = FlowRunId::now();
         self.events.emit(Event::FlowStart {
@@ -89,7 +78,8 @@ impl Executor {
             flow_name: flow.name.name.clone(),
             ts: chrono::Utc::now(),
         });
-        let result = exec_flow_with_siblings(
+        let flow_cancel = session.map(|s| s.flow_cancel_token()).unwrap_or_default();
+        let exec_fut = exec_flow_with_siblings(
             flow,
             args,
             &self.tools,
@@ -99,9 +89,14 @@ impl Executor {
             Some(&self.events),
             turn_id,
             Some(run_id.clone()),
-            message_sink,
-        )
-        .await;
+            session,
+            flow_cancel.clone(),
+        );
+        let result = tokio::select! {
+            biased;
+            _ = flow_cancel.cancelled() => Err(RuntimeError::Cancelled("flow cancelled by user".into())),
+            r = exec_fut => r,
+        };
         let status = match &result {
             Ok(_) => FlowStatus::Ok,
             Err(e) => FlowStatus::Errored {

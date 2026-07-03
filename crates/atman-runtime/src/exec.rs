@@ -364,7 +364,17 @@ pub async fn exec_flow(
 ) -> Result<Value, RuntimeError> {
     let flows = std::collections::HashMap::new();
     exec_flow_with_siblings(
-        flow, args, tools, tool_ctx, providers, &flows, None, None, None, None,
+        flow,
+        args,
+        tools,
+        tool_ctx,
+        providers,
+        &flows,
+        None,
+        None,
+        None,
+        None,
+        tokio_util::sync::CancellationToken::new(),
     )
     .await
 }
@@ -380,7 +390,8 @@ pub async fn exec_flow_with_siblings(
     events: Option<&crate::event::EventSink>,
     turn_id: Option<crate::event::TurnId>,
     flow_run_id: Option<crate::event::FlowRunId>,
-    message_sink: Option<&dyn crate::executor::MessageSink>,
+    session: Option<&crate::session::Session>,
+    flow_cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value, RuntimeError> {
     let mut env = Env::new();
     for (name, value) in args {
@@ -395,7 +406,8 @@ pub async fn exec_flow_with_siblings(
         events,
         turn_id,
         flow_run_id,
-        message_sink,
+        session,
+        flow_cancel,
     };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),

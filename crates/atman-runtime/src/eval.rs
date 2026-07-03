@@ -14,7 +14,8 @@ pub struct EvalCtx<'a> {
     pub events: Option<&'a crate::event::EventSink>,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
-    pub message_sink: Option<&'a dyn crate::executor::MessageSink>,
+    pub session: Option<&'a crate::session::Session>,
+    pub flow_cancel: tokio_util::sync::CancellationToken,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -83,6 +84,9 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
 }
 
 async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    if ctx.flow_cancel.is_cancelled() {
+        return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
+    }
     match node {
         Node::ToolCall { path, args } => {
             let name = tool_name(path);
@@ -333,8 +337,8 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 }
                 match outcome {
                     Ok(am) => {
-                        if let Some(sink) = ctx.message_sink {
-                            sink.append(am.message.clone(), ctx.flow_run_id.clone());
+                        if let Some(session) = ctx.session {
+                            session.append_message(am.message.clone(), ctx.flow_run_id.clone());
                         }
                         return crate::provider::assistant_message_to_value(&am);
                     }
@@ -742,7 +746,8 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            message_sink: None,
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -835,7 +840,8 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            message_sink: None,
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -872,7 +878,8 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            message_sink: None,
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
         };
 
         let mut env = Env::new();
@@ -910,7 +917,8 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            message_sink: None,
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -943,7 +951,8 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            message_sink: None,
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
         };
 
         let src = r#"flow t() {
@@ -981,7 +990,8 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            message_sink: None,
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -1009,7 +1019,8 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            message_sink: None,
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -1053,6 +1064,7 @@ flow parent(x: Int) -> Int {
             None,
             None,
             None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1085,6 +1097,7 @@ flow parent(x: Int) -> Int {
             None,
             None,
             None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1115,7 +1128,8 @@ flow parent(x: Int) -> Int {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            message_sink: None,
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
         };
 
         let mut env = Env::new();
