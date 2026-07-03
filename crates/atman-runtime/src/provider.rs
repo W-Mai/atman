@@ -18,7 +18,7 @@ pub struct LlmRequest {
     pub cache_prompt: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct TokenUsage {
     pub input: u64,
     pub cached_input: u64,

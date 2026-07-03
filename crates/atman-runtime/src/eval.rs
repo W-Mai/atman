@@ -249,6 +249,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         usage,
                         wallclock_ms: elapsed_ms,
                         status,
+                        ts: chrono::Utc::now(),
                     });
                 }
                 match outcome {

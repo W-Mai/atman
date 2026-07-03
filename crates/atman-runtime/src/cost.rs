@@ -104,6 +104,7 @@ mod tests {
             },
             wallclock_ms: 100,
             status: LlmCallStatus::Ok,
+            ts: chrono::Utc::now(),
         }
     }
 
@@ -117,6 +118,7 @@ mod tests {
             },
             wallclock_ms: 50,
             status: LlmCallStatus::Errored("boom".into()),
+            ts: chrono::Utc::now(),
         }
     }
 
@@ -153,16 +155,19 @@ mod tests {
     #[test]
     fn non_llm_events_ignored() {
         use crate::event::{FlowRunId, FlowStatus};
+        let run_id = FlowRunId::now();
         let events = vec![
             Event::FlowStart {
-                run_id: FlowRunId(1),
+                run_id: run_id.clone(),
                 flow_name: "t".into(),
+                ts: chrono::Utc::now(),
             },
             ok_call("m", "p", 5, 5),
             Event::FlowEnd {
-                run_id: FlowRunId(1),
+                run_id,
                 flow_name: "t".into(),
                 status: FlowStatus::Ok,
+                ts: chrono::Utc::now(),
             },
         ];
         let t = total(&events);

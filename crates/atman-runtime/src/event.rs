@@ -1,21 +1,40 @@
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-#[derive(Debug, Clone)]
-pub struct FlowRunId(pub u64);
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct FlowRunId(pub Uuid);
 
-#[derive(Debug, Clone)]
+impl FlowRunId {
+    pub fn now() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl std::fmt::Display for FlowRunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     FlowStart {
         run_id: FlowRunId,
         flow_name: String,
+        ts: chrono::DateTime<chrono::Utc>,
     },
     FlowEnd {
         run_id: FlowRunId,
         flow_name: String,
         status: FlowStatus,
+        ts: chrono::DateTime<chrono::Utc>,
     },
     LlmCall {
         model: String,
@@ -23,17 +42,20 @@ pub enum Event {
         usage: crate::provider::TokenUsage,
         wallclock_ms: u64,
         status: LlmCallStatus,
+        ts: chrono::DateTime<chrono::Utc>,
     },
 }
 
-#[derive(Debug, Clone)]
-pub enum LlmCallStatus {
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FlowStatus {
     Ok,
     Errored(String),
 }
 
-#[derive(Debug, Clone)]
-pub enum FlowStatus {
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LlmCallStatus {
     Ok,
     Errored(String),
 }
@@ -69,6 +91,7 @@ pub struct Observable<T> {
 #[derive(Default, Clone)]
 pub struct EventSink {
     events: Arc<Mutex<Vec<Event>>>,
+    forwarder: Option<mpsc::UnboundedSender<Event>>,
 }
 
 impl EventSink {
@@ -76,7 +99,15 @@ impl EventSink {
         Self::default()
     }
 
+    pub fn with_forwarder(mut self, tx: mpsc::UnboundedSender<Event>) -> Self {
+        self.forwarder = Some(tx);
+        self
+    }
+
     pub fn emit(&self, event: Event) {
+        if let Some(tx) = &self.forwarder {
+            let _ = tx.send(event.clone());
+        }
         self.events.lock().expect("event sink poisoned").push(event);
     }
 

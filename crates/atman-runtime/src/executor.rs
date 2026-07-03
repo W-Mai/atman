@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use atman_dsl::ast::{File, FlowDecl};
 
@@ -15,7 +14,6 @@ pub struct Executor {
     pub providers: ProviderRegistry,
     pub events: EventSink,
     pub tool_ctx: ToolCtx,
-    next_run_id: AtomicU64,
 }
 
 impl Executor {
@@ -25,7 +23,6 @@ impl Executor {
             providers: ProviderRegistry::new(),
             events: EventSink::new(),
             tool_ctx: ToolCtx::new(),
-            next_run_id: AtomicU64::new(1),
         }
     }
 
@@ -52,10 +49,11 @@ impl Executor {
         args: Vec<(String, Value)>,
         flows: &HashMap<String, FlowDecl>,
     ) -> Result<Value, RuntimeError> {
-        let run_id = FlowRunId(self.next_run_id.fetch_add(1, Ordering::SeqCst));
+        let run_id = FlowRunId::now();
         self.events.emit(Event::FlowStart {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
+            ts: chrono::Utc::now(),
         });
         let result = exec_flow_with_siblings(
             flow,
@@ -75,6 +73,7 @@ impl Executor {
             run_id,
             flow_name: flow.name.name.clone(),
             status,
+            ts: chrono::Utc::now(),
         });
         result
     }
