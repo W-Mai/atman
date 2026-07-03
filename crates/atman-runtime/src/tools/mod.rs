@@ -6,6 +6,7 @@ pub mod bash;
 pub mod fs;
 pub mod memory;
 pub mod memory_stubs;
+pub mod preview;
 pub mod stdlib;
 pub mod web;
 
@@ -28,6 +29,10 @@ pub fn register_web(reg: &mut ToolRegistry, config: web::WebConfig) {
 
 pub fn register_web_search(reg: &mut ToolRegistry, provider: Arc<dyn web::SearchProvider>) {
     reg.register(Arc::new(web::WebSearch::new(provider)));
+}
+
+pub fn register_preview(reg: &mut ToolRegistry, config: preview::PreviewConfig) {
+    reg.register(Arc::new(preview::PreviewPush::new(config)));
 }
 
 pub fn register_memory(

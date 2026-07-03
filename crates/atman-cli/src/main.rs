@@ -141,6 +141,7 @@ async fn cmd_run(
 
     let mut executor = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&mut executor.tools);
+    tools::register_preview(&mut executor.tools, load_preview_config());
     if mock {
         executor.providers.register(Arc::new(
             MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
@@ -419,6 +420,7 @@ async fn cmd_repl() -> Result<()> {
 
     let mut executor = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&mut executor.tools);
+    tools::register_preview(&mut executor.tools, load_preview_config());
 
     if let Err(e) = run_boot_flow(&executor).await {
         eprintln!("[atman] boot flow error: {e}");
@@ -856,7 +858,79 @@ async fn cmd_doctor() -> Result<()> {
         };
         println!("  [{mark}] {name:<28} ${env}");
     }
+    println!();
+    let pcfg = load_preview_config();
+    let ping = atman_runtime::tools::preview::ping(&pcfg.base_url, pcfg.timeout_ms).await;
+    let (mark, note) = match &ping {
+        atman_runtime::tools::preview::PingResult::Ok => ("✓", String::new()),
+        atman_runtime::tools::preview::PingResult::Unavailable => (
+            "✗",
+            " (server not running; preview.push will return status=unavailable)".to_string(),
+        ),
+        atman_runtime::tools::preview::PingResult::Fail(msg) => ("✗", format!(" ({msg})")),
+    };
+    println!("preview:");
+    println!("  [{mark}] {}{}", pcfg.base_url, note);
     Ok(())
+}
+
+fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {
+    let cfg = atman_runtime::tools::preview::PreviewConfig::default();
+    let Ok(dir) = config_dir() else {
+        return cfg;
+    };
+    let path = dir.join("config.toml");
+    if !path.exists() {
+        return cfg;
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return cfg;
+    };
+    parse_preview_config(&text, cfg)
+}
+
+fn parse_preview_config(
+    text: &str,
+    mut cfg: atman_runtime::tools::preview::PreviewConfig,
+) -> atman_runtime::tools::preview::PreviewConfig {
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name) = rest.strip_suffix(']')
+        {
+            in_section = name.trim() == "preview";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim().trim_matches('"');
+        match key {
+            "base_url" => cfg.base_url = val.to_string(),
+            "timeout_ms" => {
+                if let Ok(n) = val.parse::<u64>() {
+                    cfg.timeout_ms = n;
+                }
+            }
+            "project_abs_path" => cfg.project_abs_path = val.to_string(),
+            "project_hint_slug" => cfg.project_hint_slug = Some(val.to_string()),
+            "max_body_bytes" => {
+                if let Ok(n) = val.parse::<usize>() {
+                    cfg.max_body_bytes = n;
+                }
+            }
+            _ => {}
+        }
+    }
+    cfg
 }
 
 async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Result<()> {

@@ -417,6 +417,31 @@ fn repl_attach_list_shows_pending_paths() {
 }
 
 #[test]
+fn doctor_reports_preview_unavailable_when_server_absent() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    std::fs::write(
+        cfg.path().join("config.toml"),
+        "[preview]\nbase_url = \"http://127.0.0.1:1\"\ntimeout_ms = 200\n",
+    )
+    .unwrap();
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .arg("doctor")
+        .output()
+        .expect("doctor");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("preview:"), "stdout: {stdout}");
+    assert!(stdout.contains("http://127.0.0.1:1"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("server not running") || stdout.contains("✗"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn repl_at_path_inline_becomes_image_part_in_user_msg_event() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
