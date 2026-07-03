@@ -102,10 +102,8 @@ async fn main() -> Result<()> {
         Some(Cmd::Session {
             action: SessionAction::Gc,
         }) => cmd_session_gc().await,
-        Some(_) => {
-            eprintln!("subcommand not yet implemented");
-            std::process::exit(2);
-        }
+        Some(Cmd::Cost { session_id }) => cmd_cost(session_id).await,
+        Some(Cmd::Doctor) => cmd_doctor().await,
     }
 }
 
@@ -271,6 +269,122 @@ fn count_lines(path: &std::path::Path) -> usize {
     }
 }
 
+async fn cmd_cost(session_id: Option<String>) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let root = data_dir()?;
+    let sid = match session_id {
+        Some(s) => s,
+        None => latest_session(&root)?
+            .with_context(|| format!("no sessions found under {}", root.display()))?,
+    };
+    let path = root.join("sessions").join(&sid).join("events.jsonl");
+    if !path.exists() {
+        bail!("events file not found: {}", path.display());
+    }
+
+    let contents = tokio::fs::read_to_string(&path).await?;
+    let mut by_model: BTreeMap<String, (u64, u64, u64, u64, u64)> = BTreeMap::new();
+    let mut total_calls = 0u64;
+    for line in contents.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v["type"] != "llm_call" {
+            continue;
+        }
+        let model = v["model"].as_str().unwrap_or("<unknown>").to_string();
+        let input = v["usage"]["input"].as_u64().unwrap_or(0);
+        let cached = v["usage"]["cached_input"].as_u64().unwrap_or(0);
+        let output = v["usage"]["output"].as_u64().unwrap_or(0);
+        let wall = v["wallclock_ms"].as_u64().unwrap_or(0);
+        let entry = by_model.entry(model).or_insert((0, 0, 0, 0, 0));
+        entry.0 += 1;
+        entry.1 += input;
+        entry.2 += cached;
+        entry.3 += output;
+        entry.4 += wall;
+        total_calls += 1;
+    }
+
+    println!("session: {sid}");
+    println!("total llm_calls: {total_calls}");
+    println!();
+    println!(
+        "{:<32} {:>6} {:>10} {:>10} {:>10} {:>10}",
+        "model", "calls", "in", "cached", "out", "wall_ms"
+    );
+    for (model, (calls, input, cached, output, wall)) in &by_model {
+        println!(
+            "{:<32} {:>6} {:>10} {:>10} {:>10} {:>10}",
+            model, calls, input, cached, output, wall
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_doctor() -> Result<()> {
+    let data = data_dir()?;
+    let cfg = config_dir()?;
+    let sessions = data.join("sessions");
+    let commands = cfg.join("commands");
+
+    let session_count = if sessions.exists() {
+        std::fs::read_dir(&sessions)
+            .map(|it| it.filter_map(|e| e.ok()).count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let commands_count = if commands.exists() {
+        std::fs::read_dir(&commands)
+            .map(|it| {
+                it.filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s == "at")
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    println!("atman v{}", env!("CARGO_PKG_VERSION"));
+    println!("data_dir:   {}", data.display());
+    println!(
+        " sessions:  {} ({} entries)",
+        sessions.display(),
+        session_count
+    );
+    println!("config_dir: {}", cfg.display());
+    println!(
+        " commands:  {} ({} .at files)",
+        commands.display(),
+        commands_count
+    );
+    println!();
+    println!("providers:");
+    for (name, env) in [
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("glm (anthropic compat)", "ATMAN_TEST_GLM_KEY"),
+    ] {
+        let mark = if std::env::var(env).is_ok() {
+            "✓"
+        } else {
+            "✗"
+        };
+        println!("  [{mark}] {name:<28} ${env}");
+    }
+    Ok(())
+}
+
 async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Result<()> {
     let root = data_dir()?;
     let sid = match session_id {
@@ -303,6 +417,15 @@ fn data_dir() -> Result<PathBuf> {
     let proj = ProjectDirs::from("", "", "atman")
         .context("could not determine XDG data dir; set ATMAN_DATA_DIR to override")?;
     Ok(proj.data_dir().to_path_buf())
+}
+
+fn config_dir() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("ATMAN_CONFIG_DIR") {
+        return Ok(PathBuf::from(p));
+    }
+    let proj = ProjectDirs::from("", "", "atman")
+        .context("could not determine XDG config dir; set ATMAN_CONFIG_DIR to override")?;
+    Ok(proj.config_dir().to_path_buf())
 }
 
 fn latest_session(root: &std::path::Path) -> Result<Option<String>> {

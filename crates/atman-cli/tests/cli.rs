@@ -154,6 +154,57 @@ fn session_show_prints_event_counts() {
 }
 
 #[test]
+fn cost_aggregates_llm_calls_from_session() {
+    let data = tempfile::tempdir().unwrap();
+    let flow_dir = tempfile::tempdir().unwrap();
+    let flow_path = flow_dir.path().join("c.at");
+    std::fs::write(
+        &flow_path,
+        r#"flow c(q: string) -> string {
+    return llm { model: "mock", prompt: q }
+}
+"#,
+    )
+    .unwrap();
+
+    Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .arg("run")
+        .arg("--mock")
+        .arg(&flow_path)
+        .arg("q=hi")
+        .output()
+        .unwrap();
+
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .arg("cost")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("total llm_calls: 1"));
+    assert!(stdout.contains("mock"));
+}
+
+#[test]
+fn doctor_reports_paths_and_provider_marks() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("atman v"));
+    assert!(stdout.contains("data_dir:"));
+    assert!(stdout.contains("providers:"));
+}
+
+#[test]
 fn session_gc_removes_only_empty_sessions() {
     let data = tempfile::tempdir().unwrap();
     let sessions = data.path().join("sessions");
