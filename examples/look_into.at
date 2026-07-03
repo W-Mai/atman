@@ -1,0 +1,30 @@
+flow look_into(question: string) -> Report {
+    contract {
+        scope {
+            read: [project_root]
+        }
+    }
+
+    findings = fanout [
+        subflow(explore_module, question, "src/"),
+        subflow(explore_module, question, "tests/"),
+    ] collect: all
+
+    summary = llm {
+        model: "claude-opus-4.7"
+        prompt: @"prompts/synthesize.md"
+        input: { question: question, findings: findings }
+        schema: Report
+        cache: true
+    }
+
+    return summary
+}
+
+flow explore_module(question: string, dir: string) -> Finding {
+    return llm {
+        model: "gpt-4o-mini"
+        prompt: "Focus on: " + question + " in " + dir
+        schema: Finding
+    }
+}
