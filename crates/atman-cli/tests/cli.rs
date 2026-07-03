@@ -42,6 +42,82 @@ fn run_executes_pure_flow_and_prints_return_value() {
 }
 
 #[test]
+fn run_persists_events_and_logs_tail_reads_them() {
+    let data = tempfile::tempdir().unwrap();
+    let flow_dir = tempfile::tempdir().unwrap();
+    let flow_path = flow_dir.path().join("hello.at");
+    std::fs::write(
+        &flow_path,
+        r#"flow hello() -> string {
+    return "hi persist"
+}
+"#,
+    )
+    .unwrap();
+
+    let run = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .arg("run")
+        .arg(&flow_path)
+        .output()
+        .expect("run");
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "hi persist");
+
+    let sessions = data.path().join("sessions");
+    let dirs: Vec<_> = std::fs::read_dir(&sessions)
+        .expect("sessions dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(dirs.len(), 1);
+    let sid = dirs[0].file_name().into_string().unwrap();
+
+    let tail = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .args(["logs", "tail", &sid])
+        .output()
+        .expect("logs tail");
+    assert!(
+        tail.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&tail.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&tail.stdout);
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("\"type\":\"flow_start\""));
+    assert!(lines[1].contains("\"type\":\"flow_end\""));
+}
+
+#[test]
+fn logs_tail_without_session_id_uses_latest() {
+    let data = tempfile::tempdir().unwrap();
+    let flow_dir = tempfile::tempdir().unwrap();
+    let flow_path = flow_dir.path().join("hi.at");
+    std::fs::write(&flow_path, "flow hi() -> Int { return 1 }\n").unwrap();
+
+    Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .arg("run")
+        .arg(&flow_path)
+        .output()
+        .expect("run");
+
+    let tail = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .args(["logs", "tail"])
+        .output()
+        .expect("logs tail");
+    assert!(tail.status.success());
+    let stdout = String::from_utf8_lossy(&tail.stdout);
+    assert!(stdout.contains("\"type\":\"flow_start\""));
+}
+
+#[test]
 fn run_reports_error_and_exits_nonzero() {
     let dir = tempfile::tempdir().unwrap();
     let flow_path = dir.path().join("bad.at");
