@@ -88,9 +88,16 @@ fn run_persists_events_and_logs_tail_reads_them() {
     );
     let stdout = String::from_utf8_lossy(&tail.stdout);
     let lines: Vec<_> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2);
-    assert!(lines[0].contains("\"type\":\"flow_start\""));
-    assert!(lines[1].contains("\"type\":\"flow_end\""));
+    let types: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| l.split("\"type\":\"").nth(1))
+        .filter_map(|s| s.split('"').next())
+        .collect();
+    assert!(types.contains(&"turn_start"), "types: {types:?}");
+    assert!(types.contains(&"user_msg"), "types: {types:?}");
+    assert!(types.contains(&"flow_start"), "types: {types:?}");
+    assert!(types.contains(&"flow_end"), "types: {types:?}");
+    assert!(types.contains(&"turn_end"), "types: {types:?}");
 }
 
 #[test]

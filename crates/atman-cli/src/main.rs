@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use atman_dsl::parse::parse_file;
+use atman_runtime::providers::anthropic::AnthropicProvider;
 use atman_runtime::providers::mock::MockProvider;
+use atman_runtime::providers::openai::OpenAiProvider;
 use atman_runtime::{Executor, Session, Value, tools};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
@@ -141,14 +143,25 @@ async fn cmd_run(
 
     let mut executor = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&mut executor.tools);
+    tools::register_shell(&mut executor.tools);
     tools::register_preview(&mut executor.tools, load_preview_config());
+    register_providers_from_env(&mut executor);
     if mock {
         executor.providers.register(Arc::new(
             MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
         ));
     }
 
-    let outcome = executor.run(&parsed, &flow_name, args).await;
+    let turn_id = atman_runtime::event::TurnId::now();
+    let user_msg = atman_runtime::message::Message::user_text(
+        turn_id.clone(),
+        format!("atman run {} flow={flow_name}", file.display()),
+    );
+    session.begin_turn(user_msg);
+    let outcome = executor
+        .run_in_turn(&parsed, &flow_name, args, Some(turn_id), Some(&session))
+        .await;
+    session.end_turn();
     session.shutdown().await;
 
     match outcome {
@@ -420,7 +433,9 @@ async fn cmd_repl() -> Result<()> {
 
     let mut executor = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&mut executor.tools);
+    tools::register_shell(&mut executor.tools);
     tools::register_preview(&mut executor.tools, load_preview_config());
+    register_providers_from_env(&mut executor);
 
     if let Err(e) = run_boot_flow(&executor).await {
         eprintln!("[atman] boot flow error: {e}");
@@ -872,6 +887,23 @@ async fn cmd_doctor() -> Result<()> {
     println!("preview:");
     println!("  [{mark}] {}{}", pcfg.base_url, note);
     Ok(())
+}
+
+fn register_providers_from_env(executor: &mut Executor) {
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        let mut p = AnthropicProvider::new("anthropic", key);
+        if let Ok(url) = std::env::var("ANTHROPIC_BASE_URL") {
+            p = p.with_base_url(url);
+        }
+        executor.providers.register(Arc::new(p));
+    }
+    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        let mut p = OpenAiProvider::new("openai", key);
+        if let Ok(url) = std::env::var("OPENAI_BASE_URL") {
+            p = p.with_base_url(url);
+        }
+        executor.providers.register(Arc::new(p));
+    }
 }
 
 fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {

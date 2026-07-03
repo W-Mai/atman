@@ -1,0 +1,28 @@
+flow demo(file: path) -> string {
+    contract {
+        scope {
+            read: [project_root]
+        }
+        interjection {
+            accept: [L1, L4]
+        }
+    }
+
+    code = fs.read(file)
+
+    review = llm {
+        model: "xiaomi/mimo-v2.5-pro"
+        messages: [
+            system_msg("You are a terse senior code reviewer. Output 2-3 short bullet points on the most important issue only. No prose."),
+            user_msg("Review this file:\n\n" + code),
+        ]
+    }
+
+    audit = preview.push(
+        topic: "killer-demo",
+        title: "atman review " + file,
+        content: "**file:** `" + file + "`\n\n" + review,
+    )
+
+    return review
+}
