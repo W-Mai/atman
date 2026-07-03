@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::event::{Event, EventSink, FlowRunId, TurnId};
 use crate::event_writer::EventWriter;
+use crate::injection::{Injection, InjectionId, InjectionState};
 use crate::message::{Message, MessageRole};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -29,6 +31,8 @@ pub struct Session {
     sink: EventSink,
     messages: Mutex<Vec<Message>>,
     current_turn: Mutex<Option<TurnId>>,
+    injection_queue: Mutex<Vec<Injection>>,
+    flow_cancel: Mutex<CancellationToken>,
 }
 
 impl Session {
@@ -44,6 +48,8 @@ impl Session {
             sink,
             messages: Mutex::new(Vec::new()),
             current_turn: Mutex::new(None),
+            injection_queue: Mutex::new(Vec::new()),
+            flow_cancel: Mutex::new(CancellationToken::new()),
         })
     }
 
@@ -55,6 +61,8 @@ impl Session {
             sink: EventSink::new(),
             messages: Mutex::new(Vec::new()),
             current_turn: Mutex::new(None),
+            injection_queue: Mutex::new(Vec::new()),
+            flow_cancel: Mutex::new(CancellationToken::new()),
         }
     }
 
@@ -117,6 +125,7 @@ impl Session {
     pub fn begin_turn(&self, user_msg: Message) -> TurnId {
         let turn_id = user_msg.turn_id.clone();
         *self.current_turn.lock().unwrap() = Some(turn_id.clone());
+        *self.flow_cancel.lock().unwrap() = CancellationToken::new();
         self.sink.emit(Event::TurnStart {
             turn_id: turn_id.clone(),
             ts: chrono::Utc::now(),
@@ -128,10 +137,15 @@ impl Session {
     pub fn end_turn(&self) {
         let turn_id = self.current_turn.lock().unwrap().take();
         if let Some(turn_id) = turn_id {
-            self.sink.emit(Event::TurnEnd {
-                turn_id,
-                ts: chrono::Utc::now(),
-            });
+            let now = chrono::Utc::now();
+            let mut q = self.injection_queue.lock().unwrap();
+            for inj in q.iter_mut() {
+                if inj.state == InjectionState::Pending && inj.turn_id == turn_id {
+                    inj.state = InjectionState::Cancelled;
+                }
+            }
+            drop(q);
+            self.sink.emit(Event::TurnEnd { turn_id, ts: now });
         }
     }
 
@@ -139,9 +153,65 @@ impl Session {
         self.current_turn.lock().unwrap().clone()
     }
 
+    pub fn enqueue_injection(&self, text: impl Into<String>) -> Result<InjectionId, EnqueueError> {
+        let turn_id = self
+            .current_turn
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(EnqueueError::NoActiveTurn)?;
+        let inj = Injection::new_pending(turn_id.clone(), text);
+        let id = inj.id.clone();
+        self.sink.emit(Event::UserInject {
+            turn_id,
+            injection: inj.clone(),
+            ts: inj.created_at,
+        });
+        self.injection_queue.lock().unwrap().push(inj);
+        Ok(id)
+    }
+
+    /// Drain all Pending injections for `turn_id`. Marks them Injected.
+    /// Returns them in creation order.
+    pub fn drain_injections(&self, turn_id: &TurnId) -> Vec<Injection> {
+        let mut q = self.injection_queue.lock().unwrap();
+        let mut out = Vec::new();
+        for inj in q.iter_mut() {
+            if inj.state == InjectionState::Pending && inj.turn_id == *turn_id {
+                inj.state = InjectionState::Injected;
+                out.push(inj.clone());
+            }
+        }
+        out
+    }
+
+    pub fn list_pending_injections(&self) -> Vec<Injection> {
+        self.injection_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|i| i.state == InjectionState::Pending)
+            .cloned()
+            .collect()
+    }
+
+    pub fn cancel_flow(&self) {
+        self.flow_cancel.lock().unwrap().cancel();
+    }
+
+    pub fn flow_cancel_token(&self) -> CancellationToken {
+        self.flow_cancel.lock().unwrap().clone()
+    }
+
     pub async fn shutdown(mut self) {
         if let Some(writer) = self.writer.take() {
             writer.shutdown().await;
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EnqueueError {
+    #[error("enqueue_injection called with no active turn")]
+    NoActiveTurn,
 }

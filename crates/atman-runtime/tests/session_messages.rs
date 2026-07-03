@@ -99,6 +99,85 @@ fn assistant_msg_with_flow_run_id_records_correlation() {
 }
 
 #[test]
+fn enqueue_injection_requires_active_turn() {
+    let session = Session::open_ephemeral();
+    let err = session.enqueue_injection("hi").unwrap_err();
+    assert!(format!("{err}").contains("no active turn"));
+}
+
+#[test]
+fn drain_injections_marks_pending_as_injected_and_returns_in_order() {
+    let session = Session::open_ephemeral();
+    let turn_id = TurnId::now();
+    session.begin_turn(user_msg(turn_id.clone(), "start"));
+
+    let id1 = session.enqueue_injection("first").unwrap();
+    let id2 = session.enqueue_injection("second").unwrap();
+
+    let drained = session.drain_injections(&turn_id);
+    assert_eq!(drained.len(), 2);
+    assert_eq!(drained[0].id, id1);
+    assert_eq!(drained[1].id, id2);
+    assert_eq!(drained[0].text, "first");
+    assert_eq!(drained[1].text, "second");
+    assert_eq!(drained[0].state, atman_runtime::InjectionState::Injected);
+
+    let second_drain = session.drain_injections(&turn_id);
+    assert!(second_drain.is_empty(), "drain twice should be empty");
+}
+
+#[test]
+fn end_turn_marks_pending_injections_cancelled() {
+    let session = Session::open_ephemeral();
+    let turn_id = TurnId::now();
+    session.begin_turn(user_msg(turn_id.clone(), "start"));
+    session.enqueue_injection("orphan").unwrap();
+    assert_eq!(session.list_pending_injections().len(), 1);
+    session.end_turn();
+    assert!(
+        session.list_pending_injections().is_empty(),
+        "end_turn should cancel pending injections"
+    );
+}
+
+#[test]
+fn user_inject_event_is_emitted_on_enqueue() {
+    let session = Session::open_ephemeral();
+    let turn_id = TurnId::now();
+    session.begin_turn(user_msg(turn_id.clone(), "start"));
+    session.enqueue_injection("nudge!").unwrap();
+
+    let events = session.sink().snapshot();
+    let has_inject = events.iter().any(|e| {
+        matches!(
+            e,
+            atman_runtime::Event::UserInject { turn_id: t, injection, .. }
+                if *t == turn_id && injection.text == "nudge!"
+        )
+    });
+    assert!(has_inject);
+}
+
+#[test]
+fn flow_cancel_token_is_reset_on_new_turn() {
+    let session = Session::open_ephemeral();
+    let t1 = TurnId::now();
+    session.begin_turn(user_msg(t1, "one"));
+    let tok1 = session.flow_cancel_token();
+    session.cancel_flow();
+    assert!(tok1.is_cancelled());
+    session.end_turn();
+
+    let t2 = TurnId::now();
+    session.begin_turn(user_msg(t2, "two"));
+    let tok2 = session.flow_cancel_token();
+    assert!(
+        !tok2.is_cancelled(),
+        "new turn must have fresh cancel token"
+    );
+}
+
+#[test]
 fn multiple_messages_preserve_order() {
     let session = Session::open_ephemeral();
     let t1 = TurnId::now();
