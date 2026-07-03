@@ -94,6 +94,88 @@ fn run_persists_events_and_logs_tail_reads_them() {
 }
 
 #[test]
+fn session_list_prints_rows_sorted_by_mtime() {
+    let data = tempfile::tempdir().unwrap();
+    let flow_dir = tempfile::tempdir().unwrap();
+    let flow_path = flow_dir.path().join("s.at");
+    std::fs::write(&flow_path, "flow s() -> Int { return 1 }\n").unwrap();
+
+    for _ in 0..2 {
+        Command::new(atman_binary())
+            .env("ATMAN_DATA_DIR", data.path())
+            .arg("run")
+            .arg(&flow_path)
+            .output()
+            .unwrap();
+    }
+
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .args(["session", "list"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].contains("session_id"));
+}
+
+#[test]
+fn session_show_prints_event_counts() {
+    let data = tempfile::tempdir().unwrap();
+    let flow_dir = tempfile::tempdir().unwrap();
+    let flow_path = flow_dir.path().join("s.at");
+    std::fs::write(&flow_path, "flow s() -> Int { return 1 }\n").unwrap();
+    Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .arg("run")
+        .arg(&flow_path)
+        .output()
+        .unwrap();
+
+    let sid = std::fs::read_dir(data.path().join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .args(["session", "show", &sid])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("flow_start: 1"));
+    assert!(stdout.contains("flow_end:   1"));
+}
+
+#[test]
+fn session_gc_removes_only_empty_sessions() {
+    let data = tempfile::tempdir().unwrap();
+    let sessions = data.path().join("sessions");
+    let empty = sessions.join("019f0000-empty");
+    let full = sessions.join("019f0000-full");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::create_dir_all(&full).unwrap();
+    std::fs::write(empty.join("events.jsonl"), "").unwrap();
+    std::fs::write(full.join("events.jsonl"), "{\"type\":\"flow_start\"}\n").unwrap();
+
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .args(["session", "gc"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("removed 1"));
+    assert!(!empty.exists());
+    assert!(full.exists());
+}
+
+#[test]
 fn logs_tail_without_session_id_uses_latest() {
     let data = tempfile::tempdir().unwrap();
     let flow_dir = tempfile::tempdir().unwrap();

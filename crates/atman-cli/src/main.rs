@@ -93,6 +93,15 @@ async fn main() -> Result<()> {
                     follow,
                 },
         }) => cmd_logs_tail(session_id, n, follow).await,
+        Some(Cmd::Session {
+            action: SessionAction::List,
+        }) => cmd_session_list().await,
+        Some(Cmd::Session {
+            action: SessionAction::Show { session_id },
+        }) => cmd_session_show(session_id).await,
+        Some(Cmd::Session {
+            action: SessionAction::Gc,
+        }) => cmd_session_gc().await,
         Some(_) => {
             eprintln!("subcommand not yet implemented");
             std::process::exit(2);
@@ -158,6 +167,107 @@ async fn cmd_run(
             eprintln!("flow error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+async fn cmd_session_list() -> Result<()> {
+    let root = data_dir()?;
+    let sessions = root.join("sessions");
+    if !sessions.exists() {
+        return Ok(());
+    }
+    let mut rows: Vec<(std::time::SystemTime, String, u64, usize)> = Vec::new();
+    for entry in std::fs::read_dir(&sessions)? {
+        let entry = entry?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let sid = entry.file_name().to_string_lossy().to_string();
+        let events_path = entry.path().join("events.jsonl");
+        let (bytes, events) = match std::fs::metadata(&events_path) {
+            Ok(m) => (m.len(), count_lines(&events_path)),
+            Err(_) => (0, 0),
+        };
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        rows.push((modified, sid, bytes, events));
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
+    println!("{:<38} {:>10} {:>10}", "session_id", "events", "bytes");
+    for (_, sid, bytes, events) in rows {
+        println!("{:<38} {:>10} {:>10}", sid, events, bytes);
+    }
+    Ok(())
+}
+
+async fn cmd_session_show(sid: String) -> Result<()> {
+    let root = data_dir()?;
+    let dir = root.join("sessions").join(&sid);
+    if !dir.is_dir() {
+        bail!("session not found: {}", dir.display());
+    }
+    let events_path = dir.join("events.jsonl");
+    let mut flow_start = 0usize;
+    let mut flow_end = 0usize;
+    let mut llm_call = 0usize;
+    if events_path.exists() {
+        let contents = tokio::fs::read_to_string(&events_path).await?;
+        for line in contents.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                match v["type"].as_str() {
+                    Some("flow_start") => flow_start += 1,
+                    Some("flow_end") => flow_end += 1,
+                    Some("llm_call") => llm_call += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let size = std::fs::metadata(&events_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!("session_id: {sid}");
+    println!("dir:        {}", dir.display());
+    println!("events:     {} bytes", size);
+    println!("flow_start: {flow_start}");
+    println!("flow_end:   {flow_end}");
+    println!("llm_call:   {llm_call}");
+    Ok(())
+}
+
+async fn cmd_session_gc() -> Result<()> {
+    let root = data_dir()?;
+    let sessions = root.join("sessions");
+    if !sessions.exists() {
+        return Ok(());
+    }
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(&sessions)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let events_path = path.join("events.jsonl");
+        let empty = match std::fs::metadata(&events_path) {
+            Ok(m) => m.len() == 0,
+            Err(_) => true,
+        };
+        if empty {
+            std::fs::remove_dir_all(&path).with_context(|| format!("rm -r {}", path.display()))?;
+            removed += 1;
+        }
+    }
+    println!("gc removed {} empty session(s)", removed);
+    Ok(())
+}
+
+fn count_lines(path: &std::path::Path) -> usize {
+    match std::fs::read_to_string(path) {
+        Ok(s) => s.lines().filter(|l| !l.trim().is_empty()).count(),
+        Err(_) => 0,
     }
 }
 
