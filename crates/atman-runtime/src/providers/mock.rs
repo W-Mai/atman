@@ -65,10 +65,15 @@ impl Provider for MockProvider {
     }
 
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
-        Box::pin(async move { self.lookup(&req).map(|v| value_to_assistant_message(&v)) })
+        let turn_id = turn_id_from_req(&req);
+        Box::pin(async move {
+            self.lookup(&req)
+                .map(|v| value_to_assistant_message(&v, turn_id))
+        })
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+        let turn_id = turn_id_from_req(&req);
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
@@ -113,7 +118,7 @@ impl Provider for MockProvider {
                 let _ = tx.send(NodeEvent::LlmDone {
                     total_tokens: running,
                 });
-                Ok(value_to_assistant_message(&value))
+                Ok(value_to_assistant_message(&value, turn_id))
             });
         Observable {
             output,
@@ -150,13 +155,13 @@ impl MockProvider {
     }
 }
 
-fn value_to_assistant_message(v: &Value) -> AssistantMessage {
+fn value_to_assistant_message(v: &Value, turn_id: crate::event::TurnId) -> AssistantMessage {
     let text = value_to_stream_text(v);
     AssistantMessage {
         message: Message {
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Text { text: text.clone() }],
-            turn_id: crate::event::TurnId::now(),
+            turn_id,
         },
         stop_reason: StopReason::End,
         token_usage: TokenUsage {
@@ -164,6 +169,13 @@ fn value_to_assistant_message(v: &Value) -> AssistantMessage {
             ..Default::default()
         },
     }
+}
+
+fn turn_id_from_req(req: &LlmRequest) -> crate::event::TurnId {
+    req.messages
+        .first()
+        .map(|m| m.turn_id.clone())
+        .unwrap_or_else(crate::event::TurnId::now)
 }
 
 fn value_to_stream_text(v: &Value) -> String {

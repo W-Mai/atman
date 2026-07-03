@@ -4,11 +4,22 @@ use std::sync::Mutex;
 use atman_dsl::ast::{File, FlowDecl};
 
 use crate::error::RuntimeError;
-use crate::event::{Event, EventSink, FlowRunId, FlowStatus};
+use crate::event::{Event, EventSink, FlowRunId, FlowStatus, TurnId};
 use crate::exec::exec_flow_with_siblings;
+use crate::message::Message;
 use crate::provider::{Attachment, ProviderRegistry};
 use crate::tool::{ToolCtx, ToolRegistry};
 use crate::value::Value;
+
+pub trait MessageSink: Send + Sync {
+    fn append(&self, msg: Message, flow_run_id: Option<FlowRunId>);
+}
+
+impl MessageSink for crate::session::Session {
+    fn append(&self, msg: Message, flow_run_id: Option<FlowRunId>) {
+        self.append_message(msg, flow_run_id);
+    }
+}
 
 pub struct Executor {
     pub tools: ToolRegistry,
@@ -53,6 +64,17 @@ impl Executor {
         flow_name: &str,
         args: Vec<(String, Value)>,
     ) -> Result<Value, RuntimeError> {
+        self.run_in_turn(file, flow_name, args, None, None).await
+    }
+
+    pub async fn run_in_turn(
+        &self,
+        file: &File,
+        flow_name: &str,
+        args: Vec<(String, Value)>,
+        turn_id: Option<TurnId>,
+        message_sink: Option<&dyn MessageSink>,
+    ) -> Result<Value, RuntimeError> {
         let flows: HashMap<_, _> = file
             .flows
             .iter()
@@ -61,7 +83,8 @@ impl Executor {
         let flow = flows
             .get(flow_name)
             .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{flow_name}`")))?;
-        self.run_flow(flow, args, &flows).await
+        self.run_flow(flow, args, &flows, turn_id, message_sink)
+            .await
     }
 
     async fn run_flow(
@@ -69,6 +92,8 @@ impl Executor {
         flow: &FlowDecl,
         args: Vec<(String, Value)>,
         flows: &HashMap<String, FlowDecl>,
+        turn_id: Option<TurnId>,
+        message_sink: Option<&dyn MessageSink>,
     ) -> Result<Value, RuntimeError> {
         let run_id = FlowRunId::now();
         self.events.emit(Event::FlowStart {
@@ -85,7 +110,9 @@ impl Executor {
             flows,
             Some(&self.events),
             Some(&self.pending_attachments),
-            None,
+            turn_id,
+            Some(run_id.clone()),
+            message_sink,
         )
         .await;
         let status = match &result {

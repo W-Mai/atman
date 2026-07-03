@@ -14,6 +14,8 @@ pub struct EvalCtx<'a> {
     pub events: Option<&'a crate::event::EventSink>,
     pub attachments: Option<&'a std::sync::Mutex<Vec<crate::provider::Attachment>>>,
     pub turn_id: Option<crate::event::TurnId>,
+    pub flow_run_id: Option<crate::event::FlowRunId>,
+    pub message_sink: Option<&'a dyn crate::executor::MessageSink>,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -286,7 +288,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     });
                 }
                 match outcome {
-                    Ok(am) => return crate::provider::assistant_message_to_value(&am),
+                    Ok(am) => {
+                        if let Some(sink) = ctx.message_sink {
+                            sink.append(am.message.clone(), ctx.flow_run_id.clone());
+                        }
+                        return crate::provider::assistant_message_to_value(&am);
+                    }
                     Err(e) => last_err = Some(e),
                 }
             }
@@ -725,6 +732,8 @@ mod tests {
             events: None,
             attachments: None,
             turn_id: None,
+            flow_run_id: None,
+            message_sink: None,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -817,6 +826,8 @@ mod tests {
             events: None,
             attachments: None,
             turn_id: None,
+            flow_run_id: None,
+            message_sink: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -853,6 +864,8 @@ mod tests {
             events: None,
             attachments: None,
             turn_id: None,
+            flow_run_id: None,
+            message_sink: None,
         };
 
         let mut env = Env::new();
@@ -890,6 +903,8 @@ mod tests {
             events: None,
             attachments: None,
             turn_id: None,
+            flow_run_id: None,
+            message_sink: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -922,6 +937,8 @@ mod tests {
             events: None,
             attachments: None,
             turn_id: None,
+            flow_run_id: None,
+            message_sink: None,
         };
 
         let src = r#"flow t() {
@@ -959,6 +976,8 @@ mod tests {
             events: None,
             attachments: None,
             turn_id: None,
+            flow_run_id: None,
+            message_sink: None,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -986,6 +1005,8 @@ mod tests {
             events: None,
             attachments: None,
             turn_id: None,
+            flow_run_id: None,
+            message_sink: None,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -1028,6 +1049,8 @@ flow parent(x: Int) -> Int {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1056,6 +1079,8 @@ flow parent(x: Int) -> Int {
             &tool_ctx,
             &providers,
             &flows,
+            None,
+            None,
             None,
             None,
             None,
@@ -1089,6 +1114,8 @@ flow parent(x: Int) -> Int {
             events: None,
             attachments: None,
             turn_id: None,
+            flow_run_id: None,
+            message_sink: None,
         };
 
         let mut env = Env::new();
