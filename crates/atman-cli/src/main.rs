@@ -1,4 +1,10 @@
+use anyhow::{Context, Result, bail};
+use atman_dsl::parse::parse_file;
+use atman_runtime::providers::mock::MockProvider;
+use atman_runtime::{Executor, Session, Value, tools};
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -14,9 +20,11 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     Run {
-        file: std::path::PathBuf,
+        file: PathBuf,
         #[arg(long)]
         flow: Option<String>,
+        #[arg(long)]
+        mock: bool,
         args: Vec<String>,
     },
     Logs {
@@ -47,7 +55,7 @@ enum SessionAction {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         None => {
@@ -61,25 +69,87 @@ async fn main() -> anyhow::Result<()> {
             println!("atman v{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Some(Cmd::Run { .. }) => {
-            eprintln!("atman run: not yet implemented");
+        Some(Cmd::Run {
+            file,
+            flow,
+            mock,
+            args,
+        }) => cmd_run(file, flow, mock, args).await,
+        Some(_) => {
+            eprintln!("subcommand not yet implemented");
             std::process::exit(2);
         }
-        Some(Cmd::Logs { .. }) => {
-            eprintln!("atman logs: not yet implemented");
-            std::process::exit(2);
+    }
+}
+
+async fn cmd_run(
+    file: PathBuf,
+    flow_name: Option<String>,
+    mock: bool,
+    raw_args: Vec<String>,
+) -> Result<()> {
+    let source =
+        std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+    let parsed = parse_file(&source).with_context(|| format!("parsing {}", file.display()))?;
+
+    let flow_name = match flow_name {
+        Some(n) => n,
+        None => {
+            if parsed.flows.len() != 1 {
+                bail!(
+                    "{} has {} flows; pass --flow=<name> to disambiguate",
+                    file.display(),
+                    parsed.flows.len()
+                );
+            }
+            parsed.flows[0].name.name.clone()
         }
-        Some(Cmd::Session { .. }) => {
-            eprintln!("atman session: not yet implemented");
-            std::process::exit(2);
+    };
+
+    let args = parse_args(&raw_args)?;
+
+    let session = Session::open_ephemeral();
+    let mut executor = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&mut executor.tools);
+    if mock {
+        executor.providers.register(Arc::new(
+            MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
+        ));
+    }
+
+    let outcome = executor.run(&parsed, &flow_name, args).await;
+    session.shutdown().await;
+
+    match outcome {
+        Ok(v) => {
+            println!("{}", render_value(&v));
+            Ok(())
         }
-        Some(Cmd::Cost { .. }) => {
-            eprintln!("atman cost: not yet implemented");
-            std::process::exit(2);
+        Err(e) => {
+            eprintln!("flow error: {e}");
+            std::process::exit(1);
         }
-        Some(Cmd::Doctor) => {
-            eprintln!("atman doctor: not yet implemented");
-            std::process::exit(2);
-        }
+    }
+}
+
+fn parse_args(raw: &[String]) -> Result<Vec<(String, Value)>> {
+    let mut out = Vec::with_capacity(raw.len());
+    for arg in raw {
+        let (name, value) = arg
+            .split_once('=')
+            .with_context(|| format!("expected `name=value`, got `{arg}`"))?;
+        out.push((name.to_string(), Value::Str(value.to_string())));
+    }
+    Ok(out)
+}
+
+fn render_value(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Unit => String::new(),
+        other => format!("{other:?}"),
     }
 }
