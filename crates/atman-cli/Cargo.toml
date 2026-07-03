@@ -15,6 +15,10 @@ path = "src/main.rs"
 [dependencies]
 atman-dsl      = { path = "../atman-dsl" }
 atman-runtime  = { path = "../atman-runtime" }
+atman-daemon   = { path = "../atman-daemon" }
+atman-proto    = { path = "../atman-proto" }
+reqwest.workspace      = true
+libc                   = "0.2"
 clap.workspace         = true
 tokio.workspace        = true
 anyhow.workspace       = true

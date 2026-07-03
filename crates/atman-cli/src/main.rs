@@ -49,6 +49,17 @@ enum Cmd {
         #[arg(long, default_value_t = 65098)]
         port: u16,
     },
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonAction {
+    Start,
+    Stop,
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -105,7 +116,81 @@ async fn main() -> Result<()> {
         Some(Cmd::Cost { session_id }) => cmd_cost(session_id).await,
         Some(Cmd::Doctor) => cmd_doctor().await,
         Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
+        Some(Cmd::Daemon {
+            action: DaemonAction::Start,
+        }) => cmd_daemon_start().await,
+        Some(Cmd::Daemon {
+            action: DaemonAction::Stop,
+        }) => cmd_daemon_stop().await,
+        Some(Cmd::Daemon {
+            action: DaemonAction::Status,
+        }) => cmd_daemon_status().await,
     }
+}
+
+async fn cmd_daemon_start() -> Result<()> {
+    let pid_path = atman_daemon::pidfile::default_pid_path()?;
+    if let Some(pid) = atman_daemon::pidfile::read_pid(&pid_path)?
+        && atman_daemon::pidfile::is_alive(pid)
+    {
+        println!("atman-daemon already running (pid={pid})");
+        return Ok(());
+    }
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("atman-daemon")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("atman-daemon"));
+    let child = std::process::Command::new(&bin)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawning {}", bin.display()))?;
+    println!("atman-daemon spawned (pid={})", child.id());
+    println!("pid file: {}", pid_path.display());
+    Ok(())
+}
+
+async fn cmd_daemon_stop() -> Result<()> {
+    let pid_path = atman_daemon::pidfile::default_pid_path()?;
+    let Some(pid) = atman_daemon::pidfile::read_pid(&pid_path)? else {
+        println!(
+            "no atman-daemon running (no pid file at {})",
+            pid_path.display()
+        );
+        return Ok(());
+    };
+    if !atman_daemon::pidfile::is_alive(pid) {
+        println!("stale pid file (pid={pid} not alive), removing");
+        atman_daemon::pidfile::remove_pid(&pid_path);
+        return Ok(());
+    }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if rc != 0 {
+        anyhow::bail!(
+            "kill(pid={pid}, SIGTERM) failed: errno={}",
+            std::io::Error::last_os_error()
+        );
+    }
+    println!("sent SIGTERM to atman-daemon (pid={pid})");
+    Ok(())
+}
+
+async fn cmd_daemon_status() -> Result<()> {
+    let pid_path = atman_daemon::pidfile::default_pid_path()?;
+    match atman_daemon::pidfile::read_pid(&pid_path)? {
+        Some(pid) if atman_daemon::pidfile::is_alive(pid) => {
+            println!("atman-daemon running (pid={pid})");
+        }
+        Some(pid) => {
+            println!("atman-daemon pid file stale (pid={pid} not alive)");
+        }
+        None => {
+            println!("atman-daemon not running");
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_run(

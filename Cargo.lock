@@ -113,11 +113,15 @@ name = "atman-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "atman-daemon",
  "atman-dsl",
+ "atman-proto",
  "atman-runtime",
  "axum",
  "clap",
  "directories",
+ "libc",
+ "reqwest",
  "rustyline",
  "serde",
  "serde_json",
@@ -138,6 +142,7 @@ dependencies = [
  "chrono",
  "directories",
  "futures",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

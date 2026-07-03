@@ -5,6 +5,7 @@ use atman_daemon::{
     DaemonState,
     config::{DaemonConfig, default_config_path},
     http::{HttpState, router},
+    pidfile,
     unix::UnixServer,
 };
 use tokio_util::sync::CancellationToken;
@@ -13,6 +14,17 @@ use tokio_util::sync::CancellationToken;
 async fn main() -> Result<()> {
     let sessions_dir = default_sessions_dir()?;
     let state = Arc::new(DaemonState::new(sessions_dir));
+
+    let pid_path = pidfile::default_pid_path()?;
+    if let Some(existing) = pidfile::read_pid(&pid_path)?
+        && pidfile::is_alive(existing)
+    {
+        anyhow::bail!(
+            "another atman-daemon already running (pid={existing}, {})",
+            pid_path.display()
+        );
+    }
+    pidfile::write_pid(&pid_path, std::process::id())?;
 
     let config_path = default_config_path()?;
     let config = DaemonConfig::load_or_init(&config_path)?;
@@ -57,6 +69,7 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(async move { shutdown.cancelled().await });
     serve.await?;
     let _ = unix_task.await;
+    pidfile::remove_pid(&pid_path);
     Ok(())
 }
 
