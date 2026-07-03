@@ -10,6 +10,7 @@ pub struct EvalCtx<'a> {
     pub tool_ctx: &'a ToolCtx,
     pub providers: &'a crate::provider::ProviderRegistry,
     pub flows: &'a std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
+    pub contract: Option<&'a atman_dsl::ast::Contract>,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -90,6 +91,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     return Value::Err(RuntimeError::UndefinedTool(name));
                 }
             };
+            if matches!(tool.tier(), crate::tool::Tier::Four)
+                && !contract_allows_shell(ctx.contract)
+            {
+                return Value::Err(RuntimeError::ToolFailed(format!(
+                    "tool `{name}` is Tier 4 (shell); flow contract must declare `capabilities {{ shell: true }}`"
+                )));
+            }
             let mut positional = Vec::new();
             let mut named = Vec::new();
             for arg in args {
@@ -245,6 +253,24 @@ fn tool_name(path: &[atman_dsl::ast::Ident]) -> String {
     parts.join(".")
 }
 
+fn contract_allows_shell(contract: Option<&atman_dsl::ast::Contract>) -> bool {
+    let Some(c) = contract else { return false };
+    for block in &c.blocks {
+        if block.name.name != "capabilities" {
+            continue;
+        }
+        for (k, v) in &block.kwargs {
+            if k.name != "shell" {
+                continue;
+            }
+            if let atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Bool(true)) = v {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // Bare primitive names inside `schema: { valid: bool, ... }` parse as tool calls; treat as Unit.
 fn is_type_annotation(path: &[atman_dsl::ast::Ident]) -> bool {
     if path.len() != 1 {
@@ -341,6 +367,7 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            contract: None,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -429,6 +456,7 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            contract: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -461,6 +489,7 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            contract: None,
         };
 
         let mut env = Env::new();
@@ -494,6 +523,7 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            contract: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -522,6 +552,7 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            contract: None,
         };
 
         let src = r#"flow t() {
@@ -555,6 +586,7 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            contract: None,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -578,6 +610,7 @@ mod tests {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            contract: None,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -671,6 +704,7 @@ flow parent(x: Int) -> Int {
             tool_ctx: &tool_ctx,
             providers: &providers,
             flows: &flows,
+            contract: None,
         };
 
         let mut env = Env::new();

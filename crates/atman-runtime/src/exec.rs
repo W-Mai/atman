@@ -357,6 +357,7 @@ pub async fn exec_flow_with_siblings(
         tool_ctx,
         providers,
         flows,
+        contract: flow.contract.as_ref(),
     };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),
