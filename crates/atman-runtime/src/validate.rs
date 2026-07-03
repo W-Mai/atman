@@ -117,6 +117,14 @@ fn walk_node(
             }
         }
         Node::UserConfirm { msg } => walk_expr(msg, scope, tools, errors),
+        Node::Subflow { args, .. } => {
+            for arg in args {
+                match arg {
+                    Arg::Positional(e) => walk_expr(e, scope, tools, errors),
+                    Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
+                }
+            }
+        }
     }
 }
 

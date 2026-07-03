@@ -211,6 +211,20 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
             write_expr(out, msg, indent);
             out.push(')');
         }
+        Node::Subflow { name, args } => {
+            write!(out, "subflow({}", name.name).unwrap();
+            for a in args {
+                out.push_str(", ");
+                match a {
+                    Arg::Positional(e) => write_expr(out, e, indent),
+                    Arg::Named { name, value } => {
+                        write!(out, "{}: ", name.name).unwrap();
+                        write_expr(out, value, indent);
+                    }
+                }
+            }
+            out.push(')');
+        }
     }
 }
 

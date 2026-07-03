@@ -9,6 +9,7 @@ pub struct EvalCtx<'a> {
     pub tools: &'a ToolRegistry,
     pub tool_ctx: &'a ToolCtx,
     pub providers: &'a crate::provider::ProviderRegistry,
+    pub flows: &'a std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -193,6 +194,46 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             }
             Value::Bool(true)
         }
+        Node::Subflow { name, args } => {
+            let Some(target) = ctx.flows.get(&name.name) else {
+                return Value::Err(RuntimeError::UndefinedTool(format!(
+                    "subflow({})",
+                    name.name
+                )));
+            };
+            let mut bindings = Vec::with_capacity(args.len());
+            for (i, arg) in args.iter().enumerate() {
+                let (param_name, value) = match arg {
+                    Arg::Positional(e) => {
+                        let Some((pname, _)) = target.params.get(i) else {
+                            return Value::Err(RuntimeError::MissingArg(format!(
+                                "subflow({}): too many positional args",
+                                name.name
+                            )));
+                        };
+                        let v = eval_expr(e, env, ctx).await;
+                        (pname.name.clone(), v)
+                    }
+                    Arg::Named { name: n, value } => {
+                        let v = eval_expr(value, env, ctx).await;
+                        (n.name.clone(), v)
+                    }
+                };
+                if value.is_err() {
+                    return value;
+                }
+                bindings.push((param_name, value));
+            }
+            let mut sub_env = Env::new();
+            for (n, v) in bindings {
+                sub_env.bind(n, v);
+            }
+            match crate::exec::exec_stmts(&target.body, &mut sub_env, ctx).await {
+                crate::exec::StmtOutcome::Return(v) => v,
+                crate::exec::StmtOutcome::Err(e) => Value::Err(e),
+                crate::exec::StmtOutcome::Continue => Value::Unit,
+            }
+        }
     }
 }
 
@@ -280,10 +321,12 @@ mod tests {
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
+            flows: &flows,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -366,10 +409,12 @@ mod tests {
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
+            flows: &flows,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -396,10 +441,12 @@ mod tests {
         tools.register(Arc::new(FsRead));
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
+            flows: &flows,
         };
 
         let mut env = Env::new();
@@ -427,10 +474,12 @@ mod tests {
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
+            flows: &flows,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -453,10 +502,12 @@ mod tests {
         )));
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
+        let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
+            flows: &flows,
         };
 
         let src = r#"flow t() {
@@ -484,10 +535,12 @@ mod tests {
         let providers = crate::provider::ProviderRegistry::new();
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
+        let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
+            flows: &flows,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -505,10 +558,12 @@ mod tests {
         let providers = crate::provider::ProviderRegistry::new();
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
+        let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
+            flows: &flows,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -518,6 +573,68 @@ mod tests {
                 Value::Bool(true)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn subflow_calls_target_flow_with_positional_args() {
+        let src = r#"flow child(n: Int) -> Int {
+    return n + 100
+}
+
+flow parent(x: Int) -> Int {
+    y = subflow(child, x)
+    return y + 1
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let flows_map: std::collections::HashMap<_, _> = file
+            .flows
+            .iter()
+            .map(|f| (f.name.name.clone(), f.clone()))
+            .collect();
+        let parent = &file.flows[1];
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let providers = crate::provider::ProviderRegistry::new();
+        let out = crate::exec::exec_flow_with_siblings(
+            parent,
+            vec![("x".into(), Value::Int(5))],
+            &tools,
+            &tool_ctx,
+            &providers,
+            &flows_map,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(out, Value::Int(106)));
+    }
+
+    #[tokio::test]
+    async fn subflow_missing_target_reports_undefined_tool() {
+        let src = r#"flow parent() -> Int {
+    return subflow(nope, 1)
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let flows: std::collections::HashMap<_, _> = file
+            .flows
+            .iter()
+            .map(|f| (f.name.name.clone(), f.clone()))
+            .collect();
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let providers = crate::provider::ProviderRegistry::new();
+        let err = crate::exec::exec_flow_with_siblings(
+            &file.flows[0],
+            vec![],
+            &tools,
+            &tool_ctx,
+            &providers,
+            &flows,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, RuntimeError::UndefinedTool(name) if name.contains("nope")));
     }
 
     #[tokio::test]
@@ -534,10 +651,12 @@ mod tests {
         tools.register(Arc::new(FsRead));
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
             providers: &providers,
+            flows: &flows,
         };
 
         let mut env = Env::new();

@@ -32,6 +32,43 @@ fn contract_roundtrip_stable() {
 }
 
 #[test]
+fn subflow_node_parses_with_positional_args() {
+    use atman_dsl::ast::{Arg, Expr, Node, Stmt};
+
+    let src = r#"flow parent(q: string) -> Report {
+    r = subflow(child, q, 42)
+    return r
+}
+"#;
+    let file = parse_file(src).unwrap();
+    let Stmt::Bind { value, .. } = &file.flows[0].body[0] else {
+        panic!("bind expected");
+    };
+    let Expr::Node(Node::Subflow { name, args }) = value else {
+        panic!("subflow node expected");
+    };
+    assert_eq!(name.name, "child");
+    assert_eq!(args.len(), 2);
+    assert!(matches!(&args[0], Arg::Positional(_)));
+}
+
+#[test]
+fn subflow_roundtrips() {
+    let src = r#"flow parent(q: string) -> Report {
+    r = subflow(child, q, 42)
+    return r
+}
+"#;
+    let file1 = parse_file(src).unwrap();
+    let printed = print_file(&file1);
+    let file2 = parse_file(&printed)
+        .unwrap_or_else(|e| panic!("re-parse failed:\n{printed}\n\nerror: {e}"));
+    let a = strip_spans(&format!("{:#?}", file1));
+    let b = strip_spans(&format!("{:#?}", file2));
+    assert_eq!(a, b, "subflow AST diverged after roundtrip");
+}
+
+#[test]
 fn flow_without_contract_still_parses() {
     let src = r#"flow trivial() -> Unit {
     return 0

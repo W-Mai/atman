@@ -81,6 +81,18 @@ pub async fn exec_flow(
     tool_ctx: &ToolCtx,
     providers: &crate::provider::ProviderRegistry,
 ) -> Result<Value, RuntimeError> {
+    let flows = std::collections::HashMap::new();
+    exec_flow_with_siblings(flow, args, tools, tool_ctx, providers, &flows).await
+}
+
+pub async fn exec_flow_with_siblings(
+    flow: &FlowDecl,
+    args: Vec<(String, Value)>,
+    tools: &ToolRegistry,
+    tool_ctx: &ToolCtx,
+    providers: &crate::provider::ProviderRegistry,
+    flows: &std::collections::HashMap<String, FlowDecl>,
+) -> Result<Value, RuntimeError> {
     let mut env = Env::new();
     for (name, value) in args {
         env.bind(name, value);
@@ -89,6 +101,7 @@ pub async fn exec_flow(
         tools,
         tool_ctx,
         providers,
+        flows,
     };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),

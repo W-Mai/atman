@@ -15,6 +15,7 @@ mod kw {
     syn::custom_keyword!(first);
     syn::custom_keyword!(user_confirm);
     syn::custom_keyword!(contract);
+    syn::custom_keyword!(subflow);
 }
 
 fn to_ident(id: syn::Ident) -> Ident {
@@ -274,6 +275,9 @@ fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
     if input.peek(kw::user_confirm) {
         return Ok(Expr::Node(parse_user_confirm(input)?));
     }
+    if input.peek(kw::subflow) {
+        return Ok(Expr::Node(parse_subflow(input)?));
+    }
 
     if input.peek(LitStr) {
         let s: LitStr = input.parse()?;
@@ -416,6 +420,22 @@ fn parse_llm(input: ParseStream) -> Result<Node> {
     input.parse::<kw::llm>()?;
     let kwargs = parse_kwargs(input)?;
     Ok(Node::Llm { kwargs })
+}
+
+fn parse_subflow(input: ParseStream) -> Result<Node> {
+    input.parse::<kw::subflow>()?;
+    let content;
+    parenthesized!(content in input);
+    let name = to_ident(content.parse::<syn::Ident>()?);
+    let args = if content.peek(Token![,]) {
+        content.parse::<Token![,]>()?;
+        parse_call_args(&content)?
+    } else if content.is_empty() {
+        Vec::new()
+    } else {
+        return Err(content.error("expected `,` after subflow name"));
+    };
+    Ok(Node::Subflow { name, args })
 }
 
 fn parse_user_confirm(input: ParseStream) -> Result<Node> {

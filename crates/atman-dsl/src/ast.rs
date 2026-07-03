@@ -87,6 +87,10 @@ pub enum Node {
     UserConfirm {
         msg: Box<Expr>,
     },
+    Subflow {
+        name: Ident,
+        args: Vec<Arg>,
+    },
 }
 
 #[derive(Debug, Clone)]
