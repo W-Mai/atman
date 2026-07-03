@@ -45,6 +45,10 @@ enum Cmd {
     },
     Doctor,
     Version,
+    Monitor {
+        #[arg(long, default_value_t = 65098)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -100,6 +104,7 @@ async fn main() -> Result<()> {
         }) => cmd_session_gc().await,
         Some(Cmd::Cost { session_id }) => cmd_cost(session_id).await,
         Some(Cmd::Doctor) => cmd_doctor().await,
+        Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
     }
 }
 
@@ -873,6 +878,152 @@ async fn cmd_cost(session_id: Option<String>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+const MONITOR_HTML: &str = r##"<!doctype html>
+<html><head><meta charset="utf-8"><title>atman monitor</title>
+<style>
+body{font:14px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;padding:16px;background:#0e1116;color:#e6edf3}
+h1{margin:0 0 16px;font-size:16px;color:#7ee787}
+.row{display:flex;gap:16px}
+.pane{flex:1;background:#151b23;border:1px solid #30363d;border-radius:6px;padding:12px;overflow:auto;max-height:80vh}
+.sess{padding:6px 8px;border-radius:4px;cursor:pointer;font-family:monospace;font-size:12px;color:#7d8590}
+.sess:hover{background:#1f2530}
+.sess.active{background:#1f2f4a;color:#79c0ff}
+pre{white-space:pre-wrap;word-break:break-all;margin:0;font-family:'SF Mono',Menlo,monospace;font-size:11px}
+.event{padding:6px 8px;margin-bottom:4px;border-radius:4px;background:#1c2430;border-left:3px solid #30363d}
+.event.flow_start{border-left-color:#7ee787}
+.event.flow_end{border-left-color:#79c0ff}
+.event.llm_call{border-left-color:#f0883e}
+.event.user_msg{border-left-color:#d2a8ff}
+.event.assistant_msg{border-left-color:#7ee787}
+.event.error{border-left-color:#f85149}
+.type{color:#79c0ff;font-weight:600}
+.ts{color:#6e7681;font-size:10px}
+</style></head><body>
+<h1>atman monitor · <span id="hint">select a session</span></h1>
+<div class="row">
+  <div class="pane" style="flex:0 0 260px" id="sessions"><em>loading sessions…</em></div>
+  <div class="pane" id="events"><em>← pick a session on the left</em></div>
+</div>
+<script>
+async function fetchJson(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status);return r.json();}
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+async function loadSessions(){
+  const list=await fetchJson('/api/sessions');
+  const el=document.getElementById('sessions');
+  if(!list.length){el.innerHTML='<em>no sessions</em>';return;}
+  el.innerHTML=list.map(s=>`<div class="sess" data-id="${esc(s.id)}">${esc(s.id)}<br><span class="ts">${s.event_count} events · ${esc(s.first_ts||'?')}</span></div>`).join('');
+  el.querySelectorAll('.sess').forEach(node=>node.onclick=()=>loadEvents(node.dataset.id));
+}
+async function loadEvents(sid){
+  document.getElementById('hint').textContent=sid;
+  document.querySelectorAll('.sess').forEach(n=>n.classList.toggle('active',n.dataset.id===sid));
+  const ev=await fetchJson('/api/sessions/'+encodeURIComponent(sid)+'/events');
+  const box=document.getElementById('events');
+  if(!ev.length){box.innerHTML='<em>empty session</em>';return;}
+  box.innerHTML=ev.map(e=>`<div class="event ${esc(e.type||'')}"><span class="type">${esc(e.type||'?')}</span> <span class="ts">${esc(e.ts||'')}</span><pre>${esc(JSON.stringify(e,null,2))}</pre></div>`).join('');
+}
+loadSessions();
+setInterval(loadSessions,5000);
+</script></body></html>
+"##;
+
+async fn cmd_monitor(port: u16) -> Result<()> {
+    use axum::Router;
+    use axum::extract::Path;
+    use axum::response::{Html, IntoResponse, Json};
+    use axum::routing::get;
+    use std::net::SocketAddr;
+
+    let data = data_dir()?;
+    let sessions_dir = data.join("sessions");
+    let state = Arc::new(sessions_dir);
+
+    let app = Router::new()
+        .route("/", get(|| async { Html(MONITOR_HTML) }))
+        .route(
+            "/api/sessions",
+            get({
+                let state = state.clone();
+                move || {
+                    let state = state.clone();
+                    async move { Json(list_sessions_summary(&state).await) }
+                }
+            }),
+        )
+        .route(
+            "/api/sessions/{sid}/events",
+            get({
+                let state = state.clone();
+                move |Path(sid): Path<String>| {
+                    let state = state.clone();
+                    async move { Json(read_session_events(&state, &sid).await).into_response() }
+                }
+            }),
+        )
+        .with_state(());
+
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    println!("[atman] monitor listening on http://{addr}");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn list_sessions_summary(sessions_dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+    for entry in entries.flatten() {
+        let id = entry.file_name().to_string_lossy().to_string();
+        let events_path = entry.path().join("events.jsonl");
+        let (count, first_ts) = summarize_events_file(&events_path);
+        out.push((
+            id.clone(),
+            serde_json::json!({
+                "id": id,
+                "event_count": count,
+                "first_ts": first_ts,
+            }),
+        ));
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+fn summarize_events_file(path: &std::path::Path) -> (usize, Option<String>) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return (0, None);
+    };
+    let mut count = 0usize;
+    let mut first_ts: Option<String> = None;
+    for line in contents.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        count += 1;
+        if first_ts.is_none()
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(ts) = v.get("ts").and_then(|t| t.as_str())
+        {
+            first_ts = Some(ts.into());
+        }
+    }
+    (count, first_ts)
+}
+
+async fn read_session_events(sessions_dir: &std::path::Path, sid: &str) -> Vec<serde_json::Value> {
+    let path = sessions_dir.join(sid).join("events.jsonl");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .collect()
 }
 
 async fn cmd_doctor() -> Result<()> {

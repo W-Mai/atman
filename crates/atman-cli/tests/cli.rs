@@ -424,6 +424,69 @@ fn repl_attach_list_shows_pending_paths() {
 }
 
 #[test]
+fn monitor_serves_sessions_and_events_over_http() {
+    let data = tempfile::tempdir().unwrap();
+    let sessions = data.path().join("sessions");
+    let sid = "019f2800-0000-7000-8000-000000000001";
+    let dir = sessions.join(sid);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ev = "{\"type\":\"flow_start\",\"run_id\":\"r1\",\"flow_name\":\"demo\",\"ts\":\"2026-07-03T00:00:00Z\"}\n{\"type\":\"flow_end\",\"run_id\":\"r1\",\"flow_name\":\"demo\",\"status\":{\"kind\":\"ok\"},\"ts\":\"2026-07-03T00:00:01Z\"}\n";
+    std::fs::write(dir.join("events.jsonl"), ev).unwrap();
+
+    let port = 65_000 + (std::process::id() % 500) as u16;
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .args(["monitor", "--port", &port.to_string()])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    let base = format!("http://127.0.0.1:{port}");
+    let sessions_resp = std::process::Command::new("curl")
+        .args(["-s", &format!("{base}/api/sessions")])
+        .output()
+        .expect("curl sessions");
+    let events_resp = std::process::Command::new("curl")
+        .args(["-s", &format!("{base}/api/sessions/{sid}/events")])
+        .output()
+        .expect("curl events");
+    let index_resp = std::process::Command::new("curl")
+        .args(["-s", &format!("{base}/")])
+        .output()
+        .expect("curl index");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let sessions_body = String::from_utf8_lossy(&sessions_resp.stdout);
+    assert!(
+        sessions_body.contains(sid),
+        "sessions body: {sessions_body}"
+    );
+    assert!(
+        sessions_body.contains("\"event_count\":2"),
+        "sessions body: {sessions_body}"
+    );
+
+    let events_body = String::from_utf8_lossy(&events_resp.stdout);
+    assert!(
+        events_body.contains("flow_start"),
+        "events body: {events_body}"
+    );
+    assert!(
+        events_body.contains("flow_end"),
+        "events body: {events_body}"
+    );
+
+    let index_body = String::from_utf8_lossy(&index_resp.stdout);
+    assert!(
+        index_body.contains("atman monitor"),
+        "index body must contain title: {index_body}"
+    );
+}
+
+#[test]
 fn doctor_lists_migrated_rules_from_fake_home() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
