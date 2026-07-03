@@ -8,6 +8,7 @@ pub mod memory;
 pub mod memory_stubs;
 pub mod preview;
 pub mod stdlib;
+pub mod test;
 pub mod web;
 
 pub fn register_tier_zero(reg: &mut ToolRegistry) {
@@ -23,6 +24,7 @@ pub fn register_tier_zero(reg: &mut ToolRegistry) {
     reg.register(Arc::new(stdlib::Head));
     reg.register(Arc::new(stdlib::Tail));
     reg.register(Arc::new(stdlib::IsEmpty));
+    reg.register(Arc::new(test::TestRun));
 }
 
 pub fn register_shell(reg: &mut ToolRegistry) {
