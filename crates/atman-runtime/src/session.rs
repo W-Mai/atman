@@ -154,13 +154,22 @@ impl Session {
     }
 
     pub fn enqueue_injection(&self, text: impl Into<String>) -> Result<InjectionId, EnqueueError> {
+        self.enqueue_injection_with_level(text, crate::injection::InjectionLevel::L1Nudge, None)
+    }
+
+    pub fn enqueue_injection_with_level(
+        &self,
+        text: impl Into<String>,
+        level: crate::injection::InjectionLevel,
+        redirect_target: Option<String>,
+    ) -> Result<InjectionId, EnqueueError> {
         let turn_id = self
             .current_turn
             .lock()
             .unwrap()
             .clone()
             .ok_or(EnqueueError::NoActiveTurn)?;
-        let inj = Injection::new_pending(turn_id.clone(), text);
+        let inj = Injection::with_level(turn_id.clone(), text, level, redirect_target);
         let id = inj.id.clone();
         self.sink.emit(Event::UserInject {
             turn_id,
@@ -169,6 +178,27 @@ impl Session {
         });
         self.injection_queue.lock().unwrap().push(inj);
         Ok(id)
+    }
+
+    pub fn mark_injection_consumed(&self, id: &InjectionId) {
+        let mut q = self.injection_queue.lock().unwrap();
+        for inj in q.iter_mut() {
+            if inj.id == *id && inj.state == InjectionState::Pending {
+                inj.state = InjectionState::Injected;
+                return;
+            }
+        }
+    }
+
+    pub fn peek_pending_l2_or_higher(&self, turn_id: &TurnId) -> Option<Injection> {
+        let q = self.injection_queue.lock().unwrap();
+        q.iter()
+            .find(|i| {
+                i.state == InjectionState::Pending
+                    && i.turn_id == *turn_id
+                    && !matches!(i.level, crate::injection::InjectionLevel::L1Nudge)
+            })
+            .cloned()
     }
 
     /// Drain all Pending injections for `turn_id`. Marks them Injected.

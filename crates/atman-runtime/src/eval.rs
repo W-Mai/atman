@@ -294,10 +294,28 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     crate::message::Message::user_text(turn_id.clone(), prompt_text.clone());
                 (vec![user_msg], prompt_text)
             };
+            if let Some(session) = ctx.session
+                && let Some(l3_or_l2) = session.peek_pending_l2_or_higher(&turn_id)
+                && matches!(l3_or_l2.level, crate::injection::InjectionLevel::L3Redirect)
+                && let Some(target) = &l3_or_l2.redirect_target
+            {
+                session.mark_injection_consumed(&l3_or_l2.id);
+                return Value::Err(RuntimeError::Redirect(target.clone()));
+            }
             if let Some(session) = ctx.session {
                 let injections = session.drain_injections(&turn_id);
-                if !injections.is_empty() {
-                    let rendered = render_injections(&injections);
+                let renderable: Vec<crate::injection::Injection> = injections
+                    .into_iter()
+                    .filter(|i| {
+                        matches!(
+                            i.level,
+                            crate::injection::InjectionLevel::L1Nudge
+                                | crate::injection::InjectionLevel::L2CourseCorrect
+                        )
+                    })
+                    .collect();
+                if !renderable.is_empty() {
+                    let rendered = render_injections(&renderable);
                     final_messages.push(crate::message::Message::user_text(
                         turn_id.clone(),
                         rendered,
@@ -737,13 +755,18 @@ async fn eval_message_node<'a>(
 }
 
 fn render_injections(injections: &[crate::injection::Injection]) -> String {
+    use crate::injection::InjectionLevel;
     let mut out = String::from(
         "The user sent the following steering message(s) while you were working. \
          Apply them to your next step if still relevant.\n\n",
     );
     for inj in injections {
+        let tag = match inj.level {
+            InjectionLevel::L2CourseCorrect => "user_correction",
+            _ => "user_nudge",
+        };
         out.push_str(&format!(
-            "<user_nudge id=\"{}\" ts=\"{}\">\n{}\n</user_nudge>\n",
+            "<{tag} id=\"{}\" ts=\"{}\">\n{}\n</{tag}>\n",
             inj.id.0,
             inj.created_at.to_rfc3339(),
             inj.text

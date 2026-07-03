@@ -22,4 +22,7 @@ pub enum RuntimeError {
 
     #[error("aborted: {0}")]
     Aborted(String),
+
+    #[error("redirect to flow `{0}`")]
+    Redirect(String),
 }

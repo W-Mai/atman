@@ -617,17 +617,49 @@ async fn run_turn_with_interjection(
     session.end_turn();
 }
 
-/// Returns true if the line was fully consumed as an interjection (`!nudge` / `!stop`)
-/// or reported as a busy-warning, false if it should be pushed back for the main loop
-/// (e.g. `:exit` or a normal command arriving before the current flow finishes).
+/// Returns true if the line was fully consumed as an interjection (`!nudge` / `!course-correct` /
+/// `!redirect` / `!stop`) or reported as a busy-warning, false if it should be pushed back for the
+/// main loop (e.g. `:exit` or a normal command arriving before the current flow finishes).
 fn consume_interjection_input(line: &str, session: &Session) -> bool {
+    use atman_runtime::injection::InjectionLevel;
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return true;
     }
     if trimmed == "!stop" {
         session.cancel_flow();
+        let _ = session.enqueue_injection_with_level("stop", InjectionLevel::L4HardStop, None);
         println!("[atman] stop requested; flow will abort at next node boundary");
+        return true;
+    }
+    if let Some(text) = trimmed.strip_prefix("!course-correct ") {
+        let text = text.trim();
+        if text.is_empty() {
+            eprintln!("[atman] usage: !course-correct <text>");
+            return true;
+        }
+        match session.enqueue_injection_with_level(text, InjectionLevel::L2CourseCorrect, None) {
+            Ok(id) => println!(
+                "[atman] course-correct queued ({id}) — llm restarts at next chunk boundary"
+            ),
+            Err(e) => eprintln!("[atman] course-correct rejected: {e}"),
+        }
+        return true;
+    }
+    if let Some(target) = trimmed.strip_prefix("!redirect ") {
+        let target = target.trim();
+        if target.is_empty() {
+            eprintln!("[atman] usage: !redirect <flow_name>");
+            return true;
+        }
+        match session.enqueue_injection_with_level(
+            target,
+            InjectionLevel::L3Redirect,
+            Some(target.to_string()),
+        ) {
+            Ok(id) => println!("[atman] redirect queued ({id}) → {target}"),
+            Err(e) => eprintln!("[atman] redirect rejected: {e}"),
+        }
         return true;
     }
     if let Some(text) = trimmed
@@ -636,7 +668,9 @@ fn consume_interjection_input(line: &str, session: &Session) -> bool {
     {
         let text = text.trim();
         if text.is_empty() {
-            eprintln!("[atman] usage while flow runs: !nudge <text> | !stop");
+            eprintln!(
+                "[atman] usage while flow runs: !nudge <text> | !course-correct <text> | !redirect <flow> | !stop"
+            );
             return true;
         }
         match session.enqueue_injection(text) {

@@ -58,10 +58,27 @@ impl Executor {
             .iter()
             .map(|f| (f.name.name.clone(), f.clone()))
             .collect();
-        let flow = flows
-            .get(flow_name)
-            .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{flow_name}`")))?;
-        self.run_flow(flow, args, &flows, turn_id, session).await
+        let mut current = flow_name.to_string();
+        let mut current_args = args;
+        for _ in 0..5 {
+            let flow = flows
+                .get(&current)
+                .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
+            match self
+                .run_flow(flow, current_args, &flows, turn_id.clone(), session)
+                .await
+            {
+                Err(RuntimeError::Redirect(target)) => {
+                    current = target;
+                    current_args = Vec::new();
+                    continue;
+                }
+                other => return other,
+            }
+        }
+        Err(RuntimeError::ToolFailed(
+            "redirect chain exceeded max depth (5)".into(),
+        ))
     }
 
     async fn run_flow(
