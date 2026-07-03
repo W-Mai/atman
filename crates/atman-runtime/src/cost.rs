@@ -40,7 +40,7 @@ pub fn summarize_by_model(events: &[Event]) -> HashMap<String, CostSummary> {
             entry.accumulate(
                 usage,
                 *wallclock_ms,
-                matches!(status, LlmCallStatus::Errored(_)),
+                matches!(status, LlmCallStatus::Errored { .. }),
             );
         }
     }
@@ -62,7 +62,7 @@ pub fn summarize_by_provider(events: &[Event]) -> HashMap<String, CostSummary> {
             entry.accumulate(
                 usage,
                 *wallclock_ms,
-                matches!(status, LlmCallStatus::Errored(_)),
+                matches!(status, LlmCallStatus::Errored { .. }),
             );
         }
     }
@@ -82,7 +82,7 @@ pub fn total(events: &[Event]) -> CostSummary {
             acc.accumulate(
                 usage,
                 *wallclock_ms,
-                matches!(status, LlmCallStatus::Errored(_)),
+                matches!(status, LlmCallStatus::Errored { .. }),
             );
         }
     }
@@ -117,7 +117,9 @@ mod tests {
                 ..Default::default()
             },
             wallclock_ms: 50,
-            status: LlmCallStatus::Errored("boom".into()),
+            status: LlmCallStatus::Errored {
+                message: "boom".into(),
+            },
             ts: chrono::Utc::now(),
         }
     }

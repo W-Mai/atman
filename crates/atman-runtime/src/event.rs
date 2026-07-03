@@ -50,14 +50,30 @@ pub enum Event {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FlowStatus {
     Ok,
-    Errored(String),
+    Errored { message: String },
+}
+
+impl FlowStatus {
+    pub fn errored(msg: impl Into<String>) -> Self {
+        Self::Errored {
+            message: msg.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmCallStatus {
     Ok,
-    Errored(String),
+    Errored { message: String },
+}
+
+impl LlmCallStatus {
+    pub fn errored(msg: impl Into<String>) -> Self {
+        Self::Errored {
+            message: msg.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

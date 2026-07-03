@@ -67,7 +67,9 @@ impl Executor {
         .await;
         let status = match &result {
             Ok(_) => FlowStatus::Ok,
-            Err(e) => FlowStatus::Errored(e.to_string()),
+            Err(e) => FlowStatus::Errored {
+                message: e.to_string(),
+            },
         };
         self.events.emit(Event::FlowEnd {
             run_id,

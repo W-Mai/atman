@@ -240,7 +240,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 };
                 let status = match &outcome {
                     Ok(_) => crate::event::LlmCallStatus::Ok,
-                    Err(e) => crate::event::LlmCallStatus::Errored(e.to_string()),
+                    Err(e) => crate::event::LlmCallStatus::Errored {
+                        message: e.to_string(),
+                    },
                 };
                 if let Some(sink) = ctx.events {
                     sink.emit(crate::event::Event::LlmCall {

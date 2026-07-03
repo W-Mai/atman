@@ -48,7 +48,7 @@ async fn executor_reports_err_status_on_failure() {
     assert!(matches!(
         events.last(),
         Some(Event::FlowEnd {
-            status: FlowStatus::Errored(_),
+            status: FlowStatus::Errored { .. },
             ..
         })
     ));
