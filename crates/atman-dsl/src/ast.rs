@@ -109,6 +109,9 @@ pub enum Node {
         role: MessageRole,
         args: Vec<Arg>,
     },
+    FixUntilTestPasses {
+        kwargs: Kwargs,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

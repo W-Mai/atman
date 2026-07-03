@@ -295,6 +295,15 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
             }
             out.push(')');
         }
+        Node::FixUntilTestPasses { kwargs } => {
+            out.push_str("fix_until_test_passes {\n");
+            for (name, value) in kwargs {
+                write!(out, "{pad}{}: ", name.name).unwrap();
+                write_expr(out, value, indent + 1);
+                out.push('\n');
+            }
+            write!(out, "{outer_pad}}}").unwrap();
+        }
         Node::Message { role, args } => {
             out.push_str(role.keyword());
             out.push('(');

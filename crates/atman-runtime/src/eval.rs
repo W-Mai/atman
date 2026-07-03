@@ -374,6 +374,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             }
             Value::Bool(true)
         }
+        Node::FixUntilTestPasses { kwargs } => eval_fix_until_test_passes(kwargs, env, ctx).await,
         Node::Message { role, args } => eval_message_node(*role, args, env, ctx).await,
         Node::Subflow { name, args } => {
             let Some(target) = ctx.flows.get(&name.name) else {
@@ -421,6 +422,16 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
 fn tool_name(path: &[atman_dsl::ast::Ident]) -> String {
     let parts: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
     parts.join(".")
+}
+
+async fn eval_fix_until_test_passes<'a>(
+    _kwargs: &'a atman_dsl::ast::Kwargs,
+    _env: &'a Env,
+    _ctx: &'a EvalCtx<'a>,
+) -> Value {
+    Value::Err(RuntimeError::ToolFailed(
+        "fix_until_test_passes: S3 runtime not yet landed".into(),
+    ))
 }
 
 async fn eval_message_node<'a>(

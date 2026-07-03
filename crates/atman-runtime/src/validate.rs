@@ -131,6 +131,11 @@ fn walk_node(
                 }
             }
         }
+        Node::FixUntilTestPasses { kwargs } => {
+            for (_, v) in kwargs {
+                walk_expr(v, scope, tools, errors);
+            }
+        }
         Node::Message { args, .. } => {
             for arg in args {
                 match arg {

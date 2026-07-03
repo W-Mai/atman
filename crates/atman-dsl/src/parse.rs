@@ -20,6 +20,7 @@ mod kw {
     syn::custom_keyword!(assistant_msg);
     syn::custom_keyword!(system_msg);
     syn::custom_keyword!(tool_result);
+    syn::custom_keyword!(fix_until_test_passes);
     syn::custom_keyword!(watch);
     syn::custom_keyword!(on);
     syn::custom_keyword!(token);
@@ -350,6 +351,9 @@ fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
         input.parse::<kw::tool_result>()?;
         return Ok(Expr::Node(parse_message_args(input, MessageRole::Tool)?));
     }
+    if input.peek(kw::fix_until_test_passes) {
+        return Ok(Expr::Node(parse_fix_until_test_passes(input)?));
+    }
 
     if input.peek(LitStr) {
         let s: LitStr = input.parse()?;
@@ -645,6 +649,12 @@ fn parse_message_args(input: ParseStream, role: MessageRole) -> Result<Node> {
     parenthesized!(content in input);
     let args = parse_call_args(&content)?;
     Ok(Node::Message { role, args })
+}
+
+fn parse_fix_until_test_passes(input: ParseStream) -> Result<Node> {
+    input.parse::<kw::fix_until_test_passes>()?;
+    let kwargs = parse_kwargs(input)?;
+    Ok(Node::FixUntilTestPasses { kwargs })
 }
 
 fn parse_fanout(input: ParseStream) -> Result<Node> {
