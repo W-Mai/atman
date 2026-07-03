@@ -118,6 +118,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "atman-dsl",
+ "base64",
  "chrono",
  "eventsource-stream",
  "futures",

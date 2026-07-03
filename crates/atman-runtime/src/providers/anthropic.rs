@@ -45,14 +45,7 @@ impl AnthropicProvider {
     }
 
     fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
-        let content = if req.cache_prompt {
-            MessageContent::Blocks(vec![ContentPart::Text {
-                text: req.prompt.clone(),
-                cache_control: Some(CacheControl { kind: "ephemeral" }),
-            }])
-        } else {
-            MessageContent::Text(req.prompt.clone())
-        };
+        let content = build_content(req);
         let body = MessagesRequest {
             model: req.model.clone(),
             max_tokens: self.max_tokens,
@@ -68,6 +61,63 @@ impl AnthropicProvider {
             .header("anthropic-version", &self.anthropic_version)
             .json(&body)
     }
+}
+
+fn build_content(req: &LlmRequest) -> MessageContent {
+    let cache = if req.cache_prompt {
+        Some(CacheControl { kind: "ephemeral" })
+    } else {
+        None
+    };
+    if req.attachments.is_empty() && !req.cache_prompt {
+        return MessageContent::Text(req.prompt.clone());
+    }
+    let mut blocks: Vec<ContentPart> = req
+        .attachments
+        .iter()
+        .filter_map(|a| match a.kind {
+            crate::provider::AttachmentKind::Image => {
+                let bytes = std::fs::read(&a.path).ok()?;
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let media_type = a
+                    .mime
+                    .clone()
+                    .or_else(|| guess_image_mime(&a.path))
+                    .unwrap_or_else(|| "image/png".to_string());
+                Some(ContentPart::Image {
+                    source: ImageSource {
+                        kind: "base64",
+                        media_type,
+                        data,
+                    },
+                })
+            }
+            crate::provider::AttachmentKind::File => None,
+        })
+        .collect();
+    blocks.push(ContentPart::Text {
+        text: req.prompt.clone(),
+        cache_control: cache,
+    });
+    MessageContent::Blocks(blocks)
+}
+
+fn guess_image_mime(path: &std::path::Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())?
+        .to_ascii_lowercase();
+    Some(
+        match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 impl Provider for AnthropicProvider {
@@ -215,6 +265,17 @@ enum ContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    Image {
+        source: ImageSource,
+    },
+}
+
+#[derive(Serialize)]
+struct ImageSource {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Serialize)]

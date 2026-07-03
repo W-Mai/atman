@@ -86,6 +86,60 @@ async fn openai_non_streaming_returns_message_content() {
 }
 
 #[tokio::test]
+async fn openai_multimodal_request_uses_image_url_parts() {
+    use atman_runtime::provider::Attachment;
+
+    let dir = tempfile::tempdir().unwrap();
+    let img_path = dir.path().join("pic.jpg");
+    let jpg_bytes: [u8; 4] = [0xFF, 0xD8, 0xFF, 0xE0];
+    std::fs::write(&img_path, jpg_bytes).unwrap();
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(jpg_bytes);
+    let expected_url = format!("data:image/jpeg;base64,{data}");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(wiremock::matchers::body_partial_json(serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": expected_url}},
+                    {"type": "text", "text": "describe"}
+                ]
+            }]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "cmpl-x",
+            "object": "chat.completion",
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiProvider::new("openai", "k").with_base_url(server.uri());
+    let v = provider
+        .call(LlmRequest {
+            model: "gpt-4o".into(),
+            prompt: "describe".into(),
+            input: Value::Unit,
+            schema: None,
+            cache_prompt: false,
+            attachments: vec![Attachment::image(&img_path)],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(v, Value::Str(s) if s == "ok"));
+}
+
+#[tokio::test]
 async fn openai_http_error_becomes_tool_failed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

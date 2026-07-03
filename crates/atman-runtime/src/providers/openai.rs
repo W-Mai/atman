@@ -44,7 +44,7 @@ impl OpenAiProvider {
             max_tokens: self.max_tokens,
             messages: vec![ChatMessage {
                 role: "user",
-                content: req.prompt.clone(),
+                content: build_content(req),
             }],
         };
         self.client
@@ -52,6 +52,55 @@ impl OpenAiProvider {
             .bearer_auth(&self.api_key)
             .json(&body)
     }
+}
+
+fn build_content(req: &LlmRequest) -> ChatContent {
+    if req.attachments.is_empty() {
+        return ChatContent::Text(req.prompt.clone());
+    }
+    let mut parts: Vec<ChatPart> = req
+        .attachments
+        .iter()
+        .filter_map(|a| match a.kind {
+            crate::provider::AttachmentKind::Image => {
+                let bytes = std::fs::read(&a.path).ok()?;
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let mime = a
+                    .mime
+                    .clone()
+                    .or_else(|| guess_image_mime(&a.path))
+                    .unwrap_or_else(|| "image/png".to_string());
+                Some(ChatPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: format!("data:{mime};base64,{data}"),
+                    },
+                })
+            }
+            crate::provider::AttachmentKind::File => None,
+        })
+        .collect();
+    parts.push(ChatPart::Text {
+        text: req.prompt.clone(),
+    });
+    ChatContent::Parts(parts)
+}
+
+fn guess_image_mime(path: &std::path::Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())?
+        .to_ascii_lowercase();
+    Some(
+        match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 impl Provider for OpenAiProvider {
@@ -183,7 +232,26 @@ struct ChatCompletionsRequest {
 #[derive(Serialize)]
 struct ChatMessage {
     role: &'static str,
-    content: String,
+    content: ChatContent,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ChatContent {
+    Text(String),
+    Parts(Vec<ChatPart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ChatPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Serialize)]
+struct ImageUrl {
+    url: String,
 }
 
 #[derive(Deserialize)]
