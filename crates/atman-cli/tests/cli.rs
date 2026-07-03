@@ -429,6 +429,61 @@ fn repl_routes_bare_input_to_command_via_routes_toml() {
 }
 
 #[test]
+fn repl_attach_command_accepts_existing_file() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let img = data.path().join("pic.png");
+    std::fs::write(&img, b"fake").unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let cmd = format!(":attach {}\n:exit\n", img.display());
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(cmd.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("attached"), "stdout: {stdout}");
+    assert!(stdout.contains("pending count: 1"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_attach_command_rejects_missing_file() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b":attach /nope/nope.png\n:exit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("file not found"), "stderr: {stderr}");
+}
+
+#[test]
 fn repl_unrouted_input_hints_at_routes_toml() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

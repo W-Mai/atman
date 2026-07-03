@@ -425,7 +425,7 @@ async fn cmd_repl() -> Result<()> {
             continue;
         }
         if let Some(rest) = line.strip_prefix(':') {
-            if !handle_builtin(rest.trim(), session.id().to_string().as_str()) {
+            if !handle_builtin(rest.trim(), session.id().to_string().as_str(), &executor) {
                 break;
             }
             continue;
@@ -453,13 +453,38 @@ async fn cmd_repl() -> Result<()> {
     Ok(())
 }
 
-fn handle_builtin(cmd: &str, sid: &str) -> bool {
+fn handle_builtin(cmd: &str, sid: &str, executor: &Executor) -> bool {
+    if let Some(rest) = cmd.strip_prefix("attach") {
+        let path = rest.trim();
+        if path.is_empty() {
+            eprintln!(":attach <path> — path required");
+            return true;
+        }
+        let expanded = std::path::PathBuf::from(path);
+        if !expanded.exists() {
+            eprintln!(":attach: file not found: {}", expanded.display());
+            return true;
+        }
+        let kind = classify_attachment(&expanded);
+        executor.push_attachment(atman_runtime::provider::Attachment {
+            kind,
+            path: expanded.clone(),
+            mime: None,
+        });
+        println!(
+            "[atman] attached {} (pending count: {})",
+            expanded.display(),
+            executor.pending_attachment_count()
+        );
+        return true;
+    }
     match cmd {
         "help" => {
             println!(":help          — show this");
             println!(":exit | :quit  — leave REPL");
             println!(":session       — print current session id");
             println!(":cost          — cost summary for current session");
+            println!(":attach <path> — attach a file to the next LLM call");
             true
         }
         "exit" | "quit" => false,
@@ -475,6 +500,20 @@ fn handle_builtin(cmd: &str, sid: &str) -> bool {
             eprintln!("unknown builtin `:{other}` — try `:help`");
             true
         }
+    }
+}
+
+fn classify_attachment(path: &std::path::Path) -> atman_runtime::provider::AttachmentKind {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => {
+            atman_runtime::provider::AttachmentKind::Image
+        }
+        _ => atman_runtime::provider::AttachmentKind::File,
     }
 }
 
