@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::event::Event;
@@ -13,6 +13,7 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 pub struct EventWriter {
     handle: Option<JoinHandle<()>>,
     tx: mpsc::UnboundedSender<Event>,
+    stop_tx: Option<oneshot::Sender<()>>,
     events_path: PathBuf,
 }
 
@@ -21,15 +22,17 @@ impl EventWriter {
         let events_path = session_dir.as_ref().join("events.jsonl");
         std::fs::create_dir_all(session_dir.as_ref())?;
         let (tx, rx) = mpsc::unbounded_channel::<Event>();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let file_path = events_path.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = writer_loop(rx, &file_path).await {
+            if let Err(e) = writer_loop(rx, stop_rx, &file_path).await {
                 eprintln!("[atman] event writer failed: {e}");
             }
         });
         Ok(Self {
             handle: Some(handle),
             tx,
+            stop_tx: Some(stop_tx),
             events_path,
         })
     }
@@ -43,15 +46,20 @@ impl EventWriter {
     }
 
     pub async fn shutdown(mut self) {
-        drop(self.tx.clone());
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
         if let Some(handle) = self.handle.take() {
-            drop(std::mem::replace(&mut self.tx, mpsc::unbounded_channel().0));
             let _ = handle.await;
         }
     }
 }
 
-async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Event>, path: &Path) -> std::io::Result<()> {
+async fn writer_loop(
+    mut rx: mpsc::UnboundedReceiver<Event>,
+    mut stop_rx: oneshot::Receiver<()>,
+    path: &Path,
+) -> std::io::Result<()> {
     let file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -64,14 +72,16 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Event>, path: &Path) -> std
     loop {
         tokio::select! {
             biased;
+            _ = &mut stop_rx => {
+                while let Ok(event) = rx.try_recv() {
+                    write_event(&mut buf, &event).await?;
+                }
+                break;
+            }
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Some(event) => {
-                        let line = serde_json::to_string(&event).unwrap_or_else(|e| {
-                            format!("{{\"type\":\"encode_error\",\"error\":{:?}}}", e.to_string())
-                        });
-                        buf.write_all(line.as_bytes()).await?;
-                        buf.write_all(b"\n").await?;
+                        write_event(&mut buf, &event).await?;
                         since_flush += 1;
                         if since_flush >= BATCH_SIZE {
                             buf.flush().await?;
@@ -90,6 +100,21 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Event>, path: &Path) -> std
         }
     }
     buf.flush().await?;
+    Ok(())
+}
+
+async fn write_event(
+    buf: &mut tokio::io::BufWriter<tokio::fs::File>,
+    event: &Event,
+) -> std::io::Result<()> {
+    let line = serde_json::to_string(event).unwrap_or_else(|e| {
+        format!(
+            "{{\"type\":\"encode_error\",\"error\":{:?}}}",
+            e.to_string()
+        )
+    });
+    buf.write_all(line.as_bytes()).await?;
+    buf.write_all(b"\n").await?;
     Ok(())
 }
 

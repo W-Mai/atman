@@ -26,6 +26,15 @@ impl Executor {
         }
     }
 
+    pub fn with_events(events: EventSink) -> Self {
+        Self {
+            tools: ToolRegistry::new(),
+            providers: ProviderRegistry::new(),
+            events,
+            tool_ctx: ToolCtx::new(),
+        }
+    }
+
     pub async fn run(
         &self,
         file: &File,
