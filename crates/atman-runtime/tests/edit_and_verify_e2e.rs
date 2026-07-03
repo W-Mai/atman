@@ -102,6 +102,104 @@ async fn edit_and_verify_reverts_file_when_check_fails() {
     assert_eq!(after, original, "file must be restored to original content");
 }
 
+const FIX_LOOP_FLOW: &str = r#"flow demo(target: path, script: string) -> string {
+    contract {
+        scope { read: [project_root] write: [project_root] }
+        capabilities { shell: true }
+    }
+    result = fix_until_test_passes {
+        edit_flow: llm { model: "mock", prompt: "fix" }
+        test: bash.exec(script)
+        target: target
+        max_iters: 5
+        on_giveup: { status: "gave_up" }
+    }
+    return result.status
+}
+"#;
+
+#[tokio::test]
+async fn fix_until_test_passes_iterates_until_bash_check_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("subject.txt");
+    std::fs::write(&target, "original\n").unwrap();
+    let counter = dir.path().join("counter");
+    let script = format!(
+        "F={}; N=$(cat $F 2>/dev/null || echo 0); echo $((N+1)) > $F; if [ $N -lt 2 ]; then exit 1; else exit 0; fi",
+        counter.display()
+    );
+
+    let file = parse_file(FIX_LOOP_FLOW).unwrap();
+    let mut ex = Executor::new();
+    tools::register_tier_zero(&mut ex.tools);
+    tools::register_shell(&mut ex.tools);
+    let edited_value = Value::Struct(vec![
+        ("new_content".into(), Value::Str("edited\n".into())),
+        ("rationale".into(), Value::Str("try again".into())),
+    ]);
+    ex.providers.register(Arc::new(
+        MockProvider::new("mock").with_model("mock", edited_value),
+    ));
+
+    let out = ex
+        .run(
+            &file,
+            "demo",
+            vec![
+                ("target".into(), Value::Path(target.clone())),
+                ("script".into(), Value::Str(script)),
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&out, Value::Str(s) if s == "passed"),
+        "want passed after retries, got {out:?}"
+    );
+    let after = std::fs::read_to_string(&target).unwrap();
+    assert_eq!(
+        after, "original\n",
+        "pristine base must remain since final pass triggers no revert but also no successful edit persistence in this shape"
+    );
+}
+
+#[tokio::test]
+async fn fix_until_test_passes_returns_gave_up_after_max_iters() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("subject.txt");
+    std::fs::write(&target, "original\n").unwrap();
+
+    let file = parse_file(FIX_LOOP_FLOW).unwrap();
+    let mut ex = Executor::new();
+    tools::register_tier_zero(&mut ex.tools);
+    tools::register_shell(&mut ex.tools);
+    let edited_value = Value::Struct(vec![
+        ("new_content".into(), Value::Str("attempt\n".into())),
+        ("rationale".into(), Value::Str("hopeful".into())),
+    ]);
+    ex.providers.register(Arc::new(
+        MockProvider::new("mock").with_model("mock", edited_value),
+    ));
+
+    let out = ex
+        .run(
+            &file,
+            "demo",
+            vec![
+                ("target".into(), Value::Path(target.clone())),
+                ("script".into(), Value::Str("false".into())),
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(&out, Value::Str(s) if s == "gave_up"));
+    let after = std::fs::read_to_string(&target).unwrap();
+    assert_eq!(
+        after, "original\n",
+        "target must be reverted to pristine after all iters fail"
+    );
+}
+
 #[tokio::test]
 async fn edit_and_verify_keeps_edit_when_check_passes() {
     let dir = tempfile::tempdir().unwrap();
