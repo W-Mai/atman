@@ -149,6 +149,8 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
         Node::Llm { kwargs } => {
             let mut model: Option<String> = None;
             let mut prompt: Option<String> = None;
+            let mut messages_override: Option<Vec<crate::message::Message>> = None;
+            let mut system: Option<String> = None;
             let mut input: Value = Value::Unit;
             let mut retry_count: u32 = 0;
             let mut cache_prompt = false;
@@ -182,6 +184,38 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         other => {
                             return Value::Err(RuntimeError::TypeMismatch {
                                 expected: "string or @\"path\"".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    },
+                    "messages" => match val {
+                        Value::List(items) => {
+                            let mut msgs = Vec::with_capacity(items.len());
+                            for item in items {
+                                match item {
+                                    Value::Message(m) => msgs.push(m),
+                                    other => {
+                                        return Value::Err(RuntimeError::TypeMismatch {
+                                            expected: "message".into(),
+                                            actual: other.kind_name().into(),
+                                        });
+                                    }
+                                }
+                            }
+                            messages_override = Some(msgs);
+                        }
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "list of message".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    },
+                    "system" => match val {
+                        Value::Str(s) => system = Some(s),
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "string (system prompt)".into(),
                                 actual: other.kind_name().into(),
                             });
                         }
@@ -220,11 +254,10 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let Some(model) = model else {
                 return Value::Err(RuntimeError::MissingArg("llm.model".into()));
             };
-            let Some(mut prompt) = prompt else {
-                return Value::Err(RuntimeError::MissingArg("llm.prompt".into()));
-            };
-            if let Some(budget) = context_budget {
-                prompt = truncate_prompt_to_budget(prompt, budget);
+            if messages_override.is_some() && prompt.is_some() {
+                return Value::Err(RuntimeError::ToolFailed(
+                    "llm node: cannot specify both `messages:` and `prompt:` (pick one)".into(),
+                ));
             }
             let Some(provider) = ctx.providers.resolve(&model) else {
                 return Value::Err(RuntimeError::ToolFailed(format!(
@@ -239,13 +272,29 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now);
-            let user_msg = build_user_message_from_prompt(&prompt, &attachments, turn_id);
+            let (final_messages, prompt_for_budget) = if let Some(msgs) = messages_override {
+                let budget_text = msgs.last().map(|m| m.text_concat()).unwrap_or_default();
+                (msgs, budget_text)
+            } else {
+                let Some(mut prompt_text) = prompt else {
+                    return Value::Err(RuntimeError::MissingArg(
+                        "llm node: either `prompt:` or `messages:` required".into(),
+                    ));
+                };
+                if let Some(budget) = context_budget {
+                    prompt_text = truncate_prompt_to_budget(prompt_text, budget);
+                }
+                let user_msg =
+                    build_user_message_from_prompt(&prompt_text, &attachments, turn_id.clone());
+                (vec![user_msg], prompt_text)
+            };
+            let prompt = prompt_for_budget;
             let mut last_err: Option<RuntimeError> = None;
             for _ in 0..=retry_count {
                 let req = crate::provider::LlmRequest {
                     model: model.clone(),
-                    messages: vec![user_msg.clone()],
-                    system: None,
+                    messages: final_messages.clone(),
+                    system: system.clone(),
                     input: input.clone(),
                     schema: None,
                     cache_prompt,
