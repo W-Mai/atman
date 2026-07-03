@@ -110,9 +110,24 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 Err(e) => Value::Err(e),
             }
         }
-        Node::Llm { .. } | Node::Fanout { .. } | Node::UserConfirm { .. } => Value::Err(
-            RuntimeError::ToolFailed("node kind not yet implemented in W2 T5".into()),
-        ),
+        Node::Fanout { items, collect } => match collect {
+            atman_dsl::ast::FanoutCollect::All => {
+                let futs = items.iter().map(|item| eval_expr(item, env, ctx));
+                let results: Vec<Value> = futures::future::join_all(futs).await;
+                for v in &results {
+                    if let Value::Err(e) = v {
+                        return Value::Err(e.clone());
+                    }
+                }
+                Value::List(results)
+            }
+            atman_dsl::ast::FanoutCollect::First => Value::Err(RuntimeError::ToolFailed(
+                "fanout collect: first not yet implemented".into(),
+            )),
+        },
+        Node::Llm { .. } | Node::UserConfirm { .. } => Value::Err(RuntimeError::ToolFailed(
+            "node kind not yet implemented in W2".into(),
+        )),
     }
 }
 
@@ -292,6 +307,63 @@ mod tests {
             assert!(matches!(
                 v,
                 Value::Err(RuntimeError::UndefinedTool(name)) if name == "fs.readnope"
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn fanout_all_gathers_results_in_order() {
+        use crate::tools::fs::FsRead;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let pa = dir.path().join("a.txt");
+        let pb = dir.path().join("b.txt");
+        tokio::fs::write(&pa, b"AAA").await.unwrap();
+        tokio::fs::write(&pb, b"BBB").await.unwrap();
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(FsRead));
+        let tool_ctx = ToolCtx::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+        };
+
+        let mut env = Env::new();
+        env.bind("a", Value::Path(pa));
+        env.bind("b", Value::Path(pb));
+
+        let src = r#"flow t() { return fanout [ fs.read(a), fs.read(b) ] collect: all }"#;
+        let file = parse_file(src).unwrap();
+        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+            let v = eval_expr(value, &env, &ctx).await;
+            if let Value::List(items) = v {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0], Value::Str(s) if s == "AAA"));
+                assert!(matches!(&items[1], Value::Str(s) if s == "BBB"));
+            } else {
+                panic!("expected list");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fanout_all_short_circuits_on_err() {
+        let src = r#"flow t() { return fanout [ 1, missing, 3 ] collect: all }"#;
+        let file = parse_file(src).unwrap();
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+        };
+        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+            let v = eval_expr(value, &Env::new(), &ctx).await;
+            assert!(matches!(
+                v,
+                Value::Err(RuntimeError::UndefinedVar(name)) if name == "missing"
             ));
         }
     }
