@@ -3,6 +3,7 @@ use std::sync::Arc;
 use atman_proto::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, methods};
 use serde_json::json;
 
+pub mod config;
 pub mod http;
 pub mod state;
 pub mod unix;
