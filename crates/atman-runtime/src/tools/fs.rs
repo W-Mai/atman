@@ -26,6 +26,45 @@ impl Tool for FsRead {
     }
 }
 
+pub struct FsWrite;
+
+impl Tool for FsWrite {
+    fn name(&self) -> &str {
+        "fs.write"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Two
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let path = extract_path(&args, "path", 0)?;
+            let content = extract_string(&args, "content", 1)?;
+            tokio::fs::write(&path, content.as_bytes())
+                .await
+                .map_err(|e| {
+                    RuntimeError::ToolFailed(format!("fs.write({}): {e}", path.display()))
+                })?;
+            Ok(Value::Path(path))
+        })
+    }
+}
+
+fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, RuntimeError> {
+    let value = match args.named(name) {
+        Some(v) => v,
+        None => args.positional(pos)?,
+    };
+    match value {
+        Value::Str(s) => Ok(s.clone()),
+        other => Err(RuntimeError::TypeMismatch {
+            expected: "string".into(),
+            actual: other.kind_name().into(),
+        }),
+    }
+}
+
 pub struct FsList;
 
 impl Tool for FsList {

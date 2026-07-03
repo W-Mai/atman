@@ -1,0 +1,37 @@
+flow edit_and_verify(file: path, instruction: string) -> EditResult {
+    contract {
+        scope {
+            read: [project_root]
+            write: [project_root]
+        }
+        capabilities {
+            shell: true
+        }
+    }
+
+    original = fs.read(file)
+
+    edited = llm {
+        model: "claude-opus-4.7"
+        prompt: @"prompts/edit.md"
+        input: { file: file, original: original, instruction: instruction }
+        schema: { new_content: string, rationale: string }
+    }
+
+    ok = user_confirm("Apply edit to " + shell_quote(instruction) + "?")
+
+    when ok == false {
+        return { status: "cancelled" }
+    }
+
+    fs.write(file, edited.new_content)
+
+    check = bash.exec("cargo check")
+
+    when check.exit != 0 {
+        fs.write(file, original)
+        return { status: "reverted", stderr: check.stderr }
+    }
+
+    return { status: "applied", rationale: edited.rationale }
+}
