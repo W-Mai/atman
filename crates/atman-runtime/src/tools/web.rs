@@ -34,6 +34,127 @@ impl WebConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub description: String,
+}
+
+pub trait SearchProvider: Send + Sync {
+    fn call<'a>(&'a self, query: &'a str) -> BoxFut<'a, Result<Vec<SearchResult>, RuntimeError>>;
+}
+
+pub struct BraveSearch {
+    api_key: String,
+    endpoint: String,
+    client: reqwest::Client,
+}
+
+impl BraveSearch {
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self::with_endpoint(api_key, "https://api.search.brave.com/res/v1/web/search")
+    }
+
+    pub fn with_endpoint(api_key: impl Into<String>, endpoint: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            endpoint: endpoint.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+impl SearchProvider for BraveSearch {
+    fn call<'a>(&'a self, query: &'a str) -> BoxFut<'a, Result<Vec<SearchResult>, RuntimeError>> {
+        Box::pin(async move {
+            let resp = self
+                .client
+                .get(&self.endpoint)
+                .query(&[("q", query)])
+                .header("X-Subscription-Token", &self.api_key)
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("web.search: {e}")))?;
+            let status = resp.status();
+            let json: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("web.search decode: {e}")))?;
+            if !status.is_success() {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "web.search: brave returned {status}: {json}"
+                )));
+            }
+            let items = json
+                .pointer("/web/results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            Ok(items
+                .into_iter()
+                .map(|item| SearchResult {
+                    title: item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    url: item
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    description: item
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+                .collect())
+        })
+    }
+}
+
+pub struct WebSearch {
+    provider: Arc<dyn SearchProvider>,
+}
+
+impl WebSearch {
+    pub fn new(provider: Arc<dyn SearchProvider>) -> Self {
+        Self { provider }
+    }
+}
+
+impl Tool for WebSearch {
+    fn name(&self) -> &str {
+        "web.search"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Three
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let query = extract_string(&args, "query", 0)?;
+            let results = self.provider.call(&query).await?;
+            Ok(Value::List(
+                results
+                    .into_iter()
+                    .map(|r| {
+                        Value::Struct(vec![
+                            ("title".into(), Value::Str(r.title)),
+                            ("url".into(), Value::Str(r.url)),
+                            ("description".into(), Value::Str(r.description)),
+                        ])
+                    })
+                    .collect(),
+            ))
+        })
+    }
+}
+
 pub struct WebFetch {
     pub config: Arc<WebConfig>,
     pub client: reqwest::Client,
@@ -230,5 +351,84 @@ mod tests {
         };
         let err = tool.call(args, &ctx).await.err().unwrap();
         assert!(format!("{err}").contains("blocked by policy"));
+    }
+
+    #[tokio::test]
+    async fn brave_search_maps_results_and_forwards_api_key() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "web": {
+                "results": [
+                    {"title": "atman flow DSL", "url": "https://example.com/a", "description": "flow-driven code agent"},
+                    {"title": "runtime notes", "url": "https://example.com/b", "description": "watch supervisor"}
+                ]
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/web/search"))
+            .and(wiremock::matchers::header(
+                "X-Subscription-Token",
+                "secret-key",
+            ))
+            .and(wiremock::matchers::query_param("q", "atman"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = Arc::new(BraveSearch::with_endpoint(
+            "secret-key",
+            format!("{}/web/search", server.uri()),
+        ));
+        let tool = WebSearch::new(provider);
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str("atman".into())],
+            named: vec![],
+        };
+        let v = tool.call(args, &ctx).await.unwrap();
+        let Value::List(items) = v else {
+            panic!("expected list");
+        };
+        assert_eq!(items.len(), 2);
+        let Value::Struct(first) = &items[0] else {
+            panic!("first not struct");
+        };
+        assert!(
+            matches!(&first.iter().find(|(k, _)| k == "title").unwrap().1, Value::Str(s) if s == "atman flow DSL")
+        );
+        assert!(
+            matches!(&first.iter().find(|(k, _)| k == "url").unwrap().1, Value::Str(s) if s == "https://example.com/a")
+        );
+    }
+
+    #[tokio::test]
+    async fn brave_search_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/web/search"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_body_json(serde_json::json!({"error": "rate limit"})),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = Arc::new(BraveSearch::with_endpoint(
+            "k",
+            format!("{}/web/search", server.uri()),
+        ));
+        let tool = WebSearch::new(provider);
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str("x".into())],
+            named: vec![],
+        };
+        let err = tool.call(args, &ctx).await.err().unwrap();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("429") || msg.contains("rate limit"),
+            "msg: {msg}"
+        );
     }
 }

@@ -22,6 +22,10 @@ pub fn register_web(reg: &mut ToolRegistry, config: web::WebConfig) {
     reg.register(Arc::new(web::WebFetch::new(config)));
 }
 
+pub fn register_web_search(reg: &mut ToolRegistry, provider: Arc<dyn web::SearchProvider>) {
+    reg.register(Arc::new(web::WebSearch::new(provider)));
+}
+
 pub fn register_memory(
     reg: &mut ToolRegistry,
     todo_store: Arc<crate::memory::todo::TodoStore>,
