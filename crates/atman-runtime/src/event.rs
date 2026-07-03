@@ -95,6 +95,15 @@ pub enum Event {
         injection: crate::injection::Injection,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    ContentFilterHit {
+        turn_id: Option<TurnId>,
+        flow_run_id: Option<FlowRunId>,
+        provider: String,
+        model: String,
+        category: String,
+        action: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -140,6 +140,190 @@ impl Tool for IsEmpty {
     }
 }
 
+pub struct RenderPromptXml;
+pub struct RenderPromptMarkdown;
+pub struct RenderPromptTerse;
+
+fn extract_prompt_spec(v: &Value) -> Result<PromptSpec<'_>, RuntimeError> {
+    let Value::Struct(fields) = v else {
+        return Err(RuntimeError::TypeMismatch {
+            expected: "struct { role?, context?, task, examples?, schema? }".into(),
+            actual: v.kind_name().into(),
+        });
+    };
+    let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    let task = match get("task") {
+        Some(Value::Str(s)) => s.clone(),
+        Some(other) => {
+            return Err(RuntimeError::TypeMismatch {
+                expected: "string (task)".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+        None => return Err(RuntimeError::MissingArg("prompt.task".into())),
+    };
+    let role = match get("role") {
+        Some(Value::Str(s)) => Some(s.clone()),
+        Some(Value::Unit) | None => None,
+        Some(other) => {
+            return Err(RuntimeError::TypeMismatch {
+                expected: "string (role)".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    let context = get("context");
+    let schema = match get("schema") {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let examples = match get("examples") {
+        Some(Value::List(items)) => items.iter().collect(),
+        _ => Vec::new(),
+    };
+    Ok(PromptSpec {
+        role,
+        context,
+        task,
+        examples,
+        schema,
+    })
+}
+
+struct PromptSpec<'a> {
+    role: Option<String>,
+    context: Option<&'a Value>,
+    task: String,
+    examples: Vec<&'a Value>,
+    schema: Option<String>,
+}
+
+fn json_str(v: &Value) -> String {
+    serde_json::to_string_pretty(&v.to_json()).unwrap_or_default()
+}
+
+fn render_xml(spec: &PromptSpec<'_>) -> String {
+    let mut out = String::new();
+    if let Some(role) = &spec.role {
+        out.push_str(&format!("<role>{}</role>\n", role));
+    }
+    if let Some(ctx) = spec.context {
+        out.push_str(&format!("<context>\n{}\n</context>\n", json_str(ctx)));
+    }
+    if !spec.examples.is_empty() {
+        out.push_str("<examples>\n");
+        for (i, ex) in spec.examples.iter().enumerate() {
+            out.push_str(&format!(
+                "  <example n=\"{}\">\n{}\n  </example>\n",
+                i + 1,
+                json_str(ex)
+            ));
+        }
+        out.push_str("</examples>\n");
+    }
+    out.push_str(&format!("<task>{}</task>\n", spec.task));
+    if let Some(schema) = &spec.schema {
+        out.push_str(&format!("<schema>{}</schema>\n", schema));
+    }
+    out
+}
+
+fn render_markdown(spec: &PromptSpec<'_>) -> String {
+    let mut out = String::new();
+    if let Some(role) = &spec.role {
+        out.push_str(&format!("# Role\n{}\n\n", role));
+    }
+    if let Some(ctx) = spec.context {
+        out.push_str(&format!("# Context\n```json\n{}\n```\n\n", json_str(ctx)));
+    }
+    if !spec.examples.is_empty() {
+        out.push_str("# Examples\n");
+        for (i, ex) in spec.examples.iter().enumerate() {
+            out.push_str(&format!(
+                "{}. `{}`\n",
+                i + 1,
+                json_str(ex).replace('\n', " ")
+            ));
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!("# Task\n{}\n", spec.task));
+    if let Some(schema) = &spec.schema {
+        out.push_str(&format!("\n# Schema\n{}\n", schema));
+    }
+    out
+}
+
+fn render_terse(spec: &PromptSpec<'_>) -> String {
+    let mut out = String::new();
+    if let Some(role) = &spec.role {
+        out.push_str(&format!("Role: {}\n", role));
+    }
+    if let Some(ctx) = spec.context {
+        out.push_str(&format!("Context: {}\n", json_str(ctx).replace('\n', " ")));
+    }
+    out.push_str(&format!("Task: {}\n", spec.task));
+    if let Some(schema) = &spec.schema {
+        out.push_str(&format!("Schema: {}\n", schema));
+    }
+    for (i, ex) in spec.examples.iter().enumerate() {
+        out.push_str(&format!(
+            "Example {}: {}\n",
+            i + 1,
+            json_str(ex).replace('\n', " ")
+        ));
+    }
+    out
+}
+
+impl Tool for RenderPromptXml {
+    fn name(&self) -> &str {
+        "render_prompt_xml"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = args.positional(0)?;
+            let spec = extract_prompt_spec(v)?;
+            Ok(Value::Str(render_xml(&spec)))
+        })
+    }
+}
+
+impl Tool for RenderPromptMarkdown {
+    fn name(&self) -> &str {
+        "render_prompt_markdown"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = args.positional(0)?;
+            let spec = extract_prompt_spec(v)?;
+            Ok(Value::Str(render_markdown(&spec)))
+        })
+    }
+}
+
+impl Tool for RenderPromptTerse {
+    fn name(&self) -> &str {
+        "render_prompt_terse"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = args.positional(0)?;
+            let spec = extract_prompt_spec(v)?;
+            Ok(Value::Str(render_terse(&spec)))
+        })
+    }
+}
+
 pub struct ToJsonString;
 
 impl Tool for ToJsonString {
