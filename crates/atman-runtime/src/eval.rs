@@ -148,6 +148,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut input: Value = Value::Unit;
             let mut retry_count: u32 = 0;
             let mut cache_prompt = false;
+            let mut context_budget: Option<u64> = None;
             let mut fallback_expr: Option<&Expr> = None;
             for (k, v) in kwargs {
                 match k.name.as_str() {
@@ -200,15 +201,27 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             });
                         }
                     },
+                    "context_budget" => match val {
+                        Value::Int(n) if n > 0 => context_budget = Some(n as u64),
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "positive int".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    },
                     _ => {}
                 }
             }
             let Some(model) = model else {
                 return Value::Err(RuntimeError::MissingArg("llm.model".into()));
             };
-            let Some(prompt) = prompt else {
+            let Some(mut prompt) = prompt else {
                 return Value::Err(RuntimeError::MissingArg("llm.prompt".into()));
             };
+            if let Some(budget) = context_budget {
+                prompt = truncate_prompt_to_budget(prompt, budget);
+            }
             let Some(provider) = ctx.providers.resolve(&model) else {
                 return Value::Err(RuntimeError::ToolFailed(format!(
                     "no provider registered for model `{model}`"
@@ -335,6 +348,36 @@ fn contract_allows_shell(contract: Option<&atman_dsl::ast::Contract>) -> bool {
         }
     }
     false
+}
+
+pub fn truncate_prompt_to_budget(prompt: String, budget_tokens: u64) -> String {
+    let budget_chars = budget_tokens.saturating_mul(4) as usize;
+    if prompt.len() <= budget_chars {
+        return prompt;
+    }
+    let head_chars = budget_chars * 4 / 10;
+    let tail_chars = budget_chars * 4 / 10;
+    let (head, tail) = if head_chars + tail_chars >= prompt.len() {
+        return prompt;
+    } else {
+        let head_end = char_boundary(&prompt, head_chars, false);
+        let tail_start = char_boundary(&prompt, prompt.len().saturating_sub(tail_chars), true);
+        (&prompt[..head_end], &prompt[tail_start..])
+    };
+    let dropped = prompt.len() - head.len() - tail.len();
+    format!("{head}\n\n[... truncated {dropped} chars ...]\n\n{tail}")
+}
+
+fn char_boundary(s: &str, target: usize, round_up: bool) -> usize {
+    let mut idx = target.min(s.len());
+    while idx > 0 && idx < s.len() && !s.is_char_boundary(idx) {
+        if round_up {
+            idx += 1;
+        } else {
+            idx -= 1;
+        }
+    }
+    idx
 }
 
 // Bare primitive names inside `schema: { valid: bool, ... }` parse as tool calls; treat as Unit.

@@ -112,6 +112,7 @@ async fn eval_bind_with_watches(
     let mut prompt: Option<String> = None;
     let mut input = Value::Unit;
     let mut cache_prompt = false;
+    let mut context_budget: Option<u64> = None;
     for (k, v) in kwargs {
         if k.name == "schema" || k.name == "fallback" || k.name == "retry" {
             continue;
@@ -149,15 +150,27 @@ async fn eval_bind_with_watches(
                     }));
                 }
             },
+            "context_budget" => match val {
+                Value::Int(n) if n > 0 => context_budget = Some(n as u64),
+                other => {
+                    return Ok(Value::Err(RuntimeError::TypeMismatch {
+                        expected: "positive int".into(),
+                        actual: other.kind_name().into(),
+                    }));
+                }
+            },
             _ => {}
         }
     }
     let Some(model) = model else {
         return Ok(Value::Err(RuntimeError::MissingArg("llm.model".into())));
     };
-    let Some(prompt) = prompt else {
+    let Some(mut prompt) = prompt else {
         return Ok(Value::Err(RuntimeError::MissingArg("llm.prompt".into())));
     };
+    if let Some(budget) = context_budget {
+        prompt = crate::eval::truncate_prompt_to_budget(prompt, budget);
+    }
     let Some(provider) = ctx.providers.resolve(&model) else {
         return Ok(Value::Err(RuntimeError::ToolFailed(format!(
             "no provider registered for model `{model}`"
