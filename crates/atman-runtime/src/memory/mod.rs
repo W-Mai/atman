@@ -7,9 +7,11 @@ use uuid::Uuid;
 use crate::error::RuntimeError;
 
 pub mod confession;
+pub mod spec;
 pub mod todo;
 
 pub use confession::{Confession, ConfessionStore};
+pub use spec::{SpecDeviation, SpecEntry, SpecStatus, SpecStore};
 pub use todo::{Todo, TodoStatus, TodoStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::error::RuntimeError;
 use crate::memory::MemoryId;
 use crate::memory::confession::{Confession, ConfessionStore};
+use crate::memory::spec::SpecStore;
 use crate::memory::todo::{Todo, TodoStatus, TodoStore};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
@@ -98,6 +99,87 @@ impl Tool for MemoryConfess {
             };
             let id = self.store.append(confession).await?;
             Ok(Value::Str(id.to_string()))
+        })
+    }
+}
+
+pub struct MemorySpecStatus {
+    pub store: Arc<SpecStore>,
+}
+
+impl Tool for MemorySpecStatus {
+    fn name(&self) -> &str {
+        "memory.spec.status"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let feature = required_string(&args, "feature")?;
+            let st = self.store.status(&feature).await?;
+            Ok(Value::Struct(vec![
+                ("feature".into(), Value::Str(st.feature)),
+                ("phase".into(), Value::Str(st.phase)),
+                ("entry_count".into(), Value::Int(st.entry_count as i64)),
+                (
+                    "deviation_count".into(),
+                    Value::Int(st.deviation_count as i64),
+                ),
+            ]))
+        })
+    }
+}
+
+pub struct MemorySpecUpdate {
+    pub store: Arc<SpecStore>,
+}
+
+impl Tool for MemorySpecUpdate {
+    fn name(&self) -> &str {
+        "memory.spec.update"
+    }
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let feature = required_string(&args, "feature")?;
+            let phase = required_string(&args, "phase")?;
+            let content = required_string(&args, "content")?;
+            let entry = self.store.update(&feature, &phase, content).await?;
+            Ok(Value::Struct(vec![
+                ("id".into(), Value::Str(entry.id.to_string())),
+                ("feature".into(), Value::Str(entry.feature)),
+                ("phase".into(), Value::Str(entry.phase)),
+            ]))
+        })
+    }
+}
+
+pub struct MemorySpecDeviate {
+    pub store: Arc<SpecStore>,
+}
+
+impl Tool for MemorySpecDeviate {
+    fn name(&self) -> &str {
+        "memory.spec.deviate"
+    }
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let feature = required_string(&args, "feature")?;
+            let section = required_string(&args, "section")?;
+            let delta = required_string(&args, "delta")?;
+            let reason = required_string(&args, "reason")?;
+            let dev = self.store.deviate(&feature, section, delta, reason).await?;
+            Ok(Value::Struct(vec![
+                ("id".into(), Value::Str(dev.id.to_string())),
+                ("feature".into(), Value::Str(dev.feature)),
+                ("section".into(), Value::Str(dev.section)),
+            ]))
         })
     }
 }

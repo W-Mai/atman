@@ -72,3 +72,16 @@ pub fn register_memory(
         store: confession_store,
     }));
 }
+
+pub fn register_spec_memory(
+    reg: &mut ToolRegistry,
+    spec_store: Arc<crate::memory::spec::SpecStore>,
+) {
+    reg.register(Arc::new(memory::MemorySpecStatus {
+        store: spec_store.clone(),
+    }));
+    reg.register(Arc::new(memory::MemorySpecUpdate {
+        store: spec_store.clone(),
+    }));
+    reg.register(Arc::new(memory::MemorySpecDeviate { store: spec_store }));
+}
