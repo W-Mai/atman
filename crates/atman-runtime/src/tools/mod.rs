@@ -4,6 +4,7 @@ use crate::tool::ToolRegistry;
 
 pub mod bash;
 pub mod fs;
+pub mod hunk;
 pub mod memory;
 pub mod memory_stubs;
 pub mod preview;
@@ -25,6 +26,8 @@ pub fn register_tier_zero(reg: &mut ToolRegistry) {
     reg.register(Arc::new(stdlib::Tail));
     reg.register(Arc::new(stdlib::IsEmpty));
     reg.register(Arc::new(test::TestRun));
+    reg.register(Arc::new(hunk::FsEdit));
+    reg.register(Arc::new(hunk::HunkApply));
 }
 
 pub fn register_shell(reg: &mut ToolRegistry) {
