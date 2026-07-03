@@ -36,6 +36,110 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
+pub struct Len;
+
+impl Tool for Len {
+    fn name(&self) -> &str {
+        "len"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = args.positional(0)?;
+            match v {
+                Value::List(items) => Ok(Value::Int(items.len() as i64)),
+                Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+                other => Err(RuntimeError::TypeMismatch {
+                    expected: "list or string".into(),
+                    actual: other.kind_name().into(),
+                }),
+            }
+        })
+    }
+}
+
+pub struct Head;
+
+impl Tool for Head {
+    fn name(&self) -> &str {
+        "head"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            match args.positional(0)? {
+                Value::List(items) => items
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::ToolFailed("head: empty list".into())),
+                other => Err(RuntimeError::TypeMismatch {
+                    expected: "list".into(),
+                    actual: other.kind_name().into(),
+                }),
+            }
+        })
+    }
+}
+
+pub struct Tail;
+
+impl Tool for Tail {
+    fn name(&self) -> &str {
+        "tail"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            match args.positional(0)? {
+                Value::List(items) if !items.is_empty() => Ok(Value::List(items[1..].to_vec())),
+                Value::List(_) => Err(RuntimeError::ToolFailed("tail: empty list".into())),
+                other => Err(RuntimeError::TypeMismatch {
+                    expected: "list".into(),
+                    actual: other.kind_name().into(),
+                }),
+            }
+        })
+    }
+}
+
+pub struct IsEmpty;
+
+impl Tool for IsEmpty {
+    fn name(&self) -> &str {
+        "is_empty"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = args.positional(0)?;
+            match v {
+                Value::List(items) => Ok(Value::Bool(items.is_empty())),
+                Value::Str(s) => Ok(Value::Bool(s.is_empty())),
+                other => Err(RuntimeError::TypeMismatch {
+                    expected: "list or string".into(),
+                    actual: other.kind_name().into(),
+                }),
+            }
+        })
+    }
+}
+
 pub struct ToJsonString;
 
 impl Tool for ToJsonString {

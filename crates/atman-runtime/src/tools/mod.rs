@@ -15,9 +15,14 @@ pub fn register_tier_zero(reg: &mut ToolRegistry) {
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(fs::FsWrite));
     reg.register(Arc::new(memory_stubs::FetchConfessions));
+    reg.register(Arc::new(memory_stubs::FetchRule::new()));
     reg.register(Arc::new(stdlib::ShellQuote));
     reg.register(Arc::new(stdlib::ToJsonString));
     reg.register(Arc::new(stdlib::ComposeEmailPreview));
+    reg.register(Arc::new(stdlib::Len));
+    reg.register(Arc::new(stdlib::Head));
+    reg.register(Arc::new(stdlib::Tail));
+    reg.register(Arc::new(stdlib::IsEmpty));
 }
 
 pub fn register_shell(reg: &mut ToolRegistry) {
