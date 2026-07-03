@@ -79,12 +79,17 @@ pub async fn exec_flow(
     args: Vec<(String, Value)>,
     tools: &ToolRegistry,
     tool_ctx: &ToolCtx,
+    providers: &crate::provider::ProviderRegistry,
 ) -> Result<Value, RuntimeError> {
     let mut env = Env::new();
     for (name, value) in args {
         env.bind(name, value);
     }
-    let ctx = EvalCtx { tools, tool_ctx };
+    let ctx = EvalCtx {
+        tools,
+        tool_ctx,
+        providers,
+    };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),
         StmtOutcome::Err(e) => Err(e),
@@ -101,7 +106,8 @@ mod tests {
         let file = parse_file(src).expect("parse test src");
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
-        exec_flow(&file.flows[0], args, &tools, &tool_ctx).await
+        let providers = crate::provider::ProviderRegistry::new();
+        exec_flow(&file.flows[0], args, &tools, &tool_ctx, &providers).await
     }
 
     #[tokio::test]

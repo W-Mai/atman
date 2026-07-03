@@ -8,6 +8,7 @@ use crate::value::Value;
 pub struct EvalCtx<'a> {
     pub tools: &'a ToolRegistry,
     pub tool_ctx: &'a ToolCtx,
+    pub providers: &'a crate::provider::ProviderRegistry,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -21,9 +22,10 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
             Some(v) => v.clone(),
             None => Value::Err(RuntimeError::UndefinedVar(id.name.clone())),
         },
-        Expr::FileRef(_) => Value::Err(RuntimeError::ToolFailed(
-            "file references only resolve inside node args".into(),
-        )),
+        Expr::FileRef(f) => match tokio::fs::read_to_string(&f.path).await {
+            Ok(s) => Value::Str(s),
+            Err(e) => Value::Err(RuntimeError::ToolFailed(format!("@\"{}\": {e}", f.path))),
+        },
         Expr::Member { base, field } => {
             let base_v = eval_expr(base, env, ctx).await;
             if base_v.is_err() {
@@ -125,9 +127,72 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 "fanout collect: first not yet implemented".into(),
             )),
         },
-        Node::Llm { .. } | Node::UserConfirm { .. } => Value::Err(RuntimeError::ToolFailed(
-            "node kind not yet implemented in W2".into(),
-        )),
+        Node::Llm { kwargs } => {
+            let mut model: Option<String> = None;
+            let mut prompt: Option<String> = None;
+            let mut input: Value = Value::Unit;
+            let mut schema: Option<String> = None;
+            for (k, v) in kwargs {
+                let val = eval_expr(v, env, ctx).await;
+                if val.is_err() {
+                    return val;
+                }
+                match k.name.as_str() {
+                    "model" => match val {
+                        Value::Str(s) => model = Some(s),
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "string".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    },
+                    "prompt" => match val {
+                        Value::Str(s) => prompt = Some(s),
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "string or @\"path\"".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    },
+                    "input" => input = val,
+                    "schema" => match val {
+                        Value::Str(s) => schema = Some(s),
+                        _ => schema = None,
+                    },
+                    _ => {}
+                }
+            }
+            let Some(model) = model else {
+                return Value::Err(RuntimeError::MissingArg("llm.model".into()));
+            };
+            let Some(prompt) = prompt else {
+                return Value::Err(RuntimeError::MissingArg("llm.prompt".into()));
+            };
+            let Some(provider) = ctx.providers.resolve(&model) else {
+                return Value::Err(RuntimeError::ToolFailed(format!(
+                    "no provider registered for model `{model}`"
+                )));
+            };
+            let req = crate::provider::LlmRequest {
+                model,
+                prompt,
+                input,
+                schema,
+            };
+            match provider.call(req).await {
+                Ok(v) => v,
+                Err(e) => Value::Err(e),
+            }
+        }
+        Node::UserConfirm { msg } => {
+            let v = eval_expr(msg, env, ctx).await;
+            if v.is_err() {
+                return v;
+            }
+            Value::Bool(true)
+        }
     }
 }
 
@@ -214,9 +279,11 @@ mod tests {
         let file = parse_file(&src).expect("parse test snippet");
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
+        let providers = crate::provider::ProviderRegistry::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
+            providers: &providers,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -298,9 +365,11 @@ mod tests {
         let file = parse_file(src).unwrap();
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
+        let providers = crate::provider::ProviderRegistry::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
+            providers: &providers,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -326,9 +395,11 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(FsRead));
         let tool_ctx = ToolCtx::new();
+        let providers = crate::provider::ProviderRegistry::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
+            providers: &providers,
         };
 
         let mut env = Env::new();
@@ -355,15 +426,96 @@ mod tests {
         let file = parse_file(src).unwrap();
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
+        let providers = crate::provider::ProviderRegistry::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
+            providers: &providers,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
             assert!(matches!(
                 v,
                 Value::Err(RuntimeError::UndefinedVar(name)) if name == "missing"
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_node_dispatches_to_mock_provider() {
+        use crate::providers::mock::MockProvider;
+        use std::sync::Arc;
+
+        let mut providers = crate::provider::ProviderRegistry::new();
+        providers.register(Arc::new(MockProvider::new("mock").with_model(
+            "claude-opus-4.7",
+            Value::Struct(vec![("severity".into(), Value::Str("info".into()))]),
+        )));
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+            providers: &providers,
+        };
+
+        let src = r#"flow t() {
+    return llm {
+        model: "claude-opus-4.7"
+        prompt: "review please"
+        input: 1
+    }
+}
+"#;
+        let file = parse_file(src).unwrap();
+        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+            let v = eval_expr(value, &Env::new(), &ctx).await;
+            if let Value::Struct(fields) = v {
+                assert_eq!(fields[0].0, "severity");
+                assert!(matches!(&fields[0].1, Value::Str(s) if s == "info"));
+            } else {
+                panic!("expected struct");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_missing_model_reports_missing_arg() {
+        let providers = crate::provider::ProviderRegistry::new();
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+            providers: &providers,
+        };
+        let src = r#"flow t() { return llm { prompt: "hi" } }"#;
+        let file = parse_file(src).unwrap();
+        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+            let v = eval_expr(value, &Env::new(), &ctx).await;
+            assert!(matches!(
+                v,
+                Value::Err(RuntimeError::MissingArg(name)) if name == "llm.model"
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn user_confirm_stub_returns_true() {
+        let providers = crate::provider::ProviderRegistry::new();
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+            providers: &providers,
+        };
+        let src = r#"flow t() { return user_confirm("proceed?") }"#;
+        let file = parse_file(src).unwrap();
+        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+            assert!(matches!(
+                eval_expr(value, &Env::new(), &ctx).await,
+                Value::Bool(true)
             ));
         }
     }
@@ -381,9 +533,11 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(FsRead));
         let tool_ctx = ToolCtx::new();
+        let providers = crate::provider::ProviderRegistry::new();
         let ctx = EvalCtx {
             tools: &tools,
             tool_ctx: &tool_ctx,
+            providers: &providers,
         };
 
         let mut env = Env::new();
