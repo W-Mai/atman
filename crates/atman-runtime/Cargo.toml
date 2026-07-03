@@ -12,3 +12,8 @@ description = "atman flow execution runtime: values, errors, executor"
 atman-dsl        = { path = "../atman-dsl" }
 anyhow.workspace   = true
 thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
