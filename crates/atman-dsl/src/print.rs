@@ -31,10 +31,30 @@ fn write_flow(out: &mut String, flow: &FlowDecl) {
         write_type(out, ret);
     }
     out.push_str(" {\n");
+    if let Some(contract) = &flow.contract {
+        write_contract(out, contract, 1);
+    }
     for stmt in &flow.body {
         write_stmt(out, stmt, 1);
     }
     out.push_str("}\n");
+}
+
+fn write_contract(out: &mut String, contract: &Contract, indent: usize) {
+    let outer_pad = "    ".repeat(indent);
+    let inner_pad = "    ".repeat(indent + 1);
+    let field_pad = "    ".repeat(indent + 2);
+    writeln!(out, "{outer_pad}contract {{").unwrap();
+    for block in &contract.blocks {
+        writeln!(out, "{inner_pad}{} {{", block.name.name).unwrap();
+        for (k, v) in &block.kwargs {
+            write!(out, "{field_pad}{}: ", k.name).unwrap();
+            write_expr(out, v, indent + 2);
+            out.push('\n');
+        }
+        writeln!(out, "{inner_pad}}}").unwrap();
+    }
+    writeln!(out, "{outer_pad}}}").unwrap();
 }
 
 fn write_type(out: &mut String, ty: &TypeExpr) {

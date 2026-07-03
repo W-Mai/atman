@@ -116,7 +116,19 @@ pub struct FlowDecl {
     pub name: Ident,
     pub params: Vec<(Ident, TypeExpr)>,
     pub ret: Option<TypeExpr>,
+    pub contract: Option<Contract>,
     pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Contract {
+    pub blocks: Vec<ContractBlock>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContractBlock {
+    pub name: Ident,
+    pub kwargs: Kwargs,
 }
 
 #[derive(Debug, Clone)]

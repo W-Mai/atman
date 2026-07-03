@@ -14,6 +14,7 @@ mod kw {
     syn::custom_keyword!(all);
     syn::custom_keyword!(first);
     syn::custom_keyword!(user_confirm);
+    syn::custom_keyword!(contract);
 }
 
 fn to_ident(id: syn::Ident) -> Ident {
@@ -55,15 +56,47 @@ impl Parse for FlowDecl {
 
         let body_content;
         braced!(body_content in input);
+
+        let contract = if body_content.peek(kw::contract) {
+            Some(parse_contract(&body_content)?)
+        } else {
+            None
+        };
+
         let body = parse_stmts(&body_content)?;
 
         Ok(FlowDecl {
             name,
             params,
             ret,
+            contract,
             body,
         })
     }
+}
+
+fn parse_contract(input: ParseStream) -> Result<Contract> {
+    input.parse::<kw::contract>()?;
+    let content;
+    braced!(content in input);
+    let mut blocks = Vec::new();
+    while !content.is_empty() {
+        let name = to_ident(content.parse::<syn::Ident>()?);
+        let kwargs_content;
+        braced!(kwargs_content in content);
+        let mut kwargs = Vec::new();
+        while !kwargs_content.is_empty() {
+            let k = to_ident(kwargs_content.parse::<syn::Ident>()?);
+            kwargs_content.parse::<Token![:]>()?;
+            let v = parse_expr(&kwargs_content)?;
+            kwargs.push((k, v));
+            if kwargs_content.peek(Token![,]) {
+                kwargs_content.parse::<Token![,]>()?;
+            }
+        }
+        blocks.push(ContractBlock { name, kwargs });
+    }
+    Ok(Contract { blocks })
 }
 
 fn parse_params(input: ParseStream) -> Result<Vec<(Ident, TypeExpr)>> {

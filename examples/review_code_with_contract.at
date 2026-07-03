@@ -1,0 +1,25 @@
+flow review_code(file: path) -> Review {
+    contract {
+        scope {
+            read: [project_root]
+            write: []
+        }
+        interjection {
+            accept: [L1, L4]
+        }
+    }
+
+    gather = fanout [
+        fs.read(file),
+        fetch_rule("code-review"),
+    ] collect: all
+
+    primary = llm {
+        model: "claude-opus-4.7"
+        prompt: @"prompts/code-review.md"
+        input: gather
+        schema: Review
+    }
+
+    return primary
+}
