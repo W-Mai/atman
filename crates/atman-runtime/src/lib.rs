@@ -6,6 +6,7 @@ pub mod event;
 pub mod event_writer;
 pub mod exec;
 pub mod executor;
+pub mod memory;
 pub mod provider;
 pub mod providers;
 pub mod session;
