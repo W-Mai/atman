@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
+use crate::message::Message;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -12,6 +13,7 @@ pub enum Value {
     Path(PathBuf),
     List(Vec<Value>),
     Struct(Vec<(String, Value)>),
+    Message(Message),
     Err(RuntimeError),
 }
 
@@ -30,6 +32,7 @@ impl Value {
             Value::Path(_) => "path",
             Value::List(_) => "list",
             Value::Struct(_) => "struct",
+            Value::Message(_) => "message",
             Value::Err(_) => "err",
         }
     }

@@ -7,6 +7,7 @@ pub mod event_writer;
 pub mod exec;
 pub mod executor;
 pub mod memory;
+pub mod message;
 pub mod provider;
 pub mod providers;
 pub mod session;
@@ -20,10 +21,13 @@ pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use env::Env;
 pub use error::RuntimeError;
 pub use eval::{EvalCtx, eval_expr};
-pub use event::{Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable};
+pub use event::{
+    Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable, TurnId,
+};
 pub use event_writer::EventWriter;
 pub use exec::{exec_flow, exec_stmts};
 pub use executor::Executor;
+pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
 pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
 pub use session::{Session, SessionId};
 pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
