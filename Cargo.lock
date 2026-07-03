@@ -106,6 +106,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "atman-daemon"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "atman-proto",
+ "axum",
+ "chrono",
+ "directories",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower-http",
+ "uuid",
+]
+
+[[package]]
 name = "atman-dsl"
 version = "0.0.0"
 dependencies = [
