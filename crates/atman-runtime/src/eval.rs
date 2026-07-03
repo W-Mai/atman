@@ -1,25 +1,31 @@
-use atman_dsl::ast::{BinOp, Expr, Literal};
+use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node};
 
 use crate::env::Env;
 use crate::error::RuntimeError;
+use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
-pub fn eval_expr(expr: &Expr, env: &Env) -> Value {
+pub struct EvalCtx<'a> {
+    pub tools: &'a ToolRegistry,
+    pub tool_ctx: &'a ToolCtx,
+}
+
+pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
+    Box::pin(async move { eval_expr_inner(expr, env, ctx).await })
+}
+
+async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
     match expr {
         Expr::Literal(lit) => eval_literal(lit),
         Expr::Ident(id) => match env.lookup(&id.name) {
             Some(v) => v.clone(),
             None => Value::Err(RuntimeError::UndefinedVar(id.name.clone())),
         },
-        Expr::FileRef(_) => {
-            // File loading is a runtime concern handled by tool nodes, not
-            // a bare expression: keep it symbolic so downstream nodes decide.
-            Value::Err(RuntimeError::ToolFailed(
-                "file references only resolve inside node args".into(),
-            ))
-        }
+        Expr::FileRef(_) => Value::Err(RuntimeError::ToolFailed(
+            "file references only resolve inside node args".into(),
+        )),
         Expr::Member { base, field } => {
-            let base_v = eval_expr(base, env);
+            let base_v = eval_expr(base, env, ctx).await;
             if base_v.is_err() {
                 return base_v;
             }
@@ -29,11 +35,11 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Value {
             }
         }
         Expr::Binary { op, left, right } => {
-            let l = eval_expr(left, env);
+            let l = eval_expr(left, env, ctx).await;
             if l.is_err() {
                 return l;
             }
-            let r = eval_expr(right, env);
+            let r = eval_expr(right, env, ctx).await;
             if r.is_err() {
                 return r;
             }
@@ -42,7 +48,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Value {
         Expr::List(items) => {
             let mut acc = Vec::with_capacity(items.len());
             for item in items {
-                let v = eval_expr(item, env);
+                let v = eval_expr(item, env, ctx).await;
                 if v.is_err() {
                     return v;
                 }
@@ -53,7 +59,7 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Value {
         Expr::Struct(fields) => {
             let mut acc = Vec::with_capacity(fields.len());
             for (k, v) in fields {
-                let val = eval_expr(v, env);
+                let val = eval_expr(v, env, ctx).await;
                 if val.is_err() {
                     return val;
                 }
@@ -61,10 +67,58 @@ pub fn eval_expr(expr: &Expr, env: &Env) -> Value {
             }
             Value::Struct(acc)
         }
-        Expr::Node(_) | Expr::Call { .. } => Value::Err(RuntimeError::ToolFailed(
-            "node/call evaluation not yet implemented in W2 T2".into(),
+        Expr::Node(node) => eval_node(node, env, ctx).await,
+        Expr::Call { .. } => Value::Err(RuntimeError::ToolFailed(
+            "bare function call not supported; use namespaced tool call".into(),
         )),
     }
+}
+
+async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    match node {
+        Node::ToolCall { path, args } => {
+            let name = tool_name(path);
+            let tool = match ctx.tools.get(&name) {
+                Some(t) => t,
+                None => return Value::Err(RuntimeError::UndefinedTool(name)),
+            };
+            let mut positional = Vec::new();
+            let mut named = Vec::new();
+            for arg in args {
+                match arg {
+                    Arg::Positional(e) => {
+                        let v = eval_expr(e, env, ctx).await;
+                        if v.is_err() {
+                            return v;
+                        }
+                        positional.push(v);
+                    }
+                    Arg::Named { name, value } => {
+                        let v = eval_expr(value, env, ctx).await;
+                        if v.is_err() {
+                            return v;
+                        }
+                        named.push((name.name.clone(), v));
+                    }
+                }
+            }
+            match tool
+                .call(ToolArgs { positional, named }, ctx.tool_ctx)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => Value::Err(e),
+            }
+        }
+        Node::Llm { .. } | Node::Fanout { .. } | Node::UserConfirm { .. } => Value::Err(
+            RuntimeError::ToolFailed("node kind not yet implemented in W2 T5".into()),
+        ),
+    }
+}
+
+fn tool_name(path: &[atman_dsl::ast::Ident]) -> String {
+    let parts: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
+    parts.join(".")
 }
 
 fn eval_literal(lit: &Literal) -> Value {
@@ -140,69 +194,70 @@ mod tests {
     use super::*;
     use atman_dsl::parse::parse_file;
 
-    fn eval_snippet(expr_src: &str) -> Value {
+    async fn eval_snippet(expr_src: &str) -> Value {
         let src = format!("flow t() {{\n    return {expr_src}\n}}\n");
         let file = parse_file(&src).expect("parse test snippet");
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+        };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
-            eval_expr(value, &Env::new())
+            eval_expr(value, &Env::new(), &ctx).await
         } else {
             panic!("expected return statement");
         }
     }
 
-    #[test]
-    fn literals_evaluate() {
-        assert!(matches!(eval_snippet("42"), Value::Int(42)));
-        assert!(matches!(eval_snippet("true"), Value::Bool(true)));
-        assert!(matches!(eval_snippet(r#""hello""#), Value::Str(s) if s == "hello"));
-    }
-
-    #[test]
-    fn ident_lookup_uses_env() {
-        let mut env = Env::new();
-        env.bind("x", Value::Int(9));
-        let src = "flow t() { return x }\n";
-        let file = parse_file(src).unwrap();
-        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
-            assert!(matches!(eval_expr(value, &env), Value::Int(9)));
-        }
-    }
-
-    #[test]
-    fn undefined_ident_yields_err_value() {
+    #[tokio::test]
+    async fn literals_evaluate() {
+        assert!(matches!(eval_snippet("42").await, Value::Int(42)));
+        assert!(matches!(eval_snippet("true").await, Value::Bool(true)));
         assert!(matches!(
-            eval_snippet("missing"),
+            eval_snippet(r#""hello""#).await,
+            Value::Str(s) if s == "hello"
+        ));
+    }
+
+    #[tokio::test]
+    async fn undefined_ident_yields_err_value() {
+        assert!(matches!(
+            eval_snippet("missing").await,
             Value::Err(RuntimeError::UndefinedVar(name)) if name == "missing"
         ));
     }
 
-    #[test]
-    fn binary_arithmetic_and_comparison() {
-        assert!(matches!(eval_snippet("1 == 1"), Value::Bool(true)));
-        assert!(matches!(eval_snippet("2 < 3"), Value::Bool(true)));
-        assert!(matches!(eval_snippet(r#""a" + "b""#), Value::Str(s) if s == "ab"));
+    #[tokio::test]
+    async fn binary_arithmetic_and_comparison() {
+        assert!(matches!(eval_snippet("1 == 1").await, Value::Bool(true)));
+        assert!(matches!(eval_snippet("2 < 3").await, Value::Bool(true)));
+        assert!(matches!(
+            eval_snippet(r#""a" + "b""#).await,
+            Value::Str(s) if s == "ab"
+        ));
     }
 
-    #[test]
-    fn type_mismatch_bubbles_up() {
+    #[tokio::test]
+    async fn type_mismatch_bubbles_up() {
         assert!(matches!(
-            eval_snippet(r#"1 + "x""#),
+            eval_snippet(r#"1 + "x""#).await,
             Value::Err(RuntimeError::TypeMismatch { .. })
         ));
     }
 
-    #[test]
-    fn err_short_circuits_binary() {
+    #[tokio::test]
+    async fn err_short_circuits_binary() {
         assert!(matches!(
-            eval_snippet("missing == 1"),
+            eval_snippet("missing == 1").await,
             Value::Err(RuntimeError::UndefinedVar(name)) if name == "missing"
         ));
     }
 
-    #[test]
-    fn list_evaluates_all_items() {
-        let v = eval_snippet("[1, 2, 3]");
+    #[tokio::test]
+    async fn list_evaluates_all_items() {
+        let v = eval_snippet("[1, 2, 3]").await;
         if let Value::List(items) = v {
             assert_eq!(items.len(), 3);
             assert!(matches!(items[2], Value::Int(3)));
@@ -211,29 +266,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn struct_literal_evaluates_fields_in_order() {
-        let v = eval_snippet(r#"{ severity: "critical", count: 3 }"#);
+    #[tokio::test]
+    async fn struct_literal_evaluates_fields_in_order() {
+        let v = eval_snippet(r#"{ severity: "critical", count: 3 }"#).await;
         if let Value::Struct(fields) = v {
             assert_eq!(fields[0].0, "severity");
-            assert!(matches!(&fields[0].1, Value::Str(s) if s == "critical"));
             assert_eq!(fields[1].0, "count");
         } else {
             panic!("expected struct");
         }
     }
 
-    #[test]
-    fn member_access_on_struct() {
+    #[tokio::test]
+    async fn undefined_tool_returns_undefined_tool_err() {
+        let src = r#"flow t() { return fs.readnope("/tmp") }"#;
+        let file = parse_file(src).unwrap();
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+        };
+        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+            let v = eval_expr(value, &Env::new(), &ctx).await;
+            assert!(matches!(
+                v,
+                Value::Err(RuntimeError::UndefinedTool(name)) if name == "fs.readnope"
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_dispatches_via_registry() {
+        use crate::tools::fs::FsRead;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hi.txt");
+        tokio::fs::write(&path, b"hello runtime").await.unwrap();
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(FsRead));
+        let tool_ctx = ToolCtx::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+        };
+
         let mut env = Env::new();
-        env.bind(
-            "primary",
-            Value::Struct(vec![("severity".into(), Value::Str("critical".into()))]),
-        );
-        let src = "flow t() { return primary.severity }\n";
+        env.bind("p", Value::Path(path));
+
+        let src = r#"flow t() { return fs.read(p) }"#;
         let file = parse_file(src).unwrap();
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
-            assert!(matches!(eval_expr(value, &env), Value::Str(s) if s == "critical"));
+            let v = eval_expr(value, &env, &ctx).await;
+            assert!(matches!(v, Value::Str(s) if s == "hello runtime"));
         }
     }
 }

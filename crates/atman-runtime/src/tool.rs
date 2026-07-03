@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::RuntimeError;
 use crate::value::Value;
 
-pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+// Not `Send`: proc-macro2 spans hold `Rc<()>`. Eval / exec await inline, never spawn.
+pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 pub type ToolResult = Result<Value, RuntimeError>;
 
