@@ -42,7 +42,7 @@ async fn sse_missing_auth_returns_401() {
 async fn sse_streams_existing_and_appended_events() {
     let tmp = tempfile::tempdir().unwrap();
     let sid = Uuid::now_v7();
-    let sdir = tmp.path().join(sid.to_string());
+    let sdir = tmp.path().join("sessions").join(sid.to_string());
     std::fs::create_dir_all(&sdir).unwrap();
     let events_path = sdir.join("events.jsonl");
     std::fs::write(

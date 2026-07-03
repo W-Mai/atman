@@ -29,7 +29,7 @@ async fn method_not_found_returns_jsonrpc_error() {
 async fn list_sessions_reads_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let sid = uuid::Uuid::now_v7();
-    let sdir = tmp.path().join(sid.to_string());
+    let sdir = tmp.path().join("sessions").join(sid.to_string());
     std::fs::create_dir_all(&sdir).unwrap();
     std::fs::write(
         sdir.join("events.jsonl"),

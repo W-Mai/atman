@@ -12,8 +12,14 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let sessions_dir = default_sessions_dir()?;
-    let state = Arc::new(DaemonState::new(sessions_dir));
+    let data_dir = default_data_dir()?;
+    let state = Arc::new(DaemonState::new(data_dir.clone()));
+    let launcher = std::sync::Arc::new(atman_daemon::run::RunLauncher {
+        project_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        config_dir: atman_daemon::bootstrap::default_config_dir().ok(),
+        home_dir: std::env::var("HOME").ok().map(std::path::PathBuf::from),
+    });
+    state.set_launcher(launcher);
 
     let pid_path = pidfile::default_pid_path()?;
     if let Some(existing) = pidfile::read_pid(&pid_path)?
@@ -73,18 +79,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn default_sessions_dir() -> Result<std::path::PathBuf> {
+fn default_data_dir() -> Result<std::path::PathBuf> {
     let base = directories::ProjectDirs::from("com", "atman", "atman")
         .context("no home dir")?
         .data_dir()
         .to_path_buf();
-    Ok(base.join("sessions"))
+    Ok(base)
 }
 
 fn default_socket_path() -> Result<std::path::PathBuf> {
-    let base = directories::ProjectDirs::from("com", "atman", "atman")
-        .context("no home dir")?
-        .data_dir()
-        .to_path_buf();
-    Ok(base.join("run").join("atman.sock"))
+    Ok(default_data_dir()?.join("run").join("atman.sock"))
 }

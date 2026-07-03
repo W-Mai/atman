@@ -62,7 +62,7 @@ async fn sse_handler(
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::io::Error>>>, (StatusCode, String)> {
     let events_path = state
         .daemon
-        .sessions_dir()
+        .sessions_root()
         .join(q.session_id.0.to_string())
         .join("events.jsonl");
     let start = q.since_seq.unwrap_or(0);

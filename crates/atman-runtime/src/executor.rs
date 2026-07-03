@@ -53,6 +53,19 @@ impl Executor {
         turn_id: Option<TurnId>,
         session: Option<&Session>,
     ) -> Result<Value, RuntimeError> {
+        self.run_in_turn_with_run_id(file, flow_name, args, turn_id, session, None)
+            .await
+    }
+
+    pub async fn run_in_turn_with_run_id(
+        &self,
+        file: &File,
+        flow_name: &str,
+        args: Vec<(String, Value)>,
+        turn_id: Option<TurnId>,
+        session: Option<&Session>,
+        first_run_id: Option<FlowRunId>,
+    ) -> Result<Value, RuntimeError> {
         let flows: HashMap<_, _> = file
             .flows
             .iter()
@@ -60,12 +73,20 @@ impl Executor {
             .collect();
         let mut current = flow_name.to_string();
         let mut current_args = args;
+        let mut next_run_id = first_run_id;
         for _ in 0..5 {
             let flow = flows
                 .get(&current)
                 .ok_or_else(|| RuntimeError::UndefinedTool(format!("flow `{current}`")))?;
             match self
-                .run_flow(flow, current_args, &flows, turn_id.clone(), session)
+                .run_flow(
+                    flow,
+                    current_args,
+                    &flows,
+                    turn_id.clone(),
+                    session,
+                    next_run_id.take(),
+                )
                 .await
             {
                 Err(RuntimeError::Redirect(target)) => {
@@ -88,8 +109,9 @@ impl Executor {
         flows: &HashMap<String, FlowDecl>,
         turn_id: Option<TurnId>,
         session: Option<&Session>,
+        run_id: Option<FlowRunId>,
     ) -> Result<Value, RuntimeError> {
-        let run_id = FlowRunId::now();
+        let run_id = run_id.unwrap_or_else(FlowRunId::now);
         self.events.emit(Event::FlowStart {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),

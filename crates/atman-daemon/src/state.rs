@@ -8,9 +8,10 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 pub struct DaemonState {
-    sessions_dir: PathBuf,
+    data_dir: PathBuf,
     live: Mutex<HashMap<SessionId, LiveSession>>,
     prompts: Mutex<HashMap<PromptId, oneshot::Sender<serde_json::Value>>>,
+    launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
 }
 
 pub struct LiveSession {
@@ -21,12 +22,25 @@ pub struct LiveSession {
 }
 
 impl DaemonState {
-    pub fn new(sessions_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf) -> Self {
         Self {
-            sessions_dir,
+            data_dir,
             live: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
+            launcher: Mutex::new(None),
         }
+    }
+
+    pub fn set_launcher(&self, launcher: std::sync::Arc<crate::run::RunLauncher>) {
+        *self.launcher.lock().unwrap() = Some(launcher);
+    }
+
+    pub fn launcher(&self) -> Option<std::sync::Arc<crate::run::RunLauncher>> {
+        self.launcher.lock().unwrap().clone()
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     pub fn register_pending_prompt(&self, id: PromptId) -> oneshot::Receiver<serde_json::Value> {
@@ -46,8 +60,8 @@ impl DaemonState {
         self.prompts.lock().unwrap().remove(id);
     }
 
-    pub fn sessions_dir(&self) -> &Path {
-        &self.sessions_dir
+    pub fn sessions_root(&self) -> PathBuf {
+        self.data_dir.join("sessions")
     }
 
     pub fn register_live(&self, id: SessionId, entry: LiveSession) {
@@ -80,9 +94,10 @@ impl DaemonState {
         let mut out: Vec<SessionSummary> = Vec::new();
         let mut seen: std::collections::HashSet<SessionId> = std::collections::HashSet::new();
 
-        if self.sessions_dir.exists() {
-            for entry in std::fs::read_dir(&self.sessions_dir)
-                .with_context(|| format!("read_dir {}", self.sessions_dir.display()))?
+        let sessions_root = self.sessions_root();
+        if sessions_root.exists() {
+            for entry in std::fs::read_dir(&sessions_root)
+                .with_context(|| format!("read_dir {}", sessions_root.display()))?
             {
                 let entry = entry?;
                 if !entry.path().is_dir() {

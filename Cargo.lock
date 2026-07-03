@@ -137,6 +137,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "atman-dsl",
  "atman-proto",
  "atman-runtime",
  "axum",

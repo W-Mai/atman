@@ -66,7 +66,7 @@ impl AssistantMessage {
     }
 }
 
-pub trait Provider {
+pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage>;
