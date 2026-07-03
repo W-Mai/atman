@@ -11,6 +11,7 @@ pub struct EvalCtx<'a> {
     pub providers: &'a crate::provider::ProviderRegistry,
     pub flows: &'a std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
     pub contract: Option<&'a atman_dsl::ast::Contract>,
+    pub events: Option<&'a crate::event::EventSink>,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -211,7 +212,35 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     input: input.clone(),
                     schema: None,
                 };
-                match provider.call(req).await {
+                let start = std::time::Instant::now();
+                let outcome = provider.call(req).await;
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let usage = match &outcome {
+                    Ok(Value::Str(s)) => crate::provider::TokenUsage {
+                        input: crate::provider::estimate_tokens(&prompt),
+                        cached_input: 0,
+                        output: crate::provider::estimate_tokens(s),
+                        cache_write: 0,
+                    },
+                    _ => crate::provider::TokenUsage {
+                        input: crate::provider::estimate_tokens(&prompt),
+                        ..Default::default()
+                    },
+                };
+                let status = match &outcome {
+                    Ok(_) => crate::event::LlmCallStatus::Ok,
+                    Err(e) => crate::event::LlmCallStatus::Errored(e.to_string()),
+                };
+                if let Some(sink) = ctx.events {
+                    sink.emit(crate::event::Event::LlmCall {
+                        model: model.clone(),
+                        provider: provider.name().to_string(),
+                        usage,
+                        wallclock_ms: elapsed_ms,
+                        status,
+                    });
+                }
+                match outcome {
                     Ok(v) => return v,
                     Err(e) => last_err = Some(e),
                 }
@@ -391,6 +420,7 @@ mod tests {
             providers: &providers,
             flows: &flows,
             contract: None,
+            events: None,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -480,6 +510,7 @@ mod tests {
             providers: &providers,
             flows: &flows,
             contract: None,
+            events: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -513,6 +544,7 @@ mod tests {
             providers: &providers,
             flows: &flows,
             contract: None,
+            events: None,
         };
 
         let mut env = Env::new();
@@ -547,6 +579,7 @@ mod tests {
             providers: &providers,
             flows: &flows,
             contract: None,
+            events: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -576,6 +609,7 @@ mod tests {
             providers: &providers,
             flows: &flows,
             contract: None,
+            events: None,
         };
 
         let src = r#"flow t() {
@@ -610,6 +644,7 @@ mod tests {
             providers: &providers,
             flows: &flows,
             contract: None,
+            events: None,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -634,6 +669,7 @@ mod tests {
             providers: &providers,
             flows: &flows,
             contract: None,
+            events: None,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -673,6 +709,7 @@ flow parent(x: Int) -> Int {
             &tool_ctx,
             &providers,
             &flows_map,
+            None,
         )
         .await
         .unwrap();
@@ -701,6 +738,7 @@ flow parent(x: Int) -> Int {
             &tool_ctx,
             &providers,
             &flows,
+            None,
         )
         .await
         .unwrap_err();
@@ -728,6 +766,7 @@ flow parent(x: Int) -> Int {
             providers: &providers,
             flows: &flows,
             contract: None,
+            events: None,
         };
 
         let mut env = Env::new();

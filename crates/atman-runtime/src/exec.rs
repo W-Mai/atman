@@ -337,7 +337,7 @@ pub async fn exec_flow(
     providers: &crate::provider::ProviderRegistry,
 ) -> Result<Value, RuntimeError> {
     let flows = std::collections::HashMap::new();
-    exec_flow_with_siblings(flow, args, tools, tool_ctx, providers, &flows).await
+    exec_flow_with_siblings(flow, args, tools, tool_ctx, providers, &flows, None).await
 }
 
 pub async fn exec_flow_with_siblings(
@@ -347,6 +347,7 @@ pub async fn exec_flow_with_siblings(
     tool_ctx: &ToolCtx,
     providers: &crate::provider::ProviderRegistry,
     flows: &std::collections::HashMap<String, FlowDecl>,
+    events: Option<&crate::event::EventSink>,
 ) -> Result<Value, RuntimeError> {
     let mut env = Env::new();
     for (name, value) in args {
@@ -358,6 +359,7 @@ pub async fn exec_flow_with_siblings(
         providers,
         flows,
         contract: flow.contract.as_ref(),
+        events,
     };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),

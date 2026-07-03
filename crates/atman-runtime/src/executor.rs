@@ -64,6 +64,7 @@ impl Executor {
             &self.tool_ctx,
             &self.providers,
             flows,
+            Some(&self.events),
         )
         .await;
         let status = match &result {

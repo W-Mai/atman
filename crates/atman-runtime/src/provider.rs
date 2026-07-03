@@ -17,6 +17,23 @@ pub struct LlmRequest {
     pub schema: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub cached_input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input
+            .saturating_add(self.cached_input)
+            .saturating_add(self.output)
+            .saturating_add(self.cache_write)
+    }
+}
+
 pub trait Provider {
     fn name(&self) -> &str;
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<Value, RuntimeError>>;

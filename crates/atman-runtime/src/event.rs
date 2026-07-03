@@ -17,6 +17,19 @@ pub enum Event {
         flow_name: String,
         status: FlowStatus,
     },
+    LlmCall {
+        model: String,
+        provider: String,
+        usage: crate::provider::TokenUsage,
+        wallclock_ms: u64,
+        status: LlmCallStatus,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum LlmCallStatus {
+    Ok,
+    Errored(String),
 }
 
 #[derive(Debug, Clone)]

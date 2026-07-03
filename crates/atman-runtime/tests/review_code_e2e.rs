@@ -81,7 +81,15 @@ async fn end_to_end_review_flow_produces_structured_output() {
         panic!("expected struct output, got {out:?}");
     }
     let events = ex.events.snapshot();
-    assert_eq!(events.len(), 2);
+    assert!(events.len() >= 2);
+    assert!(matches!(
+        events.first(),
+        Some(atman_runtime::Event::FlowStart { .. })
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(atman_runtime::Event::FlowEnd { .. })
+    ));
 }
 
 #[tokio::test]
