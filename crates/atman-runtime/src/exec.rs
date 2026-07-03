@@ -70,6 +70,7 @@ fn exec_stmt<'a>(
                 }
                 StmtOutcome::Continue
             }
+            Stmt::Watch(_) => StmtOutcome::Continue,
         }
     })
 }

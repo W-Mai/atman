@@ -106,6 +106,72 @@ fn write_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
             write_expr(out, e, indent);
             out.push('\n');
         }
+        Stmt::Watch(w) => write_watch(out, w, indent),
+    }
+}
+
+fn write_watch(out: &mut String, w: &WatchDecl, indent: usize) {
+    let pad = "    ".repeat(indent);
+    let inner_pad = "    ".repeat(indent + 1);
+    let body_pad = "    ".repeat(indent + 2);
+    writeln!(out, "{pad}watch {} {{", w.target.name).unwrap();
+    for block in &w.on_blocks {
+        write!(out, "{inner_pad}on ").unwrap();
+        match &block.event {
+            WatchEvent::Token { patterns } => {
+                out.push_str("token(match: ");
+                for (i, p) in patterns.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(" | ");
+                    }
+                    write!(out, "\"{}\"", p.replace('"', "\\\"")).unwrap();
+                }
+                out.push(')');
+            }
+            WatchEvent::Elapsed { cmp, duration_ms } => {
+                let (n, unit) = if *duration_ms % 1000 == 0 {
+                    (duration_ms / 1000, "s")
+                } else {
+                    (*duration_ms, "ms")
+                };
+                write!(out, "elapsed({} {n} {unit})", cmp_str(*cmp)).unwrap();
+            }
+            WatchEvent::TokensConsumed { cmp, value } => {
+                write!(out, "tokens_consumed({} {value})", cmp_str(*cmp)).unwrap();
+            }
+        }
+        out.push_str(" {\n");
+        for action in &block.actions {
+            write!(out, "{body_pad}").unwrap();
+            match action {
+                WatchAction::Abort { msg } => {
+                    out.push_str("abort(");
+                    if let Some(m) = msg {
+                        write_expr(out, m, indent + 2);
+                    }
+                    out.push(')');
+                }
+                WatchAction::Warn { msg } => {
+                    out.push_str("warn(");
+                    if let Some(m) = msg {
+                        write_expr(out, m, indent + 2);
+                    }
+                    out.push(')');
+                }
+            }
+            out.push('\n');
+        }
+        writeln!(out, "{inner_pad}}}").unwrap();
+    }
+    writeln!(out, "{pad}}}").unwrap();
+}
+
+fn cmp_str(op: CmpOp) -> &'static str {
+    match op {
+        CmpOp::Gt => ">",
+        CmpOp::Ge => ">=",
+        CmpOp::Lt => "<",
+        CmpOp::Le => "<=",
     }
 }
 

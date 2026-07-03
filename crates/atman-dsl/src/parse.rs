@@ -16,6 +16,16 @@ mod kw {
     syn::custom_keyword!(user_confirm);
     syn::custom_keyword!(contract);
     syn::custom_keyword!(subflow);
+    syn::custom_keyword!(watch);
+    syn::custom_keyword!(on);
+    syn::custom_keyword!(token);
+    syn::custom_keyword!(elapsed);
+    syn::custom_keyword!(tokens_consumed);
+
+    syn::custom_keyword!(abort);
+    syn::custom_keyword!(warn);
+    syn::custom_keyword!(ms);
+    syn::custom_keyword!(s);
 }
 
 fn to_ident(id: syn::Ident) -> Ident {
@@ -160,6 +170,9 @@ fn parse_stmt(input: ParseStream) -> Result<Stmt> {
         input.parse::<Token![return]>()?;
         let value = parse_expr(input)?;
         return Ok(Stmt::Return { value });
+    }
+    if input.peek(kw::watch) {
+        return Ok(Stmt::Watch(parse_watch(input)?));
     }
     if input.peek(kw::when) {
         input.parse::<kw::when>()?;
@@ -398,6 +411,121 @@ fn parse_call_args(input: ParseStream) -> Result<Vec<Arg>> {
         input.parse::<Token![,]>()?;
     }
     Ok(args)
+}
+
+fn parse_watch(input: ParseStream) -> Result<WatchDecl> {
+    input.parse::<kw::watch>()?;
+    let target = to_ident(input.parse::<syn::Ident>()?);
+    let content;
+    braced!(content in input);
+    let mut on_blocks = Vec::new();
+    while !content.is_empty() {
+        on_blocks.push(parse_on_block(&content)?);
+    }
+    Ok(WatchDecl { target, on_blocks })
+}
+
+fn parse_on_block(input: ParseStream) -> Result<OnBlock> {
+    input.parse::<kw::on>()?;
+    let event = parse_watch_event(input)?;
+    let body;
+    braced!(body in input);
+    let mut actions = Vec::new();
+    while !body.is_empty() {
+        actions.push(parse_watch_action(&body)?);
+    }
+    Ok(OnBlock { event, actions })
+}
+
+fn parse_watch_event(input: ParseStream) -> Result<WatchEvent> {
+    if input.peek(kw::token) {
+        input.parse::<kw::token>()?;
+        let inner;
+        parenthesized!(inner in input);
+        let label = <syn::Ident as syn::ext::IdentExt>::parse_any(&inner)?;
+        if label != "match" {
+            return Err(syn::Error::new(label.span(), "expected `match:`"));
+        }
+        inner.parse::<Token![:]>()?;
+        let mut patterns = Vec::new();
+        patterns.push(inner.parse::<LitStr>()?.value());
+        while inner.peek(Token![|]) {
+            inner.parse::<Token![|]>()?;
+            patterns.push(inner.parse::<LitStr>()?.value());
+        }
+        return Ok(WatchEvent::Token { patterns });
+    }
+    if input.peek(kw::elapsed) {
+        input.parse::<kw::elapsed>()?;
+        let inner;
+        parenthesized!(inner in input);
+        let cmp = parse_cmp(&inner)?;
+        let n = inner.parse::<LitInt>()?.base10_parse::<u64>()?;
+        let ms = if inner.peek(kw::ms) {
+            inner.parse::<kw::ms>()?;
+            n
+        } else if inner.peek(kw::s) {
+            inner.parse::<kw::s>()?;
+            n.saturating_mul(1000)
+        } else {
+            return Err(inner.error("expected `ms` or `s` unit"));
+        };
+        return Ok(WatchEvent::Elapsed {
+            cmp,
+            duration_ms: ms,
+        });
+    }
+    if input.peek(kw::tokens_consumed) {
+        input.parse::<kw::tokens_consumed>()?;
+        let inner;
+        parenthesized!(inner in input);
+        let cmp = parse_cmp(&inner)?;
+        let value = inner.parse::<LitInt>()?.base10_parse::<u64>()?;
+        return Ok(WatchEvent::TokensConsumed { cmp, value });
+    }
+    Err(input.error("expected `token`, `elapsed`, or `tokens_consumed`"))
+}
+
+fn parse_cmp(input: ParseStream) -> Result<CmpOp> {
+    if input.peek(Token![>=]) {
+        input.parse::<Token![>=]>()?;
+        Ok(CmpOp::Ge)
+    } else if input.peek(Token![>]) {
+        input.parse::<Token![>]>()?;
+        Ok(CmpOp::Gt)
+    } else if input.peek(Token![<=]) {
+        input.parse::<Token![<=]>()?;
+        Ok(CmpOp::Le)
+    } else if input.peek(Token![<]) {
+        input.parse::<Token![<]>()?;
+        Ok(CmpOp::Lt)
+    } else {
+        Err(input.error("expected `>`, `>=`, `<`, or `<=`"))
+    }
+}
+
+fn parse_watch_action(input: ParseStream) -> Result<WatchAction> {
+    let kind = if input.peek(kw::abort) {
+        input.parse::<kw::abort>()?;
+        "abort"
+    } else if input.peek(kw::warn) {
+        input.parse::<kw::warn>()?;
+        "warn"
+    } else {
+        return Err(input.error("expected `abort` or `warn`"));
+    };
+    let inner;
+    parenthesized!(inner in input);
+    let msg = if inner.is_empty() {
+        None
+    } else {
+        Some(parse_expr(&inner)?)
+    };
+    Ok(match kind {
+        "abort" => WatchAction::Abort { msg },
+        "warn" => WatchAction::Warn { msg },
+        _ => unreachable!(),
+    })
 }
 
 fn parse_kwargs(input: ParseStream) -> Result<Kwargs> {

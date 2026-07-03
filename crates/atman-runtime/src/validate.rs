@@ -42,6 +42,11 @@ fn walk_stmts(
             }
             Stmt::Return { value } => walk_expr(value, scope, tools, errors),
             Stmt::Expr(e) => walk_expr(e, scope, tools, errors),
+            Stmt::Watch(w) => {
+                if !scope.contains(&w.target.name) {
+                    errors.push(ValidationError::UndefinedVar(w.target.name.clone()));
+                }
+            }
         }
     }
 }

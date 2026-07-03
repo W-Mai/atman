@@ -113,6 +113,40 @@ pub enum Stmt {
     When { cond: Expr, body: Vec<Stmt> },
     Return { value: Expr },
     Expr(Expr),
+    Watch(WatchDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct WatchDecl {
+    pub target: Ident,
+    pub on_blocks: Vec<OnBlock>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OnBlock {
+    pub event: WatchEvent,
+    pub actions: Vec<WatchAction>,
+}
+
+#[derive(Debug, Clone)]
+pub enum WatchEvent {
+    Token { patterns: Vec<String> },
+    Elapsed { cmp: CmpOp, duration_ms: u64 },
+    TokensConsumed { cmp: CmpOp, value: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
+
+#[derive(Debug, Clone)]
+pub enum WatchAction {
+    Abort { msg: Option<Expr> },
+    Warn { msg: Option<Expr> },
 }
 
 #[derive(Debug, Clone)]
