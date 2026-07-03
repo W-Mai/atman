@@ -30,8 +30,19 @@ flow edit_and_verify(file: path, instruction: string) -> EditResult {
 
     when check.exit != 0 {
         fs.write(file, original)
+        audit_fail = preview.push(
+            topic: "edit-and-verify",
+            title: "reverted: " + file,
+            content: "**reverted after cargo check failed.**\n\n```\n" + check.stderr + "\n```",
+        )
         return { status: "reverted", stderr: check.stderr }
     }
+
+    audit = preview.push(
+        topic: "edit-and-verify",
+        title: "applied: " + file,
+        content: "**rationale:** " + edited.rationale + "\n\n```diff\n" + edited.new_content + "\n```",
+    )
 
     return { status: "applied", rationale: edited.rationale }
 }

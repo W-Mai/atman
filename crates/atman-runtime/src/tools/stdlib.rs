@@ -36,6 +36,28 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
+pub struct ToJsonString;
+
+impl Tool for ToJsonString {
+    fn name(&self) -> &str {
+        "to_json_string"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = args.positional(0)?.clone();
+            let json = v.to_json();
+            let s = serde_json::to_string_pretty(&json)
+                .map_err(|e| RuntimeError::ToolFailed(format!("to_json_string: {e}")))?;
+            Ok(Value::Str(s))
+        })
+    }
+}
+
 pub struct ComposeEmailPreview;
 
 impl Tool for ComposeEmailPreview {

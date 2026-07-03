@@ -712,7 +712,13 @@ fn eval_binop(op: BinOp, l: &Value, r: &Value) -> Value {
             (Value::Int(a), Value::Int(b)) => Value::Int(a + b),
             (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
             (Value::Str(a), Value::Str(b)) => Value::Str(format!("{a}{b}")),
-            _ => type_mismatch("int+int | float+float | string+string", l, r),
+            (Value::Str(a), Value::Path(b)) => Value::Str(format!("{a}{}", b.display())),
+            (Value::Path(a), Value::Str(b)) => Value::Str(format!("{}{b}", a.display())),
+            _ => type_mismatch(
+                "int+int | float+float | string+string | string+path | path+string",
+                l,
+                r,
+            ),
         },
     }
 }

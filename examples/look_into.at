@@ -18,6 +18,12 @@ flow look_into(question: string) -> Report {
         cache: true
     }
 
+    audit = preview.push(
+        topic: "look-into",
+        title: "look-into: " + question,
+        content: "```json\n" + to_json_string(summary) + "\n```",
+    )
+
     return summary
 }
 
