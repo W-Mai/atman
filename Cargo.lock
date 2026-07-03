@@ -138,6 +138,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "atman-proto",
+ "atman-runtime",
  "axum",
  "chrono",
  "directories",

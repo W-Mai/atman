@@ -5,6 +5,7 @@ use atman_proto::{
 };
 use serde_json::json;
 
+pub mod bootstrap;
 pub mod config;
 pub mod http;
 pub mod pidfile;

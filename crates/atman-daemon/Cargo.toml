@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 atman-proto = { path = "../atman-proto" }
+atman-runtime = { path = "../atman-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
