@@ -27,16 +27,16 @@ async fn openai_streaming_parses_delta_content() {
 
     let provider = OpenAiProvider::new("openai", "test-key").with_base_url(server.uri());
     let mut obs = provider.call_streaming(LlmRequest {
-        model: "gpt-test".into(),
-        prompt: "hi".into(),
+        model: "gpt-test".to_string(),
+        messages: vec![atman_runtime::provider::user_text_message("hi")],
+        system: None,
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
-        attachments: vec![],
     });
 
     let final_value = obs.output.await.unwrap();
-    assert!(matches!(&final_value, Value::Str(s) if s == "hello openai"));
+    assert!(final_value.text_concat() == "hello openai");
 
     let mut chunks = Vec::new();
     let mut total_tokens = 0u64;
@@ -73,16 +73,16 @@ async fn openai_non_streaming_returns_message_content() {
     let provider = OpenAiProvider::new("openai", "test-key").with_base_url(server.uri());
     let value = provider
         .call(LlmRequest {
-            model: "gpt-test".into(),
-            prompt: "hi".into(),
+            model: "gpt-test".to_string(),
+            messages: vec![atman_runtime::provider::user_text_message("hi")],
+            system: None,
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
-            attachments: vec![],
         })
         .await
         .unwrap();
-    assert!(matches!(value, Value::Str(s) if s == "hello world"));
+    assert!(value.text_concat() == "hello world");
 }
 
 #[tokio::test]
@@ -125,18 +125,36 @@ async fn openai_multimodal_request_uses_image_url_parts() {
         .await;
 
     let provider = OpenAiProvider::new("openai", "k").with_base_url(server.uri());
+    let user_msg = atman_runtime::message::Message {
+        role: atman_runtime::message::MessageRole::User,
+        parts: vec![
+            atman_runtime::message::MessagePart::Image {
+                source: atman_runtime::message::ImageSource {
+                    media_type: "image/jpeg".into(),
+                    data: atman_runtime::message::ImageData::Path {
+                        path: img_path.clone(),
+                    },
+                },
+            },
+            atman_runtime::message::MessagePart::Text {
+                text: "describe".into(),
+            },
+        ],
+        turn_id: atman_runtime::event::TurnId::now(),
+    };
+    let _ = Attachment::image(img_path);
     let v = provider
         .call(LlmRequest {
-            model: "gpt-4o".into(),
-            prompt: "describe".into(),
+            model: "gpt-4o".to_string(),
+            messages: vec![user_msg],
+            system: None,
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
-            attachments: vec![Attachment::image(&img_path)],
         })
         .await
         .unwrap();
-    assert!(matches!(v, Value::Str(s) if s == "ok"));
+    assert!(v.text_concat() == "ok");
 }
 
 #[tokio::test]
@@ -151,12 +169,12 @@ async fn openai_http_error_becomes_tool_failed() {
     let provider = OpenAiProvider::new("openai", "bad").with_base_url(server.uri());
     let err = provider
         .call(LlmRequest {
-            model: "gpt-test".into(),
-            prompt: "hi".into(),
+            model: "gpt-test".to_string(),
+            messages: vec![atman_runtime::provider::user_text_message("hi")],
+            system: None,
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
-            attachments: vec![],
         })
         .await
         .unwrap_err();

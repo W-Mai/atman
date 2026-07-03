@@ -178,13 +178,14 @@ async fn eval_bind_with_watches(
     };
 
     let rules = collect_watch_rules(watches);
+    let user_msg = crate::provider::user_text_message(prompt.clone());
     let obs = provider.call_streaming(LlmRequest {
         model,
-        prompt,
+        messages: vec![user_msg],
+        system: None,
         input,
         schema: None,
         cache_prompt,
-        attachments: Vec::new(),
     });
     let cancel = obs.cancel.clone();
     let mut events = obs.events;
@@ -290,7 +291,7 @@ async fn eval_bind_with_watches(
         _ if abort_reason.is_some() => Ok(Value::Err(RuntimeError::Aborted(
             abort_reason.take().unwrap_or_default(),
         ))),
-        Ok(v) => Ok(v),
+        Ok(am) => Ok(crate::provider::assistant_message_to_value(&am)),
         Err(e) => Ok(Value::Err(e)),
     }
 }

@@ -36,16 +36,16 @@ async fn anthropic_streaming_parses_content_block_delta() {
 
     let provider = AnthropicProvider::new("anthropic", "test-key").with_base_url(server.uri());
     let mut obs = provider.call_streaming(LlmRequest {
-        model: "claude-test".into(),
-        prompt: "hi".into(),
+        model: "claude-test".to_string(),
+        messages: vec![atman_runtime::provider::user_text_message("hi")],
+        system: None,
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
-        attachments: vec![],
     });
 
     let final_value = obs.output.await.unwrap();
-    assert!(matches!(&final_value, Value::Str(s) if s == "hello atman"));
+    assert!(final_value.text_concat() == "hello atman");
 
     let mut chunks = Vec::new();
     let mut total_tokens = 0u64;
@@ -97,18 +97,36 @@ async fn anthropic_multimodal_request_includes_image_block() {
         .await;
 
     let provider = AnthropicProvider::new("anthropic", "k").with_base_url(server.uri());
+    let user_msg = atman_runtime::message::Message {
+        role: atman_runtime::message::MessageRole::User,
+        parts: vec![
+            atman_runtime::message::MessagePart::Image {
+                source: atman_runtime::message::ImageSource {
+                    media_type: "image/png".into(),
+                    data: atman_runtime::message::ImageData::Path {
+                        path: img_path.clone(),
+                    },
+                },
+            },
+            atman_runtime::message::MessagePart::Text {
+                text: "describe".into(),
+            },
+        ],
+        turn_id: atman_runtime::event::TurnId::now(),
+    };
+    let _ = Attachment::image(img_path);
     let v = provider
         .call(LlmRequest {
-            model: "claude-test".into(),
-            prompt: "describe".into(),
+            model: "claude-test".to_string(),
+            messages: vec![user_msg],
+            system: None,
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
-            attachments: vec![Attachment::image(&img_path)],
         })
         .await
         .unwrap();
-    assert!(matches!(v, Value::Str(s) if s == "ok"));
+    assert!(v.text_concat() == "ok");
 }
 
 #[tokio::test]
@@ -134,16 +152,16 @@ async fn anthropic_non_streaming_returns_concatenated_text() {
     let provider = AnthropicProvider::new("anthropic", "test-key").with_base_url(server.uri());
     let value = provider
         .call(LlmRequest {
-            model: "claude-test".into(),
-            prompt: "hi".into(),
+            model: "claude-test".to_string(),
+            messages: vec![atman_runtime::provider::user_text_message("hi")],
+            system: None,
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
-            attachments: vec![],
         })
         .await
         .unwrap();
-    assert!(matches!(value, Value::Str(s) if s == "hello world"));
+    assert!(value.text_concat() == "hello world");
 }
 
 #[tokio::test]
@@ -158,12 +176,12 @@ async fn anthropic_http_error_becomes_tool_failed() {
     let provider = AnthropicProvider::new("anthropic", "bad").with_base_url(server.uri());
     let err = provider
         .call(LlmRequest {
-            model: "claude-test".into(),
-            prompt: "hi".into(),
+            model: "claude-test".to_string(),
+            messages: vec![atman_runtime::provider::user_text_message("hi")],
+            system: None,
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
-            attachments: vec![],
         })
         .await
         .unwrap_err();
@@ -188,17 +206,16 @@ async fn anthropic_real() {
     let provider = AnthropicProvider::new("glm", key).with_base_url(base);
     let obs = provider.call_streaming(LlmRequest {
         model,
-        prompt: "Reply with exactly one short sentence.".into(),
+        messages: vec![atman_runtime::provider::user_text_message(
+            "Reply with exactly one short sentence.",
+        )],
+        system: None,
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
-        attachments: vec![],
     });
     let value = obs.output.await.unwrap();
-    let text = match value {
-        Value::Str(s) => s,
-        other => panic!("expected string, got {other:?}"),
-    };
+    let text = value.text_concat();
     println!("[anthropic_real] {text}");
     assert!(!text.trim().is_empty());
 }

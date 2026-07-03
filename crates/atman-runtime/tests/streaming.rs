@@ -8,12 +8,12 @@ async fn mock_streaming_emits_chunks_then_done() {
     let provider = MockProvider::new("mock")
         .with_model("test-model", Value::Str("hello streaming world".into()));
     let mut obs = provider.call_streaming(LlmRequest {
-        model: "test-model".into(),
-        prompt: "hi".into(),
+        model: "test-model".to_string(),
+        messages: vec![atman_runtime::provider::user_text_message("hi")],
+        system: None,
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
-        attachments: vec![],
     });
 
     let mut chunks = Vec::new();
@@ -29,7 +29,7 @@ async fn mock_streaming_emits_chunks_then_done() {
     assert!(!chunks.is_empty(), "expected at least one chunk");
     assert_eq!(chunks.concat(), "hello streaming world");
     assert!(done_seen, "expected LlmDone event");
-    assert!(matches!(value, Value::Str(s) if s == "hello streaming world"));
+    assert!(value.text_concat() == "hello streaming world");
 }
 
 #[tokio::test]
@@ -39,12 +39,12 @@ async fn mock_streaming_non_string_value_emits_single_done() {
         Value::Struct(vec![("severity".into(), Value::Str("info".into()))]),
     );
     let mut obs = provider.call_streaming(LlmRequest {
-        model: "m".into(),
-        prompt: "".into(),
+        model: "m".to_string(),
+        messages: vec![atman_runtime::provider::user_text_message("")],
+        system: None,
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
-        attachments: vec![],
     });
     let value = obs.output.await.unwrap();
     let mut events = Vec::new();
@@ -52,7 +52,10 @@ async fn mock_streaming_non_string_value_emits_single_done() {
         events.push(ev);
     }
     assert!(matches!(events.last(), Some(NodeEvent::LlmDone { .. })));
-    assert!(matches!(value, Value::Struct(_)));
+    assert!(matches!(
+        value.message.parts.first(),
+        Some(atman_runtime::message::MessagePart::Text { .. })
+    ));
 }
 
 #[tokio::test]
@@ -60,12 +63,12 @@ async fn mock_streaming_cancel_before_await_yields_cancelled_err() {
     let provider =
         MockProvider::new("mock").with_model("m", Value::Str("some long text to chunk".into()));
     let obs = provider.call_streaming(LlmRequest {
-        model: "m".into(),
-        prompt: "".into(),
+        model: "m".to_string(),
+        messages: vec![atman_runtime::provider::user_text_message("")],
+        system: None,
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
-        attachments: vec![],
     });
     obs.cancel.cancel();
     let err = obs.output.await.unwrap_err();

@@ -38,16 +38,16 @@ async fn cache_prompt_true_sends_ephemeral_cache_control() {
     let provider = AnthropicProvider::new("anthropic", "test-key").with_base_url(server.uri());
     let value = provider
         .call(LlmRequest {
-            model: "test".into(),
-            prompt: "cache me".into(),
+            model: "test".to_string(),
+            messages: vec![atman_runtime::provider::user_text_message("cache me")],
+            system: None,
             input: Value::Unit,
             schema: None,
             cache_prompt: true,
-            attachments: vec![],
         })
         .await
         .unwrap();
-    assert!(matches!(value, Value::Str(s) if s == "ok"));
+    assert!(value.text_concat() == "ok");
 }
 
 #[tokio::test]
@@ -58,7 +58,7 @@ async fn cache_prompt_false_sends_plain_string_content() {
         .and(body_partial_json(serde_json::json!({
             "messages": [{
                 "role": "user",
-                "content": "no cache"
+                "content": [{"type": "text", "text": "no cache"}]
             }]
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -75,16 +75,16 @@ async fn cache_prompt_false_sends_plain_string_content() {
     let provider = AnthropicProvider::new("anthropic", "test-key").with_base_url(server.uri());
     let value = provider
         .call(LlmRequest {
-            model: "test".into(),
-            prompt: "no cache".into(),
+            model: "test".to_string(),
+            messages: vec![atman_runtime::provider::user_text_message("no cache")],
+            system: None,
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
-            attachments: vec![],
         })
         .await
         .unwrap();
-    assert!(matches!(value, Value::Str(s) if s == "ok"));
+    assert!(value.text_concat() == "ok");
 }
 
 #[tokio::test]

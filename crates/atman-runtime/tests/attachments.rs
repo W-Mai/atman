@@ -2,13 +2,23 @@ use std::sync::{Arc, Mutex};
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::event::Observable;
-use atman_runtime::provider::{Attachment, LlmRequest, Provider, wrap_call_as_streaming};
+use atman_runtime::message::{Message, MessagePart};
+use atman_runtime::provider::{
+    AssistantMessage, Attachment, LlmRequest, Provider, wrap_call_as_streaming,
+};
 use atman_runtime::tool::BoxFut;
 use atman_runtime::{Executor, RuntimeError, Value};
 
 struct RecorderProvider {
     inner_name: String,
-    recorded: Arc<Mutex<Vec<Vec<Attachment>>>>,
+    recorded: Arc<Mutex<Vec<Vec<Message>>>>,
+}
+
+fn ok_msg() -> AssistantMessage {
+    AssistantMessage::text_only(Message::assistant_text(
+        atman_runtime::event::TurnId::now(),
+        "ok",
+    ))
 }
 
 impl Provider for RecorderProvider {
@@ -16,22 +26,29 @@ impl Provider for RecorderProvider {
         &self.inner_name
     }
 
-    fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<Value, RuntimeError>> {
+    fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         let recorded = self.recorded.clone();
         Box::pin(async move {
-            recorded.lock().unwrap().push(req.attachments.clone());
-            Ok(Value::Str("ok".into()))
+            recorded.lock().unwrap().push(req.messages.clone());
+            Ok(ok_msg())
         })
     }
 
-    fn call_streaming(&self, req: LlmRequest) -> Observable<Value> {
+    fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let recorded = self.recorded.clone();
-        let attachments = req.attachments.clone();
+        let messages = req.messages.clone();
         wrap_call_as_streaming(Box::pin(async move {
-            recorded.lock().unwrap().push(attachments);
-            Ok(Value::Str("ok".into()))
+            recorded.lock().unwrap().push(messages);
+            Ok(ok_msg())
         }))
     }
+}
+
+fn count_image_parts(msgs: &[Message]) -> usize {
+    msgs.iter()
+        .flat_map(|m| m.parts.iter())
+        .filter(|p| matches!(p, MessagePart::Image { .. }))
+        .count()
 }
 
 #[tokio::test]
@@ -41,7 +58,7 @@ async fn pending_attachments_drain_into_next_llm_call() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let recorded: Arc<Mutex<Vec<Vec<Attachment>>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut executor = Executor::new();
     executor.providers.register(Arc::new(RecorderProvider {
@@ -57,8 +74,7 @@ async fn pending_attachments_drain_into_next_llm_call() {
 
     let calls = recorded.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].len(), 1);
-    assert_eq!(calls[0][0].path.to_string_lossy(), "/tmp/pic.png");
+    assert_eq!(count_image_parts(&calls[0]), 1);
 
     assert_eq!(executor.pending_attachment_count(), 0);
 }
@@ -70,7 +86,7 @@ async fn no_pending_yields_empty_attachments() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let recorded: Arc<Mutex<Vec<Vec<Attachment>>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut executor = Executor::new();
     executor.providers.register(Arc::new(RecorderProvider {
@@ -81,5 +97,5 @@ async fn no_pending_yields_empty_attachments() {
     executor.run(&file, "ask", vec![]).await.unwrap();
     let calls = recorded.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert!(calls[0].is_empty());
+    assert_eq!(count_image_parts(&calls[0]), 0);
 }

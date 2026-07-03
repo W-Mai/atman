@@ -5,7 +5,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
-use crate::provider::{DEFAULT_STREAM_BUFFER, LlmRequest, Provider, estimate_tokens};
+use crate::message::{Message, MessagePart, MessageRole};
+use crate::provider::{
+    AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
+    estimate_tokens,
+};
 use crate::tool::BoxFut;
 use crate::value::Value;
 
@@ -60,55 +64,57 @@ impl Provider for MockProvider {
         &self.name
     }
 
-    fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<Value, RuntimeError>> {
-        Box::pin(async move { self.lookup(&req) })
+    fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+        Box::pin(async move { self.lookup(&req).map(|v| value_to_assistant_message(&v)) })
     }
 
-    fn call_streaming(&self, req: LlmRequest) -> Observable<Value> {
+    fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let looked_up = self.lookup(&req);
         let chunk_delay = self.chunk_delay;
-        let output: BoxFut<'static, Result<Value, RuntimeError>> = Box::pin(async move {
-            let value = match looked_up {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
-                    return Err(e);
-                }
-            };
-            let chunks = split_for_stream(&value);
-            let mut running = 0u64;
-            for chunk in chunks {
-                if let Some(d) = chunk_delay {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_for_task.cancelled() => {
-                            let _ = tx.send(NodeEvent::LlmDone { total_tokens: running });
-                            return Err(RuntimeError::Cancelled("mock stream cancelled".into()));
-                        }
-                        _ = tokio::time::sleep(d) => {}
+        let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
+            Box::pin(async move {
+                let value = match looked_up {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+                        return Err(e);
                     }
-                }
-                if cancel_for_task.is_cancelled() {
-                    let _ = tx.send(NodeEvent::LlmDone {
-                        total_tokens: running,
+                };
+                let text_form = value_to_stream_text(&value);
+                let chunks = split_for_stream(&text_form);
+                let mut running = 0u64;
+                for chunk in chunks {
+                    if let Some(d) = chunk_delay {
+                        tokio::select! {
+                            biased;
+                            _ = cancel_for_task.cancelled() => {
+                                let _ = tx.send(NodeEvent::LlmDone { total_tokens: running });
+                                return Err(RuntimeError::Cancelled("mock stream cancelled".into()));
+                            }
+                            _ = tokio::time::sleep(d) => {}
+                        }
+                    }
+                    if cancel_for_task.is_cancelled() {
+                        let _ = tx.send(NodeEvent::LlmDone {
+                            total_tokens: running,
+                        });
+                        return Err(RuntimeError::Cancelled("mock stream cancelled".into()));
+                    }
+                    let inc = estimate_tokens(&chunk);
+                    running += inc;
+                    let _ = tx.send(NodeEvent::LlmChunk {
+                        text: chunk,
+                        cumulative_tokens: running,
                     });
-                    return Err(RuntimeError::Cancelled("mock stream cancelled".into()));
                 }
-                let inc = estimate_tokens(&chunk);
-                running += inc;
-                let _ = tx.send(NodeEvent::LlmChunk {
-                    text: chunk,
-                    cumulative_tokens: running,
+                let _ = tx.send(NodeEvent::LlmDone {
+                    total_tokens: running,
                 });
-            }
-            let _ = tx.send(NodeEvent::LlmDone {
-                total_tokens: running,
+                Ok(value_to_assistant_message(&value))
             });
-            Ok(value)
-        });
         Observable {
             output,
             events,
@@ -119,8 +125,13 @@ impl Provider for MockProvider {
 
 impl MockProvider {
     fn lookup(&self, req: &LlmRequest) -> Result<Value, RuntimeError> {
+        let prompt_text = req
+            .messages
+            .last()
+            .map(|m| m.text_concat())
+            .unwrap_or_default();
         for (model, prefix, value) in &self.by_prefix {
-            if req.model == *model && req.prompt.starts_with(prefix.as_str()) {
+            if req.model == *model && prompt_text.starts_with(prefix.as_str()) {
                 return Ok(value.clone());
             }
         }
@@ -134,42 +145,66 @@ impl MockProvider {
             "mock provider `{}` has no entry for model={} prompt.prefix={:?}",
             self.name,
             req.model,
-            req.prompt.chars().take(40).collect::<String>()
+            prompt_text.chars().take(40).collect::<String>()
         )))
     }
 }
 
-fn split_for_stream(value: &Value) -> Vec<String> {
-    match value {
-        Value::Str(s) if s.len() > 8 => s
-            .as_bytes()
+fn value_to_assistant_message(v: &Value) -> AssistantMessage {
+    let text = value_to_stream_text(v);
+    AssistantMessage {
+        message: Message {
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text { text: text.clone() }],
+            turn_id: crate::event::TurnId::now(),
+        },
+        stop_reason: StopReason::End,
+        token_usage: TokenUsage {
+            output: estimate_tokens(&text),
+            ..Default::default()
+        },
+    }
+}
+
+fn value_to_stream_text(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        other => other.to_json().to_string(),
+    }
+}
+
+fn split_for_stream(s: &str) -> Vec<String> {
+    if s.len() > 8 {
+        s.as_bytes()
             .chunks(s.len().div_ceil(3))
             .map(|c| String::from_utf8_lossy(c).into_owned())
-            .collect(),
-        Value::Str(s) => vec![s.clone()],
-        other => vec![format!("{other:?}")],
+            .collect()
+    } else {
+        vec![s.to_string()]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::user_text_message;
+
+    fn req(model: &str, prompt: &str) -> LlmRequest {
+        LlmRequest {
+            model: model.into(),
+            messages: vec![user_text_message(prompt)],
+            system: None,
+            input: Value::Unit,
+            schema: None,
+            cache_prompt: false,
+        }
+    }
 
     #[tokio::test]
     async fn resolves_by_model_name() {
         let p = MockProvider::new("mock").with_model("gpt-4o-mini", Value::Str("hi".into()));
-        let out = p
-            .call(LlmRequest {
-                model: "gpt-4o-mini".into(),
-                prompt: "anything".into(),
-                input: Value::Unit,
-                schema: None,
-                cache_prompt: false,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        assert!(matches!(out, Value::Str(s) if s == "hi"));
+        let out = p.call(req("gpt-4o-mini", "anything")).await.unwrap();
+        assert_eq!(out.text_concat(), "hi");
     }
 
     #[tokio::test]
@@ -177,51 +212,21 @@ mod tests {
         let p = MockProvider::new("mock")
             .with_model("m", Value::Str("model-hit".into()))
             .with_prefix("m", "review", Value::Str("prefix-hit".into()));
-        let out = p
-            .call(LlmRequest {
-                model: "m".into(),
-                prompt: "review please".into(),
-                input: Value::Unit,
-                schema: None,
-                cache_prompt: false,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        assert!(matches!(out, Value::Str(s) if s == "prefix-hit"));
+        let out = p.call(req("m", "review please")).await.unwrap();
+        assert_eq!(out.text_concat(), "prefix-hit");
     }
 
     #[tokio::test]
     async fn missing_entry_errors_with_hint() {
         let p = MockProvider::new("mock");
-        let err = p
-            .call(LlmRequest {
-                model: "gpt".into(),
-                prompt: "hello".into(),
-                input: Value::Unit,
-                schema: None,
-                cache_prompt: false,
-                attachments: vec![],
-            })
-            .await
-            .unwrap_err();
+        let err = p.call(req("gpt", "hello")).await.unwrap_err();
         assert!(matches!(err, RuntimeError::ToolFailed(msg) if msg.contains("gpt")));
     }
 
     #[tokio::test]
     async fn fallback_captures_unmatched() {
         let p = MockProvider::new("mock").with_fallback(Value::Str("fb".into()));
-        let out = p
-            .call(LlmRequest {
-                model: "anything".into(),
-                prompt: "".into(),
-                input: Value::Unit,
-                schema: None,
-                cache_prompt: false,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        assert!(matches!(out, Value::Str(s) if s == "fb"));
+        let out = p.call(req("anything", "")).await.unwrap();
+        assert_eq!(out.text_concat(), "fb");
     }
 }

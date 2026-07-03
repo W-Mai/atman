@@ -233,27 +233,38 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 .attachments
                 .map(|m| std::mem::take(&mut *m.lock().unwrap()))
                 .unwrap_or_default();
+            let turn_id = ctx
+                .turn_id
+                .clone()
+                .unwrap_or_else(crate::event::TurnId::now);
+            let user_msg = build_user_message_from_prompt(&prompt, &attachments, turn_id);
             let mut last_err: Option<RuntimeError> = None;
             for _ in 0..=retry_count {
                 let req = crate::provider::LlmRequest {
                     model: model.clone(),
-                    prompt: prompt.clone(),
+                    messages: vec![user_msg.clone()],
+                    system: None,
                     input: input.clone(),
                     schema: None,
                     cache_prompt,
-                    attachments: attachments.clone(),
                 };
                 let start = std::time::Instant::now();
                 let outcome = provider.call(req).await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 let usage = match &outcome {
-                    Ok(Value::Str(s)) => crate::provider::TokenUsage {
-                        input: crate::provider::estimate_tokens(&prompt),
-                        cached_input: 0,
-                        output: crate::provider::estimate_tokens(s),
-                        cache_write: 0,
+                    Ok(am) => crate::provider::TokenUsage {
+                        input: am
+                            .token_usage
+                            .input
+                            .max(crate::provider::estimate_tokens(&prompt)),
+                        cached_input: am.token_usage.cached_input,
+                        output: am
+                            .token_usage
+                            .output
+                            .max(crate::provider::estimate_tokens(&am.text_concat())),
+                        cache_write: am.token_usage.cache_write,
                     },
-                    _ => crate::provider::TokenUsage {
+                    Err(_) => crate::provider::TokenUsage {
                         input: crate::provider::estimate_tokens(&prompt),
                         ..Default::default()
                     },
@@ -275,7 +286,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     });
                 }
                 match outcome {
-                    Ok(v) => return v,
+                    Ok(am) => return crate::provider::assistant_message_to_value(&am),
                     Err(e) => last_err = Some(e),
                 }
             }
@@ -513,6 +524,40 @@ async fn eval_message_node<'a>(
         parts,
         turn_id,
     })
+}
+
+fn build_user_message_from_prompt(
+    prompt: &str,
+    attachments: &[crate::provider::Attachment],
+    turn_id: crate::event::TurnId,
+) -> crate::message::Message {
+    use crate::message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
+    let mut parts: Vec<MessagePart> = Vec::new();
+    for a in attachments {
+        if matches!(a.kind, crate::provider::AttachmentKind::Image) {
+            let media_type = a
+                .mime
+                .clone()
+                .or_else(|| guess_image_mime(&a.path))
+                .unwrap_or_else(|| "image/png".to_string());
+            parts.push(MessagePart::Image {
+                source: ImageSource {
+                    media_type,
+                    data: ImageData::Path {
+                        path: a.path.clone(),
+                    },
+                },
+            });
+        }
+    }
+    parts.push(MessagePart::Text {
+        text: prompt.to_string(),
+    });
+    Message {
+        role: MessageRole::User,
+        parts,
+        turn_id,
+    }
 }
 
 fn guess_image_mime(path: &std::path::Path) -> Option<String> {

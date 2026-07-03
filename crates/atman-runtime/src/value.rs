@@ -44,6 +44,56 @@ impl Value {
             None
         }
     }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Value::Unit => serde_json::Value::Null,
+            Value::Bool(b) => serde_json::Value::Bool(*b),
+            Value::Int(i) => serde_json::Value::Number((*i).into()),
+            Value::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Value::Str(s) => serde_json::Value::String(s.clone()),
+            Value::Path(p) => serde_json::Value::String(p.display().to_string()),
+            Value::List(items) => {
+                serde_json::Value::Array(items.iter().map(|v| v.to_json()).collect())
+            }
+            Value::Struct(fields) => {
+                let mut m = serde_json::Map::with_capacity(fields.len());
+                for (k, v) in fields {
+                    m.insert(k.clone(), v.to_json());
+                }
+                serde_json::Value::Object(m)
+            }
+            Value::Message(msg) => serde_json::to_value(msg).unwrap_or(serde_json::Value::Null),
+            Value::Err(e) => serde_json::json!({ "error": e.to_string() }),
+        }
+    }
+
+    pub fn from_json(v: serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::Null => Value::Unit,
+            serde_json::Value::Bool(b) => Value::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    Value::Float(f)
+                } else {
+                    Value::Str(n.to_string())
+                }
+            }
+            serde_json::Value::String(s) => Value::Str(s),
+            serde_json::Value::Array(items) => {
+                Value::List(items.into_iter().map(Value::from_json).collect())
+            }
+            serde_json::Value::Object(map) => Value::Struct(
+                map.into_iter()
+                    .map(|(k, v)| (k, Value::from_json(v)))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

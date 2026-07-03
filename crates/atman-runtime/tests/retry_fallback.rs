@@ -5,7 +5,10 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{NodeEvent, Observable};
-use atman_runtime::provider::{DEFAULT_STREAM_BUFFER, LlmRequest, Provider};
+use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::provider::{
+    AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
+};
 use atman_runtime::tool::BoxFut;
 use atman_runtime::value::Value;
 
@@ -15,15 +18,29 @@ use tokio_util::sync::CancellationToken;
 struct FlakyProvider {
     name: String,
     fail_first_n: AtomicU32,
-    good: Value,
+    good: String,
 }
 
 impl FlakyProvider {
-    fn new(name: &str, fail_n: u32, good: Value) -> Self {
+    fn new(name: &str, fail_n: u32, good: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             fail_first_n: AtomicU32::new(fail_n),
-            good,
+            good: good.into(),
+        }
+    }
+
+    fn assistant(&self) -> AssistantMessage {
+        AssistantMessage {
+            message: Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Text {
+                    text: self.good.clone(),
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+            },
+            stop_reason: StopReason::End,
+            token_usage: TokenUsage::default(),
         }
     }
 }
@@ -33,35 +50,36 @@ impl Provider for FlakyProvider {
         &self.name
     }
 
-    fn call<'a>(&'a self, _req: LlmRequest) -> BoxFut<'a, Result<Value, RuntimeError>> {
+    fn call<'a>(&'a self, _req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         Box::pin(async move {
             let remaining = self.fail_first_n.load(Ordering::SeqCst);
             if remaining > 0 {
                 self.fail_first_n.fetch_sub(1, Ordering::SeqCst);
                 return Err(RuntimeError::ToolFailed("simulated flake".into()));
             }
-            Ok(self.good.clone())
+            Ok(self.assistant())
         })
     }
 
-    fn call_streaming(&self, req: LlmRequest) -> Observable<Value> {
+    fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
-        let good = self.good.clone();
         let remaining = self.fail_first_n.load(Ordering::SeqCst);
         if remaining > 0 {
             self.fail_first_n.fetch_sub(1, Ordering::SeqCst);
         }
         let should_fail = remaining > 0;
+        let msg = self.assistant();
         let _ = req;
-        let output: BoxFut<'static, Result<Value, RuntimeError>> = Box::pin(async move {
-            let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
-            if should_fail {
-                Err(RuntimeError::ToolFailed("simulated flake".into()))
-            } else {
-                Ok(good)
-            }
-        });
+        let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
+            Box::pin(async move {
+                let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+                if should_fail {
+                    Err(RuntimeError::ToolFailed("simulated flake".into()))
+                } else {
+                    Ok(msg)
+                }
+            });
         Observable {
             output,
             events,
@@ -83,11 +101,8 @@ async fn retry_recovers_after_flakes() {
 "#;
     let file = parse_file(src).unwrap();
     let mut ex = Executor::new();
-    ex.providers.register(Arc::new(FlakyProvider::new(
-        "flaky",
-        2,
-        Value::Str("ok".into()),
-    )));
+    ex.providers
+        .register(Arc::new(FlakyProvider::new("flaky", 2, "ok")));
     let out = ex.run(&file, "t", vec![]).await.unwrap();
     assert!(matches!(out, Value::Str(s) if s == "ok"));
 }
@@ -109,16 +124,10 @@ async fn retry_exhausted_falls_back_to_alternate_llm() {
 "#;
     let file = parse_file(src).unwrap();
     let mut ex = Executor::new();
-    ex.providers.register(Arc::new(FlakyProvider::new(
-        "flaky",
-        5,
-        Value::Str("unreachable".into()),
-    )));
-    ex.providers.register(Arc::new(FlakyProvider::new(
-        "stable",
-        0,
-        Value::Str("fallback-ok".into()),
-    )));
+    ex.providers
+        .register(Arc::new(FlakyProvider::new("flaky", 5, "unreachable")));
+    ex.providers
+        .register(Arc::new(FlakyProvider::new("stable", 0, "fallback-ok")));
     let out = ex.run(&file, "t", vec![]).await.unwrap();
     assert!(matches!(out, Value::Str(s) if s == "fallback-ok"));
 }
@@ -136,11 +145,8 @@ async fn retry_exhausted_without_fallback_returns_err() {
 "#;
     let file = parse_file(src).unwrap();
     let mut ex = Executor::new();
-    ex.providers.register(Arc::new(FlakyProvider::new(
-        "flaky",
-        5,
-        Value::Str("x".into()),
-    )));
+    ex.providers
+        .register(Arc::new(FlakyProvider::new("flaky", 5, "x")));
     let err = ex.run(&file, "t", vec![]).await.unwrap_err();
     assert!(matches!(err, RuntimeError::ToolFailed(msg) if msg.contains("simulated flake")));
 }

@@ -4,9 +4,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
-use crate::provider::{DEFAULT_STREAM_BUFFER, LlmRequest, Provider, estimate_tokens};
+use crate::message::{ImageData, Message, MessagePart, MessageRole};
+use crate::provider::{
+    AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
+    estimate_tokens,
+};
 use crate::tool::BoxFut;
-use crate::value::Value;
 
 pub struct AnthropicProvider {
     name: String,
@@ -45,15 +48,18 @@ impl AnthropicProvider {
     }
 
     fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
-        let content = build_content(req);
+        let mut wire_messages = Vec::with_capacity(req.messages.len());
+        for (idx, m) in req.messages.iter().enumerate() {
+            let is_last_user =
+                idx + 1 == req.messages.len() && m.role == MessageRole::User && req.cache_prompt;
+            wire_messages.push(build_wire_message(m, is_last_user));
+        }
         let body = MessagesRequest {
             model: req.model.clone(),
             max_tokens: self.max_tokens,
             stream,
-            messages: vec![Message {
-                role: "user",
-                content,
-            }],
+            system: req.system.clone(),
+            messages: wire_messages,
         };
         self.client
             .post(format!("{}/v1/messages", self.base_url))
@@ -63,61 +69,62 @@ impl AnthropicProvider {
     }
 }
 
-fn build_content(req: &LlmRequest) -> MessageContent {
-    let cache = if req.cache_prompt {
-        Some(CacheControl { kind: "ephemeral" })
-    } else {
-        None
+fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
+    let role = match m.role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::System => "user",
+        MessageRole::Tool => "user",
     };
-    if req.attachments.is_empty() && !req.cache_prompt {
-        return MessageContent::Text(req.prompt.clone());
-    }
-    let mut blocks: Vec<ContentPart> = req
-        .attachments
-        .iter()
-        .filter_map(|a| match a.kind {
-            crate::provider::AttachmentKind::Image => {
-                let bytes = std::fs::read(&a.path).ok()?;
-                use base64::Engine;
-                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                let media_type = a
-                    .mime
-                    .clone()
-                    .or_else(|| guess_image_mime(&a.path))
-                    .unwrap_or_else(|| "image/png".to_string());
-                Some(ContentPart::Image {
-                    source: ImageSource {
+    let mut blocks: Vec<ContentPart> = Vec::with_capacity(m.parts.len());
+    let last_idx = m.parts.len().saturating_sub(1);
+    for (i, part) in m.parts.iter().enumerate() {
+        blocks.push(match part {
+            MessagePart::Text { text } => ContentPart::Text {
+                text: text.clone(),
+                cache_control: if apply_cache_control && i == last_idx {
+                    Some(CacheControl { kind: "ephemeral" })
+                } else {
+                    None
+                },
+            },
+            MessagePart::Image { source } => {
+                let data = match &source.data {
+                    ImageData::Base64 { data } => data.clone(),
+                    ImageData::Path { path } => {
+                        let bytes = std::fs::read(path).unwrap_or_default();
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD.encode(&bytes)
+                    }
+                };
+                ContentPart::Image {
+                    source: ImageSourceWire {
                         kind: "base64",
-                        media_type,
+                        media_type: source.media_type.clone(),
                         data,
                     },
-                })
+                }
             }
-            crate::provider::AttachmentKind::File => None,
-        })
-        .collect();
-    blocks.push(ContentPart::Text {
-        text: req.prompt.clone(),
-        cache_control: cache,
-    });
-    MessageContent::Blocks(blocks)
-}
-
-fn guess_image_mime(path: &std::path::Path) -> Option<String> {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())?
-        .to_ascii_lowercase();
-    Some(
-        match ext.as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            _ => return None,
-        }
-        .to_string(),
-    )
+            MessagePart::ToolUse { id, name, input } => ContentPart::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            },
+            MessagePart::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => ContentPart::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: content.clone(),
+                is_error: *is_error,
+            },
+        });
+    }
+    WireMessage {
+        role,
+        content: MessageContent::Blocks(blocks),
+    }
 }
 
 impl Provider for AnthropicProvider {
@@ -125,7 +132,7 @@ impl Provider for AnthropicProvider {
         &self.name
     }
 
-    fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<Value, RuntimeError>> {
+    fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
         let request = self.build_request(&req, false);
         Box::pin(async move {
             let resp = request.send().await.map_err(net_err)?;
@@ -139,97 +146,217 @@ impl Provider for AnthropicProvider {
                     resp.text().await.unwrap_or_default()
                 )));
             };
-            let text = body.content.into_iter().fold(String::new(), |mut acc, b| {
-                if let ContentBlock::Text { text } = b {
-                    acc.push_str(&text);
-                }
-                acc
-            });
-            Ok(Value::Str(text))
+            Ok(response_to_assistant(body, next_turn_id_from_req(&req)))
         })
     }
 
-    fn call_streaming(&self, req: LlmRequest) -> Observable<Value> {
+    fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let request = self.build_request(&req, true);
+        let turn_id = next_turn_id_from_req(&req);
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
-        let output: BoxFut<'static, Result<Value, RuntimeError>> = Box::pin(async move {
-            use eventsource_stream::Eventsource;
-            use futures::StreamExt;
+        let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> = Box::pin(
+            async move {
+                use eventsource_stream::Eventsource;
+                use futures::StreamExt;
 
-            let resp = tokio::select! {
-                biased;
-                _ = cancel_for_task.cancelled() => return Err(RuntimeError::Cancelled("anthropic cancelled before send".into())),
-                r = request.send() => r.map_err(net_err)?,
-            };
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(RuntimeError::ToolFailed(format!(
-                    "anthropic http {status}: {body}"
-                )));
-            }
-
-            let mut stream = resp.bytes_stream().eventsource();
-            let mut acc = String::new();
-            let mut cumulative = 0u64;
-            while let Some(event) = tokio::select! {
-                biased;
-                _ = cancel_for_task.cancelled() => None,
-                next = stream.next() => next,
-            } {
-                let event = event.map_err(|e| RuntimeError::ToolFailed(format!("sse: {e}")))?;
-                if event.data.is_empty() {
-                    continue;
-                }
-                let parsed: serde_json::Value = match serde_json::from_str(&event.data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
+                let resp = tokio::select! {
+                    biased;
+                    _ = cancel_for_task.cancelled() => return Err(RuntimeError::Cancelled("anthropic cancelled before send".into())),
+                    r = request.send() => r.map_err(net_err)?,
                 };
-                let ty = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                match ty {
-                    "content_block_delta" => {
-                        if let Some(text) = parsed.pointer("/delta/text").and_then(|v| v.as_str()) {
-                            acc.push_str(text);
-                            cumulative += estimate_tokens(text);
-                            let _ = tx.send(NodeEvent::LlmChunk {
-                                text: text.to_string(),
-                                cumulative_tokens: cumulative,
-                            });
-                        }
-                    }
-                    "message_delta" => {
-                        if let Some(out) = parsed
-                            .pointer("/usage/output_tokens")
-                            .and_then(|v| v.as_u64())
-                        {
-                            cumulative = out;
-                        }
-                    }
-                    "message_stop" => break,
-                    _ => {}
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(RuntimeError::ToolFailed(format!(
+                        "anthropic http {status}: {body}"
+                    )));
                 }
-            }
-            if cancel_for_task.is_cancelled() {
+
+                let mut stream = resp.bytes_stream().eventsource();
+                let mut acc_text = String::new();
+                let mut cumulative = 0u64;
+                let mut tool_use_partial: Vec<PartialToolUse> = Vec::new();
+                let mut stop_reason = StopReason::End;
+                while let Some(event) = tokio::select! {
+                    biased;
+                    _ = cancel_for_task.cancelled() => None,
+                    next = stream.next() => next,
+                } {
+                    let event = event.map_err(|e| RuntimeError::ToolFailed(format!("sse: {e}")))?;
+                    if event.data.is_empty() {
+                        continue;
+                    }
+                    let parsed: serde_json::Value = match serde_json::from_str(&event.data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let ty = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match ty {
+                        "content_block_start" => {
+                            if let Some(block) = parsed.get("content_block")
+                                && block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+                                && let (Some(id), Some(name)) = (
+                                    block.get("id").and_then(|v| v.as_str()),
+                                    block.get("name").and_then(|v| v.as_str()),
+                                )
+                            {
+                                tool_use_partial.push(PartialToolUse {
+                                    id: id.to_string(),
+                                    name: name.to_string(),
+                                    input_json: String::new(),
+                                });
+                            }
+                        }
+                        "content_block_delta" => {
+                            if let Some(delta) = parsed.get("delta") {
+                                let delta_ty =
+                                    delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                if delta_ty == "text_delta" {
+                                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                        acc_text.push_str(text);
+                                        cumulative += estimate_tokens(text);
+                                        let _ = tx.send(NodeEvent::LlmChunk {
+                                            text: text.to_string(),
+                                            cumulative_tokens: cumulative,
+                                        });
+                                    }
+                                } else if delta_ty == "input_json_delta"
+                                    && let Some(partial) =
+                                        delta.get("partial_json").and_then(|v| v.as_str())
+                                    && let Some(last) = tool_use_partial.last_mut()
+                                {
+                                    last.input_json.push_str(partial);
+                                }
+                            }
+                        }
+                        "message_delta" => {
+                            if let Some(out) = parsed
+                                .pointer("/usage/output_tokens")
+                                .and_then(|v| v.as_u64())
+                            {
+                                cumulative = out;
+                            }
+                            if let Some(reason) = parsed
+                                .pointer("/delta/stop_reason")
+                                .and_then(|v| v.as_str())
+                            {
+                                stop_reason = parse_stop_reason(reason);
+                            }
+                        }
+                        "message_stop" => break,
+                        _ => {}
+                    }
+                }
+                if cancel_for_task.is_cancelled() {
+                    let _ = tx.send(NodeEvent::LlmDone {
+                        total_tokens: cumulative,
+                    });
+                    return Err(RuntimeError::Cancelled(
+                        "anthropic cancelled mid-stream".into(),
+                    ));
+                }
                 let _ = tx.send(NodeEvent::LlmDone {
                     total_tokens: cumulative,
                 });
-                return Err(RuntimeError::Cancelled(
-                    "anthropic cancelled mid-stream".into(),
-                ));
-            }
-            let _ = tx.send(NodeEvent::LlmDone {
-                total_tokens: cumulative,
-            });
-            Ok(Value::Str(acc))
-        });
+
+                let mut parts: Vec<MessagePart> = Vec::new();
+                if !acc_text.is_empty() {
+                    parts.push(MessagePart::Text { text: acc_text });
+                }
+                for pu in tool_use_partial {
+                    let input: serde_json::Value = if pu.input_json.is_empty() {
+                        serde_json::Value::Object(Default::default())
+                    } else {
+                        serde_json::from_str(&pu.input_json).unwrap_or(serde_json::Value::Null)
+                    };
+                    parts.push(MessagePart::ToolUse {
+                        id: pu.id,
+                        name: pu.name,
+                        input,
+                    });
+                }
+                Ok(AssistantMessage {
+                    message: Message {
+                        role: MessageRole::Assistant,
+                        parts,
+                        turn_id,
+                    },
+                    stop_reason,
+                    token_usage: TokenUsage {
+                        output: cumulative,
+                        ..Default::default()
+                    },
+                })
+            },
+        );
         Observable {
             output,
             events,
             cancel,
         }
     }
+}
+
+struct PartialToolUse {
+    id: String,
+    name: String,
+    input_json: String,
+}
+
+fn response_to_assistant(
+    body: MessagesResponse,
+    turn_id: crate::event::TurnId,
+) -> AssistantMessage {
+    let mut parts: Vec<MessagePart> = Vec::new();
+    for block in body.content {
+        match block {
+            ContentBlock::Text { text } => parts.push(MessagePart::Text { text }),
+            ContentBlock::ToolUse { id, name, input } => {
+                parts.push(MessagePart::ToolUse { id, name, input })
+            }
+            ContentBlock::Other => {}
+        }
+    }
+    let stop_reason = body
+        .stop_reason
+        .as_deref()
+        .map(parse_stop_reason)
+        .unwrap_or(StopReason::End);
+    let usage = body
+        .usage
+        .map(|u| TokenUsage {
+            input: u.input_tokens.unwrap_or(0),
+            cached_input: u.cache_read_input_tokens.unwrap_or(0),
+            output: u.output_tokens.unwrap_or(0),
+            cache_write: u.cache_creation_input_tokens.unwrap_or(0),
+        })
+        .unwrap_or_default();
+    AssistantMessage {
+        message: Message {
+            role: MessageRole::Assistant,
+            parts,
+            turn_id,
+        },
+        stop_reason,
+        token_usage: usage,
+    }
+}
+
+fn parse_stop_reason(s: &str) -> StopReason {
+    match s {
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::Length,
+        _ => StopReason::End,
+    }
+}
+
+fn next_turn_id_from_req(req: &LlmRequest) -> crate::event::TurnId {
+    req.messages
+        .first()
+        .map(|m| m.turn_id.clone())
+        .unwrap_or_else(crate::event::TurnId::now)
 }
 
 fn net_err(e: reqwest::Error) -> RuntimeError {
@@ -241,11 +368,13 @@ struct MessagesRequest {
     model: String,
     max_tokens: u32,
     stream: bool,
-    messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<WireMessage>,
 }
 
 #[derive(Serialize)]
-struct Message {
+struct WireMessage {
     role: &'static str,
     content: MessageContent,
 }
@@ -253,7 +382,6 @@ struct Message {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum MessageContent {
-    Text(String),
     Blocks(Vec<ContentPart>),
 }
 
@@ -266,12 +394,23 @@ enum ContentPart {
         cache_control: Option<CacheControl>,
     },
     Image {
-        source: ImageSource,
+        source: ImageSourceWire,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "core::ops::Not::not")]
+        is_error: bool,
     },
 }
 
 #[derive(Serialize)]
-struct ImageSource {
+struct ImageSourceWire {
     #[serde(rename = "type")]
     kind: &'static str,
     media_type: String,
@@ -287,6 +426,22 @@ struct CacheControl {
 #[derive(Deserialize)]
 struct MessagesResponse {
     content: Vec<ContentBlock>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Deserialize, Default)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -294,6 +449,11 @@ struct MessagesResponse {
 enum ContentBlock {
     Text {
         text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
     },
     #[serde(other)]
     Other,
