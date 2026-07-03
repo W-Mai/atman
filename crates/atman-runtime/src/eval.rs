@@ -271,7 +271,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now);
-            let (final_messages, prompt_for_budget) = if let Some(msgs) = messages_override {
+            let (mut final_messages, prompt_for_budget) = if let Some(msgs) = messages_override {
                 let budget_text = msgs.last().map(|m| m.text_concat()).unwrap_or_default();
                 (msgs, budget_text)
             } else {
@@ -287,6 +287,16 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     crate::message::Message::user_text(turn_id.clone(), prompt_text.clone());
                 (vec![user_msg], prompt_text)
             };
+            if let Some(session) = ctx.session {
+                let injections = session.drain_injections(&turn_id);
+                if !injections.is_empty() {
+                    let rendered = render_injections(&injections);
+                    final_messages.push(crate::message::Message::user_text(
+                        turn_id.clone(),
+                        rendered,
+                    ));
+                }
+            }
             let prompt = prompt_for_budget;
             let mut last_err: Option<RuntimeError> = None;
             for _ in 0..=retry_count {
@@ -579,6 +589,22 @@ async fn eval_message_node<'a>(
         parts,
         turn_id,
     })
+}
+
+fn render_injections(injections: &[crate::injection::Injection]) -> String {
+    let mut out = String::from(
+        "The user sent the following steering message(s) while you were working. \
+         Apply them to your next step if still relevant.\n\n",
+    );
+    for inj in injections {
+        out.push_str(&format!(
+            "<user_nudge id=\"{}\" ts=\"{}\">\n{}\n</user_nudge>\n",
+            inj.id.0,
+            inj.created_at.to_rfc3339(),
+            inj.text
+        ));
+    }
+    out
 }
 
 fn guess_image_mime(path: &std::path::Path) -> Option<String> {
