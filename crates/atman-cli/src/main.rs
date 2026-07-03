@@ -402,12 +402,11 @@ struct PendingUserMessage {
 }
 
 async fn cmd_repl() -> Result<()> {
-    use rustyline::error::ReadlineError;
-    use rustyline::{Config, DefaultEditor};
+    use std::collections::VecDeque;
+    use tokio::sync::mpsc;
 
-    let non_interactive = std::env::var("ATMAN_REPL_NON_INTERACTIVE").is_ok();
     println!(
-        "atman v{} — type `:help` for commands, `:exit` to leave",
+        "atman v{} — type `:help` for commands, `:exit` to leave, `!nudge <text>` or `!stop` while a flow is running",
         env!("CARGO_PKG_VERSION")
     );
 
@@ -425,51 +424,50 @@ async fn cmd_repl() -> Result<()> {
         eprintln!("[atman] boot flow error: {e}");
     }
 
-    let config = Config::builder().auto_add_history(true).build();
-    let mut editor: DefaultEditor = DefaultEditor::with_config(config)?;
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
+    spawn_stdin_reader(input_tx);
     let mut pending = PendingUserMessage::default();
+    let mut pushback: VecDeque<String> = VecDeque::new();
+    let sid = session.id().to_string();
 
     loop {
-        let line: String = if non_interactive {
-            let mut buf = String::new();
-            match std::io::stdin().read_line(&mut buf) {
-                Ok(0) => break,
-                Ok(_) => buf.trim_end().to_string(),
-                Err(_) => break,
-            }
+        let line = if let Some(l) = pushback.pop_front() {
+            l
         } else {
-            match editor.readline("atman> ") {
-                Ok(l) => l,
-                Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => break,
-                Err(e) => return Err(e.into()),
+            match input_rx.recv().await {
+                Some(l) => l,
+                None => break,
             }
         };
         if line.trim().is_empty() {
             continue;
         }
         if let Some(rest) = line.strip_prefix(':') {
-            if !handle_builtin(rest.trim(), session.id().to_string().as_str(), &mut pending) {
+            if !handle_builtin(rest.trim(), sid.as_str(), &mut pending) {
                 break;
             }
             continue;
         }
-        if let Some(rest) = line.strip_prefix('/') {
-            run_turn(
-                &session,
-                &executor,
-                rest.trim(),
-                &mut pending,
-                TurnKind::Slash,
-            )
-            .await;
-            continue;
-        }
-        run_turn(
+        let (text, kind) = if let Some(rest) = line.strip_prefix('/') {
+            (rest.trim().to_string(), TurnKind::Slash)
+        } else {
+            let trimmed = line.trim();
+            if resolve_route_call(trimmed).is_none() {
+                println!(
+                    "[atman] no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
+                );
+                continue;
+            }
+            (trimmed.to_string(), TurnKind::Bare)
+        };
+        run_turn_with_interjection(
             &session,
             &executor,
-            line.trim(),
+            &text,
             &mut pending,
-            TurnKind::Bare,
+            kind,
+            &mut input_rx,
+            &mut pushback,
         )
         .await;
     }
@@ -479,17 +477,62 @@ async fn cmd_repl() -> Result<()> {
     Ok(())
 }
 
+fn spawn_stdin_reader(tx: tokio::sync::mpsc::UnboundedSender<String>) {
+    let non_interactive = std::env::var("ATMAN_REPL_NON_INTERACTIVE").is_ok();
+    tokio::task::spawn_blocking(move || {
+        if non_interactive {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            let locked = stdin.lock();
+            for line in locked.lines() {
+                let Ok(l) = line else { break };
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+        } else {
+            use rustyline::error::ReadlineError;
+            use rustyline::{Config, DefaultEditor};
+            let config = Config::builder().auto_add_history(true).build();
+            let mut editor: DefaultEditor = match DefaultEditor::with_config(config) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("[atman] rustyline init failed: {e}");
+                    return;
+                }
+            };
+            loop {
+                match editor.readline("atman> ") {
+                    Ok(l) => {
+                        if tx.send(l).is_err() {
+                            break;
+                        }
+                    }
+                    Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => break,
+                    Err(e) => {
+                        eprintln!("[atman] readline error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
 enum TurnKind {
     Slash,
     Bare,
 }
 
-async fn run_turn(
+#[allow(clippy::too_many_arguments)]
+async fn run_turn_with_interjection(
     session: &Session,
     executor: &Executor,
     raw_line: &str,
     pending: &mut PendingUserMessage,
     kind: TurnKind,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    pushback: &mut std::collections::VecDeque<String>,
 ) {
     let (text, inline_attachments) = extract_at_paths(raw_line);
     let mut attachments = std::mem::take(&mut pending.attachments);
@@ -497,25 +540,69 @@ async fn run_turn(
     let turn_id = atman_runtime::event::TurnId::now();
     let user_msg = build_user_message(&text, &attachments, turn_id.clone());
     session.begin_turn(user_msg);
-    let result: Result<atman_runtime::Value> = match kind {
-        TurnKind::Slash => run_slash_command_in_turn(&text, executor, session, turn_id).await,
-        TurnKind::Bare => match route_input_in_turn(&text, executor, session, turn_id).await {
-            RouteOutcome::Handled(v) => Ok(v),
-            RouteOutcome::HandledErr(e) => Err(e),
-            RouteOutcome::Unmatched => {
-                println!(
-                    "[atman] no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
-                );
-                session.end_turn();
-                return;
-            }
-        },
+
+    let flow_fut = async {
+        match kind {
+            TurnKind::Slash => run_slash_command_in_turn(&text, executor, session, turn_id).await,
+            TurnKind::Bare => match route_input_in_turn(&text, executor, session, turn_id).await {
+                RouteOutcome::Handled(v) => Ok(v),
+                RouteOutcome::HandledErr(e) => Err(e),
+                RouteOutcome::Unmatched => Err(anyhow::anyhow!(
+                    "no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
+                )),
+            },
+        }
     };
+    tokio::pin!(flow_fut);
+
+    let result = loop {
+        tokio::select! {
+            biased;
+            r = &mut flow_fut => break r,
+            Some(line) = input_rx.recv() => {
+                if !consume_interjection_input(&line, session) {
+                    pushback.push_back(line);
+                }
+            }
+        }
+    };
+
     match result {
         Ok(v) => println!("{}", render_value(&v)),
         Err(e) => eprintln!("error: {e}"),
     }
     session.end_turn();
+}
+
+/// Returns true if the line was fully consumed as an interjection (`!nudge` / `!stop`)
+/// or reported as a busy-warning, false if it should be pushed back for the main loop
+/// (e.g. `:exit` or a normal command arriving before the current flow finishes).
+fn consume_interjection_input(line: &str, session: &Session) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed == "!stop" {
+        session.cancel_flow();
+        println!("[atman] stop requested; flow will abort at next node boundary");
+        return true;
+    }
+    if let Some(text) = trimmed
+        .strip_prefix("!nudge ")
+        .or_else(|| trimmed.strip_prefix('!'))
+    {
+        let text = text.trim();
+        if text.is_empty() {
+            eprintln!("[atman] usage while flow runs: !nudge <text> | !stop");
+            return true;
+        }
+        match session.enqueue_injection(text) {
+            Ok(id) => println!("[atman] nudge queued ({id}) — will inject at next llm node"),
+            Err(e) => eprintln!("[atman] nudge rejected: {e}"),
+        }
+        return true;
+    }
+    false
 }
 
 fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
