@@ -14,7 +14,7 @@ pub mod value;
 pub use env::Env;
 pub use error::RuntimeError;
 pub use eval::{EvalCtx, eval_expr};
-pub use event::{Event, EventSink, FlowRunId, FlowStatus};
+pub use event::{Event, EventSink, FlowRunId, FlowStatus, NodeEvent, Observable};
 pub use exec::{exec_flow, exec_stmts};
 pub use executor::Executor;
 pub use provider::{LlmRequest, Provider, ProviderRegistry};

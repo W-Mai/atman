@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+
 use crate::error::RuntimeError;
+use crate::event::{NodeEvent, Observable};
 use crate::tool::BoxFut;
 use crate::value::Value;
 
@@ -16,6 +20,51 @@ pub struct LlmRequest {
 pub trait Provider {
     fn name(&self) -> &str;
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<Value, RuntimeError>>;
+
+    fn call_streaming(&self, req: LlmRequest) -> Observable<Value>;
+}
+
+pub const DEFAULT_STREAM_BUFFER: usize = 1024;
+
+pub fn wrap_call_as_streaming(
+    call_future: BoxFut<'static, Result<Value, RuntimeError>>,
+) -> Observable<Value> {
+    let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
+    let cancel = CancellationToken::new();
+    let cancel_for_task = cancel.clone();
+    let output: BoxFut<'static, Result<Value, RuntimeError>> = Box::pin(async move {
+        tokio::select! {
+            biased;
+            _ = cancel_for_task.cancelled() => {
+                let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+                Err(RuntimeError::Cancelled("call cancelled".into()))
+            }
+            result = call_future => {
+                match &result {
+                    Ok(Value::Str(s)) => {
+                        let _ = tx.send(NodeEvent::LlmChunk {
+                            text: s.clone(),
+                            cumulative_tokens: estimate_tokens(s),
+                        });
+                        let _ = tx.send(NodeEvent::LlmDone { total_tokens: estimate_tokens(s) });
+                    }
+                    _ => {
+                        let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+                    }
+                }
+                result
+            }
+        }
+    });
+    Observable {
+        output,
+        events,
+        cancel,
+    }
+}
+
+pub fn estimate_tokens(text: &str) -> u64 {
+    ((text.len() as f64) / 3.5).ceil() as u64
 }
 
 #[derive(Default, Clone)]

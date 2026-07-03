@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+
 use crate::error::RuntimeError;
-use crate::provider::{LlmRequest, Provider};
+use crate::event::{NodeEvent, Observable};
+use crate::provider::{DEFAULT_STREAM_BUFFER, LlmRequest, Provider, estimate_tokens};
 use crate::tool::BoxFut;
 use crate::value::Value;
 
@@ -50,25 +54,82 @@ impl Provider for MockProvider {
     }
 
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<Value, RuntimeError>> {
-        Box::pin(async move {
-            for (model, prefix, value) in &self.by_prefix {
-                if req.model == *model && req.prompt.starts_with(prefix.as_str()) {
-                    return Ok(value.clone());
+        Box::pin(async move { self.lookup(&req) })
+    }
+
+    fn call_streaming(&self, req: LlmRequest) -> Observable<Value> {
+        let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let looked_up = self.lookup(&req);
+        let output: BoxFut<'static, Result<Value, RuntimeError>> = Box::pin(async move {
+            let value = match looked_up {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+                    return Err(e);
                 }
+            };
+            let chunks = split_for_stream(&value);
+            let mut running = 0u64;
+            for chunk in chunks {
+                if cancel_for_task.is_cancelled() {
+                    let _ = tx.send(NodeEvent::LlmDone {
+                        total_tokens: running,
+                    });
+                    return Err(RuntimeError::Cancelled("mock stream cancelled".into()));
+                }
+                let inc = estimate_tokens(&chunk);
+                running += inc;
+                let _ = tx.send(NodeEvent::LlmChunk {
+                    text: chunk,
+                    cumulative_tokens: running,
+                });
             }
-            if let Some(v) = self.by_model.get(&req.model) {
-                return Ok(v.clone());
+            let _ = tx.send(NodeEvent::LlmDone {
+                total_tokens: running,
+            });
+            Ok(value)
+        });
+        Observable {
+            output,
+            events,
+            cancel,
+        }
+    }
+}
+
+impl MockProvider {
+    fn lookup(&self, req: &LlmRequest) -> Result<Value, RuntimeError> {
+        for (model, prefix, value) in &self.by_prefix {
+            if req.model == *model && req.prompt.starts_with(prefix.as_str()) {
+                return Ok(value.clone());
             }
-            if let Some(v) = &self.fallback {
-                return Ok(v.clone());
-            }
-            Err(RuntimeError::ToolFailed(format!(
-                "mock provider `{}` has no entry for model={} prompt.prefix={:?}",
-                self.name,
-                req.model,
-                req.prompt.chars().take(40).collect::<String>()
-            )))
-        })
+        }
+        if let Some(v) = self.by_model.get(&req.model) {
+            return Ok(v.clone());
+        }
+        if let Some(v) = &self.fallback {
+            return Ok(v.clone());
+        }
+        Err(RuntimeError::ToolFailed(format!(
+            "mock provider `{}` has no entry for model={} prompt.prefix={:?}",
+            self.name,
+            req.model,
+            req.prompt.chars().take(40).collect::<String>()
+        )))
+    }
+}
+
+fn split_for_stream(value: &Value) -> Vec<String> {
+    match value {
+        Value::Str(s) if s.len() > 8 => s
+            .as_bytes()
+            .chunks(s.len().div_ceil(3))
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect(),
+        Value::Str(s) => vec![s.clone()],
+        other => vec![format!("{other:?}")],
     }
 }
 
