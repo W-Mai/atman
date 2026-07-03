@@ -1,0 +1,20 @@
+flow lark_mail_send(subject: string, body: string, to: [string]) -> SendResult {
+    contract {
+        scope {
+            network: [any]
+        }
+        capabilities {
+            shell: true
+        }
+    }
+
+    preview = compose_email_preview(subject, body, to)
+    ok = user_confirm(preview)
+
+    when ok == false {
+        return { status: "cancelled" }
+    }
+
+    result = bash.exec("lark-cli mail +send --subject " + shell_quote(subject) + " --body " + shell_quote(body))
+    return { status: "sent", exit: result.exit, stdout: result.stdout }
+}

@@ -6,12 +6,15 @@ pub mod bash;
 pub mod fs;
 pub mod memory;
 pub mod memory_stubs;
+pub mod stdlib;
 pub mod web;
 
 pub fn register_tier_zero(reg: &mut ToolRegistry) {
     reg.register(Arc::new(fs::FsRead));
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(memory_stubs::FetchConfessions));
+    reg.register(Arc::new(stdlib::ShellQuote));
+    reg.register(Arc::new(stdlib::ComposeEmailPreview));
 }
 
 pub fn register_shell(reg: &mut ToolRegistry) {
