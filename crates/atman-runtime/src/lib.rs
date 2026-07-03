@@ -11,6 +11,7 @@ pub mod injection;
 pub mod mcp;
 pub mod memory;
 pub mod message;
+pub mod migration;
 pub mod provider;
 pub mod providers;
 pub mod session;

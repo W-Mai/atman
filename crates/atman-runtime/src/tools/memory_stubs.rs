@@ -7,9 +7,12 @@ use crate::error::RuntimeError;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
+use crate::migration::MigratedRule;
+
 #[derive(Default, Clone)]
 pub struct FetchRule {
     entries: Arc<RwLock<HashMap<String, String>>>,
+    migrated: Arc<RwLock<Vec<MigratedRule>>>,
 }
 
 impl FetchRule {
@@ -22,6 +25,14 @@ impl FetchRule {
             .write()
             .await
             .insert(name.into(), content.into());
+    }
+
+    pub async fn set_migrated(&self, rules: Vec<MigratedRule>) {
+        *self.migrated.write().await = rules;
+    }
+
+    pub async fn migrated_count(&self) -> usize {
+        self.migrated.read().await.len()
     }
 }
 
@@ -38,11 +49,15 @@ impl Tool for FetchRule {
         Box::pin(async move {
             let name = extract_string(&args, "name", 0)?;
             let entries = self.entries.read().await;
-            Ok(entries
-                .get(&name)
-                .cloned()
-                .map(Value::Str)
-                .unwrap_or(Value::Str(String::new())))
+            if let Some(content) = entries.get(&name) {
+                return Ok(Value::Str(content.clone()));
+            }
+            drop(entries);
+            let migrated = self.migrated.read().await;
+            if let Some(rule) = crate::migration::resolve_by_name(&migrated, &name) {
+                return Ok(Value::Str(rule.content.clone()));
+            }
+            Ok(Value::Str(String::new()))
         })
     }
 }

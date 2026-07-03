@@ -13,11 +13,15 @@ pub mod test;
 pub mod web;
 
 pub fn register_tier_zero(reg: &mut ToolRegistry) {
+    register_tier_zero_with_rules(reg, memory_stubs::FetchRule::new());
+}
+
+pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_stubs::FetchRule) {
     reg.register(Arc::new(fs::FsRead));
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(fs::FsWrite));
     reg.register(Arc::new(memory_stubs::FetchConfessions));
-    reg.register(Arc::new(memory_stubs::FetchRule::new()));
+    reg.register(Arc::new(fetch_rule));
     reg.register(Arc::new(stdlib::ShellQuote));
     reg.register(Arc::new(stdlib::ToJsonString));
     reg.register(Arc::new(stdlib::ComposeEmailPreview));
