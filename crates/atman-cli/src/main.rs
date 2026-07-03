@@ -296,8 +296,8 @@ async fn route_input(line: &str, executor: &Executor) -> RouteOutcome {
         };
         let prefix = prefix.trim().trim_matches('"');
         let command = command.trim();
-        if line.starts_with(prefix) {
-            let rest = line[prefix.len()..].trim();
+        if let Some(rest) = line.strip_prefix(prefix) {
+            let rest = rest.trim();
             let call = if rest.is_empty() {
                 command.to_string()
             } else {
@@ -437,10 +437,15 @@ async fn cmd_repl() -> Result<()> {
             }
             continue;
         }
-        println!(
-            "[atman] input: {} (router pending; use `/name args...` for slash commands or `atman run <file.at>`)",
-            line
-        );
+        match route_input(line.trim(), &executor).await {
+            RouteOutcome::Handled(v) => println!("{}", render_value(&v)),
+            RouteOutcome::HandledErr(e) => eprintln!("error: {e}"),
+            RouteOutcome::Unmatched => {
+                println!(
+                    "[atman] no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
+                );
+            }
+        }
     }
 
     session.shutdown().await;

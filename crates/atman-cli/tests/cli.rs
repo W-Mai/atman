@@ -386,3 +386,70 @@ fn run_reports_error_and_exits_nonzero() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("missing"));
 }
+
+#[test]
+fn repl_routes_bare_input_to_command_via_routes_toml() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let cmd_dir = cfg.path().join("commands");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(
+        cmd_dir.join("echo.at"),
+        r#"flow echo(msg: string) -> string {
+    return "echoed: " + msg
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cfg.path().join("routes.toml"),
+        "# route bang-prefixed lines to /echo\n\"!\" -> echo\n",
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"!hello\n:exit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("echoed: hello"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_unrouted_input_hints_at_routes_toml() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"bare input\n:exit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("routes.toml"), "stdout: {stdout}");
+}
