@@ -1,8 +1,12 @@
-use atman_dsl::ast::{FlowDecl, Stmt};
+use std::collections::HashMap;
+
+use atman_dsl::ast::{Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 
 use crate::env::Env;
 use crate::error::RuntimeError;
 use crate::eval::{EvalCtx, eval_expr};
+use crate::event::NodeEvent;
+use crate::provider::LlmRequest;
 use crate::tool::{BoxFut, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
@@ -18,8 +22,9 @@ pub fn exec_stmts<'a>(
     ctx: &'a EvalCtx<'a>,
 ) -> BoxFut<'a, StmtOutcome> {
     Box::pin(async move {
+        let watches = collect_watches(stmts);
         for stmt in stmts {
-            let outcome = exec_stmt(stmt, env, ctx).await;
+            let outcome = exec_stmt(stmt, env, ctx, &watches).await;
             match outcome {
                 StmtOutcome::Continue => continue,
                 other => return other,
@@ -29,15 +34,33 @@ pub fn exec_stmts<'a>(
     })
 }
 
+fn collect_watches(stmts: &[Stmt]) -> HashMap<String, Vec<&WatchDecl>> {
+    let mut out: HashMap<String, Vec<&WatchDecl>> = HashMap::new();
+    for stmt in stmts {
+        if let Stmt::Watch(w) = stmt {
+            out.entry(w.target.name.clone()).or_default().push(w);
+        }
+    }
+    out
+}
+
 fn exec_stmt<'a>(
     stmt: &'a Stmt,
     env: &'a mut Env,
     ctx: &'a EvalCtx<'a>,
+    watches: &'a HashMap<String, Vec<&'a WatchDecl>>,
 ) -> BoxFut<'a, StmtOutcome> {
     Box::pin(async move {
         match stmt {
             Stmt::Bind { name, value } => {
-                let v = eval_expr(value, env, ctx).await;
+                let v = if let Some(ws) = watches.get(&name.name) {
+                    match eval_bind_with_watches(value, env, ctx, ws).await {
+                        Ok(v) => v,
+                        Err(e) => return StmtOutcome::Err(e),
+                    }
+                } else {
+                    eval_expr(value, env, ctx).await
+                };
                 if let Value::Err(e) = v {
                     return StmtOutcome::Err(e);
                 }
@@ -73,6 +96,154 @@ fn exec_stmt<'a>(
             Stmt::Watch(_) => StmtOutcome::Continue,
         }
     })
+}
+
+async fn eval_bind_with_watches(
+    expr: &Expr,
+    env: &mut Env,
+    ctx: &EvalCtx<'_>,
+    watches: &[&WatchDecl],
+) -> Result<Value, RuntimeError> {
+    let Expr::Node(Node::Llm { kwargs }) = expr else {
+        return Ok(eval_expr(expr, env, ctx).await);
+    };
+
+    let mut model: Option<String> = None;
+    let mut prompt: Option<String> = None;
+    let mut input = Value::Unit;
+    for (k, v) in kwargs {
+        if k.name == "schema" {
+            continue;
+        }
+        let val = eval_expr(v, env, ctx).await;
+        if val.is_err() {
+            return Ok(val);
+        }
+        match k.name.as_str() {
+            "model" => match val {
+                Value::Str(s) => model = Some(s),
+                other => {
+                    return Ok(Value::Err(RuntimeError::TypeMismatch {
+                        expected: "string".into(),
+                        actual: other.kind_name().into(),
+                    }));
+                }
+            },
+            "prompt" => match val {
+                Value::Str(s) => prompt = Some(s),
+                other => {
+                    return Ok(Value::Err(RuntimeError::TypeMismatch {
+                        expected: "string".into(),
+                        actual: other.kind_name().into(),
+                    }));
+                }
+            },
+            "input" => input = val,
+            _ => {}
+        }
+    }
+    let Some(model) = model else {
+        return Ok(Value::Err(RuntimeError::MissingArg("llm.model".into())));
+    };
+    let Some(prompt) = prompt else {
+        return Ok(Value::Err(RuntimeError::MissingArg("llm.prompt".into())));
+    };
+    let Some(provider) = ctx.providers.resolve(&model) else {
+        return Ok(Value::Err(RuntimeError::ToolFailed(format!(
+            "no provider registered for model `{model}`"
+        ))));
+    };
+
+    let token_matches = collect_token_matches(watches);
+    let obs = provider.call_streaming(LlmRequest {
+        model,
+        prompt,
+        input,
+        schema: None,
+    });
+    let cancel = obs.cancel.clone();
+    let mut events = obs.events;
+    let output = obs.output;
+    tokio::pin!(output);
+
+    let mut window = String::new();
+    let mut abort_reason: Option<String> = None;
+
+    let final_result = loop {
+        tokio::select! {
+            biased;
+            ev = events.recv() => {
+                match ev {
+                    Ok(NodeEvent::LlmChunk { text, .. }) => {
+                        window.push_str(&text);
+                        if window.len() > 512 {
+                            let drop = window.len() - 512;
+                            window.drain(..drop);
+                        }
+                        for (pat, reason) in &token_matches {
+                            if window.contains(pat.as_str()) {
+                                abort_reason = Some(reason.clone());
+                                cancel.cancel();
+                                break;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+            result = &mut output => break result,
+        }
+    };
+
+    loop {
+        match events.try_recv() {
+            Ok(NodeEvent::LlmChunk { text, .. }) => {
+                window.push_str(&text);
+                if window.len() > 512 {
+                    let drop = window.len() - 512;
+                    window.drain(..drop);
+                }
+                for (pat, reason) in &token_matches {
+                    if window.contains(pat.as_str()) {
+                        abort_reason = Some(reason.clone());
+                        break;
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+
+    match final_result {
+        _ if abort_reason.is_some() => Ok(Value::Err(RuntimeError::Aborted(
+            abort_reason.take().unwrap_or_default(),
+        ))),
+        Ok(v) => Ok(v),
+        Err(e) => Ok(Value::Err(e)),
+    }
+}
+
+fn collect_token_matches(watches: &[&WatchDecl]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for w in watches {
+        for on in &w.on_blocks {
+            if let WatchEvent::Token { patterns } = &on.event {
+                let has_abort = on
+                    .actions
+                    .iter()
+                    .any(|a| matches!(a, WatchAction::Abort { .. }));
+                if !has_abort {
+                    continue;
+                }
+                for p in patterns {
+                    out.push((p.clone(), format!("token match: {p}")));
+                }
+            }
+        }
+    }
+    out
 }
 
 pub async fn exec_flow(
