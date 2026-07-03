@@ -117,6 +117,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "atman-proto"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "atman-runtime"
 version = "0.0.0"
 dependencies = [
