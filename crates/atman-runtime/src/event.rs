@@ -60,6 +60,36 @@ pub enum Event {
         status: LlmCallStatus,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    TurnStart {
+        turn_id: TurnId,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    TurnEnd {
+        turn_id: TurnId,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    UserMsg {
+        turn_id: TurnId,
+        message: crate::message::Message,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    AssistantMsg {
+        turn_id: TurnId,
+        flow_run_id: Option<FlowRunId>,
+        message: crate::message::Message,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    ToolResultMsg {
+        turn_id: TurnId,
+        flow_run_id: Option<FlowRunId>,
+        message: crate::message::Message,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    SystemMsg {
+        turn_id: TurnId,
+        message: crate::message::Message,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

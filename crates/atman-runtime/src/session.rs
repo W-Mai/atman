@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use uuid::Uuid;
 
-use crate::event::EventSink;
+use crate::event::{Event, EventSink, FlowRunId, TurnId};
 use crate::event_writer::EventWriter;
+use crate::message::{Message, MessageRole};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(pub Uuid);
@@ -25,6 +27,8 @@ pub struct Session {
     dir: PathBuf,
     writer: Option<EventWriter>,
     sink: EventSink,
+    messages: Mutex<Vec<Message>>,
+    current_turn: Mutex<Option<TurnId>>,
 }
 
 impl Session {
@@ -38,6 +42,8 @@ impl Session {
             dir,
             writer: Some(writer),
             sink,
+            messages: Mutex::new(Vec::new()),
+            current_turn: Mutex::new(None),
         })
     }
 
@@ -47,6 +53,8 @@ impl Session {
             dir: PathBuf::new(),
             writer: None,
             sink: EventSink::new(),
+            messages: Mutex::new(Vec::new()),
+            current_turn: Mutex::new(None),
         }
     }
 
@@ -64,6 +72,71 @@ impl Session {
 
     pub fn sink(&self) -> &EventSink {
         &self.sink
+    }
+
+    /// Single-writer append. Emits the matching event before the in-memory push
+    /// so events.jsonl remains the authority (§I5).
+    pub fn append_message(&self, msg: Message, flow_run_id: Option<FlowRunId>) {
+        let ts = chrono::Utc::now();
+        let event = match msg.role {
+            MessageRole::User => Event::UserMsg {
+                turn_id: msg.turn_id.clone(),
+                message: msg.clone(),
+                ts,
+            },
+            MessageRole::Assistant => Event::AssistantMsg {
+                turn_id: msg.turn_id.clone(),
+                flow_run_id,
+                message: msg.clone(),
+                ts,
+            },
+            MessageRole::Tool => Event::ToolResultMsg {
+                turn_id: msg.turn_id.clone(),
+                flow_run_id,
+                message: msg.clone(),
+                ts,
+            },
+            MessageRole::System => Event::SystemMsg {
+                turn_id: msg.turn_id.clone(),
+                message: msg.clone(),
+                ts,
+            },
+        };
+        self.sink.emit(event);
+        self.messages.lock().unwrap().push(msg);
+    }
+
+    pub fn messages(&self) -> Vec<Message> {
+        self.messages.lock().unwrap().clone()
+    }
+
+    pub fn message_count(&self) -> usize {
+        self.messages.lock().unwrap().len()
+    }
+
+    pub fn begin_turn(&self, user_msg: Message) -> TurnId {
+        let turn_id = user_msg.turn_id.clone();
+        *self.current_turn.lock().unwrap() = Some(turn_id.clone());
+        self.sink.emit(Event::TurnStart {
+            turn_id: turn_id.clone(),
+            ts: chrono::Utc::now(),
+        });
+        self.append_message(user_msg, None);
+        turn_id
+    }
+
+    pub fn end_turn(&self) {
+        let turn_id = self.current_turn.lock().unwrap().take();
+        if let Some(turn_id) = turn_id {
+            self.sink.emit(Event::TurnEnd {
+                turn_id,
+                ts: chrono::Utc::now(),
+            });
+        }
+    }
+
+    pub fn current_turn(&self) -> Option<TurnId> {
+        self.current_turn.lock().unwrap().clone()
     }
 
     pub async fn shutdown(mut self) {
