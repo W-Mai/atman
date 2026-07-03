@@ -1,3 +1,4 @@
+pub mod cost;
 pub mod env;
 pub mod error;
 pub mod eval;
@@ -11,13 +12,14 @@ pub mod tools;
 pub mod validate;
 pub mod value;
 
+pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use env::Env;
 pub use error::RuntimeError;
 pub use eval::{EvalCtx, eval_expr};
 pub use event::{Event, EventSink, FlowRunId, FlowStatus, NodeEvent, Observable};
 pub use exec::{exec_flow, exec_stmts};
 pub use executor::Executor;
-pub use provider::{LlmRequest, Provider, ProviderRegistry};
+pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
 pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
 pub use validate::{ValidationError, validate};
 pub use value::Value;
