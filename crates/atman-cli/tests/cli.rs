@@ -388,6 +388,130 @@ fn run_reports_error_and_exits_nonzero() {
 }
 
 #[test]
+fn repl_attach_list_shows_pending_paths() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let img = data.path().join("a.png");
+    std::fs::write(&img, b"fake").unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let script = format!(":attach {}\n:attach list\n:exit\n", img.display());
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("a.png"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_at_path_inline_becomes_image_part_in_user_msg_event() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let cmd_dir = cfg.path().join("commands");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(
+        cmd_dir.join("noop.at"),
+        r#"flow noop() -> string {
+    return "done"
+}
+"#,
+    )
+    .unwrap();
+    let img = data.path().join("pic.png");
+    std::fs::write(&img, b"fake").unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let script = format!("/noop @{}\n:exit\n", img.display());
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "atman crashed: {:?}", out);
+
+    let sessions = data.path().join("sessions");
+    let mut found_image = false;
+    for entry in std::fs::read_dir(&sessions).unwrap() {
+        let entry = entry.unwrap();
+        let events_path = entry.path().join("events.jsonl");
+        if !events_path.exists() {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&events_path).unwrap();
+        for line in contents.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v["type"] == "user_msg"
+                && let Some(parts) = v["message"]["parts"].as_array()
+                && parts.iter().any(|p| p["type"] == "image")
+            {
+                found_image = true;
+            }
+        }
+    }
+    assert!(found_image, "no user_msg event carried an image part");
+}
+
+#[test]
+fn repl_attach_clear_empties_pending() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let img = data.path().join("b.png");
+    std::fs::write(&img, b"fake").unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let script = format!(
+        ":attach {}\n:attach clear\n:attach list\n:exit\n",
+        img.display()
+    );
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("cleared"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("no pending attachments"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn repl_routes_bare_input_to_command_via_routes_toml() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

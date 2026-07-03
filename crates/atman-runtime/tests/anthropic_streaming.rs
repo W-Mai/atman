@@ -62,8 +62,6 @@ async fn anthropic_streaming_parses_content_block_delta() {
 
 #[tokio::test]
 async fn anthropic_multimodal_request_includes_image_block() {
-    use atman_runtime::provider::Attachment;
-
     let dir = tempfile::tempdir().unwrap();
     let img_path = dir.path().join("pic.png");
     let png_bytes: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -114,7 +112,6 @@ async fn anthropic_multimodal_request_includes_image_block() {
         ],
         turn_id: atman_runtime::event::TurnId::now(),
     };
-    let _ = Attachment::image(img_path);
     let v = provider
         .call(LlmRequest {
             model: "claude-test".to_string(),

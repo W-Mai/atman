@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use atman_dsl::ast::{File, FlowDecl};
 
@@ -7,7 +6,7 @@ use crate::error::RuntimeError;
 use crate::event::{Event, EventSink, FlowRunId, FlowStatus, TurnId};
 use crate::exec::exec_flow_with_siblings;
 use crate::message::Message;
-use crate::provider::{Attachment, ProviderRegistry};
+use crate::provider::ProviderRegistry;
 use crate::tool::{ToolCtx, ToolRegistry};
 use crate::value::Value;
 
@@ -26,7 +25,6 @@ pub struct Executor {
     pub providers: ProviderRegistry,
     pub events: EventSink,
     pub tool_ctx: ToolCtx,
-    pub pending_attachments: Mutex<Vec<Attachment>>,
 }
 
 impl Executor {
@@ -36,7 +34,6 @@ impl Executor {
             providers: ProviderRegistry::new(),
             events: EventSink::new(),
             tool_ctx: ToolCtx::new(),
-            pending_attachments: Mutex::new(Vec::new()),
         }
     }
 
@@ -46,16 +43,7 @@ impl Executor {
             providers: ProviderRegistry::new(),
             events,
             tool_ctx: ToolCtx::new(),
-            pending_attachments: Mutex::new(Vec::new()),
         }
-    }
-
-    pub fn push_attachment(&self, a: Attachment) {
-        self.pending_attachments.lock().unwrap().push(a);
-    }
-
-    pub fn pending_attachment_count(&self) -> usize {
-        self.pending_attachments.lock().unwrap().len()
     }
 
     pub async fn run(
@@ -109,7 +97,6 @@ impl Executor {
             &self.providers,
             flows,
             Some(&self.events),
-            Some(&self.pending_attachments),
             turn_id,
             Some(run_id.clone()),
             message_sink,

@@ -87,8 +87,6 @@ async fn openai_non_streaming_returns_message_content() {
 
 #[tokio::test]
 async fn openai_multimodal_request_uses_image_url_parts() {
-    use atman_runtime::provider::Attachment;
-
     let dir = tempfile::tempdir().unwrap();
     let img_path = dir.path().join("pic.jpg");
     let jpg_bytes: [u8; 4] = [0xFF, 0xD8, 0xFF, 0xE0];
@@ -142,7 +140,6 @@ async fn openai_multimodal_request_uses_image_url_parts() {
         ],
         turn_id: atman_runtime::event::TurnId::now(),
     };
-    let _ = Attachment::image(img_path);
     let v = provider
         .call(LlmRequest {
             model: "gpt-4o".to_string(),

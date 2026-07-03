@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
@@ -10,29 +9,6 @@ use crate::event::{NodeEvent, Observable};
 use crate::message::{Message, MessagePart, MessageRole};
 use crate::tool::BoxFut;
 use crate::value::Value;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttachmentKind {
-    Image,
-    File,
-}
-
-#[derive(Debug, Clone)]
-pub struct Attachment {
-    pub kind: AttachmentKind,
-    pub path: PathBuf,
-    pub mime: Option<String>,
-}
-
-impl Attachment {
-    pub fn image(path: impl Into<PathBuf>) -> Self {
-        Self {
-            kind: AttachmentKind::Image,
-            path: path.into(),
-            mime: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct LlmRequest {

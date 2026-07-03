@@ -269,19 +269,28 @@ enum RouteOutcome {
     Unmatched,
 }
 
-async fn route_input(line: &str, executor: &Executor) -> RouteOutcome {
-    let cfg = match config_dir() {
-        Ok(c) => c,
-        Err(_) => return RouteOutcome::Unmatched,
+async fn route_input_in_turn(
+    line: &str,
+    executor: &Executor,
+    session: &Session,
+    turn_id: atman_runtime::event::TurnId,
+) -> RouteOutcome {
+    let Some(call) = resolve_route_call(line) else {
+        return RouteOutcome::Unmatched;
     };
+    match run_slash_command_in_turn(&call, executor, session, turn_id).await {
+        Ok(v) => RouteOutcome::Handled(v),
+        Err(e) => RouteOutcome::HandledErr(e),
+    }
+}
+
+fn resolve_route_call(line: &str) -> Option<String> {
+    let cfg = config_dir().ok()?;
     let routes_path = cfg.join("routes.toml");
     if !routes_path.exists() {
-        return RouteOutcome::Unmatched;
+        return None;
     }
-    let contents = match std::fs::read_to_string(&routes_path) {
-        Ok(c) => c,
-        Err(_) => return RouteOutcome::Unmatched,
-    };
+    let contents = std::fs::read_to_string(&routes_path).ok()?;
     for (i, raw_line) in contents.lines().enumerate() {
         let trimmed = raw_line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -303,13 +312,10 @@ async fn route_input(line: &str, executor: &Executor) -> RouteOutcome {
             } else {
                 format!("{command} {rest}")
             };
-            return match run_slash_command(&call, executor).await {
-                Ok(v) => RouteOutcome::Handled(v),
-                Err(e) => RouteOutcome::HandledErr(e),
-            };
+            return Some(call);
         }
     }
-    RouteOutcome::Unmatched
+    None
 }
 
 async fn run_boot_flow(executor: &Executor) -> Result<()> {
@@ -336,7 +342,22 @@ async fn run_boot_flow(executor: &Executor) -> Result<()> {
     Ok(())
 }
 
-async fn run_slash_command(line: &str, executor: &Executor) -> Result<Value> {
+async fn run_slash_command_in_turn(
+    line: &str,
+    executor: &Executor,
+    session: &Session,
+    turn_id: atman_runtime::event::TurnId,
+) -> Result<Value> {
+    let (parsed, flow_name, kv) = resolve_slash_command(line)?;
+    executor
+        .run_in_turn(&parsed, &flow_name, kv, Some(turn_id), Some(session))
+        .await
+        .map_err(Into::into)
+}
+
+type SlashCommandParsed = (atman_dsl::ast::File, String, Vec<(String, Value)>);
+
+fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     let mut parts = line.split_whitespace();
     let name = parts.next().context("empty slash command")?;
     let cfg = config_dir()?;
@@ -372,11 +393,12 @@ async fn run_slash_command(line: &str, executor: &Executor) -> Result<Value> {
             );
         }
     }
+    Ok((parsed, flow_name, kv))
+}
 
-    executor
-        .run(&parsed, &flow_name, kv)
-        .await
-        .map_err(Into::into)
+#[derive(Default)]
+struct PendingUserMessage {
+    attachments: Vec<std::path::PathBuf>,
 }
 
 async fn cmd_repl() -> Result<()> {
@@ -405,6 +427,7 @@ async fn cmd_repl() -> Result<()> {
 
     let config = Config::builder().auto_add_history(true).build();
     let mut editor: DefaultEditor = DefaultEditor::with_config(config)?;
+    let mut pending = PendingUserMessage::default();
 
     loop {
         let line: String = if non_interactive {
@@ -425,27 +448,30 @@ async fn cmd_repl() -> Result<()> {
             continue;
         }
         if let Some(rest) = line.strip_prefix(':') {
-            if !handle_builtin(rest.trim(), session.id().to_string().as_str(), &executor) {
+            if !handle_builtin(rest.trim(), session.id().to_string().as_str(), &mut pending) {
                 break;
             }
             continue;
         }
         if let Some(rest) = line.strip_prefix('/') {
-            match run_slash_command(rest.trim(), &executor).await {
-                Ok(v) => println!("{}", render_value(&v)),
-                Err(e) => eprintln!("error: {e}"),
-            }
+            run_turn(
+                &session,
+                &executor,
+                rest.trim(),
+                &mut pending,
+                TurnKind::Slash,
+            )
+            .await;
             continue;
         }
-        match route_input(line.trim(), &executor).await {
-            RouteOutcome::Handled(v) => println!("{}", render_value(&v)),
-            RouteOutcome::HandledErr(e) => eprintln!("error: {e}"),
-            RouteOutcome::Unmatched => {
-                println!(
-                    "[atman] no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
-                );
-            }
-        }
+        run_turn(
+            &session,
+            &executor,
+            line.trim(),
+            &mut pending,
+            TurnKind::Bare,
+        )
+        .await;
     }
 
     session.shutdown().await;
@@ -453,38 +479,165 @@ async fn cmd_repl() -> Result<()> {
     Ok(())
 }
 
-fn handle_builtin(cmd: &str, sid: &str, executor: &Executor) -> bool {
-    if let Some(rest) = cmd.strip_prefix("attach") {
-        let path = rest.trim();
-        if path.is_empty() {
-            eprintln!(":attach <path> — path required");
-            return true;
+enum TurnKind {
+    Slash,
+    Bare,
+}
+
+async fn run_turn(
+    session: &Session,
+    executor: &Executor,
+    raw_line: &str,
+    pending: &mut PendingUserMessage,
+    kind: TurnKind,
+) {
+    let (text, inline_attachments) = extract_at_paths(raw_line);
+    let mut attachments = std::mem::take(&mut pending.attachments);
+    attachments.extend(inline_attachments);
+    let turn_id = atman_runtime::event::TurnId::now();
+    let user_msg = build_user_message(&text, &attachments, turn_id.clone());
+    session.begin_turn(user_msg);
+    let result: Result<atman_runtime::Value> = match kind {
+        TurnKind::Slash => run_slash_command_in_turn(&text, executor, session, turn_id).await,
+        TurnKind::Bare => match route_input_in_turn(&text, executor, session, turn_id).await {
+            RouteOutcome::Handled(v) => Ok(v),
+            RouteOutcome::HandledErr(e) => Err(e),
+            RouteOutcome::Unmatched => {
+                println!(
+                    "[atman] no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
+                );
+                session.end_turn();
+                return;
+            }
+        },
+    };
+    match result {
+        Ok(v) => println!("{}", render_value(&v)),
+        Err(e) => eprintln!("error: {e}"),
+    }
+    session.end_turn();
+}
+
+fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
+    let mut text = String::with_capacity(line.len());
+    let mut attachments = Vec::new();
+    let mut first = true;
+    for tok in line.split_whitespace() {
+        if let Some(rest) = tok
+            .strip_prefix("@./")
+            .or_else(|| tok.strip_prefix("@../"))
+            .or_else(|| tok.strip_prefix("@/"))
+        {
+            let prefix = if tok.starts_with("@./") {
+                "./"
+            } else if tok.starts_with("@../") {
+                "../"
+            } else {
+                "/"
+            };
+            attachments.push(std::path::PathBuf::from(format!("{prefix}{rest}")));
+        } else {
+            if !first {
+                text.push(' ');
+            }
+            text.push_str(tok);
+            first = false;
         }
-        let expanded = std::path::PathBuf::from(path);
-        if !expanded.exists() {
-            eprintln!(":attach: file not found: {}", expanded.display());
-            return true;
-        }
-        let kind = classify_attachment(&expanded);
-        executor.push_attachment(atman_runtime::provider::Attachment {
-            kind,
-            path: expanded.clone(),
-            mime: None,
+    }
+    (text, attachments)
+}
+
+fn build_user_message(
+    text: &str,
+    attachments: &[std::path::PathBuf],
+    turn_id: atman_runtime::event::TurnId,
+) -> atman_runtime::message::Message {
+    use atman_runtime::message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
+    let mut parts: Vec<MessagePart> = Vec::new();
+    for path in attachments {
+        let media_type = guess_image_mime(path).unwrap_or_else(|| "image/png".to_string());
+        parts.push(MessagePart::Image {
+            source: ImageSource {
+                media_type,
+                data: ImageData::Path { path: path.clone() },
+            },
         });
-        println!(
-            "[atman] attached {} (pending count: {})",
-            expanded.display(),
-            executor.pending_attachment_count()
-        );
-        return true;
+    }
+    if !text.is_empty() {
+        parts.push(MessagePart::Text { text: text.into() });
+    }
+    Message {
+        role: MessageRole::User,
+        parts,
+        turn_id,
+    }
+}
+
+fn guess_image_mime(path: &std::path::Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())?
+        .to_ascii_lowercase();
+    Some(
+        match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+fn handle_builtin(cmd: &str, sid: &str, pending: &mut PendingUserMessage) -> bool {
+    if let Some(rest) = cmd.strip_prefix("attach") {
+        let arg = rest.trim();
+        match arg {
+            "" => {
+                eprintln!(":attach <path>  |  :attach clear  |  :attach list");
+                return true;
+            }
+            "clear" => {
+                pending.attachments.clear();
+                println!("[atman] pending attachments cleared");
+                return true;
+            }
+            "list" => {
+                if pending.attachments.is_empty() {
+                    println!("[atman] no pending attachments");
+                } else {
+                    for (i, p) in pending.attachments.iter().enumerate() {
+                        println!("  {i}: {}", p.display());
+                    }
+                }
+                return true;
+            }
+            path => {
+                let expanded = std::path::PathBuf::from(path);
+                if !expanded.exists() {
+                    eprintln!(":attach: file not found: {}", expanded.display());
+                    return true;
+                }
+                pending.attachments.push(expanded.clone());
+                println!(
+                    "[atman] attached {} (pending count: {})",
+                    expanded.display(),
+                    pending.attachments.len()
+                );
+                return true;
+            }
+        }
     }
     match cmd {
         "help" => {
-            println!(":help          — show this");
-            println!(":exit | :quit  — leave REPL");
-            println!(":session       — print current session id");
-            println!(":cost          — cost summary for current session");
-            println!(":attach <path> — attach a file to the next LLM call");
+            println!(":help                — show this");
+            println!(":exit | :quit        — leave REPL");
+            println!(":session             — print current session id");
+            println!(":cost                — cost summary for current session");
+            println!(":attach <path>       — attach file to next turn");
+            println!(":attach clear|list   — manage pending attachments");
+            println!("@./path or @/abs     — inline attach in bare input");
             true
         }
         "exit" | "quit" => false,
@@ -500,20 +653,6 @@ fn handle_builtin(cmd: &str, sid: &str, executor: &Executor) -> bool {
             eprintln!("unknown builtin `:{other}` — try `:help`");
             true
         }
-    }
-}
-
-fn classify_attachment(path: &std::path::Path) -> atman_runtime::provider::AttachmentKind {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => {
-            atman_runtime::provider::AttachmentKind::Image
-        }
-        _ => atman_runtime::provider::AttachmentKind::File,
     }
 }
 

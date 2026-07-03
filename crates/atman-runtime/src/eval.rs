@@ -12,7 +12,6 @@ pub struct EvalCtx<'a> {
     pub flows: &'a std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
     pub contract: Option<&'a atman_dsl::ast::Contract>,
     pub events: Option<&'a crate::event::EventSink>,
-    pub attachments: Option<&'a std::sync::Mutex<Vec<crate::provider::Attachment>>>,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
     pub message_sink: Option<&'a dyn crate::executor::MessageSink>,
@@ -264,10 +263,6 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     "no provider registered for model `{model}`"
                 )));
             };
-            let attachments = ctx
-                .attachments
-                .map(|m| std::mem::take(&mut *m.lock().unwrap()))
-                .unwrap_or_default();
             let turn_id = ctx
                 .turn_id
                 .clone()
@@ -285,7 +280,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     prompt_text = truncate_prompt_to_budget(prompt_text, budget);
                 }
                 let user_msg =
-                    build_user_message_from_prompt(&prompt_text, &attachments, turn_id.clone());
+                    crate::message::Message::user_text(turn_id.clone(), prompt_text.clone());
                 (vec![user_msg], prompt_text)
             };
             let prompt = prompt_for_budget;
@@ -582,40 +577,6 @@ async fn eval_message_node<'a>(
     })
 }
 
-fn build_user_message_from_prompt(
-    prompt: &str,
-    attachments: &[crate::provider::Attachment],
-    turn_id: crate::event::TurnId,
-) -> crate::message::Message {
-    use crate::message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
-    let mut parts: Vec<MessagePart> = Vec::new();
-    for a in attachments {
-        if matches!(a.kind, crate::provider::AttachmentKind::Image) {
-            let media_type = a
-                .mime
-                .clone()
-                .or_else(|| guess_image_mime(&a.path))
-                .unwrap_or_else(|| "image/png".to_string());
-            parts.push(MessagePart::Image {
-                source: ImageSource {
-                    media_type,
-                    data: ImageData::Path {
-                        path: a.path.clone(),
-                    },
-                },
-            });
-        }
-    }
-    parts.push(MessagePart::Text {
-        text: prompt.to_string(),
-    });
-    Message {
-        role: MessageRole::User,
-        parts,
-        turn_id,
-    }
-}
-
 fn guess_image_mime(path: &std::path::Path) -> Option<String> {
     let ext = path
         .extension()
@@ -779,7 +740,6 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
-            attachments: None,
             turn_id: None,
             flow_run_id: None,
             message_sink: None,
@@ -873,7 +833,6 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
-            attachments: None,
             turn_id: None,
             flow_run_id: None,
             message_sink: None,
@@ -911,7 +870,6 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
-            attachments: None,
             turn_id: None,
             flow_run_id: None,
             message_sink: None,
@@ -950,7 +908,6 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
-            attachments: None,
             turn_id: None,
             flow_run_id: None,
             message_sink: None,
@@ -984,7 +941,6 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
-            attachments: None,
             turn_id: None,
             flow_run_id: None,
             message_sink: None,
@@ -1023,7 +979,6 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
-            attachments: None,
             turn_id: None,
             flow_run_id: None,
             message_sink: None,
@@ -1052,7 +1007,6 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
-            attachments: None,
             turn_id: None,
             flow_run_id: None,
             message_sink: None,
@@ -1099,7 +1053,6 @@ flow parent(x: Int) -> Int {
             None,
             None,
             None,
-            None,
         )
         .await
         .unwrap();
@@ -1132,7 +1085,6 @@ flow parent(x: Int) -> Int {
             None,
             None,
             None,
-            None,
         )
         .await
         .unwrap_err();
@@ -1161,7 +1113,6 @@ flow parent(x: Int) -> Int {
             flows: &flows,
             contract: None,
             events: None,
-            attachments: None,
             turn_id: None,
             flow_run_id: None,
             message_sink: None,

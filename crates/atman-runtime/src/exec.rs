@@ -364,7 +364,7 @@ pub async fn exec_flow(
 ) -> Result<Value, RuntimeError> {
     let flows = std::collections::HashMap::new();
     exec_flow_with_siblings(
-        flow, args, tools, tool_ctx, providers, &flows, None, None, None, None, None,
+        flow, args, tools, tool_ctx, providers, &flows, None, None, None, None,
     )
     .await
 }
@@ -378,7 +378,6 @@ pub async fn exec_flow_with_siblings(
     providers: &crate::provider::ProviderRegistry,
     flows: &std::collections::HashMap<String, FlowDecl>,
     events: Option<&crate::event::EventSink>,
-    attachments: Option<&std::sync::Mutex<Vec<crate::provider::Attachment>>>,
     turn_id: Option<crate::event::TurnId>,
     flow_run_id: Option<crate::event::FlowRunId>,
     message_sink: Option<&dyn crate::executor::MessageSink>,
@@ -394,7 +393,6 @@ pub async fn exec_flow_with_siblings(
         flows,
         contract: flow.contract.as_ref(),
         events,
-        attachments,
         turn_id,
         flow_run_id,
         message_sink,
