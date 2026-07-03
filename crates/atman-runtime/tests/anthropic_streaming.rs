@@ -41,6 +41,7 @@ async fn anthropic_streaming_parses_content_block_delta() {
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
+        attachments: vec![],
     });
 
     let final_value = obs.output.await.unwrap();
@@ -87,6 +88,7 @@ async fn anthropic_non_streaming_returns_concatenated_text() {
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
+            attachments: vec![],
         })
         .await
         .unwrap();
@@ -110,6 +112,7 @@ async fn anthropic_http_error_becomes_tool_failed() {
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
+            attachments: vec![],
         })
         .await
         .unwrap_err();
@@ -138,6 +141,7 @@ async fn anthropic_real() {
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
+        attachments: vec![],
     });
     let value = obs.output.await.unwrap();
     let text = match value {

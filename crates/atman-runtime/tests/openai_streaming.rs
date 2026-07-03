@@ -32,6 +32,7 @@ async fn openai_streaming_parses_delta_content() {
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
+        attachments: vec![],
     });
 
     let final_value = obs.output.await.unwrap();
@@ -77,6 +78,7 @@ async fn openai_non_streaming_returns_message_content() {
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
+            attachments: vec![],
         })
         .await
         .unwrap();
@@ -100,6 +102,7 @@ async fn openai_http_error_becomes_tool_failed() {
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
+            attachments: vec![],
         })
         .await
         .unwrap_err();

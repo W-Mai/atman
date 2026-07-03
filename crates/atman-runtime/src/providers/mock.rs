@@ -165,6 +165,7 @@ mod tests {
                 input: Value::Unit,
                 schema: None,
                 cache_prompt: false,
+                attachments: vec![],
             })
             .await
             .unwrap();
@@ -183,6 +184,7 @@ mod tests {
                 input: Value::Unit,
                 schema: None,
                 cache_prompt: false,
+                attachments: vec![],
             })
             .await
             .unwrap();
@@ -199,6 +201,7 @@ mod tests {
                 input: Value::Unit,
                 schema: None,
                 cache_prompt: false,
+                attachments: vec![],
             })
             .await
             .unwrap_err();
@@ -215,6 +218,7 @@ mod tests {
                 input: Value::Unit,
                 schema: None,
                 cache_prompt: false,
+                attachments: vec![],
             })
             .await
             .unwrap();

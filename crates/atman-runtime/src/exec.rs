@@ -184,6 +184,7 @@ async fn eval_bind_with_watches(
         input,
         schema: None,
         cache_prompt,
+        attachments: Vec::new(),
     });
     let cancel = obs.cancel.clone();
     let mut events = obs.events;
@@ -361,9 +362,10 @@ pub async fn exec_flow(
     providers: &crate::provider::ProviderRegistry,
 ) -> Result<Value, RuntimeError> {
     let flows = std::collections::HashMap::new();
-    exec_flow_with_siblings(flow, args, tools, tool_ctx, providers, &flows, None).await
+    exec_flow_with_siblings(flow, args, tools, tool_ctx, providers, &flows, None, None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn exec_flow_with_siblings(
     flow: &FlowDecl,
     args: Vec<(String, Value)>,
@@ -372,6 +374,7 @@ pub async fn exec_flow_with_siblings(
     providers: &crate::provider::ProviderRegistry,
     flows: &std::collections::HashMap<String, FlowDecl>,
     events: Option<&crate::event::EventSink>,
+    attachments: Option<&std::sync::Mutex<Vec<crate::provider::Attachment>>>,
 ) -> Result<Value, RuntimeError> {
     let mut env = Env::new();
     for (name, value) in args {
@@ -384,6 +387,7 @@ pub async fn exec_flow_with_siblings(
         flows,
         contract: flow.contract.as_ref(),
         events,
+        attachments,
     };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),

@@ -12,6 +12,7 @@ pub struct EvalCtx<'a> {
     pub flows: &'a std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
     pub contract: Option<&'a atman_dsl::ast::Contract>,
     pub events: Option<&'a crate::event::EventSink>,
+    pub attachments: Option<&'a std::sync::Mutex<Vec<crate::provider::Attachment>>>,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -227,6 +228,10 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     "no provider registered for model `{model}`"
                 )));
             };
+            let attachments = ctx
+                .attachments
+                .map(|m| std::mem::take(&mut *m.lock().unwrap()))
+                .unwrap_or_default();
             let mut last_err: Option<RuntimeError> = None;
             for _ in 0..=retry_count {
                 let req = crate::provider::LlmRequest {
@@ -235,6 +240,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     input: input.clone(),
                     schema: None,
                     cache_prompt,
+                    attachments: attachments.clone(),
                 };
                 let start = std::time::Instant::now();
                 let outcome = provider.call(req).await;
@@ -478,6 +484,7 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
+            attachments: None,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -568,6 +575,7 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
+            attachments: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -602,6 +610,7 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
+            attachments: None,
         };
 
         let mut env = Env::new();
@@ -637,6 +646,7 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
+            attachments: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -667,6 +677,7 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
+            attachments: None,
         };
 
         let src = r#"flow t() {
@@ -702,6 +713,7 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
+            attachments: None,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -727,6 +739,7 @@ mod tests {
             flows: &flows,
             contract: None,
             events: None,
+            attachments: None,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -767,6 +780,7 @@ flow parent(x: Int) -> Int {
             &providers,
             &flows_map,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -796,6 +810,7 @@ flow parent(x: Int) -> Int {
             &providers,
             &flows,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -824,6 +839,7 @@ flow parent(x: Int) -> Int {
             flows: &flows,
             contract: None,
             events: None,
+            attachments: None,
         };
 
         let mut env = Env::new();
