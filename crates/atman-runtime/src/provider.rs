@@ -92,7 +92,10 @@ impl ProviderRegistry {
         }
     }
 
-    pub fn resolve(&self, _model: &str) -> Option<Arc<dyn Provider>> {
+    pub fn resolve(&self, model: &str) -> Option<Arc<dyn Provider>> {
+        if let Some(p) = self.providers.get(model) {
+            return Some(p.clone());
+        }
         self.default
             .as_ref()
             .and_then(|n| self.providers.get(n).cloned())

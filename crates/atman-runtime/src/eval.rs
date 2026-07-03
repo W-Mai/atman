@@ -145,9 +145,16 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut model: Option<String> = None;
             let mut prompt: Option<String> = None;
             let mut input: Value = Value::Unit;
+            let mut retry_count: u32 = 0;
+            let mut fallback_expr: Option<&Expr> = None;
             for (k, v) in kwargs {
-                if k.name == "schema" {
-                    continue;
+                match k.name.as_str() {
+                    "schema" => continue,
+                    "fallback" => {
+                        fallback_expr = Some(v);
+                        continue;
+                    }
+                    _ => {}
                 }
                 let val = eval_expr(v, env, ctx).await;
                 if val.is_err() {
@@ -173,6 +180,15 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         }
                     },
                     "input" => input = val,
+                    "retry" => match val {
+                        Value::Int(n) if n >= 0 => retry_count = n as u32,
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "non-negative int".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -187,16 +203,23 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     "no provider registered for model `{model}`"
                 )));
             };
-            let req = crate::provider::LlmRequest {
-                model,
-                prompt,
-                input,
-                schema: None,
-            };
-            match provider.call(req).await {
-                Ok(v) => v,
-                Err(e) => Value::Err(e),
+            let mut last_err: Option<RuntimeError> = None;
+            for _ in 0..=retry_count {
+                let req = crate::provider::LlmRequest {
+                    model: model.clone(),
+                    prompt: prompt.clone(),
+                    input: input.clone(),
+                    schema: None,
+                };
+                match provider.call(req).await {
+                    Ok(v) => return v,
+                    Err(e) => last_err = Some(e),
+                }
             }
+            if let Some(fb) = fallback_expr {
+                return eval_expr(fb, env, ctx).await;
+            }
+            Value::Err(last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into())))
         }
         Node::UserConfirm { msg } => {
             let v = eval_expr(msg, env, ctx).await;
