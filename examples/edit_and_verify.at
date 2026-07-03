@@ -13,7 +13,7 @@ flow edit_and_verify(file: path, instruction: string) -> EditResult {
 
     edited = llm {
         model: "claude-opus-4.7"
-        prompt: @"prompts/edit.md"
+        messages: [system_msg(@"prompts/edit.md"), user_msg("Apply the instruction to the file.")]
         input: { file: file, original: original, instruction: instruction }
         schema: { new_content: string, rationale: string }
     }

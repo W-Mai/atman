@@ -12,7 +12,7 @@ flow look_into(question: string) -> Report {
 
     summary = llm {
         model: "claude-opus-4.7"
-        prompt: @"prompts/synthesize.md"
+        messages: [system_msg(@"prompts/synthesize.md"), user_msg("Synthesize findings for the question.")]
         input: { question: question, findings: findings }
         schema: Report
         cache: true
@@ -24,7 +24,7 @@ flow look_into(question: string) -> Report {
 flow explore_module(question: string, dir: string) -> Finding {
     return llm {
         model: "gpt-4o-mini"
-        prompt: "Focus on: " + question + " in " + dir
+        messages: [user_msg("Focus on: " + question + " in " + dir)]
         schema: Finding
     }
 }

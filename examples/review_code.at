@@ -17,7 +17,7 @@ flow review_code(file: path) -> Review {
 
     primary = llm {
         model: "claude-opus-4.7"
-        prompt: @"prompts/code-review.md"
+        messages: [system_msg(@"prompts/code-review.md"), user_msg("Review the code and gathered context.")]
         input: gather
         schema: Review
         cache: true
@@ -26,7 +26,7 @@ flow review_code(file: path) -> Review {
 
     verify = llm {
         model: "gpt-4o-mini"
-        prompt: @"prompts/verify.md"
+        messages: [system_msg(@"prompts/verify.md"), user_msg("Verify the review above.")]
         input: primary
         schema: { valid: bool, issues: [string] }
     }
@@ -34,7 +34,7 @@ flow review_code(file: path) -> Review {
     when verify.valid == false {
         primary = llm {
             model: "claude-opus-4.7"
-            prompt: @"prompts/code-review.md"
+            messages: [system_msg(@"prompts/code-review.md"), user_msg("Try again with more care.")]
             input: gather
             schema: Review
             cache: true
