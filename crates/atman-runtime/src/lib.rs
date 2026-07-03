@@ -6,6 +6,7 @@ pub mod event;
 pub mod event_writer;
 pub mod exec;
 pub mod executor;
+pub mod hunk;
 pub mod injection;
 pub mod memory;
 pub mod message;
@@ -26,6 +27,7 @@ pub use event::{
     Event, EventSink, FlowRunId, FlowStatus, LlmCallStatus, NodeEvent, Observable, TurnId,
 };
 pub use executor::Executor;
+pub use hunk::{ApplyError, EditProposal, Hunk, HunkLine};
 pub use injection::{Injection, InjectionId, InjectionState};
 pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
 pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};

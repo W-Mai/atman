@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
+use crate::hunk::EditProposal;
 use crate::message::Message;
 
 #[derive(Debug, Clone)]
@@ -14,6 +15,7 @@ pub enum Value {
     List(Vec<Value>),
     Struct(Vec<(String, Value)>),
     Message(Message),
+    EditProposal(Box<EditProposal>),
     Err(RuntimeError),
 }
 
@@ -33,6 +35,7 @@ impl Value {
             Value::List(_) => "list",
             Value::Struct(_) => "struct",
             Value::Message(_) => "message",
+            Value::EditProposal(_) => "edit_proposal",
             Value::Err(_) => "err",
         }
     }
@@ -66,6 +69,7 @@ impl Value {
                 serde_json::Value::Object(m)
             }
             Value::Message(msg) => serde_json::to_value(msg).unwrap_or(serde_json::Value::Null),
+            Value::EditProposal(p) => serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
             Value::Err(e) => serde_json::json!({ "error": e.to_string() }),
         }
     }

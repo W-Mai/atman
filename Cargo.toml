@@ -30,6 +30,7 @@ clap       = { version = "4", features = ["derive"] }
 directories = "6"
 rustyline  = { version = "17", default-features = false, features = ["custom-bindings"] }
 base64     = "0.22"
+similar    = "2"
 
 [profile.release]
 lto = "thin"
