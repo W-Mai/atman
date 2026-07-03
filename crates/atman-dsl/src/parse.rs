@@ -397,8 +397,8 @@ fn parse_ident_expr(input: ParseStream) -> Result<Expr> {
 fn parse_call_args(input: ParseStream) -> Result<Vec<Arg>> {
     let mut args = Vec::new();
     while !input.is_empty() {
-        if input.peek(syn::Ident) && input.peek2(Token![:]) {
-            let name = to_ident(input.parse::<syn::Ident>()?);
+        if (input.peek(syn::Ident) || peek_any_ident(input)) && input.peek2(Token![:]) {
+            let name = to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(input)?);
             input.parse::<Token![:]>()?;
             let value = parse_expr(input)?;
             args.push(Arg::Named { name, value });
@@ -411,6 +411,13 @@ fn parse_call_args(input: ParseStream) -> Result<Vec<Arg>> {
         input.parse::<Token![,]>()?;
     }
     Ok(args)
+}
+
+fn peek_any_ident(input: ParseStream) -> bool {
+    input
+        .fork()
+        .call(<syn::Ident as syn::ext::IdentExt>::parse_any)
+        .is_ok()
 }
 
 fn parse_watch(input: ParseStream) -> Result<WatchDecl> {
