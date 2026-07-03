@@ -57,6 +57,13 @@ enum DaemonAction {
     Start,
     Stop,
     Status,
+    Run {
+        file: PathBuf,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long, default_value_t = 65099)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -122,7 +129,78 @@ async fn main() -> Result<()> {
         Some(Cmd::Daemon {
             action: DaemonAction::Status,
         }) => cmd_daemon_status().await,
+        Some(Cmd::Daemon {
+            action: DaemonAction::Run { file, follow, port },
+        }) => cmd_daemon_run(file, follow, port).await,
     }
+}
+
+async fn cmd_daemon_run(file: PathBuf, follow: bool, port: u16) -> Result<()> {
+    let cfg_path = atman_daemon::config::default_config_path()?;
+    let cfg = atman_daemon::config::DaemonConfig::load_or_init(&cfg_path)?;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let abs = if file.is_absolute() {
+        file.clone()
+    } else {
+        std::env::current_dir()?.join(&file)
+    };
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "run_flow",
+        "params": {"flow_path": abs.to_string_lossy()}
+    });
+    let resp = client
+        .post(format!("{base}/rpc"))
+        .bearer_auth(&cfg.auth_token)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {base}/rpc (is atman-daemon running?)"))?;
+    if !resp.status().is_success() {
+        bail!("daemon returned HTTP {}", resp.status());
+    }
+    let out: serde_json::Value = resp.json().await?;
+    if let Some(err) = out.get("error") {
+        bail!("daemon rpc error: {err}");
+    }
+    let sid = out["result"]["session_id"]
+        .as_str()
+        .context("no session_id in response")?
+        .to_string();
+    let rid = out["result"]["run_id"].as_str().unwrap_or("");
+    println!("session_id: {sid}");
+    println!("run_id:     {rid}");
+
+    if !follow {
+        return Ok(());
+    }
+    let sse = client
+        .get(format!("{base}/events?session_id={sid}"))
+        .bearer_auth(&cfg.auth_token)
+        .send()
+        .await?;
+    use futures::StreamExt;
+    let mut stream = sse.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buf.extend_from_slice(&chunk);
+        while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
+            let line = buf.drain(..=nl).collect::<Vec<u8>>();
+            let text = String::from_utf8_lossy(&line).trim().to_string();
+            if let Some(data) = text.strip_prefix("data: ") {
+                println!("{data}");
+                if data.contains("\"flow_end\"") {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_daemon_start() -> Result<()> {
