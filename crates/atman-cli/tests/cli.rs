@@ -424,6 +424,36 @@ fn repl_attach_list_shows_pending_paths() {
 }
 
 #[test]
+fn doctor_lists_migrated_rules_from_fake_home() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let home_agents = home.path().join(".config/opencode/AGENTS.md");
+    std::fs::create_dir_all(home_agents.parent().unwrap()).unwrap();
+    std::fs::write(&home_agents, "# global-rules\ncontent\n").unwrap();
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "# project-rules\ncontent\n",
+    )
+    .unwrap();
+
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("HOME", home.path())
+        .current_dir(project.path())
+        .arg("doctor")
+        .output()
+        .expect("doctor");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("migrated rules:"), "stdout: {stdout}");
+    assert!(stdout.contains("project-rules"), "stdout: {stdout}");
+    assert!(stdout.contains("global-rules"), "stdout: {stdout}");
+}
+
+#[test]
 fn doctor_reports_no_mcp_servers_when_config_missing() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

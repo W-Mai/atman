@@ -142,7 +142,8 @@ async fn cmd_run(
     }
 
     let mut executor = Executor::with_events(session.sink().clone());
-    tools::register_tier_zero(&mut executor.tools);
+    let fetch_rule = build_fetch_rule_with_migrations().await;
+    tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
     tools::register_shell(&mut executor.tools);
     tools::register_preview(&mut executor.tools, load_preview_config());
     register_providers_from_env(&mut executor);
@@ -444,7 +445,8 @@ async fn cmd_repl() -> Result<()> {
     }
 
     let mut executor = Executor::with_events(session.sink().clone());
-    tools::register_tier_zero(&mut executor.tools);
+    let fetch_rule = build_fetch_rule_with_migrations().await;
+    tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
     tools::register_shell(&mut executor.tools);
     tools::register_preview(&mut executor.tools, load_preview_config());
     register_providers_from_env(&mut executor);
@@ -911,6 +913,33 @@ async fn cmd_doctor() -> Result<()> {
     println!("preview:");
     println!("  [{mark}] {}{}", pcfg.base_url, note);
     println!();
+    println!();
+    println!("migrated rules:");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Ok(home) = std::env::var("HOME") {
+        let rules =
+            atman_runtime::migration::scan_migrated_rules(&cwd, std::path::Path::new(&home));
+        if rules.is_empty() {
+            println!("  (none detected in project or user home)");
+        } else {
+            for r in &rules {
+                let scope = match r.scope {
+                    atman_runtime::migration::RuleScope::Project => "project",
+                    atman_runtime::migration::RuleScope::Global => "global ",
+                };
+                println!(
+                    "  [✓] {:<30} [{:<8}] {} — {}",
+                    r.name,
+                    r.source_tool,
+                    scope,
+                    r.source_path.display()
+                );
+            }
+        }
+    } else {
+        println!("  (HOME env not set)");
+    }
+    println!();
     println!("mcp:");
     let mcp_configs = load_mcp_configs();
     if mcp_configs.is_empty() {
@@ -933,6 +962,21 @@ async fn cmd_doctor() -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn build_fetch_rule_with_migrations() -> atman_runtime::tools::memory_stubs::FetchRule {
+    let fetch_rule = atman_runtime::tools::memory_stubs::FetchRule::new();
+    if std::env::var("ATMAN_DISABLE_MIGRATION").is_ok() {
+        return fetch_rule;
+    }
+    let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let home = match std::env::var("HOME") {
+        Ok(h) => std::path::PathBuf::from(h),
+        Err(_) => return fetch_rule,
+    };
+    let rules = atman_runtime::migration::scan_migrated_rules(&project_root, &home);
+    fetch_rule.set_migrated(rules).await;
+    fetch_rule
 }
 
 fn register_providers_from_env(executor: &mut Executor) {
