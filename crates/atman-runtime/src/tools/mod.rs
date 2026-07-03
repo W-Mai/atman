@@ -6,6 +6,7 @@ pub mod bash;
 pub mod fs;
 pub mod memory;
 pub mod memory_stubs;
+pub mod web;
 
 pub fn register_tier_zero(reg: &mut ToolRegistry) {
     reg.register(Arc::new(fs::FsRead));
@@ -15,6 +16,10 @@ pub fn register_tier_zero(reg: &mut ToolRegistry) {
 
 pub fn register_shell(reg: &mut ToolRegistry) {
     reg.register(Arc::new(bash::BashExec));
+}
+
+pub fn register_web(reg: &mut ToolRegistry, config: web::WebConfig) {
+    reg.register(Arc::new(web::WebFetch::new(config)));
 }
 
 pub fn register_memory(
