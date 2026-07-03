@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use atman_proto::{FlowRunId, SessionId, SessionStatus, SessionSummary};
+use atman_proto::{FlowRunId, PromptId, SessionId, SessionStatus, SessionSummary};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 pub struct DaemonState {
     sessions_dir: PathBuf,
     live: Mutex<HashMap<SessionId, LiveSession>>,
+    prompts: Mutex<HashMap<PromptId, oneshot::Sender<serde_json::Value>>>,
 }
 
 pub struct LiveSession {
@@ -23,7 +25,25 @@ impl DaemonState {
         Self {
             sessions_dir,
             live: Mutex::new(HashMap::new()),
+            prompts: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn register_pending_prompt(&self, id: PromptId) -> oneshot::Receiver<serde_json::Value> {
+        let (tx, rx) = oneshot::channel();
+        self.prompts.lock().unwrap().insert(id, tx);
+        rx
+    }
+
+    pub fn resolve_prompt(&self, id: &PromptId, answer: serde_json::Value) -> bool {
+        let Some(sender) = self.prompts.lock().unwrap().remove(id) else {
+            return false;
+        };
+        sender.send(answer).is_ok()
+    }
+
+    pub fn drop_pending_prompt(&self, id: &PromptId) {
+        self.prompts.lock().unwrap().remove(id);
     }
 
     pub fn sessions_dir(&self) -> &Path {

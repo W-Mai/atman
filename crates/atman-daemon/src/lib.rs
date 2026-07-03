@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use atman_proto::{CancelRunRequest, JsonRpcError, JsonRpcRequest, JsonRpcResponse, methods};
+use atman_proto::{
+    CancelRunRequest, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ResolvePromptRequest, methods,
+};
 use serde_json::json;
 
 pub mod config;
@@ -41,6 +43,17 @@ pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcRe
                 Ok(p) => {
                     let cancelled = state.cancel_run(&p.run_id);
                     JsonRpcResponse::ok(id, json!({"cancelled": cancelled}))
+                }
+                Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
+            }
+        }
+        methods::RESOLVE_PROMPT => {
+            let params = req.params.unwrap_or(json!({}));
+            let parsed: Result<ResolvePromptRequest, _> = serde_json::from_value(params);
+            match parsed {
+                Ok(p) => {
+                    let resolved = state.resolve_prompt(&p.prompt_id, p.answer);
+                    JsonRpcResponse::ok(id, json!({"resolved": resolved}))
                 }
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::invalid_params(e.to_string())),
             }
