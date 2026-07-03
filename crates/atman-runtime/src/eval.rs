@@ -13,6 +13,7 @@ pub struct EvalCtx<'a> {
     pub contract: Option<&'a atman_dsl::ast::Contract>,
     pub events: Option<&'a crate::event::EventSink>,
     pub attachments: Option<&'a std::sync::Mutex<Vec<crate::provider::Attachment>>>,
+    pub turn_id: Option<crate::event::TurnId>,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -290,6 +291,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             }
             Value::Bool(true)
         }
+        Node::Message { role, args } => eval_message_node(*role, args, env, ctx).await,
         Node::Subflow { name, args } => {
             let Some(target) = ctx.flows.get(&name.name) else {
                 return Value::Err(RuntimeError::UndefinedTool(format!(
@@ -336,6 +338,198 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
 fn tool_name(path: &[atman_dsl::ast::Ident]) -> String {
     let parts: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
     parts.join(".")
+}
+
+async fn eval_message_node<'a>(
+    ast_role: atman_dsl::ast::MessageRole,
+    args: &'a [Arg],
+    env: &'a Env,
+    ctx: &'a EvalCtx<'a>,
+) -> Value {
+    use crate::message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
+
+    let role = match ast_role {
+        atman_dsl::ast::MessageRole::User => MessageRole::User,
+        atman_dsl::ast::MessageRole::Assistant => MessageRole::Assistant,
+        atman_dsl::ast::MessageRole::System => MessageRole::System,
+        atman_dsl::ast::MessageRole::Tool => MessageRole::Tool,
+    };
+    let turn_id = ctx
+        .turn_id
+        .clone()
+        .unwrap_or_else(crate::event::TurnId::now);
+
+    let mut positional = Vec::new();
+    let mut named: Vec<(String, Value)> = Vec::new();
+    let mut attachment_paths_raw: Option<Vec<std::path::PathBuf>> = None;
+    for arg in args {
+        match arg {
+            Arg::Positional(e) => {
+                let v = eval_expr(e, env, ctx).await;
+                if v.is_err() {
+                    return v;
+                }
+                positional.push(v);
+            }
+            Arg::Named { name, value } => {
+                if name.name == "attachments" {
+                    if let Expr::List(items) = value {
+                        let mut collected = Vec::with_capacity(items.len());
+                        let mut all_fileref = true;
+                        for it in items {
+                            if let Expr::FileRef(f) = it {
+                                collected.push(std::path::PathBuf::from(&f.path));
+                            } else {
+                                all_fileref = false;
+                                break;
+                            }
+                        }
+                        if all_fileref {
+                            attachment_paths_raw = Some(collected);
+                            continue;
+                        }
+                    }
+                }
+                let v = eval_expr(value, env, ctx).await;
+                if v.is_err() {
+                    return v;
+                }
+                named.push((name.name.clone(), v));
+            }
+        }
+    }
+    let take_named = |k: &str, named: &mut Vec<(String, Value)>| -> Option<Value> {
+        let pos = named.iter().position(|(n, _)| n == k)?;
+        Some(named.remove(pos).1)
+    };
+
+    if role == MessageRole::Tool {
+        let tool_use_id = match positional.first().or(take_named("id", &mut named).as_ref()) {
+            Some(Value::Str(s)) => s.clone(),
+            Some(other) => {
+                return Value::Err(RuntimeError::TypeMismatch {
+                    expected: "string (tool_use_id)".into(),
+                    actual: other.kind_name().into(),
+                });
+            }
+            None => {
+                return Value::Err(RuntimeError::MissingArg("tool_result: id".into()));
+            }
+        };
+        let content = match positional
+            .get(1)
+            .or(take_named("content", &mut named).as_ref())
+        {
+            Some(Value::Str(s)) => s.clone(),
+            Some(other) => {
+                return Value::Err(RuntimeError::TypeMismatch {
+                    expected: "string (content)".into(),
+                    actual: other.kind_name().into(),
+                });
+            }
+            None => {
+                return Value::Err(RuntimeError::MissingArg("tool_result: content".into()));
+            }
+        };
+        let is_error = match take_named("is_error", &mut named) {
+            Some(Value::Bool(b)) => b,
+            Some(other) => {
+                return Value::Err(RuntimeError::TypeMismatch {
+                    expected: "bool (is_error)".into(),
+                    actual: other.kind_name().into(),
+                });
+            }
+            None => false,
+        };
+        return Value::Message(Message {
+            role,
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            }],
+            turn_id,
+        });
+    }
+
+    let text = match positional.first() {
+        Some(Value::Str(s)) => Some(s.clone()),
+        Some(other) => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "string (message text)".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+        None => None,
+    };
+    let attachment_paths: Vec<std::path::PathBuf> = if let Some(raw) = attachment_paths_raw {
+        raw
+    } else {
+        match take_named("attachments", &mut named) {
+            Some(Value::List(items)) => {
+                let mut ps = Vec::with_capacity(items.len());
+                for it in items {
+                    match it {
+                        Value::Path(p) => ps.push(p),
+                        Value::Str(s) => ps.push(std::path::PathBuf::from(s)),
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "path (attachment)".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    }
+                }
+                ps
+            }
+            Some(other) => {
+                return Value::Err(RuntimeError::TypeMismatch {
+                    expected: "list of path".into(),
+                    actual: other.kind_name().into(),
+                });
+            }
+            None => Vec::new(),
+        }
+    };
+
+    let mut parts: Vec<MessagePart> = attachment_paths
+        .into_iter()
+        .map(|path| {
+            let media_type = guess_image_mime(&path).unwrap_or_else(|| "image/png".to_string());
+            MessagePart::Image {
+                source: ImageSource {
+                    media_type,
+                    data: ImageData::Path { path },
+                },
+            }
+        })
+        .collect();
+    if let Some(t) = text {
+        parts.push(MessagePart::Text { text: t });
+    }
+
+    Value::Message(Message {
+        role,
+        parts,
+        turn_id,
+    })
+}
+
+fn guess_image_mime(path: &std::path::Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())?
+        .to_ascii_lowercase();
+    Some(
+        match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 fn contract_allows_shell(contract: Option<&atman_dsl::ast::Contract>) -> bool {
@@ -485,6 +679,7 @@ mod tests {
             contract: None,
             events: None,
             attachments: None,
+            turn_id: None,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -576,6 +771,7 @@ mod tests {
             contract: None,
             events: None,
             attachments: None,
+            turn_id: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -611,6 +807,7 @@ mod tests {
             contract: None,
             events: None,
             attachments: None,
+            turn_id: None,
         };
 
         let mut env = Env::new();
@@ -647,6 +844,7 @@ mod tests {
             contract: None,
             events: None,
             attachments: None,
+            turn_id: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -678,6 +876,7 @@ mod tests {
             contract: None,
             events: None,
             attachments: None,
+            turn_id: None,
         };
 
         let src = r#"flow t() {
@@ -714,6 +913,7 @@ mod tests {
             contract: None,
             events: None,
             attachments: None,
+            turn_id: None,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -740,6 +940,7 @@ mod tests {
             contract: None,
             events: None,
             attachments: None,
+            turn_id: None,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -781,6 +982,7 @@ flow parent(x: Int) -> Int {
             &flows_map,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -809,6 +1011,7 @@ flow parent(x: Int) -> Int {
             &tool_ctx,
             &providers,
             &flows,
+            None,
             None,
             None,
         )
@@ -840,6 +1043,7 @@ flow parent(x: Int) -> Int {
             contract: None,
             events: None,
             attachments: None,
+            turn_id: None,
         };
 
         let mut env = Env::new();

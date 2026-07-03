@@ -130,6 +130,14 @@ fn walk_node(
                 }
             }
         }
+        Node::Message { args, .. } => {
+            for arg in args {
+                match arg {
+                    Arg::Positional(e) => walk_expr(e, scope, tools, errors),
+                    Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
+                }
+            }
+        }
     }
 }
 

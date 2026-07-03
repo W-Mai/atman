@@ -16,6 +16,10 @@ mod kw {
     syn::custom_keyword!(user_confirm);
     syn::custom_keyword!(contract);
     syn::custom_keyword!(subflow);
+    syn::custom_keyword!(user_msg);
+    syn::custom_keyword!(assistant_msg);
+    syn::custom_keyword!(system_msg);
+    syn::custom_keyword!(tool_result);
     syn::custom_keyword!(watch);
     syn::custom_keyword!(on);
     syn::custom_keyword!(token);
@@ -290,6 +294,25 @@ fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
     }
     if input.peek(kw::subflow) {
         return Ok(Expr::Node(parse_subflow(input)?));
+    }
+    if input.peek(kw::user_msg) {
+        input.parse::<kw::user_msg>()?;
+        return Ok(Expr::Node(parse_message_args(input, MessageRole::User)?));
+    }
+    if input.peek(kw::assistant_msg) {
+        input.parse::<kw::assistant_msg>()?;
+        return Ok(Expr::Node(parse_message_args(
+            input,
+            MessageRole::Assistant,
+        )?));
+    }
+    if input.peek(kw::system_msg) {
+        input.parse::<kw::system_msg>()?;
+        return Ok(Expr::Node(parse_message_args(input, MessageRole::System)?));
+    }
+    if input.peek(kw::tool_result) {
+        input.parse::<kw::tool_result>()?;
+        return Ok(Expr::Node(parse_message_args(input, MessageRole::Tool)?));
     }
 
     if input.peek(LitStr) {
@@ -579,6 +602,13 @@ fn parse_user_confirm(input: ParseStream) -> Result<Node> {
     parenthesized!(content in input);
     let msg = parse_expr(&content)?;
     Ok(Node::UserConfirm { msg: Box::new(msg) })
+}
+
+fn parse_message_args(input: ParseStream, role: MessageRole) -> Result<Node> {
+    let content;
+    parenthesized!(content in input);
+    let args = parse_call_args(&content)?;
+    Ok(Node::Message { role, args })
 }
 
 fn parse_fanout(input: ParseStream) -> Result<Node> {

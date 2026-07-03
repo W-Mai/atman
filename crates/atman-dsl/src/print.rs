@@ -291,6 +291,25 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
             }
             out.push(')');
         }
+        Node::Message { role, args } => {
+            out.push_str(role.keyword());
+            out.push('(');
+            let mut first = true;
+            for a in args {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+                match a {
+                    Arg::Positional(e) => write_expr(out, e, indent),
+                    Arg::Named { name, value } => {
+                        write!(out, "{}: ", name.name).unwrap();
+                        write_expr(out, value, indent);
+                    }
+                }
+            }
+            out.push(')');
+        }
     }
 }
 

@@ -85,6 +85,7 @@ impl Executor {
             flows,
             Some(&self.events),
             Some(&self.pending_attachments),
+            None,
         )
         .await;
         let status = match &result {

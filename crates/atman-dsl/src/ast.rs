@@ -91,6 +91,29 @@ pub enum Node {
         name: Ident,
         args: Vec<Arg>,
     },
+    Message {
+        role: MessageRole,
+        args: Vec<Arg>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+impl MessageRole {
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            MessageRole::User => "user_msg",
+            MessageRole::Assistant => "assistant_msg",
+            MessageRole::System => "system_msg",
+            MessageRole::Tool => "tool_result",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
