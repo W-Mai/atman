@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+default-members = ["crates/atman-cli"]
 
 [workspace.package]
 version = "0.0.0"
@@ -25,6 +26,8 @@ serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid       = { version = "1", features = ["v7", "serde"] }
 chrono     = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap       = { version = "4", features = ["derive"] }
+directories = "6"
 
 [profile.release]
 lto = "thin"

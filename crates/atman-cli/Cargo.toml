@@ -1,0 +1,21 @@
+[package]
+name = "atman-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "atman command-line interface"
+
+[[bin]]
+name = "atman"
+path = "src/main.rs"
+
+[dependencies]
+atman-dsl      = { path = "../atman-dsl" }
+atman-runtime  = { path = "../atman-runtime" }
+clap.workspace         = true
+tokio.workspace        = true
+anyhow.workspace       = true
+directories.workspace  = true
