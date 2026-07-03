@@ -20,6 +20,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atman-runtime"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "atman-dsl",
+ "thiserror",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
