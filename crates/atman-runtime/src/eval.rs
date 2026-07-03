@@ -425,13 +425,140 @@ fn tool_name(path: &[atman_dsl::ast::Ident]) -> String {
 }
 
 async fn eval_fix_until_test_passes<'a>(
-    _kwargs: &'a atman_dsl::ast::Kwargs,
-    _env: &'a Env,
-    _ctx: &'a EvalCtx<'a>,
+    kwargs: &'a atman_dsl::ast::Kwargs,
+    env: &'a Env,
+    ctx: &'a EvalCtx<'a>,
 ) -> Value {
-    Value::Err(RuntimeError::ToolFailed(
-        "fix_until_test_passes: S3 runtime not yet landed".into(),
-    ))
+    let mut edit_flow_expr: Option<&Expr> = None;
+    let mut test_expr: Option<&Expr> = None;
+    let mut on_giveup_expr: Option<&Expr> = None;
+    let mut max_iters: u32 = 5;
+    let mut target_path: Option<std::path::PathBuf> = None;
+
+    for (k, v) in kwargs {
+        match k.name.as_str() {
+            "edit_flow" => edit_flow_expr = Some(v),
+            "test" => test_expr = Some(v),
+            "on_giveup" => on_giveup_expr = Some(v),
+            "max_iters" => match eval_expr(v, env, ctx).await {
+                Value::Int(n) if n > 0 => max_iters = n as u32,
+                other => {
+                    return Value::Err(RuntimeError::TypeMismatch {
+                        expected: "positive int (max_iters)".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            },
+            "target" => match eval_expr(v, env, ctx).await {
+                Value::Path(p) => target_path = Some(p),
+                Value::Str(s) => target_path = Some(std::path::PathBuf::from(s)),
+                Value::Unit => {}
+                other => {
+                    return Value::Err(RuntimeError::TypeMismatch {
+                        expected: "path (target)".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            },
+            _ => {}
+        }
+    }
+
+    let Some(edit_flow_expr) = edit_flow_expr else {
+        return Value::Err(RuntimeError::MissingArg(
+            "fix_until_test_passes.edit_flow".into(),
+        ));
+    };
+    let Some(test_expr) = test_expr else {
+        return Value::Err(RuntimeError::MissingArg(
+            "fix_until_test_passes.test".into(),
+        ));
+    };
+
+    let pristine: Option<String> = match &target_path {
+        Some(p) => match tokio::fs::read_to_string(p).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                return Value::Err(RuntimeError::ToolFailed(format!(
+                    "fix_until_test_passes: cannot read target {}: {e}",
+                    p.display()
+                )));
+            }
+        },
+        None => None,
+    };
+
+    let mut prev_fail = String::new();
+    let mut last_test_result: Option<Value> = None;
+
+    for iter in 0..max_iters {
+        let mut loop_env = env.clone();
+        loop_env.bind("iter", Value::Int(iter as i64));
+        loop_env.bind("prev_fail", Value::Str(prev_fail.clone()));
+
+        let edit_v = eval_expr(edit_flow_expr, &loop_env, ctx).await;
+        if edit_v.is_err() {
+            return edit_v;
+        }
+        loop_env.bind("last_edit", edit_v);
+
+        let test_v = eval_expr(test_expr, &loop_env, ctx).await;
+        if test_v.is_err() {
+            return test_v;
+        }
+        let exit = test_v.field("exit").and_then(|v| match v {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        });
+        last_test_result = Some(test_v.clone());
+        if let Some(0) = exit {
+            return Value::Struct(vec![
+                ("status".into(), Value::Str("passed".into())),
+                ("iters".into(), Value::Int((iter + 1) as i64)),
+                ("test".into(), test_v),
+            ]);
+        }
+        let stderr_tail = test_v
+            .field("stderr_tail")
+            .and_then(|v| match v {
+                Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let stdout_tail = test_v
+            .field("stdout_tail")
+            .and_then(|v| match v {
+                Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        prev_fail = format!(
+            "iter {iter} exit={:?}\n--- stderr ---\n{stderr_tail}\n--- stdout ---\n{stdout_tail}",
+            exit
+        );
+
+        if let (Some(target), Some(pristine)) = (&target_path, &pristine)
+            && let Err(e) = tokio::fs::write(target, pristine.as_bytes()).await
+        {
+            return Value::Err(RuntimeError::ToolFailed(format!(
+                "fix_until_test_passes: revert failed on {}: {e}",
+                target.display()
+            )));
+        }
+    }
+
+    if let Some(giveup) = on_giveup_expr {
+        let mut giveup_env = env.clone();
+        giveup_env.bind("iters", Value::Int(max_iters as i64));
+        giveup_env.bind("prev_fail", Value::Str(prev_fail));
+        return eval_expr(giveup, &giveup_env, ctx).await;
+    }
+
+    Value::Struct(vec![
+        ("status".into(), Value::Str("gave_up".into())),
+        ("iters".into(), Value::Int(max_iters as i64)),
+        ("last_test".into(), last_test_result.unwrap_or(Value::Unit)),
+    ])
 }
 
 async fn eval_message_node<'a>(
