@@ -164,6 +164,7 @@ mod tests {
                 prompt: "anything".into(),
                 input: Value::Unit,
                 schema: None,
+                cache_prompt: false,
             })
             .await
             .unwrap();
@@ -181,6 +182,7 @@ mod tests {
                 prompt: "review please".into(),
                 input: Value::Unit,
                 schema: None,
+                cache_prompt: false,
             })
             .await
             .unwrap();
@@ -196,6 +198,7 @@ mod tests {
                 prompt: "hello".into(),
                 input: Value::Unit,
                 schema: None,
+                cache_prompt: false,
             })
             .await
             .unwrap_err();
@@ -211,6 +214,7 @@ mod tests {
                 prompt: "".into(),
                 input: Value::Unit,
                 schema: None,
+                cache_prompt: false,
             })
             .await
             .unwrap();

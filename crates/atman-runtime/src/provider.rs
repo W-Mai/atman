@@ -15,6 +15,7 @@ pub struct LlmRequest {
     pub prompt: String,
     pub input: Value,
     pub schema: Option<String>,
+    pub cache_prompt: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

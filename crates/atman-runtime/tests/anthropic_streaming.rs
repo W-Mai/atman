@@ -40,6 +40,7 @@ async fn anthropic_streaming_parses_content_block_delta() {
         prompt: "hi".into(),
         input: Value::Unit,
         schema: None,
+        cache_prompt: false,
     });
 
     let final_value = obs.output.await.unwrap();
@@ -85,6 +86,7 @@ async fn anthropic_non_streaming_returns_concatenated_text() {
             prompt: "hi".into(),
             input: Value::Unit,
             schema: None,
+            cache_prompt: false,
         })
         .await
         .unwrap();
@@ -107,6 +109,7 @@ async fn anthropic_http_error_becomes_tool_failed() {
             prompt: "hi".into(),
             input: Value::Unit,
             schema: None,
+            cache_prompt: false,
         })
         .await
         .unwrap_err();
@@ -134,6 +137,7 @@ async fn anthropic_real() {
         prompt: "Reply with exactly one short sentence.".into(),
         input: Value::Unit,
         schema: None,
+        cache_prompt: false,
     });
     let value = obs.output.await.unwrap();
     let text = match value {

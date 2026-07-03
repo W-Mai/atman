@@ -147,6 +147,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut prompt: Option<String> = None;
             let mut input: Value = Value::Unit;
             let mut retry_count: u32 = 0;
+            let mut cache_prompt = false;
             let mut fallback_expr: Option<&Expr> = None;
             for (k, v) in kwargs {
                 match k.name.as_str() {
@@ -190,6 +191,15 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             });
                         }
                     },
+                    "cache" => match val {
+                        Value::Bool(b) => cache_prompt = b,
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "bool".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -211,6 +221,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     prompt: prompt.clone(),
                     input: input.clone(),
                     schema: None,
+                    cache_prompt,
                 };
                 let start = std::time::Instant::now();
                 let outcome = provider.call(req).await;

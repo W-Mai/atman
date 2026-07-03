@@ -45,13 +45,21 @@ impl AnthropicProvider {
     }
 
     fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
+        let content = if req.cache_prompt {
+            MessageContent::Blocks(vec![ContentPart::Text {
+                text: req.prompt.clone(),
+                cache_control: Some(CacheControl { kind: "ephemeral" }),
+            }])
+        } else {
+            MessageContent::Text(req.prompt.clone())
+        };
         let body = MessagesRequest {
             model: req.model.clone(),
             max_tokens: self.max_tokens,
             stream,
             messages: vec![Message {
                 role: "user",
-                content: req.prompt.clone(),
+                content,
             }],
         };
         self.client
@@ -189,7 +197,30 @@ struct MessagesRequest {
 #[derive(Serialize)]
 struct Message {
     role: &'static str,
-    content: String,
+    content: MessageContent,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum MessageContent {
+    Text(String),
+    Blocks(Vec<ContentPart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentPart {
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+}
+
+#[derive(Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Deserialize)]

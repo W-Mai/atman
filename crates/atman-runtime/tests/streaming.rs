@@ -12,6 +12,7 @@ async fn mock_streaming_emits_chunks_then_done() {
         prompt: "hi".into(),
         input: Value::Unit,
         schema: None,
+        cache_prompt: false,
     });
 
     let mut chunks = Vec::new();
@@ -41,6 +42,7 @@ async fn mock_streaming_non_string_value_emits_single_done() {
         prompt: "".into(),
         input: Value::Unit,
         schema: None,
+        cache_prompt: false,
     });
     let value = obs.output.await.unwrap();
     let mut events = Vec::new();
@@ -60,6 +62,7 @@ async fn mock_streaming_cancel_before_await_yields_cancelled_err() {
         prompt: "".into(),
         input: Value::Unit,
         schema: None,
+        cache_prompt: false,
     });
     obs.cancel.cancel();
     let err = obs.output.await.unwrap_err();

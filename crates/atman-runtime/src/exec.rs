@@ -111,8 +111,9 @@ async fn eval_bind_with_watches(
     let mut model: Option<String> = None;
     let mut prompt: Option<String> = None;
     let mut input = Value::Unit;
+    let mut cache_prompt = false;
     for (k, v) in kwargs {
-        if k.name == "schema" {
+        if k.name == "schema" || k.name == "fallback" || k.name == "retry" {
             continue;
         }
         let val = eval_expr(v, env, ctx).await;
@@ -139,6 +140,15 @@ async fn eval_bind_with_watches(
                 }
             },
             "input" => input = val,
+            "cache" => match val {
+                Value::Bool(b) => cache_prompt = b,
+                other => {
+                    return Ok(Value::Err(RuntimeError::TypeMismatch {
+                        expected: "bool".into(),
+                        actual: other.kind_name().into(),
+                    }));
+                }
+            },
             _ => {}
         }
     }
@@ -160,6 +170,7 @@ async fn eval_bind_with_watches(
         prompt,
         input,
         schema: None,
+        cache_prompt,
     });
     let cancel = obs.cancel.clone();
     let mut events = obs.events;
