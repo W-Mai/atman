@@ -188,6 +188,86 @@ fn cost_aggregates_llm_calls_from_session() {
 }
 
 #[test]
+fn repl_runs_boot_flow_at_startup() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    std::fs::write(
+        cfg.path().join("on_session_start.at"),
+        r#"flow boot() -> string {
+    return "boot ok"
+}
+"#,
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b":exit\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("boot ok"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_slash_command_runs_flow_from_config_dir() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let cmd_dir = cfg.path().join("commands");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(
+        cmd_dir.join("greet.at"),
+        r#"flow greet(who: string) -> string {
+    return "hi " + who
+}
+"#,
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b"/greet atman\n:exit\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("hi atman"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_slash_command_unknown_reports_error() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b"/missing\n:exit\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no such command"), "stderr: {stderr}");
+}
+
+#[test]
 fn repl_help_and_exit_via_stdin() {
     let data = tempfile::tempdir().unwrap();
     let mut child = std::process::Command::new(atman_binary())

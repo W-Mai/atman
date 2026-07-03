@@ -263,6 +263,40 @@ fn count_lines(path: &std::path::Path) -> usize {
     }
 }
 
+async fn run_slash_command(line: &str, executor: &Executor) -> Result<Value> {
+    let mut parts = line.split_whitespace();
+    let name = parts.next().context("empty slash command")?;
+    let cfg = config_dir()?;
+    let path = cfg.join("commands").join(format!("{name}.at"));
+    if !path.exists() {
+        bail!("no such command: {} (looked for {})", name, path.display());
+    }
+    let source = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let parsed = parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
+    if parsed.flows.len() != 1 {
+        bail!("{} must contain exactly one flow", path.display());
+    }
+    let flow = &parsed.flows[0];
+    let flow_name = flow.name.name.clone();
+    let params: Vec<String> = flow.params.iter().map(|(id, _)| id.name.clone()).collect();
+
+    let mut kv: Vec<(String, Value)> = Vec::new();
+    let mut positional_index = 0usize;
+    for tok in parts {
+        if let Some((k, v)) = tok.split_once('=') {
+            kv.push((k.to_string(), Value::Str(v.to_string())));
+        } else if positional_index < params.len() {
+            kv.push((params[positional_index].clone(), Value::Str(tok.to_string())));
+            positional_index += 1;
+        } else {
+            bail!("extra positional argument `{tok}` (flow expects {} params)", params.len());
+        }
+    }
+
+    executor.run(&parsed, &flow_name, kv).await.map_err(Into::into)
+}
+
 async fn cmd_repl() -> Result<()> {
     use rustyline::error::ReadlineError;
     use rustyline::{Config, DefaultEditor};
@@ -310,8 +344,15 @@ async fn cmd_repl() -> Result<()> {
             }
             continue;
         }
+        if let Some(rest) = line.strip_prefix('/') {
+            match run_slash_command(rest.trim(), &executor).await {
+                Ok(v) => println!("{}", render_value(&v)),
+                Err(e) => eprintln!("error: {e}"),
+            }
+            continue;
+        }
         println!(
-            "[atman] input: {} (flow dispatch pending W6.8 router; for now use `atman run <file.at>`)",
+            "[atman] input: {} (router pending; use `/name args...` for slash commands or `atman run <file.at>`)",
             line
         );
     }
