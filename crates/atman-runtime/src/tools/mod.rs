@@ -28,6 +28,9 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(stdlib::RenderPromptXml));
     reg.register(Arc::new(stdlib::RenderPromptMarkdown));
     reg.register(Arc::new(stdlib::RenderPromptTerse));
+    reg.register(Arc::new(stdlib::EstimateTokens));
+    reg.register(Arc::new(stdlib::FindCompactRange));
+    reg.register(Arc::new(stdlib::ReplaceMessagesRange));
     reg.register(Arc::new(stdlib::Len));
     reg.register(Arc::new(stdlib::Head));
     reg.register(Arc::new(stdlib::Tail));

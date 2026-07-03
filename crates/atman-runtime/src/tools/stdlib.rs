@@ -140,6 +140,183 @@ impl Tool for IsEmpty {
     }
 }
 
+pub struct EstimateTokens;
+
+impl Tool for EstimateTokens {
+    fn name(&self) -> &str {
+        "estimate_tokens"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = args.positional(0)?;
+            match v {
+                Value::List(items) => {
+                    let mut msgs = Vec::with_capacity(items.len());
+                    for it in items {
+                        match it {
+                            Value::Message(m) => msgs.push(m.clone()),
+                            other => {
+                                return Err(RuntimeError::TypeMismatch {
+                                    expected: "list of message".into(),
+                                    actual: other.kind_name().into(),
+                                });
+                            }
+                        }
+                    }
+                    let n = crate::compaction::estimate_tokens_for_messages(&msgs);
+                    Ok(Value::Int(n as i64))
+                }
+                Value::Message(m) => Ok(Value::Int(
+                    crate::compaction::estimate_tokens_for_message(m) as i64,
+                )),
+                Value::Str(s) => {
+                    let approx = ((s.len() as f64) / 3.5).ceil() as i64;
+                    Ok(Value::Int(approx))
+                }
+                other => Err(RuntimeError::TypeMismatch {
+                    expected: "message | list of message | string".into(),
+                    actual: other.kind_name().into(),
+                }),
+            }
+        })
+    }
+}
+
+pub struct FindCompactRange;
+
+impl Tool for FindCompactRange {
+    fn name(&self) -> &str {
+        "find_compact_range"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let messages = extract_message_list(&args, "messages", 0)?;
+            let budget = extract_int(&args, "budget", 1)? as u64;
+            match crate::compaction::find_compact_range(&messages, budget) {
+                Some(range) => Ok(Value::Struct(vec![
+                    ("start".into(), Value::Int(range.start as i64)),
+                    ("end".into(), Value::Int(range.end as i64)),
+                    (
+                        "tokens_saved".into(),
+                        Value::Int(range.tokens_saved_estimate as i64),
+                    ),
+                    ("found".into(), Value::Bool(true)),
+                ])),
+                None => Ok(Value::Struct(vec![
+                    ("start".into(), Value::Int(0)),
+                    ("end".into(), Value::Int(0)),
+                    ("tokens_saved".into(), Value::Int(0)),
+                    ("found".into(), Value::Bool(false)),
+                ])),
+            }
+        })
+    }
+}
+
+pub struct ReplaceMessagesRange;
+
+impl Tool for ReplaceMessagesRange {
+    fn name(&self) -> &str {
+        "replace_messages_range"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let messages = extract_message_list(&args, "messages", 0)?;
+            let start = extract_int(&args, "start", 1)? as usize;
+            let end = extract_int(&args, "end", 2)? as usize;
+            let summary = extract_string_arg(&args, "summary", 3)?;
+            if start > end || end > messages.len() {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "replace_messages_range: invalid range start={start} end={end} len={}",
+                    messages.len()
+                )));
+            }
+            let range = crate::compaction::CompactRange {
+                start,
+                end,
+                tokens_saved_estimate: 0,
+            };
+            let turn_id = messages
+                .first()
+                .map(|m| m.turn_id.clone())
+                .unwrap_or_else(crate::event::TurnId::now);
+            let out =
+                crate::compaction::replace_range_with_summary(&messages, &range, summary, turn_id);
+            let list: Vec<Value> = out.into_iter().map(Value::Message).collect();
+            Ok(Value::List(list))
+        })
+    }
+}
+
+fn extract_message_list(
+    args: &ToolArgs,
+    name: &str,
+    pos: usize,
+) -> Result<Vec<crate::message::Message>, RuntimeError> {
+    let value = match args.named(name) {
+        Some(v) => v,
+        None => args.positional(pos)?,
+    };
+    match value {
+        Value::List(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                match it {
+                    Value::Message(m) => out.push(m.clone()),
+                    other => {
+                        return Err(RuntimeError::TypeMismatch {
+                            expected: "list of message".into(),
+                            actual: other.kind_name().into(),
+                        });
+                    }
+                }
+            }
+            Ok(out)
+        }
+        other => Err(RuntimeError::TypeMismatch {
+            expected: "list of message".into(),
+            actual: other.kind_name().into(),
+        }),
+    }
+}
+
+fn extract_int(args: &ToolArgs, name: &str, pos: usize) -> Result<i64, RuntimeError> {
+    let value = match args.named(name) {
+        Some(v) => v,
+        None => args.positional(pos)?,
+    };
+    match value {
+        Value::Int(n) => Ok(*n),
+        other => Err(RuntimeError::TypeMismatch {
+            expected: "int".into(),
+            actual: other.kind_name().into(),
+        }),
+    }
+}
+
+fn extract_string_arg(args: &ToolArgs, name: &str, pos: usize) -> Result<String, RuntimeError> {
+    let value = match args.named(name) {
+        Some(v) => v,
+        None => args.positional(pos)?,
+    };
+    match value {
+        Value::Str(s) => Ok(s.clone()),
+        other => Err(RuntimeError::TypeMismatch {
+            expected: "string".into(),
+            actual: other.kind_name().into(),
+        }),
+    }
+}
+
 pub struct RenderPromptXml;
 pub struct RenderPromptMarkdown;
 pub struct RenderPromptTerse;

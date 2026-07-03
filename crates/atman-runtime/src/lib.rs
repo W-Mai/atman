@@ -1,3 +1,4 @@
+pub mod compaction;
 pub mod cost;
 pub mod env;
 pub mod error;

@@ -104,6 +104,14 @@ pub enum Event {
         action: String,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    ContextCompact {
+        session_id: String,
+        before_tokens: u64,
+        after_tokens: u64,
+        compacted_range_start: u64,
+        compacted_range_end: u64,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
