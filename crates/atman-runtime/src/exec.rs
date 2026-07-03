@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use atman_dsl::ast::{Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
+use atman_dsl::ast::{CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 
 use crate::env::Env;
 use crate::error::RuntimeError;
@@ -154,7 +154,7 @@ async fn eval_bind_with_watches(
         ))));
     };
 
-    let token_matches = collect_token_matches(watches);
+    let rules = collect_watch_rules(watches);
     let obs = provider.call_streaming(LlmRequest {
         model,
         prompt,
@@ -167,52 +167,97 @@ async fn eval_bind_with_watches(
     tokio::pin!(output);
 
     let mut window = String::new();
+    let mut tokens_seen = 0u64;
     let mut abort_reason: Option<String> = None;
+
+    let elapsed_active = rules.elapsed_ms_gt.is_some();
+    let elapsed_deadline_ms = rules.elapsed_ms_gt.unwrap_or(u64::MAX / 2);
+    let elapsed_sleep = tokio::time::sleep(tokio::time::Duration::from_millis(
+        elapsed_deadline_ms.saturating_add(1),
+    ));
+    tokio::pin!(elapsed_sleep);
 
     let final_result = loop {
         tokio::select! {
             biased;
             ev = events.recv() => {
                 match ev {
-                    Ok(NodeEvent::LlmChunk { text, .. }) => {
+                    Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
+                        tokens_seen = cumulative_tokens;
                         window.push_str(&text);
                         if window.len() > 512 {
                             let drop = window.len() - 512;
                             window.drain(..drop);
                         }
-                        for (pat, reason) in &token_matches {
+                        for (pat, reason) in &rules.token_matches {
                             if window.contains(pat.as_str()) {
                                 abort_reason = Some(reason.clone());
                                 cancel.cancel();
                                 break;
                             }
                         }
+                        if let Some(limit) = rules.tokens_gt {
+                            if abort_reason.is_none() && tokens_seen > limit {
+                                abort_reason = Some(format!("tokens_consumed > {limit}"));
+                                cancel.cancel();
+                            }
+                        }
+                    }
+                    Ok(NodeEvent::LlmDone { total_tokens }) => {
+                        tokens_seen = total_tokens.max(tokens_seen);
                     }
                     Ok(_) => {}
                     Err(_) => {}
                 }
             }
+            _ = &mut elapsed_sleep, if elapsed_active && abort_reason.is_none() => {
+                abort_reason = Some(format!("elapsed > {elapsed_deadline_ms}ms"));
+                cancel.cancel();
+                break Err(RuntimeError::Cancelled("elapsed".into()));
+            }
             result = &mut output => break result,
         }
     };
 
-    loop {
-        match events.try_recv() {
-            Ok(NodeEvent::LlmChunk { text, .. }) => {
+    while let Ok(ev) = events.try_recv() {
+        match ev {
+            NodeEvent::LlmChunk {
+                text,
+                cumulative_tokens,
+            } => {
+                tokens_seen = cumulative_tokens.max(tokens_seen);
                 window.push_str(&text);
                 if window.len() > 512 {
                     let drop = window.len() - 512;
                     window.drain(..drop);
                 }
-                for (pat, reason) in &token_matches {
-                    if window.contains(pat.as_str()) {
-                        abort_reason = Some(reason.clone());
-                        break;
+                if abort_reason.is_none() {
+                    for (pat, reason) in &rules.token_matches {
+                        if window.contains(pat.as_str()) {
+                            abort_reason = Some(reason.clone());
+                            break;
+                        }
+                    }
+                }
+                if abort_reason.is_none() {
+                    if let Some(limit) = rules.tokens_gt {
+                        if tokens_seen > limit {
+                            abort_reason = Some(format!("tokens_consumed > {limit}"));
+                        }
                     }
                 }
             }
-            Ok(_) => {}
-            Err(_) => break,
+            NodeEvent::LlmDone { total_tokens } => {
+                tokens_seen = total_tokens.max(tokens_seen);
+                if abort_reason.is_none() {
+                    if let Some(limit) = rules.tokens_gt {
+                        if tokens_seen > limit {
+                            abort_reason = Some(format!("tokens_consumed > {limit}"));
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -225,25 +270,63 @@ async fn eval_bind_with_watches(
     }
 }
 
-fn collect_token_matches(watches: &[&WatchDecl]) -> Vec<(String, String)> {
-    let mut out = Vec::new();
+#[derive(Default)]
+struct WatchRules {
+    token_matches: Vec<(String, String)>,
+    tokens_gt: Option<u64>,
+    elapsed_ms_gt: Option<u64>,
+}
+
+fn collect_watch_rules(watches: &[&WatchDecl]) -> WatchRules {
+    let mut rules = WatchRules::default();
     for w in watches {
         for on in &w.on_blocks {
-            if let WatchEvent::Token { patterns } = &on.event {
-                let has_abort = on
-                    .actions
-                    .iter()
-                    .any(|a| matches!(a, WatchAction::Abort { .. }));
-                if !has_abort {
-                    continue;
+            let has_abort = on
+                .actions
+                .iter()
+                .any(|a| matches!(a, WatchAction::Abort { .. }));
+            if !has_abort {
+                continue;
+            }
+            match &on.event {
+                WatchEvent::Token { patterns } => {
+                    for p in patterns {
+                        rules
+                            .token_matches
+                            .push((p.clone(), format!("token match: {p}")));
+                    }
                 }
-                for p in patterns {
-                    out.push((p.clone(), format!("token match: {p}")));
+                WatchEvent::TokensConsumed { cmp, value }
+                    if matches!(cmp, CmpOp::Gt | CmpOp::Ge) =>
+                {
+                    let threshold = if matches!(cmp, CmpOp::Ge) {
+                        value.saturating_sub(1)
+                    } else {
+                        *value
+                    };
+                    rules.tokens_gt = Some(match rules.tokens_gt {
+                        Some(existing) => existing.min(threshold),
+                        None => threshold,
+                    });
                 }
+                WatchEvent::Elapsed { cmp, duration_ms }
+                    if matches!(cmp, CmpOp::Gt | CmpOp::Ge) =>
+                {
+                    let threshold = if matches!(cmp, CmpOp::Ge) {
+                        duration_ms.saturating_sub(1)
+                    } else {
+                        *duration_ms
+                    };
+                    rules.elapsed_ms_gt = Some(match rules.elapsed_ms_gt {
+                        Some(existing) => existing.min(threshold),
+                        None => threshold,
+                    });
+                }
+                _ => {}
             }
         }
     }
-    out
+    rules
 }
 
 pub async fn exec_flow(

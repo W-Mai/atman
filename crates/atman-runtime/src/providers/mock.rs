@@ -14,6 +14,7 @@ pub struct MockProvider {
     by_model: HashMap<String, Value>,
     by_prefix: Vec<(String, String, Value)>,
     fallback: Option<Value>,
+    chunk_delay: Option<std::time::Duration>,
 }
 
 impl MockProvider {
@@ -23,7 +24,13 @@ impl MockProvider {
             by_model: HashMap::new(),
             by_prefix: Vec::new(),
             fallback: None,
+            chunk_delay: None,
         }
+    }
+
+    pub fn with_chunk_delay(mut self, d: std::time::Duration) -> Self {
+        self.chunk_delay = Some(d);
+        self
     }
 
     pub fn with_model(mut self, model: impl Into<String>, value: Value) -> Self {
@@ -62,6 +69,7 @@ impl Provider for MockProvider {
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let looked_up = self.lookup(&req);
+        let chunk_delay = self.chunk_delay;
         let output: BoxFut<'static, Result<Value, RuntimeError>> = Box::pin(async move {
             let value = match looked_up {
                 Ok(v) => v,
@@ -73,6 +81,16 @@ impl Provider for MockProvider {
             let chunks = split_for_stream(&value);
             let mut running = 0u64;
             for chunk in chunks {
+                if let Some(d) = chunk_delay {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_for_task.cancelled() => {
+                            let _ = tx.send(NodeEvent::LlmDone { total_tokens: running });
+                            return Err(RuntimeError::Cancelled("mock stream cancelled".into()));
+                        }
+                        _ = tokio::time::sleep(d) => {}
+                    }
+                }
                 if cancel_for_task.is_cancelled() {
                     let _ = tx.send(NodeEvent::LlmDone {
                         total_tokens: running,
