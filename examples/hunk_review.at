@@ -1,0 +1,18 @@
+flow hunk_review(file: path, new_content: string) -> HunkResult {
+    contract {
+        scope {
+            read: [project_root]
+            write: [project_root]
+        }
+    }
+
+    proposal = fs.edit(file, new_content)
+
+    audit = preview.push(
+        topic: "hunk-review",
+        title: "hunk-review: " + file,
+        content: "**proposal:** " + to_json_string(proposal),
+    )
+
+    return hunk.apply(proposal, hunks: "all")
+}
