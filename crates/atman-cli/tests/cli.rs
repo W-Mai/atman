@@ -424,6 +424,43 @@ fn repl_attach_list_shows_pending_paths() {
 }
 
 #[test]
+fn doctor_reports_no_mcp_servers_when_config_missing() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .arg("doctor")
+        .output()
+        .expect("doctor");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("mcp:"), "stdout: {stdout}");
+    assert!(stdout.contains("none configured"), "stdout: {stdout}");
+}
+
+#[test]
+fn doctor_reports_mcp_boot_failure_when_command_missing() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    std::fs::write(
+        cfg.path().join("config.toml"),
+        "[[mcp]]\nname = \"broken\"\ncommand = \"/no/such/binary/here\"\ntimeout_ms = 200\n",
+    )
+    .unwrap();
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .arg("doctor")
+        .output()
+        .expect("doctor");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("broken"), "stdout: {stdout}");
+    assert!(stdout.contains("[✗]"), "stdout: {stdout}");
+}
+
+#[test]
 fn doctor_reports_preview_unavailable_when_server_absent() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

@@ -146,6 +146,18 @@ async fn cmd_run(
     tools::register_shell(&mut executor.tools);
     tools::register_preview(&mut executor.tools, load_preview_config());
     register_providers_from_env(&mut executor);
+    let mcp_configs = load_mcp_configs();
+    let mcp_status =
+        atman_runtime::mcp::register_from_configs(&mut executor.tools, &mcp_configs).await;
+    for outcome in &mcp_status {
+        match outcome {
+            Ok(s) => eprintln!(
+                "[atman] mcp `{}` connected ({} tools)",
+                s.name, s.tool_count
+            ),
+            Err(e) => eprintln!("[atman] mcp boot: {e}"),
+        }
+    }
     if mock {
         executor.providers.register(Arc::new(
             MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
@@ -436,6 +448,18 @@ async fn cmd_repl() -> Result<()> {
     tools::register_shell(&mut executor.tools);
     tools::register_preview(&mut executor.tools, load_preview_config());
     register_providers_from_env(&mut executor);
+    let mcp_configs = load_mcp_configs();
+    let mcp_status =
+        atman_runtime::mcp::register_from_configs(&mut executor.tools, &mcp_configs).await;
+    for outcome in &mcp_status {
+        match outcome {
+            Ok(s) => println!(
+                "[atman] mcp `{}` connected ({} tools)",
+                s.name, s.tool_count
+            ),
+            Err(e) => eprintln!("[atman] mcp boot: {e}"),
+        }
+    }
 
     if let Err(e) = run_boot_flow(&executor).await {
         eprintln!("[atman] boot flow error: {e}");
@@ -886,6 +910,28 @@ async fn cmd_doctor() -> Result<()> {
     };
     println!("preview:");
     println!("  [{mark}] {}{}", pcfg.base_url, note);
+    println!();
+    println!("mcp:");
+    let mcp_configs = load_mcp_configs();
+    if mcp_configs.is_empty() {
+        println!("  (none configured — add [[mcp]] blocks to config.toml)");
+    } else {
+        let mut probe_registry = atman_runtime::ToolRegistry::new();
+        let statuses =
+            atman_runtime::mcp::register_from_configs(&mut probe_registry, &mcp_configs).await;
+        for (cfg, status) in mcp_configs.iter().zip(statuses.iter()) {
+            match status {
+                Ok(s) => println!(
+                    "  [✓] {:<20} {} tools ({} {})",
+                    cfg.name,
+                    s.tool_count,
+                    cfg.command,
+                    cfg.args.join(" ")
+                ),
+                Err(e) => println!("  [✗] {:<20} {}", cfg.name, e.error),
+            }
+        }
+    }
     Ok(())
 }
 
@@ -919,6 +965,65 @@ fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {
         return cfg;
     };
     parse_preview_config(&text, cfg)
+}
+
+fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
+    let Ok(dir) = config_dir() else {
+        return Vec::new();
+    };
+    let path = dir.join("config.toml");
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    parse_mcp_configs(&text)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawMcpConfigFile {
+    #[serde(default)]
+    mcp: Vec<RawMcpConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawMcpConfig {
+    name: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    tier: Option<u8>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+fn parse_mcp_configs(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig> {
+    let file: RawMcpConfigFile = match toml::from_str(text) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    file.mcp
+        .into_iter()
+        .map(|raw| atman_runtime::mcp::McpServerConfig {
+            name: raw.name,
+            command: raw.command,
+            args: raw.args,
+            tier: tier_from_int(raw.tier.unwrap_or(3)),
+            timeout_ms: raw.timeout_ms.unwrap_or(30_000),
+        })
+        .collect()
+}
+
+fn tier_from_int(n: u8) -> atman_runtime::Tier {
+    match n {
+        0 => atman_runtime::Tier::Zero,
+        1 => atman_runtime::Tier::One,
+        2 => atman_runtime::Tier::Two,
+        3 => atman_runtime::Tier::Three,
+        _ => atman_runtime::Tier::Four,
+    }
 }
 
 fn parse_preview_config(
