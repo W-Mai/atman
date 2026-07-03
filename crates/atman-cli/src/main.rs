@@ -67,13 +67,7 @@ enum SessionAction {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        None => {
-            println!(
-                "atman v{} — REPL not yet available; try `atman --help`",
-                env!("CARGO_PKG_VERSION")
-            );
-            Ok(())
-        }
+        None => cmd_repl().await,
         Some(Cmd::Version) => {
             println!("atman v{}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -266,6 +260,89 @@ fn count_lines(path: &std::path::Path) -> usize {
     match std::fs::read_to_string(path) {
         Ok(s) => s.lines().filter(|l| !l.trim().is_empty()).count(),
         Err(_) => 0,
+    }
+}
+
+async fn cmd_repl() -> Result<()> {
+    use rustyline::error::ReadlineError;
+    use rustyline::{Config, DefaultEditor};
+
+    let non_interactive = std::env::var("ATMAN_REPL_NON_INTERACTIVE").is_ok();
+    println!(
+        "atman v{} — type `:help` for commands, `:exit` to leave",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let root = data_dir()?;
+    let session = Session::open(&root)
+        .with_context(|| format!("opening session under {}", root.display()))?;
+    if let Some(path) = session.events_path() {
+        println!("[atman] session={} events={}", session.id(), path.display());
+    }
+
+    let mut executor = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&mut executor.tools);
+
+    let config = Config::builder().auto_add_history(true).build();
+    let mut editor: DefaultEditor = DefaultEditor::with_config(config)?;
+
+    loop {
+        let line: String = if non_interactive {
+            let mut buf = String::new();
+            match std::io::stdin().read_line(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => buf.trim_end().to_string(),
+                Err(_) => break,
+            }
+        } else {
+            match editor.readline("atman> ") {
+                Ok(l) => l,
+                Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => break,
+                Err(e) => return Err(e.into()),
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(':') {
+            if !handle_builtin(rest.trim(), session.id().to_string().as_str()) {
+                break;
+            }
+            continue;
+        }
+        println!(
+            "[atman] input: {} (flow dispatch pending W6.8 router; for now use `atman run <file.at>`)",
+            line
+        );
+    }
+
+    session.shutdown().await;
+    drop(executor);
+    Ok(())
+}
+
+fn handle_builtin(cmd: &str, sid: &str) -> bool {
+    match cmd {
+        "help" => {
+            println!(":help          — show this");
+            println!(":exit | :quit  — leave REPL");
+            println!(":session       — print current session id");
+            println!(":cost          — cost summary for current session");
+            true
+        }
+        "exit" | "quit" => false,
+        "session" => {
+            println!("session_id: {sid}");
+            true
+        }
+        "cost" => {
+            eprintln!("(hint) run `atman cost {sid}` in another shell for now");
+            true
+        }
+        other => {
+            eprintln!("unknown builtin `:{other}` — try `:help`");
+            true
+        }
     }
 }
 

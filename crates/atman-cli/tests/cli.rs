@@ -188,6 +188,27 @@ fn cost_aggregates_llm_calls_from_session() {
 }
 
 #[test]
+fn repl_help_and_exit_via_stdin() {
+    let data = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let stdin = child.stdin.as_mut().unwrap();
+    stdin.write_all(b":help\n:session\n:exit\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(":help"));
+    assert!(stdout.contains("session_id:"));
+}
+
+#[test]
 fn doctor_reports_paths_and_provider_marks() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
