@@ -523,6 +523,277 @@ impl Tool for ToJsonString {
     }
 }
 
+pub struct TextConcat;
+
+impl Tool for TextConcat {
+    fn name(&self) -> &str {
+        "text_concat"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Flatten the text parts of a Message into a single string.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"message": {"description": "A Message value from an llm call."}},
+            "required": ["message"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = match args.named("message") {
+                Some(v) => v,
+                None => args.positional(0)?,
+            };
+            match v {
+                Value::Message(m) => Ok(Value::Str(m.text_concat())),
+                Value::Str(s) => Ok(Value::Str(s.clone())),
+                other => Err(RuntimeError::TypeMismatch {
+                    expected: "message or string".into(),
+                    actual: other.kind_name().into(),
+                }),
+            }
+        })
+    }
+}
+
+pub struct Concat;
+
+impl Tool for Concat {
+    fn name(&self) -> &str {
+        "concat"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Concatenate two lists into a single new list.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "left": {"type": "array"},
+                "right": {"type": "array"}
+            },
+            "required": ["left", "right"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let left = extract_list(&args, "left", 0)?;
+            let right = extract_list(&args, "right", 1)?;
+            let mut out = Vec::with_capacity(left.len() + right.len());
+            out.extend(left);
+            out.extend(right);
+            Ok(Value::List(out))
+        })
+    }
+}
+
+pub struct ExtractToolUses;
+
+impl Tool for ExtractToolUses {
+    fn name(&self) -> &str {
+        "extract_tool_uses"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Pull the tool_use parts out of an assistant Message. Returns a list of \
+             {id, name, input} structs suitable for dispatch_all.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"message": {"description": "Assistant Message value."}},
+            "required": ["message"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let v = match args.named("message") {
+                Some(v) => v,
+                None => args.positional(0)?,
+            };
+            let m = match v {
+                Value::Message(m) => m,
+                Value::Str(_) => return Ok(Value::List(Vec::new())),
+                other => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "message or string".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            };
+            let mut out = Vec::new();
+            for part in &m.parts {
+                if let crate::message::MessagePart::ToolUse { id, name, input } = part {
+                    out.push(Value::Struct(vec![
+                        ("id".into(), Value::Str(id.clone())),
+                        ("name".into(), Value::Str(name.clone())),
+                        ("input".into(), Value::from_json(input.clone())),
+                    ]));
+                }
+            }
+            Ok(Value::List(out))
+        })
+    }
+}
+
+pub struct DispatchAll;
+
+impl Tool for DispatchAll {
+    fn name(&self) -> &str {
+        "dispatch_all"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Dispatch each tool_use in the list against the current tool registry and \
+             return a list of tool_result Message values.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"tool_uses": {"type": "array"}},
+            "required": ["tool_uses"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let uses = extract_list(&args, "tool_uses", 0)?;
+            let Some(registry) = ctx.registry.as_ref() else {
+                return Err(RuntimeError::ToolFailed(
+                    "dispatch_all: no tool registry available on ctx".into(),
+                ));
+            };
+            let mut out = Vec::with_capacity(uses.len());
+            for entry in uses {
+                let Value::Struct(fields) = entry else {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "struct {id, name, input}".into(),
+                        actual: entry.kind_name().into(),
+                    });
+                };
+                let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+                let id = match get("id") {
+                    Some(Value::Str(s)) => s,
+                    _ => {
+                        return Err(RuntimeError::ToolFailed(
+                            "dispatch_all: tool_use missing `id` string".into(),
+                        ));
+                    }
+                };
+                let name = match get("name") {
+                    Some(Value::Str(s)) => s,
+                    _ => {
+                        return Err(RuntimeError::ToolFailed(
+                            "dispatch_all: tool_use missing `name` string".into(),
+                        ));
+                    }
+                };
+                let input = get("input").unwrap_or(Value::Unit);
+                let Some(tool) = registry.get(&name) else {
+                    let msg = crate::message::Message {
+                        role: crate::message::MessageRole::Tool,
+                        parts: vec![crate::message::MessagePart::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: format!("dispatch_all: unknown tool `{name}`"),
+                            is_error: true,
+                        }],
+                        turn_id: ctx
+                            .turn_id
+                            .clone()
+                            .unwrap_or_else(crate::event::TurnId::now),
+                    };
+                    out.push(Value::Message(msg));
+                    continue;
+                };
+                let named = match &input {
+                    Value::Struct(fields) => fields.clone(),
+                    Value::Unit => Vec::new(),
+                    other => {
+                        return Err(RuntimeError::TypeMismatch {
+                            expected: "struct or unit for tool input".into(),
+                            actual: other.kind_name().into(),
+                        });
+                    }
+                };
+                let call_args = ToolArgs {
+                    positional: Vec::new(),
+                    named,
+                };
+                let (content, is_error) = match tool.call(call_args, ctx).await {
+                    Ok(v) => (render_tool_result_text(&v), false),
+                    Err(e) => (format!("{e}"), true),
+                };
+                let msg = crate::message::Message {
+                    role: crate::message::MessageRole::Tool,
+                    parts: vec![crate::message::MessagePart::ToolResult {
+                        tool_use_id: id,
+                        content,
+                        is_error,
+                    }],
+                    turn_id: ctx
+                        .turn_id
+                        .clone()
+                        .unwrap_or_else(crate::event::TurnId::now),
+                };
+                out.push(Value::Message(msg));
+            }
+            Ok(Value::List(out))
+        })
+    }
+}
+
+fn render_tool_result_text(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        Value::Message(m) => m.text_concat(),
+        other => other.to_json().to_string(),
+    }
+}
+
+fn extract_list(args: &ToolArgs, name: &str, pos: usize) -> Result<Vec<Value>, RuntimeError> {
+    let value = match args.named(name) {
+        Some(v) => v,
+        None => args.positional(pos)?,
+    };
+    match value {
+        Value::List(items) => Ok(items.clone()),
+        other => Err(RuntimeError::TypeMismatch {
+            expected: "list".into(),
+            actual: other.kind_name().into(),
+        }),
+    }
+}
+
 pub struct ComposeEmailPreview;
 
 impl Tool for ComposeEmailPreview {

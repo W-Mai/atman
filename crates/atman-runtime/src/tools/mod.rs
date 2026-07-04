@@ -35,6 +35,10 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(stdlib::Head));
     reg.register(Arc::new(stdlib::Tail));
     reg.register(Arc::new(stdlib::IsEmpty));
+    reg.register(Arc::new(stdlib::Concat));
+    reg.register(Arc::new(stdlib::TextConcat));
+    reg.register(Arc::new(stdlib::ExtractToolUses));
+    reg.register(Arc::new(stdlib::DispatchAll));
     reg.register(Arc::new(test::TestRun));
     reg.register(Arc::new(hunk::FsEdit));
     reg.register(Arc::new(hunk::HunkApply));

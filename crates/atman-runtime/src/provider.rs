@@ -120,6 +120,14 @@ pub fn estimate_tokens(text: &str) -> u64 {
 }
 
 pub fn assistant_message_to_value(am: &AssistantMessage) -> Value {
+    let has_structural_part = am
+        .message
+        .parts
+        .iter()
+        .any(|p| !matches!(p, MessagePart::Text { .. }));
+    if has_structural_part {
+        return Value::Message(am.message.clone());
+    }
     let text = am.text_concat();
     if text.is_empty() {
         return Value::Message(am.message.clone());

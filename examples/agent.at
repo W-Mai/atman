@@ -1,0 +1,26 @@
+flow agent(user_prompt: string) -> string {
+    contract {
+        capabilities { shell: true }
+    }
+    initial = user_msg(user_prompt)
+    return subflow(agent_loop, [initial], 0)
+}
+
+flow agent_loop(messages: list, iteration: int) -> string {
+    when iteration >= 20 {
+        return "[agent: max iterations reached]"
+    }
+    reply = llm {
+        model: "claude-opus-4.7"
+        messages: messages
+        tools: [fs.read, fs.write, fs.list, bash.exec, hunk.review, hunk.apply, memory.confess]
+    }
+    tool_uses = extract_tool_uses(reply)
+    when is_empty(tool_uses) {
+        return text_concat(reply)
+    }
+    tool_results = dispatch_all(tool_uses)
+    new_history = concat(messages, concat([reply], tool_results))
+    j = iteration + 1
+    return subflow(agent_loop, new_history, j)
+}

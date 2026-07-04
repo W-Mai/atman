@@ -55,6 +55,7 @@ pub struct ToolCtx {
     pub flow_run_id: Option<crate::event::FlowRunId>,
     pub event_seq: Option<u64>,
     pub prompt_resolver: Option<std::sync::Arc<dyn crate::rendezvous::PromptResolver>>,
+    pub registry: Option<std::sync::Arc<ToolRegistry>>,
 }
 
 impl ToolCtx {
@@ -71,6 +72,11 @@ impl ToolCtx {
         self.turn_id = turn_id;
         self.flow_run_id = flow_run_id;
         self.event_seq = event_seq;
+        self
+    }
+
+    pub fn with_registry(mut self, registry: std::sync::Arc<ToolRegistry>) -> Self {
+        self.registry = Some(registry);
         self
     }
 }

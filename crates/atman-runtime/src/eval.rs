@@ -133,11 +133,15 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     }
                 }
             }
-            let ctx_with_anchors = ctx.tool_ctx.clone().with_anchors(
-                ctx.turn_id.clone(),
-                ctx.flow_run_id.clone(),
-                ctx.events.map(|s| s.next_seq_peek()),
-            );
+            let ctx_with_anchors = ctx
+                .tool_ctx
+                .clone()
+                .with_anchors(
+                    ctx.turn_id.clone(),
+                    ctx.flow_run_id.clone(),
+                    ctx.events.map(|s| s.next_seq_peek()),
+                )
+                .with_registry(std::sync::Arc::new(ctx.tools.clone()));
             match tool
                 .call(ToolArgs { positional, named }, &ctx_with_anchors)
                 .await
