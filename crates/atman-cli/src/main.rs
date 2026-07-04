@@ -307,7 +307,7 @@ async fn cmd_run(
     }
 
     let atman_daemon::bootstrap::BootstrapOutcome {
-        executor,
+        mut executor,
         mcp_status,
     } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
         .await?;
@@ -319,6 +319,19 @@ async fn cmd_run(
             ),
             Err(e) => eprintln!("[atman] mcp boot: {e}"),
         }
+    }
+    attach_memory_stores(&mut executor, session.dir())?;
+
+    let target_flow = parsed
+        .flows
+        .iter()
+        .find(|f| f.name.name == flow_name)
+        .ok_or_else(|| anyhow::anyhow!("flow `{flow_name}` not found in {}", file.display()))?;
+    if let Err(errs) = atman_runtime::validate::validate(target_flow, &executor.tools) {
+        for e in &errs {
+            eprintln!("[atman] validation: {e}");
+        }
+        bail!("flow validation failed with {} error(s)", errs.len());
     }
 
     let turn_id = atman_runtime::event::TurnId::now();
@@ -601,7 +614,7 @@ async fn cmd_repl() -> Result<()> {
     }
 
     let atman_daemon::bootstrap::BootstrapOutcome {
-        executor,
+        mut executor,
         mcp_status,
     } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
         .await?;
@@ -614,6 +627,7 @@ async fn cmd_repl() -> Result<()> {
             Err(e) => eprintln!("[atman] mcp boot: {e}"),
         }
     }
+    attach_memory_stores(&mut executor, session.dir())?;
 
     if let Err(e) = run_boot_flow(&executor).await {
         eprintln!("[atman] boot flow error: {e}");
@@ -1310,6 +1324,24 @@ fn bootstrap_opts(
         project_root,
         home_dir,
     })
+}
+
+fn attach_memory_stores(
+    executor: &mut atman_runtime::Executor,
+    session_dir: &std::path::Path,
+) -> Result<()> {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let confession_root = project_root.join(".atman");
+    std::fs::create_dir_all(&confession_root).ok();
+    let spec_root = data_dir()?.join("specs");
+    std::fs::create_dir_all(&spec_root).ok();
+    atman_daemon::bootstrap::attach_memory_stores(
+        executor,
+        session_dir,
+        &confession_root,
+        &spec_root,
+    );
+    Ok(())
 }
 
 fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {

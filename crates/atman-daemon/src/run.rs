@@ -109,10 +109,41 @@ async fn run_flow_inner(
         events: session.sink().clone(),
         mock: false,
         config_dir,
-        project_root,
+        project_root: project_root.clone(),
         home_dir,
     })
     .await?;
+    let mut executor = outcome.executor;
+
+    let confession_root = project_root.join(".atman");
+    let _ = std::fs::create_dir_all(&confession_root);
+    let spec_root = session
+        .dir()
+        .parent()
+        .unwrap_or(session.dir())
+        .join("specs");
+    let _ = std::fs::create_dir_all(&spec_root);
+    crate::bootstrap::attach_memory_stores(
+        &mut executor,
+        session.dir(),
+        &confession_root,
+        &spec_root,
+    );
+
+    let target_flow = parsed
+        .flows
+        .iter()
+        .find(|f| f.name.name == flow_name)
+        .ok_or_else(|| anyhow::anyhow!("flow `{flow_name}` not found in {}", path.display()))?;
+    if let Err(errs) = atman_runtime::validate::validate(target_flow, &executor.tools) {
+        anyhow::bail!(
+            "flow validation failed: {}",
+            errs.iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
 
     let turn_id = atman_runtime::event::TurnId::now();
     let user_msg = atman_runtime::message::Message::user_text(
@@ -120,8 +151,7 @@ async fn run_flow_inner(
         format!("daemon run {} flow={flow_name}", path.display()),
     );
     session.begin_turn(user_msg);
-    let _result = outcome
-        .executor
+    let _result = executor
         .run_in_turn_with_run_id(
             &parsed,
             &flow_name,

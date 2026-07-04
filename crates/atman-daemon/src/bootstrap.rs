@@ -51,6 +51,23 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     })
 }
 
+pub fn attach_memory_stores(
+    executor: &mut Executor,
+    session_dir: &Path,
+    confession_root: &Path,
+    spec_root: &Path,
+) {
+    let todo_store = Arc::new(atman_runtime::memory::todo::TodoStore::at(session_dir));
+    let confession_store = Arc::new(atman_runtime::memory::confession::ConfessionStore::at(
+        confession_root,
+    ));
+    let spec_store = Arc::new(atman_runtime::memory::spec::SpecStore::new(
+        spec_root.to_path_buf(),
+    ));
+    tools::register_memory(&mut executor.tools, todo_store, confession_store);
+    tools::register_spec_memory(&mut executor.tools, spec_store);
+}
+
 async fn build_fetch_rule(
     project_root: &Path,
     home: Option<&Path>,
