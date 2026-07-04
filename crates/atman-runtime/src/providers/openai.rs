@@ -40,7 +40,7 @@ impl OpenAiProvider {
         self
     }
 
-    fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
+    fn build_body(&self, req: &LlmRequest, stream: bool) -> ChatCompletionsRequest {
         let mut wire_messages: Vec<ChatMessage> = Vec::new();
         if let Some(sys) = &req.system {
             wire_messages.push(ChatMessage {
@@ -53,16 +53,25 @@ impl OpenAiProvider {
         for m in &req.messages {
             wire_messages.push(build_wire_message(m));
         }
-        let body = ChatCompletionsRequest {
+        ChatCompletionsRequest {
             model: req.model.clone(),
             stream,
             max_tokens: self.max_tokens,
             messages: wire_messages,
-        };
+        }
+    }
+
+    fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
+        let body = self.build_body(req, stream);
         self.client
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)
             .json(&body)
+    }
+
+    #[doc(hidden)]
+    pub fn wire_body_bytes(&self, req: &LlmRequest, stream: bool) -> Vec<u8> {
+        serde_json::to_vec(&self.build_body(req, stream)).expect("serialize wire body")
     }
 }
 
