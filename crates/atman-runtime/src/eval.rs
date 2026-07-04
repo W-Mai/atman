@@ -168,6 +168,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut system: Option<String> = None;
             let mut input: Value = Value::Unit;
             let mut retry_count: u32 = 0;
+            let mut retry_kinds: Option<std::collections::HashSet<crate::error::ErrorKind>> = None;
             let mut cache_prompt = false;
             let mut context_budget: Option<u64> = None;
             let mut fallback_expr: Option<&Expr> = None;
@@ -176,6 +177,14 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     "schema" => continue,
                     "fallback" => {
                         fallback_expr = Some(v);
+                        continue;
+                    }
+                    "retry_classified" => {
+                        let idents = match parse_error_kind_list(v) {
+                            Ok(k) => k,
+                            Err(msg) => return Value::Err(RuntimeError::ToolFailed(msg)),
+                        };
+                        retry_kinds = Some(idents);
                         continue;
                     }
                     _ => {}
@@ -342,7 +351,8 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             }
             let prompt = prompt_for_budget;
             let mut last_err: Option<RuntimeError> = None;
-            for _ in 0..=retry_count {
+            let retry_kinds_ref = retry_kinds.as_ref();
+            for attempt in 0..=retry_count {
                 let req = crate::provider::LlmRequest {
                     model: model.clone(),
                     messages: final_messages.clone(),
@@ -396,7 +406,16 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         }
                         return crate::provider::assistant_message_to_value(&am);
                     }
-                    Err(e) => last_err = Some(e),
+                    Err(e) => {
+                        if let Some(allowed) = retry_kinds_ref
+                            && attempt < retry_count
+                            && !allowed.contains(&e.kind())
+                        {
+                            last_err = Some(e);
+                            break;
+                        }
+                        last_err = Some(e);
+                    }
                 }
             }
             if let Some(fb) = fallback_expr {
@@ -834,6 +853,38 @@ pub struct TruncationStat {
     pub result_chars: usize,
     pub dropped_chars: usize,
     pub budget_tokens: u64,
+}
+
+fn parse_error_kind_list(
+    expr: &Expr,
+) -> Result<std::collections::HashSet<crate::error::ErrorKind>, String> {
+    let items = match expr {
+        Expr::List(items) => items,
+        _ => {
+            return Err(
+                "retry_classified: expected a list literal like [timeout, rate_limit]".into(),
+            );
+        }
+    };
+    let mut out = std::collections::HashSet::new();
+    for item in items {
+        let name = match item {
+            Expr::Ident(id) => id.name.clone(),
+            Expr::Literal(atman_dsl::ast::Literal::Str(s)) => s.clone(),
+            _ => {
+                return Err(
+                    "retry_classified: each item must be an identifier or string kind name".into(),
+                );
+            }
+        };
+        match crate::error::ErrorKind::from_name(&name) {
+            Some(k) => {
+                out.insert(k);
+            }
+            None => return Err(format!("retry_classified: unknown error kind `{name}`")),
+        }
+    }
+    Ok(out)
 }
 
 pub fn truncate_prompt_to_budget(prompt: String, budget_tokens: u64) -> String {
