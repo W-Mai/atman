@@ -53,6 +53,129 @@ pub fn scan_migrated_rules(project_root: &Path, home: &Path) -> Vec<MigratedRule
         }
     }
 
+    scan_aider_yaml(project_root, &mut out);
+    scan_skill_references(home, &mut out);
+
+    out
+}
+
+fn scan_aider_yaml(project_root: &Path, out: &mut Vec<MigratedRule>) {
+    let yml = project_root.join(".aider.conf.yml");
+    let Ok(raw) = std::fs::read_to_string(&yml) else {
+        return;
+    };
+    for path in parse_aider_conventions(&raw) {
+        let full = if path.is_absolute() {
+            path
+        } else {
+            project_root.join(path)
+        };
+        if let Some(rule) = load_file(&full, "aider", RuleScope::Project) {
+            out.push(rule);
+        }
+    }
+}
+
+fn parse_aider_conventions(yaml: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in yaml.lines() {
+        let stripped = strip_yaml_comment(line);
+        if let Some(rest) = stripped.strip_prefix("conventions:") {
+            let rest = rest.trim();
+            inside = true;
+            if let Some(list) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                for item in list.split(',') {
+                    let value = item.trim().trim_matches(|c| c == '"' || c == '\'');
+                    if !value.is_empty() {
+                        out.push(PathBuf::from(value));
+                    }
+                }
+                inside = false;
+            }
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let indent = stripped.len() - stripped.trim_start().len();
+        if indent == 0 && !stripped.trim().is_empty() {
+            inside = false;
+            continue;
+        }
+        let trimmed = stripped.trim();
+        if let Some(item) = trimmed.strip_prefix('-') {
+            let value = item.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !value.is_empty() {
+                out.push(PathBuf::from(value));
+            }
+        }
+    }
+    out
+}
+
+fn strip_yaml_comment(line: &str) -> &str {
+    if let Some((code, _)) = line.split_once(" #") {
+        code
+    } else if let Some(rest) = line.strip_prefix('#') {
+        &rest[..0]
+    } else {
+        line
+    }
+}
+
+fn scan_skill_references(home: &Path, out: &mut Vec<MigratedRule>) {
+    let skills_root = home.join(".claude").join("skills");
+    let Ok(entries) = std::fs::read_dir(&skills_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let skill_dir = entry.path();
+        if !skill_dir.is_dir() {
+            continue;
+        }
+        let skill_md = skill_dir.join("SKILL.md");
+        let Ok(body) = std::fs::read_to_string(&skill_md) else {
+            continue;
+        };
+        let skill_name = skill_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unnamed");
+        for rel in parse_markdown_local_links(&body) {
+            let full = skill_dir.join(&rel);
+            if let Some(mut rule) = load_file(&full, "skill", RuleScope::Global) {
+                rule.name = format!("skill:{skill_name}::{}", rel.display());
+                out.push(rule);
+            }
+        }
+    }
+}
+
+fn parse_markdown_local_links(body: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut cursor = body;
+    while let Some(open) = cursor.find("](") {
+        let after = &cursor[open + 2..];
+        let Some(close) = after.find(')') else {
+            break;
+        };
+        let target = &after[..close];
+        cursor = &after[close + 1..];
+        if target.starts_with("http")
+            || target.starts_with('/')
+            || target.starts_with('#')
+            || target.contains("://")
+        {
+            continue;
+        }
+        if !target.ends_with(".md") {
+            continue;
+        }
+        if target.starts_with("references/") || target.starts_with("templates/") {
+            out.push(PathBuf::from(target));
+        }
+    }
     out
 }
 
@@ -265,6 +388,76 @@ mod tests {
         let r = resolve_by_name(&rules, "code-review").unwrap();
         assert!(matches!(r.scope, RuleScope::Project));
         assert_eq!(r.content, "project-version");
+    }
+
+    #[test]
+    fn aider_conf_yml_block_list_loads_convention_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            ".aider.conf.yml",
+            "model: claude-sonnet-4\nconventions:\n  - docs/style.md\n  - \"docs/security.md\"\nedit-format: diff\n",
+        );
+        write(dir.path(), "docs/style.md", "# aider-style\nuse rustfmt\n");
+        write(dir.path(), "docs/security.md", "# aider-sec\nno unsafe\n");
+        let rules = scan_migrated_rules(dir.path(), home.path());
+        let aider_names: Vec<&str> = rules
+            .iter()
+            .filter(|r| r.source_tool == "aider")
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(aider_names.contains(&"aider-style"), "{aider_names:?}");
+        assert!(aider_names.contains(&"aider-sec"), "{aider_names:?}");
+    }
+
+    #[test]
+    fn aider_conf_yml_flow_style_list_also_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            ".aider.conf.yml",
+            "conventions: [docs/inline.md]\n",
+        );
+        write(dir.path(), "docs/inline.md", "# aider-inline\n");
+        let rules = scan_migrated_rules(dir.path(), home.path());
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.source_tool == "aider" && r.name == "aider-inline")
+        );
+    }
+
+    #[test]
+    fn skill_references_are_scanned_from_home_claude_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            home.path(),
+            ".claude/skills/demo/SKILL.md",
+            "# demo skill\n\nRead [rule A](references/a.md) and [rule B](templates/b.md).\n\
+             External link https://example.com should be ignored.\n\
+             Local absolute /nope/x.md too.\n",
+        );
+        write(home.path(), ".claude/skills/demo/references/a.md", "# aa\n");
+        write(home.path(), ".claude/skills/demo/templates/b.md", "# bb\n");
+
+        let rules = scan_migrated_rules(dir.path(), home.path());
+        let skill_names: Vec<&str> = rules
+            .iter()
+            .filter(|r| r.source_tool == "skill")
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(
+            skill_names.contains(&"skill:demo::references/a.md"),
+            "{skill_names:?}"
+        );
+        assert!(
+            skill_names.contains(&"skill:demo::templates/b.md"),
+            "{skill_names:?}"
+        );
+        assert_eq!(skill_names.len(), 2, "external / absolute filtered out");
     }
 
     #[test]
