@@ -80,7 +80,8 @@ impl Tool for MemoryConfess {
         Tier::One
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        let anchors = collect_anchors(&args, ctx);
         Box::pin(async move {
             let trigger = required_string(&args, "trigger")?;
             let rule_violated = required_string(&args, "rule_violated")?;
@@ -94,13 +95,34 @@ impl Tool for MemoryConfess {
                 what_i_did,
                 why,
                 mitigation,
-                anchors: vec![],
+                anchors,
                 created_at: chrono::Utc::now(),
             };
             let id = self.store.append(confession).await?;
             Ok(Value::Str(id.to_string()))
         })
     }
+}
+
+fn collect_anchors(args: &ToolArgs, ctx: &ToolCtx) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(flow_run) = &ctx.flow_run_id {
+        out.push(format!("flow_run:{flow_run}"));
+    }
+    if let Some(turn) = &ctx.turn_id {
+        out.push(format!("turn:{turn}"));
+    }
+    if let Some(seq) = ctx.event_seq {
+        out.push(format!("event_seq:{seq}"));
+    }
+    if let Some(Value::List(items)) = args.named("anchors") {
+        for item in items {
+            if let Value::Str(s) = item {
+                out.push(s.clone());
+            }
+        }
+    }
+    out
 }
 
 pub struct MemorySpecStatus {

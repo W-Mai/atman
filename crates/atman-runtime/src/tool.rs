@@ -48,22 +48,29 @@ impl ToolArgs {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ToolCtx {
     pub cancel: CancellationToken,
+    pub turn_id: Option<crate::event::TurnId>,
+    pub flow_run_id: Option<crate::event::FlowRunId>,
+    pub event_seq: Option<u64>,
 }
 
 impl ToolCtx {
     pub fn new() -> Self {
-        Self {
-            cancel: CancellationToken::new(),
-        }
+        Self::default()
     }
-}
 
-impl Default for ToolCtx {
-    fn default() -> Self {
-        Self::new()
+    pub fn with_anchors(
+        mut self,
+        turn_id: Option<crate::event::TurnId>,
+        flow_run_id: Option<crate::event::FlowRunId>,
+        event_seq: Option<u64>,
+    ) -> Self {
+        self.turn_id = turn_id;
+        self.flow_run_id = flow_run_id;
+        self.event_seq = event_seq;
+        self
     }
 }
 

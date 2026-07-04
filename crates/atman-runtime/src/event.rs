@@ -262,6 +262,10 @@ impl EventSink {
         self
     }
 
+    pub fn next_seq_peek(&self) -> u64 {
+        self.seq_counter.load(std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
     pub fn emit(&self, mut event: Event) {
         let next = self
             .seq_counter
