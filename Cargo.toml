@@ -34,6 +34,7 @@ similar    = "2"
 toml       = "0.9"
 axum       = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
+utoipa     = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 
 [profile.release]
 lto = "thin"

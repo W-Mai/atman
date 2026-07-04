@@ -29,11 +29,18 @@ pub fn router(state: Arc<HttpState>) -> Router {
     Router::new()
         .route("/rpc", post(rpc_handler))
         .route("/events", get(sse_handler))
+        .route("/openapi.json", get(openapi_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
         ))
         .with_state(state)
+}
+
+async fn openapi_handler() -> Json<serde_json::Value> {
+    use utoipa::OpenApi;
+    let schema = crate::openapi::AtmanOpenApi::openapi();
+    Json(serde_json::to_value(schema).unwrap_or(serde_json::json!({})))
 }
 
 async fn rpc_handler(State(state): State<Arc<HttpState>>, body: String) -> Json<JsonRpcResponse> {

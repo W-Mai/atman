@@ -9,6 +9,7 @@ use serde_json::json;
 pub mod bootstrap;
 pub mod config;
 pub mod http;
+pub mod openapi;
 pub mod pidfile;
 pub mod prompt_bridge;
 pub mod run;

@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 pub const JSONRPC_VERSION: &str = "2.0";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 #[serde(transparent)]
+#[schema(value_type = String, format = Uuid)]
 pub struct SessionId(pub Uuid);
 
 impl std::fmt::Display for SessionId {
@@ -13,8 +15,9 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 #[serde(transparent)]
+#[schema(value_type = String, format = Uuid)]
 pub struct FlowRunId(pub Uuid);
 
 impl std::fmt::Display for FlowRunId {
@@ -23,8 +26,9 @@ impl std::fmt::Display for FlowRunId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, ToSchema)]
 #[serde(transparent)]
+#[schema(value_type = String, format = Uuid)]
 pub struct PromptId(pub Uuid);
 
 impl std::fmt::Display for PromptId {
@@ -33,12 +37,14 @@ impl std::fmt::Display for PromptId {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
+    #[schema(value_type = Option<Object>)]
     pub id: Option<serde_json::Value>,
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
     pub params: Option<serde_json::Value>,
 }
 
@@ -57,11 +63,13 @@ impl JsonRpcRequest {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
+    #[schema(value_type = Option<Object>)]
     pub id: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
     pub result: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
@@ -87,12 +95,13 @@ impl JsonRpcResponse {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Serialize, Deserialize, thiserror::Error, ToSchema)]
 #[error("json-rpc error {code}: {message}")]
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
     pub data: Option<serde_json::Value>,
 }
 
@@ -154,25 +163,26 @@ pub mod methods {
     pub const PING: &str = "ping";
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RunFlowRequest {
     pub flow_path: String,
     #[serde(default)]
+    #[schema(value_type = Object)]
     pub args: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RunFlowResponse {
     pub session_id: SessionId,
     pub run_id: FlowRunId,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CancelRunRequest {
     pub run_id: FlowRunId,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SessionSummary {
     pub id: SessionId,
     pub event_count: usize,
@@ -180,7 +190,7 @@ pub struct SessionSummary {
     pub status: SessionStatus,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     Running,
@@ -188,16 +198,17 @@ pub enum SessionStatus {
     Pending,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct GetEventsRequest {
     pub session_id: SessionId,
     #[serde(default)]
     pub since_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolvePromptRequest {
     pub prompt_id: PromptId,
+    #[schema(value_type = Object)]
     pub answer: serde_json::Value,
 }
 
