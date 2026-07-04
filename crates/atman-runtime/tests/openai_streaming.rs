@@ -180,3 +180,31 @@ async fn openai_http_error_becomes_tool_failed() {
         atman_runtime::RuntimeError::ToolFailed(msg) if msg.contains("401")
     ));
 }
+
+// Manual OpenAI-compat smoke test — needs an Ollama-like server on the wire.
+// Run: `cargo test --test openai_streaming --ignored openai_real`.
+// Env: ATMAN_TEST_OLLAMA_{BASE_URL,MODEL,KEY} — key can be any string, Ollama ignores it.
+#[tokio::test]
+#[ignore]
+async fn openai_real() {
+    let base = std::env::var("ATMAN_TEST_OLLAMA_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:11434/v1".into());
+    let model = std::env::var("ATMAN_TEST_OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".into());
+    let key = std::env::var("ATMAN_TEST_OLLAMA_KEY").unwrap_or_else(|_| "sk-anything".into());
+
+    let provider = OpenAiProvider::new("openai-compat", key).with_base_url(base);
+    let obs = provider.call_streaming(LlmRequest {
+        model,
+        messages: vec![atman_runtime::provider::user_text_message(
+            "Reply with exactly one short sentence.",
+        )],
+        system: None,
+        input: Value::Unit,
+        schema: None,
+        cache_prompt: false,
+    });
+    let value = obs.output.await.unwrap();
+    let text = value.text_concat();
+    println!("[openai_real] {text}");
+    assert!(!text.trim().is_empty());
+}
