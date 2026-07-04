@@ -320,7 +320,7 @@ async fn cmd_run(
             Err(e) => eprintln!("[atman] mcp boot: {e}"),
         }
     }
-    attach_memory_stores(&mut executor, session.dir())?;
+    attach_memory_stores(&mut executor, session.dir(), ephemeral)?;
 
     let target_flow = parsed
         .flows
@@ -667,7 +667,7 @@ async fn cmd_repl() -> Result<()> {
             Err(e) => eprintln!("[atman] mcp boot: {e}"),
         }
     }
-    attach_memory_stores(&mut executor, session.dir())?;
+    attach_memory_stores(&mut executor, session.dir(), false)?;
 
     if let Err(e) = run_boot_flow(&executor).await {
         eprintln!("[atman] boot flow error: {e}");
@@ -1396,15 +1396,25 @@ fn bootstrap_opts(
 fn attach_memory_stores(
     executor: &mut atman_runtime::Executor,
     session_dir: &std::path::Path,
+    ephemeral: bool,
 ) -> Result<()> {
-    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let confession_root = project_root.join(".atman");
-    std::fs::create_dir_all(&confession_root).ok();
-    let spec_root = data_dir()?.join("specs");
-    std::fs::create_dir_all(&spec_root).ok();
+    // Ephemeral runs must not touch project on-disk state (confessions.jsonl / .atman/).
+    // Route everything to XDG data ephemeral scratch so `atman run --ephemeral` never pollutes cwd.
+    let (session_scope, confession_root, spec_root) = if ephemeral {
+        let scratch = data_dir()?.join("ephemeral");
+        std::fs::create_dir_all(&scratch).ok();
+        (scratch.clone(), scratch.clone(), scratch)
+    } else {
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let confession_root = project_root.join(".atman");
+        std::fs::create_dir_all(&confession_root).ok();
+        let spec_root = data_dir()?.join("specs");
+        std::fs::create_dir_all(&spec_root).ok();
+        (session_dir.to_path_buf(), confession_root, spec_root)
+    };
     atman_daemon::bootstrap::attach_memory_stores(
         executor,
-        session_dir,
+        &session_scope,
         &confession_root,
         &spec_root,
     );
