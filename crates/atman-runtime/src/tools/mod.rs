@@ -38,6 +38,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(test::TestRun));
     reg.register(Arc::new(hunk::FsEdit));
     reg.register(Arc::new(hunk::HunkApply));
+    reg.register(Arc::new(hunk::HunkReview));
 }
 
 pub fn register_shell(reg: &mut ToolRegistry) {

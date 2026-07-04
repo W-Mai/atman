@@ -29,6 +29,97 @@ impl Tool for FsEdit {
     }
 }
 
+pub struct HunkReview;
+
+impl Tool for HunkReview {
+    fn name(&self) -> &str {
+        "hunk.review"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let proposal = extract_proposal(&args)?;
+            let timeout_secs = match args.named("timeout_secs") {
+                Some(Value::Int(n)) if *n > 0 => *n as u64,
+                _ => 300,
+            };
+            let default_selection: Vec<u32> = proposal.hunks.iter().map(|h| h.id).collect();
+            let Some(resolver) = ctx.prompt_resolver.clone() else {
+                return Ok(Value::Struct(vec![
+                    ("mode".into(), Value::Str("auto".into())),
+                    (
+                        "hunks".into(),
+                        Value::List(
+                            default_selection
+                                .into_iter()
+                                .map(|id| Value::Int(id as i64))
+                                .collect(),
+                        ),
+                    ),
+                ]));
+            };
+            let id = crate::rendezvous::PromptId::now();
+            let answer = crate::rendezvous::await_prompt(
+                &resolver,
+                id,
+                std::time::Duration::from_secs(timeout_secs),
+            )
+            .await?;
+            let selection = parse_answer_hunk_ids(&answer, &default_selection)?;
+            Ok(Value::Struct(vec![
+                ("mode".into(), Value::Str("resolved".into())),
+                ("prompt_id".into(), Value::Str(id.to_string())),
+                (
+                    "hunks".into(),
+                    Value::List(
+                        selection
+                            .into_iter()
+                            .map(|id| Value::Int(id as i64))
+                            .collect(),
+                    ),
+                ),
+            ]))
+        })
+    }
+}
+
+fn parse_answer_hunk_ids(
+    answer: &serde_json::Value,
+    default: &[u32],
+) -> Result<Vec<u32>, RuntimeError> {
+    if answer.is_null() {
+        return Ok(default.to_vec());
+    }
+    if let Some(s) = answer.as_str() {
+        match s {
+            "all" => return Ok(default.to_vec()),
+            "none" => return Ok(Vec::new()),
+            other => {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "hunk.review answer: unknown string `{other}`"
+                )));
+            }
+        }
+    }
+    if let Some(hunks) = answer.get("hunks").and_then(|v| v.as_array()) {
+        let mut ids = Vec::with_capacity(hunks.len());
+        for h in hunks {
+            let n = h.as_u64().ok_or_else(|| {
+                RuntimeError::ToolFailed(format!("hunk.review answer: hunk id not u64: {h:?}"))
+            })?;
+            ids.push(n as u32);
+        }
+        return Ok(ids);
+    }
+    Err(RuntimeError::ToolFailed(format!(
+        "hunk.review answer: unrecognized shape: {answer:?}"
+    )))
+}
+
 pub struct HunkApply;
 
 impl Tool for HunkApply {

@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod http;
 pub mod pidfile;
+pub mod prompt_bridge;
 pub mod run;
 pub mod state;
 pub mod unix;

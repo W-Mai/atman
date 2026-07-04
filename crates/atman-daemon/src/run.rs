@@ -60,6 +60,7 @@ impl RunLauncher {
                     .enable_all()
                     .build()
                     .expect("build current-thread runtime");
+                let state_for_run = state_for_task.clone();
                 rt.block_on(async move {
                     if let Err(e) = run_flow_inner(
                         &session,
@@ -69,6 +70,7 @@ impl RunLauncher {
                         project_root,
                         config_dir,
                         home_dir,
+                        Some(state_for_run),
                     )
                     .await
                     {
@@ -87,6 +89,7 @@ impl RunLauncher {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_flow_inner(
     session: &atman_runtime::Session,
     path: &std::path::Path,
@@ -95,6 +98,7 @@ async fn run_flow_inner(
     project_root: PathBuf,
     config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
+    daemon_state: Option<Arc<crate::DaemonState>>,
 ) -> Result<()> {
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("reading flow {}", path.display()))?;
@@ -129,6 +133,12 @@ async fn run_flow_inner(
         &confession_root,
         &spec_root,
     );
+    if let Some(state) = daemon_state {
+        executor.tool_ctx.prompt_resolver =
+            Some(Arc::new(crate::prompt_bridge::DaemonPromptResolver {
+                state,
+            }));
+    }
 
     let target_flow = parsed
         .flows

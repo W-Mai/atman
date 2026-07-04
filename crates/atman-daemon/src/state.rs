@@ -60,6 +60,10 @@ impl DaemonState {
         self.prompts.lock().unwrap().remove(id);
     }
 
+    pub fn pending_prompt_ids(&self) -> Vec<PromptId> {
+        self.prompts.lock().unwrap().keys().cloned().collect()
+    }
+
     pub fn sessions_root(&self) -> PathBuf {
         self.data_dir.join("sessions")
     }

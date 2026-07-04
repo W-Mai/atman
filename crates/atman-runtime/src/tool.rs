@@ -54,6 +54,7 @@ pub struct ToolCtx {
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
     pub event_seq: Option<u64>,
+    pub prompt_resolver: Option<std::sync::Arc<dyn crate::rendezvous::PromptResolver>>,
 }
 
 impl ToolCtx {
