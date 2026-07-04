@@ -224,6 +224,55 @@ fn repl_runs_boot_flow_at_startup() {
 }
 
 #[test]
+fn repl_route_dsl_dispatches_by_prefix() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let cmd_dir = cfg.path().join("commands");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(
+        cmd_dir.join("greet.at"),
+        r#"flow greet(who: string) -> string {
+    return "hi " + who
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cfg.path().join("routes.at"),
+        r#"route "hello" { flow: greet }
+flow greet(who: string) -> string {
+    return "hi " + who
+}
+"#,
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"hello atman\n:exit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("hi atman"),
+        "expected 'hi atman' in stdout. stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
 fn repl_slash_command_runs_flow_from_config_dir() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

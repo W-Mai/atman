@@ -31,6 +31,12 @@ mod kw {
     syn::custom_keyword!(warn);
     syn::custom_keyword!(ms);
     syn::custom_keyword!(s);
+    syn::custom_keyword!(route);
+    syn::custom_keyword!(default_route);
+    syn::custom_keyword!(session);
+    syn::custom_keyword!(turn);
+    syn::custom_keyword!(start);
+    syn::custom_keyword!(end);
 }
 
 fn to_ident(id: syn::Ident) -> Ident {
@@ -42,16 +48,116 @@ fn to_ident(id: syn::Ident) -> Ident {
 
 impl Parse for File {
     fn parse(input: ParseStream) -> Result<Self> {
-        let mut flows = Vec::new();
+        let mut file = File::default();
         while !input.is_empty() {
             if input.peek(kw::flow) {
-                flows.push(input.parse::<FlowDecl>()?);
+                file.flows.push(input.parse::<FlowDecl>()?);
+            } else if input.peek(kw::route) {
+                file.routes.push(parse_route(input)?);
+            } else if input.peek(kw::default_route) {
+                if file.default_route.is_some() {
+                    return Err(input.error("duplicate `default_route` declaration"));
+                }
+                file.default_route = Some(parse_default_route(input)?);
+            } else if input.peek(kw::on) {
+                file.lifecycles.push(parse_lifecycle(input)?);
             } else {
-                return Err(input.error("expected `flow` declaration at top level"));
+                return Err(input.error(
+                    "expected `flow`, `route`, `default_route`, or `on` declaration at top level",
+                ));
             }
         }
-        Ok(File { flows })
+        Ok(file)
     }
+}
+
+fn parse_route(input: ParseStream) -> Result<RouteDecl> {
+    let kw_route: kw::route = input.parse()?;
+    let pat_lit: LitStr = input.parse()?;
+    let content;
+    braced!(content in input);
+    let mut flow: Option<Ident> = None;
+    while !content.is_empty() {
+        let key = content.parse::<syn::Ident>()?;
+        content.parse::<Token![:]>()?;
+        match key.to_string().as_str() {
+            "flow" => {
+                let f = content.parse::<syn::Ident>()?;
+                flow = Some(to_ident(f));
+            }
+            other => {
+                return Err(content.error(format!("unknown route key `{other}` (expected `flow`)")));
+            }
+        }
+        if content.peek(Token![,]) {
+            content.parse::<Token![,]>()?;
+        }
+    }
+    let flow = flow.ok_or_else(|| content.error("`route` block missing `flow:`"))?;
+    Ok(RouteDecl {
+        pattern: pat_lit.value(),
+        flow,
+        span: kw_route.span,
+    })
+}
+
+fn parse_default_route(input: ParseStream) -> Result<DefaultRouteDecl> {
+    let kw_dr: kw::default_route = input.parse()?;
+    let content;
+    braced!(content in input);
+    let mut flow: Option<Ident> = None;
+    while !content.is_empty() {
+        let key = content.parse::<syn::Ident>()?;
+        content.parse::<Token![:]>()?;
+        match key.to_string().as_str() {
+            "flow" => {
+                let f = content.parse::<syn::Ident>()?;
+                flow = Some(to_ident(f));
+            }
+            other => {
+                return Err(content.error(format!(
+                    "unknown default_route key `{other}` (expected `flow`)"
+                )));
+            }
+        }
+        if content.peek(Token![,]) {
+            content.parse::<Token![,]>()?;
+        }
+    }
+    let flow = flow.ok_or_else(|| content.error("`default_route` missing `flow:`"))?;
+    Ok(DefaultRouteDecl {
+        flow,
+        span: kw_dr.span,
+    })
+}
+
+fn parse_lifecycle(input: ParseStream) -> Result<LifecycleDecl> {
+    let kw_on: kw::on = input.parse()?;
+    let scope = input.parse::<syn::Ident>()?;
+    input.parse::<Token![.]>()?;
+    let hook = input.parse::<syn::Ident>()?;
+    let event = match (scope.to_string().as_str(), hook.to_string().as_str()) {
+        ("session", "start") => LifecycleEvent::SessionStart,
+        ("session", "end") => LifecycleEvent::SessionEnd,
+        ("turn", "start") => LifecycleEvent::TurnStart,
+        ("turn", "end") => LifecycleEvent::TurnEnd,
+        (s, h) => {
+            return Err(syn::Error::new(
+                hook.span(),
+                format!(
+                    "unknown lifecycle `{s}.{h}` (want session.start|session.end|turn.start|turn.end)"
+                ),
+            ));
+        }
+    };
+    let content;
+    braced!(content in input);
+    let body = parse_stmts(&content)?;
+    Ok(LifecycleDecl {
+        event,
+        body,
+        span: kw_on.span,
+    })
 }
 
 impl Parse for FlowDecl {

@@ -7,10 +7,41 @@ use crate::ast::*;
 
 pub fn print_file(file: &File) -> String {
     let mut out = String::new();
-    for (i, flow) in file.flows.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    for r in &file.routes {
+        if !first {
             out.push('\n');
         }
+        first = false;
+        writeln!(out, "route \"{}\" {{ flow: {} }}", r.pattern, r.flow.name).unwrap();
+    }
+    if let Some(dr) = &file.default_route {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        writeln!(out, "default_route {{ flow: {} }}", dr.flow.name).unwrap();
+    }
+    for lc in &file.lifecycles {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        let event_str = match lc.event {
+            LifecycleEvent::SessionStart => "session.start",
+            LifecycleEvent::SessionEnd => "session.end",
+            LifecycleEvent::TurnStart => "turn.start",
+            LifecycleEvent::TurnEnd => "turn.end",
+        };
+        writeln!(out, "on {event_str} {{").unwrap();
+        write_stmts(&mut out, &lc.body, 1);
+        out.push_str("}\n");
+    }
+    for flow in &file.flows {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
         write_flow(&mut out, flow);
     }
     out
@@ -76,6 +107,12 @@ fn write_type(out: &mut String, ty: &TypeExpr) {
             }
             out.push_str(" }");
         }
+    }
+}
+
+fn write_stmts(out: &mut String, stmts: &[Stmt], indent: usize) {
+    for stmt in stmts {
+        write_stmt(out, stmt, indent);
     }
 }
 

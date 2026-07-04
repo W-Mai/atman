@@ -481,6 +481,45 @@ async fn route_input_in_turn(
 }
 
 fn resolve_route_call(line: &str) -> Option<String> {
+    if let Some(call) = resolve_dsl_route_call(line) {
+        return Some(call);
+    }
+    resolve_toml_route_call(line)
+}
+
+fn resolve_dsl_route_call(line: &str) -> Option<String> {
+    let cfg = config_dir().ok()?;
+    let routes_at = cfg.join("routes.at");
+    if !routes_at.exists() {
+        return None;
+    }
+    let contents = std::fs::read_to_string(&routes_at).ok()?;
+    let parsed = parse_file(&contents).ok()?;
+    for r in &parsed.routes {
+        if let Some(rest) = line.strip_prefix(&r.pattern) {
+            let rest = rest.trim();
+            let cmd = format!("/{}", r.flow.name);
+            let call = if rest.is_empty() {
+                cmd
+            } else {
+                format!("{cmd} {rest}")
+            };
+            return Some(call);
+        }
+    }
+    if let Some(dr) = &parsed.default_route {
+        let cmd = format!("/{}", dr.flow.name);
+        let call = if line.trim().is_empty() {
+            cmd
+        } else {
+            format!("{cmd} {}", line.trim())
+        };
+        return Some(call);
+    }
+    None
+}
+
+fn resolve_toml_route_call(line: &str) -> Option<String> {
     let cfg = config_dir().ok()?;
     let routes_path = cfg.join("routes.toml");
     if !routes_path.exists() {
@@ -555,7 +594,8 @@ type SlashCommandParsed = (atman_dsl::ast::File, String, Vec<(String, Value)>);
 
 fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     let mut parts = line.split_whitespace();
-    let name = parts.next().context("empty slash command")?;
+    let name_full = parts.next().context("empty slash command")?;
+    let name = name_full.strip_prefix('/').unwrap_or(name_full);
     let cfg = config_dir()?;
     let path = cfg.join("commands").join(format!("{name}.at"));
     if !path.exists() {

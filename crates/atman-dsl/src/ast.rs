@@ -210,6 +210,37 @@ pub struct ContractBlock {
 }
 
 #[derive(Debug, Clone)]
+pub struct RouteDecl {
+    pub pattern: String,
+    pub flow: Ident,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct DefaultRouteDecl {
+    pub flow: Ident,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum LifecycleEvent {
+    SessionStart,
+    SessionEnd,
+    TurnStart,
+    TurnEnd,
+}
+
+#[derive(Debug, Clone)]
+pub struct LifecycleDecl {
+    pub event: LifecycleEvent,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct File {
     pub flows: Vec<FlowDecl>,
+    pub routes: Vec<RouteDecl>,
+    pub default_route: Option<DefaultRouteDecl>,
+    pub lifecycles: Vec<LifecycleDecl>,
 }
