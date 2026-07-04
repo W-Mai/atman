@@ -8,6 +8,7 @@ pub mod event_writer;
 pub mod exec;
 pub mod executor;
 pub mod hunk;
+pub mod index;
 pub mod injection;
 pub mod lifecycle;
 pub mod mcp;
