@@ -142,6 +142,7 @@ async fn run_flow_inner(
         executor.tool_ctx.prompt_resolver =
             Some(Arc::new(crate::prompt_bridge::DaemonPromptResolver {
                 state,
+                sink: session.sink().clone(),
             }));
     }
 

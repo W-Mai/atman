@@ -157,6 +157,21 @@ pub enum Event {
         message: String,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    PendingPrompt {
+        #[serde(default)]
+        seq: u64,
+        prompt_id: uuid::Uuid,
+        kind: String,
+        payload: serde_json::Value,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    PromptResolved {
+        #[serde(default)]
+        seq: u64,
+        prompt_id: uuid::Uuid,
+        answer: serde_json::Value,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 impl Event {
@@ -175,7 +190,9 @@ impl Event {
             | Event::ContentFilterHit { seq, .. }
             | Event::ContextCompact { seq, .. }
             | Event::ContextTruncated { seq, .. }
-            | Event::WatchWarn { seq, .. } => *seq = new_seq,
+            | Event::WatchWarn { seq, .. }
+            | Event::PendingPrompt { seq, .. }
+            | Event::PromptResolved { seq, .. } => *seq = new_seq,
         }
     }
 
@@ -194,7 +211,9 @@ impl Event {
             | Event::ContentFilterHit { seq, .. }
             | Event::ContextCompact { seq, .. }
             | Event::ContextTruncated { seq, .. }
-            | Event::WatchWarn { seq, .. } => *seq,
+            | Event::WatchWarn { seq, .. }
+            | Event::PendingPrompt { seq, .. }
+            | Event::PromptResolved { seq, .. } => *seq,
         }
     }
 }

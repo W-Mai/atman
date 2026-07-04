@@ -63,9 +63,12 @@ impl Tool for HunkReview {
                 ]));
             };
             let id = crate::rendezvous::PromptId::now();
-            let answer = crate::rendezvous::await_prompt(
+            let payload = hunk_review_payload(&proposal);
+            let answer = crate::rendezvous::await_prompt_with_payload(
                 &resolver,
                 id,
+                "hunk_selection",
+                payload,
                 std::time::Duration::from_secs(timeout_secs),
             )
             .await?;
@@ -85,6 +88,54 @@ impl Tool for HunkReview {
             ]))
         })
     }
+}
+
+fn hunk_review_payload(proposal: &EditProposal) -> serde_json::Value {
+    let hunks: Vec<serde_json::Value> = proposal
+        .hunks
+        .iter()
+        .map(|h| {
+            let mut diff = String::new();
+            for line in &h.lines {
+                match line {
+                    crate::hunk::HunkLine::Add { text } => {
+                        diff.push('+');
+                        diff.push_str(text);
+                        if !text.ends_with('\n') {
+                            diff.push('\n');
+                        }
+                    }
+                    crate::hunk::HunkLine::Delete { text } => {
+                        diff.push('-');
+                        diff.push_str(text);
+                        if !text.ends_with('\n') {
+                            diff.push('\n');
+                        }
+                    }
+                    crate::hunk::HunkLine::Context { text } => {
+                        diff.push(' ');
+                        diff.push_str(text);
+                        if !text.ends_with('\n') {
+                            diff.push('\n');
+                        }
+                    }
+                }
+            }
+            serde_json::json!({
+                "id": h.id,
+                "old_start": h.old_start,
+                "old_len": h.old_len,
+                "new_start": h.new_start,
+                "new_len": h.new_len,
+                "unified_diff": diff,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "path": proposal.path.display().to_string(),
+        "hunks": hunks,
+        "options": ["all", "none", "select"],
+    })
 }
 
 fn parse_answer_hunk_ids(

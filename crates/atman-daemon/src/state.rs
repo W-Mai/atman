@@ -4,13 +4,19 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use atman_proto::{FlowRunId, PromptId, SessionId, SessionStatus, SessionSummary};
+use atman_runtime::event::{Event, EventSink};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+struct PendingPrompt {
+    tx: oneshot::Sender<serde_json::Value>,
+    broadcast_sink: Option<EventSink>,
+}
 
 pub struct DaemonState {
     data_dir: PathBuf,
     live: Mutex<HashMap<SessionId, LiveSession>>,
-    prompts: Mutex<HashMap<PromptId, oneshot::Sender<serde_json::Value>>>,
+    prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
 }
 
@@ -45,19 +51,67 @@ impl DaemonState {
 
     pub fn register_pending_prompt(&self, id: PromptId) -> oneshot::Receiver<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
-        self.prompts.lock().unwrap().insert(id, tx);
+        self.prompts.lock().unwrap().insert(
+            id,
+            PendingPrompt {
+                tx,
+                broadcast_sink: None,
+            },
+        );
+        rx
+    }
+
+    pub fn register_pending_prompt_broadcast(
+        &self,
+        id: PromptId,
+        kind: &str,
+        payload: serde_json::Value,
+        sink: EventSink,
+    ) -> oneshot::Receiver<serde_json::Value> {
+        let (tx, rx) = oneshot::channel();
+        self.prompts.lock().unwrap().insert(
+            id.clone(),
+            PendingPrompt {
+                tx,
+                broadcast_sink: Some(sink.clone()),
+            },
+        );
+        sink.emit(Event::PendingPrompt {
+            seq: 0,
+            prompt_id: id.0,
+            kind: kind.to_string(),
+            payload,
+            ts: chrono::Utc::now(),
+        });
         rx
     }
 
     pub fn resolve_prompt(&self, id: &PromptId, answer: serde_json::Value) -> bool {
-        let Some(sender) = self.prompts.lock().unwrap().remove(id) else {
+        let Some(entry) = self.prompts.lock().unwrap().remove(id) else {
             return false;
         };
-        sender.send(answer).is_ok()
+        if let Some(sink) = &entry.broadcast_sink {
+            sink.emit(Event::PromptResolved {
+                seq: 0,
+                prompt_id: id.0,
+                answer: answer.clone(),
+                ts: chrono::Utc::now(),
+            });
+        }
+        entry.tx.send(answer).is_ok()
     }
 
     pub fn drop_pending_prompt(&self, id: &PromptId) {
-        self.prompts.lock().unwrap().remove(id);
+        if let Some(entry) = self.prompts.lock().unwrap().remove(id)
+            && let Some(sink) = &entry.broadcast_sink
+        {
+            sink.emit(Event::PromptResolved {
+                seq: 0,
+                prompt_id: id.0,
+                answer: serde_json::Value::Null,
+                ts: chrono::Utc::now(),
+            });
+        }
     }
 
     pub fn pending_prompt_ids(&self) -> Vec<PromptId> {

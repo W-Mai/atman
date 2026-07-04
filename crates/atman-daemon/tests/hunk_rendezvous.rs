@@ -18,6 +18,7 @@ async fn hunk_review_reuses_daemon_rendezvous_when_resolver_present() {
     tools::register_tier_zero(&mut ex.tools);
     ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
         state: daemon_state.clone(),
+        sink: atman_runtime::event::EventSink::new(),
     }));
 
     let src = format!(

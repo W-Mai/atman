@@ -25,6 +25,15 @@ impl std::fmt::Display for PromptId {
 pub trait PromptResolver: Send + Sync {
     fn register(&self, id: PromptId) -> oneshot::Receiver<serde_json::Value>;
     fn drop_pending(&self, id: &PromptId);
+
+    fn register_with_payload(
+        &self,
+        id: PromptId,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> oneshot::Receiver<serde_json::Value> {
+        self.register(id)
+    }
 }
 
 // In-proc fallback: prompts are auto-answered by a caller-provided default. Used when
@@ -47,7 +56,31 @@ pub async fn await_prompt(
     id: PromptId,
     timeout: std::time::Duration,
 ) -> Result<serde_json::Value, RuntimeError> {
-    let rx = resolver.register(id);
+    await_prompt_inner(resolver.register(id), resolver, id, timeout).await
+}
+
+pub async fn await_prompt_with_payload(
+    resolver: &Arc<dyn PromptResolver>,
+    id: PromptId,
+    kind: &str,
+    payload: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value, RuntimeError> {
+    await_prompt_inner(
+        resolver.register_with_payload(id, kind, payload),
+        resolver,
+        id,
+        timeout,
+    )
+    .await
+}
+
+async fn await_prompt_inner(
+    rx: oneshot::Receiver<serde_json::Value>,
+    resolver: &Arc<dyn PromptResolver>,
+    id: PromptId,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value, RuntimeError> {
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(_)) => {
