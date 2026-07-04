@@ -875,6 +875,53 @@ fn repl_attach_command_rejects_missing_file() {
 }
 
 #[test]
+fn rebuild_index_walks_all_sessions_and_reports_totals() {
+    let data = tempfile::tempdir().unwrap();
+    let sessions = data.path().join("sessions");
+    let sid_a = "019f2900-0000-7000-8000-00000000000a";
+    let sid_b = "019f2900-0000-7000-8000-00000000000b";
+    let dir_a = sessions.join(sid_a);
+    let dir_b = sessions.join(sid_b);
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    std::fs::write(
+        dir_a.join("events.jsonl"),
+        concat!(
+            r#"{"type":"flow_start","seq":1,"run_id":"run-a","ts":"2026-07-05T00:00:00Z"}"#,
+            "\n",
+            r#"{"type":"user_msg","seq":2,"turn_id":"turn-a","ts":"2026-07-05T00:00:01Z","message":{"role":"user","parts":[{"type":"text","text":"query token unique_xyzzy"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir_b.join("events.jsonl"),
+        r#"{"type":"flow_start","seq":1,"run_id":"run-b","ts":"2026-07-05T00:00:00Z"}"#.to_string()
+            + "\n",
+    )
+    .unwrap();
+
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .arg("rebuild-index")
+        .output()
+        .expect("run rebuild-index");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("rebuilt 3 events across 2 sessions"),
+        "stdout: {stdout}"
+    );
+
+    assert!(dir_a.join("anchors.db").exists());
+    assert!(dir_b.join("anchors.db").exists());
+}
+
+#[test]
 fn daemon_rotate_token_replaces_token_when_daemon_not_running() {
     let cfg_dir = tempfile::tempdir().unwrap();
     let pid_dir = tempfile::tempdir().unwrap();

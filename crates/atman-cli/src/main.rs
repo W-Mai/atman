@@ -41,6 +41,7 @@ enum Cmd {
         session_id: Option<String>,
     },
     Doctor,
+    RebuildIndex,
     Version,
     Monitor {
         #[arg(long, default_value_t = 65098)]
@@ -120,6 +121,7 @@ async fn main() -> Result<()> {
         }) => cmd_session_gc().await,
         Some(Cmd::Cost { session_id }) => cmd_cost(session_id).await,
         Some(Cmd::Doctor) => cmd_doctor().await,
+        Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
         Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Start,
@@ -1307,6 +1309,50 @@ async fn read_session_events(sessions_dir: &std::path::Path, sid: &str) -> Vec<s
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .collect()
+}
+
+async fn cmd_rebuild_index() -> Result<()> {
+    let data = data_dir()?;
+    let sessions_root = data.join("sessions");
+    if !sessions_root.exists() {
+        println!("no sessions directory at {}", sessions_root.display());
+        return Ok(());
+    }
+    let mut total_rebuilt = 0usize;
+    let mut total_skipped = 0usize;
+    let mut session_count = 0usize;
+    for entry in std::fs::read_dir(&sessions_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let jsonl = path.join("events.jsonl");
+        if !jsonl.exists() {
+            continue;
+        }
+        match atman_runtime::index::AnchorIndex::open_session(&path) {
+            Ok(idx) => match idx.rebuild_events_from_jsonl(&jsonl) {
+                Ok(stats) => {
+                    println!(
+                        "  session {}: rebuilt {} events (skipped {})",
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                        stats.rebuilt,
+                        stats.skipped
+                    );
+                    total_rebuilt += stats.rebuilt;
+                    total_skipped += stats.skipped;
+                    session_count += 1;
+                }
+                Err(e) => eprintln!("  session {}: rebuild failed: {e}", path.display()),
+            },
+            Err(e) => eprintln!("  session {}: open failed: {e}", path.display()),
+        }
+    }
+    println!(
+        "rebuilt {total_rebuilt} events across {session_count} sessions (skipped {total_skipped})"
+    );
+    Ok(())
 }
 
 async fn cmd_doctor() -> Result<()> {
