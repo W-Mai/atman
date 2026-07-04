@@ -136,6 +136,17 @@ pub enum Event {
         compacted_range_end: u64,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    ContextTruncated {
+        #[serde(default)]
+        seq: u64,
+        turn_id: Option<TurnId>,
+        flow_run_id: Option<FlowRunId>,
+        original_chars: u64,
+        result_chars: u64,
+        dropped_chars: u64,
+        budget_tokens: u64,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 impl Event {
@@ -152,7 +163,8 @@ impl Event {
             | Event::SystemMsg { seq, .. }
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
-            | Event::ContextCompact { seq, .. } => *seq = new_seq,
+            | Event::ContextCompact { seq, .. }
+            | Event::ContextTruncated { seq, .. } => *seq = new_seq,
         }
     }
 
@@ -169,7 +181,8 @@ impl Event {
             | Event::SystemMsg { seq, .. }
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
-            | Event::ContextCompact { seq, .. } => *seq,
+            | Event::ContextCompact { seq, .. }
+            | Event::ContextTruncated { seq, .. } => *seq,
         }
     }
 }

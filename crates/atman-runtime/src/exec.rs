@@ -169,7 +169,20 @@ async fn eval_bind_with_watches(
         return Ok(Value::Err(RuntimeError::MissingArg("llm.prompt".into())));
     };
     if let Some(budget) = context_budget {
-        prompt = crate::eval::truncate_prompt_to_budget(prompt, budget);
+        let (truncated, stat) = crate::eval::truncate_prompt_to_budget_tracked(prompt, budget);
+        prompt = truncated;
+        if let (Some(sink), Some(stat)) = (ctx.events, stat) {
+            sink.emit(crate::event::Event::ContextTruncated {
+                seq: 0,
+                turn_id: ctx.turn_id.clone(),
+                flow_run_id: ctx.flow_run_id.clone(),
+                original_chars: stat.original_chars as u64,
+                result_chars: stat.result_chars as u64,
+                dropped_chars: stat.dropped_chars as u64,
+                budget_tokens: stat.budget_tokens,
+                ts: chrono::Utc::now(),
+            });
+        }
     }
     let Some(provider) = ctx.providers.resolve(&model) else {
         return Ok(Value::Err(RuntimeError::ToolFailed(format!(

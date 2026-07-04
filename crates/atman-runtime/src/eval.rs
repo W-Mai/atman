@@ -288,7 +288,20 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     ));
                 };
                 if let Some(budget) = context_budget {
-                    prompt_text = truncate_prompt_to_budget(prompt_text, budget);
+                    let (truncated, stat) = truncate_prompt_to_budget_tracked(prompt_text, budget);
+                    prompt_text = truncated;
+                    if let (Some(sink), Some(stat)) = (ctx.events, stat) {
+                        sink.emit(crate::event::Event::ContextTruncated {
+                            seq: 0,
+                            turn_id: Some(turn_id.clone()),
+                            flow_run_id: ctx.flow_run_id.clone(),
+                            original_chars: stat.original_chars as u64,
+                            result_chars: stat.result_chars as u64,
+                            dropped_chars: stat.dropped_chars as u64,
+                            budget_tokens: stat.budget_tokens,
+                            ts: chrono::Utc::now(),
+                        });
+                    }
                 }
                 let user_msg =
                     crate::message::Message::user_text(turn_id.clone(), prompt_text.clone());
@@ -811,22 +824,44 @@ fn contract_allows_shell(contract: Option<&atman_dsl::ast::Contract>) -> bool {
     false
 }
 
+pub struct TruncationStat {
+    pub original_chars: usize,
+    pub result_chars: usize,
+    pub dropped_chars: usize,
+    pub budget_tokens: u64,
+}
+
 pub fn truncate_prompt_to_budget(prompt: String, budget_tokens: u64) -> String {
+    truncate_prompt_to_budget_tracked(prompt, budget_tokens).0
+}
+
+pub fn truncate_prompt_to_budget_tracked(
+    prompt: String,
+    budget_tokens: u64,
+) -> (String, Option<TruncationStat>) {
     let budget_chars = budget_tokens.saturating_mul(4) as usize;
     if prompt.len() <= budget_chars {
-        return prompt;
+        return (prompt, None);
     }
     let head_chars = budget_chars * 4 / 10;
     let tail_chars = budget_chars * 4 / 10;
-    let (head, tail) = if head_chars + tail_chars >= prompt.len() {
-        return prompt;
-    } else {
-        let head_end = char_boundary(&prompt, head_chars, false);
-        let tail_start = char_boundary(&prompt, prompt.len().saturating_sub(tail_chars), true);
-        (&prompt[..head_end], &prompt[tail_start..])
+    if head_chars + tail_chars >= prompt.len() {
+        return (prompt, None);
+    }
+    let original_chars = prompt.len();
+    let head_end = char_boundary(&prompt, head_chars, false);
+    let tail_start = char_boundary(&prompt, prompt.len().saturating_sub(tail_chars), true);
+    let head = &prompt[..head_end];
+    let tail = &prompt[tail_start..];
+    let dropped = original_chars - head.len() - tail.len();
+    let result = format!("{head}\n\n[... truncated {dropped} chars ...]\n\n{tail}");
+    let stat = TruncationStat {
+        original_chars,
+        result_chars: result.len(),
+        dropped_chars: dropped,
+        budget_tokens,
     };
-    let dropped = prompt.len() - head.len() - tail.len();
-    format!("{head}\n\n[... truncated {dropped} chars ...]\n\n{tail}")
+    (result, Some(stat))
 }
 
 fn char_boundary(s: &str, target: usize, round_up: bool) -> usize {
