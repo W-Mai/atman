@@ -15,6 +15,23 @@ impl Tool for BashExec {
         Tier::Four
     }
 
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Run a shell command via `sh -c`. Returns a struct with exit, stdout, stderr, \
+             duration_ms. Flow contract must declare capabilities.shell = true.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string", "description": "Shell command line, passed to `sh -c`."}
+            },
+            "required": ["cmd"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let cmd = extract_string(&args, "cmd", 0)?;

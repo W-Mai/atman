@@ -80,6 +80,32 @@ impl Tool for MemoryConfess {
         Tier::One
     }
 
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Record a confession when the agent broke a rule. Anchors are auto-filled from \
+             the current turn / flow_run / event_seq. Returns the new confession id.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "trigger": {"type": "string", "description": "What the user or watcher noticed."},
+                "rule_violated": {"type": "string", "description": "Name of the red-line rule."},
+                "what_i_did": {"type": "string", "description": "The concrete mistake."},
+                "why": {"type": "string", "description": "The reasoning that led there."},
+                "mitigation": {"type": "string", "description": "What will prevent recurrence."},
+                "anchors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional extra anchor strings (auto-filled ones stay)."
+                }
+            },
+            "required": ["trigger", "rule_violated", "what_i_did", "why", "mitigation"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         let anchors = collect_anchors(&args, ctx);
         Box::pin(async move {

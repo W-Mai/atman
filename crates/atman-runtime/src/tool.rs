@@ -81,7 +81,29 @@ pub trait Tool: Send + Sync {
     fn cancel_behavior(&self) -> CancelBehavior {
         CancelBehavior::AbortSafe
     }
+    fn description(&self) -> Option<&str> {
+        None
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult>;
+}
+
+pub fn tool_spec(tool: &dyn Tool) -> ToolSpec {
+    ToolSpec {
+        name: tool.name().to_string(),
+        description: tool.description().map(str::to_string),
+        input_schema: tool.input_schema(),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolSpec {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
 }
 
 #[derive(Default, Clone)]

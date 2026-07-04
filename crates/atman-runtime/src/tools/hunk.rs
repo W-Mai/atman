@@ -16,6 +16,24 @@ impl Tool for FsEdit {
         Tier::Zero
     }
 
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Compute a hunk-level EditProposal for replacing a file with new content. \
+             Nothing is written; feed the proposal into hunk.review or hunk.apply.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File to edit."},
+                "new_content": {"type": "string", "description": "Proposed replacement content."}
+            },
+            "required": ["path", "new_content"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
@@ -38,6 +56,25 @@ impl Tool for HunkReview {
 
     fn tier(&self) -> Tier {
         Tier::One
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Present an EditProposal to a human reviewer (or auto-approve if no resolver is \
+             configured). Returns a struct with mode = auto|resolved and a hunks id list \
+             the caller should pass to hunk.apply.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "proposal": {"description": "EditProposal value from fs.edit."},
+                "timeout_secs": {"type": "integer", "description": "Seconds to wait for a reviewer answer (default 300)."}
+            },
+            "required": ["proposal"]
+        })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -180,6 +217,28 @@ impl Tool for HunkApply {
 
     fn tier(&self) -> Tier {
         Tier::Two
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Apply selected hunks from an EditProposal to disk. `hunks` is a list of hunk ids \
+             (usually from a hunk.review result). Returns which ids were applied vs skipped.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "proposal": {"description": "EditProposal value from fs.edit."},
+                "hunks": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Hunk ids to apply. Omit or pass \"all\" to apply everything."
+                }
+            },
+            "required": ["proposal"]
+        })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {

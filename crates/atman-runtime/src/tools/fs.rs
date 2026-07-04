@@ -15,6 +15,20 @@ impl Tool for FsRead {
         Tier::Zero
     }
 
+    fn description(&self) -> Option<&str> {
+        Some("Read a UTF-8 text file from disk and return the whole contents as a string.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or relative file path."}
+            },
+            "required": ["path"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
@@ -35,6 +49,21 @@ impl Tool for FsWrite {
 
     fn tier(&self) -> Tier {
         Tier::Two
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Write text content to a file, replacing anything already there.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Target file path."},
+                "content": {"type": "string", "description": "UTF-8 text to write."}
+            },
+            "required": ["path", "content"]
+        })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -74,6 +103,20 @@ impl Tool for FsList {
 
     fn tier(&self) -> Tier {
         Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("List the entries of a directory. Returns a list of {name, kind} structs.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory path to list."}
+            },
+            "required": ["path"]
+        })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
