@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,18 +20,36 @@ impl DaemonConfig {
         let cfg = DaemonConfig {
             auth_token: generate_token(),
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        write_config(path, &cfg)?;
+        Ok(cfg)
+    }
+
+    pub fn rotate(path: &PathBuf) -> Result<Self> {
+        if !path.exists() {
+            return Err(anyhow!(
+                "no daemon config at {} — nothing to rotate. Run `atman daemon start` once to generate one.",
+                path.display()
+            ));
         }
-        let text = toml::to_string(&cfg)?;
-        std::fs::write(path, text)?;
-        set_config_perms(path)?;
+        let cfg = DaemonConfig {
+            auth_token: generate_token(),
+        };
+        write_config(path, &cfg)?;
         Ok(cfg)
     }
 }
 
+fn write_config(path: &PathBuf, cfg: &DaemonConfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = toml::to_string(cfg)?;
+    std::fs::write(path, text)?;
+    set_config_perms(path)?;
+    Ok(())
+}
+
 fn generate_token() -> String {
-    // Two v4 UUIDs concatenated give 32 bytes of entropy encoded as hex.
     let a = uuid::Uuid::new_v4().simple().to_string();
     let b = uuid::Uuid::new_v4().simple().to_string();
     format!("{a}{b}")
@@ -46,6 +64,9 @@ fn set_config_perms(path: &PathBuf) -> Result<()> {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("ATMAN_DAEMON_CONFIG_PATH") {
+        return Ok(PathBuf::from(p));
+    }
     let base = directories::ProjectDirs::from("com", "atman", "atman")
         .context("no home dir")?
         .config_dir()

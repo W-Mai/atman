@@ -28,3 +28,27 @@ fn config_file_permissions_are_owner_only() {
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 }
+
+#[test]
+fn rotate_generates_new_token_and_preserves_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("daemon.toml");
+    let old = DaemonConfig::load_or_init(&path).unwrap();
+    let new = DaemonConfig::rotate(&path).unwrap();
+    assert_ne!(old.auth_token, new.auth_token);
+    assert_eq!(new.auth_token.len(), 64);
+    let reread = DaemonConfig::load_or_init(&path).unwrap();
+    assert_eq!(reread.auth_token, new.auth_token);
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn rotate_errors_when_config_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("does-not-exist.toml");
+    let err = DaemonConfig::rotate(&path).unwrap_err();
+    assert!(err.to_string().contains("no daemon config"));
+    assert!(!path.exists());
+}

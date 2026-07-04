@@ -57,6 +57,7 @@ enum DaemonAction {
     Start,
     Stop,
     Status,
+    RotateToken,
     Run {
         file: PathBuf,
         #[arg(long)]
@@ -129,6 +130,9 @@ async fn main() -> Result<()> {
         Some(Cmd::Daemon {
             action: DaemonAction::Status,
         }) => cmd_daemon_status().await,
+        Some(Cmd::Daemon {
+            action: DaemonAction::RotateToken,
+        }) => cmd_daemon_rotate_token().await,
         Some(Cmd::Daemon {
             action: DaemonAction::Run { file, follow, port },
         }) => cmd_daemon_run(file, follow, port).await,
@@ -265,6 +269,23 @@ async fn cmd_daemon_status() -> Result<()> {
             println!("atman-daemon not running");
         }
     }
+    Ok(())
+}
+
+async fn cmd_daemon_rotate_token() -> Result<()> {
+    let pid_path = atman_daemon::pidfile::default_pid_path()?;
+    if let Some(pid) = atman_daemon::pidfile::read_pid(&pid_path)?
+        && atman_daemon::pidfile::is_alive(pid)
+    {
+        anyhow::bail!("atman-daemon is running (pid={pid}). Stop it first: `atman daemon stop`");
+    }
+    let cfg_path = atman_daemon::config::default_config_path()?;
+    let cfg = atman_daemon::config::DaemonConfig::rotate(&cfg_path)?;
+    println!("{}", cfg.auth_token);
+    eprintln!(
+        "new token written to {}. restart daemon with `atman daemon start`.",
+        cfg_path.display()
+    );
     Ok(())
 }
 

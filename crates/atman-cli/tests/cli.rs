@@ -819,6 +819,64 @@ fn repl_attach_command_rejects_missing_file() {
 }
 
 #[test]
+fn daemon_rotate_token_replaces_token_when_daemon_not_running() {
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let pid_dir = tempfile::tempdir().unwrap();
+    let cfg_path = cfg_dir.path().join("daemon.toml");
+    let pid_path = pid_dir.path().join("atman-daemon.pid");
+
+    std::fs::write(&cfg_path, "auth_token = \"old-token-000\"\n").unwrap();
+
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DAEMON_CONFIG_PATH", &cfg_path)
+        .env("ATMAN_DAEMON_PID_PATH", &pid_path)
+        .args(["daemon", "rotate-token"])
+        .output()
+        .expect("run rotate-token");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let new_token = stdout.trim();
+    assert_eq!(new_token.len(), 64, "stdout: {stdout}");
+    assert!(new_token.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("restart daemon"), "stderr: {stderr}");
+
+    let re_read = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(re_read.contains(new_token));
+    assert!(!re_read.contains("old-token-000"));
+}
+
+#[test]
+fn daemon_rotate_token_refuses_when_daemon_running() {
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let pid_dir = tempfile::tempdir().unwrap();
+    let cfg_path = cfg_dir.path().join("daemon.toml");
+    let pid_path = pid_dir.path().join("atman-daemon.pid");
+
+    std::fs::write(&cfg_path, "auth_token = \"keep-me\"\n").unwrap();
+    std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+
+    let out = Command::new(atman_binary())
+        .env("ATMAN_DAEMON_CONFIG_PATH", &cfg_path)
+        .env("ATMAN_DAEMON_PID_PATH", &pid_path)
+        .args(["daemon", "rotate-token"])
+        .output()
+        .expect("run rotate-token");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("running"), "stderr: {stderr}");
+    assert!(stderr.contains("atman daemon stop"), "stderr: {stderr}");
+
+    let re_read = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(re_read.contains("keep-me"), "token should be unchanged");
+}
+
+#[test]
 fn repl_unrouted_input_hints_at_routes_toml() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();

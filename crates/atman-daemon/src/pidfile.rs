@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 pub fn default_pid_path() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("ATMAN_DAEMON_PID_PATH") {
+        return Ok(PathBuf::from(p));
+    }
     let base = directories::ProjectDirs::from("com", "atman", "atman")
         .context("no home dir")?
         .data_dir()
