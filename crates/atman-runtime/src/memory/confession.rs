@@ -152,6 +152,11 @@ impl ConfessionStore {
     }
 
     pub async fn find_by_trigger(&self, needle: &str) -> Result<Vec<Confession>, RuntimeError> {
+        if let Ok(Some(hits)) = self.find_by_trigger_fts(needle).await
+            && !hits.is_empty()
+        {
+            return Ok(hits);
+        }
         let all = self.list().await?;
         Ok(all
             .into_iter()
