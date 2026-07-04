@@ -205,16 +205,14 @@ async fn eval_bind_with_watches(
     let output = obs.output;
     tokio::pin!(output);
 
-    let mut window = String::new();
-    let mut tokens_seen = 0u64;
-    let mut abort_reason: Option<String> = None;
-
+    let mut state = StreamMonitor::new(&rules, ctx);
     let elapsed_active = rules.elapsed_ms_gt.is_some();
     let elapsed_deadline_ms = rules.elapsed_ms_gt.unwrap_or(u64::MAX / 2);
     let elapsed_sleep = tokio::time::sleep(tokio::time::Duration::from_millis(
         elapsed_deadline_ms.saturating_add(1),
     ));
     tokio::pin!(elapsed_sleep);
+    let started = std::time::Instant::now();
 
     let final_result = loop {
         tokio::select! {
@@ -222,35 +220,17 @@ async fn eval_bind_with_watches(
             ev = events.recv() => {
                 match ev {
                     Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
-                        tokens_seen = cumulative_tokens;
-                        window.push_str(&text);
-                        if window.len() > 512 {
-                            let drop = window.len() - 512;
-                            window.drain(..drop);
-                        }
-                        for (pat, reason) in &rules.token_matches {
-                            if window.contains(pat.as_str()) {
-                                abort_reason = Some(reason.clone());
-                                cancel.cancel();
-                                break;
-                            }
-                        }
-                        if let Some(limit) = rules.tokens_gt {
-                            if abort_reason.is_none() && tokens_seen > limit {
-                                abort_reason = Some(format!("tokens_consumed > {limit}"));
-                                cancel.cancel();
-                            }
-                        }
+                        state.on_chunk(&text, cumulative_tokens, started, &rules, &cancel);
                     }
                     Ok(NodeEvent::LlmDone { total_tokens }) => {
-                        tokens_seen = total_tokens.max(tokens_seen);
+                        state.on_done(total_tokens, started, &rules, &cancel);
                     }
                     Ok(_) => {}
                     Err(_) => {}
                 }
             }
-            _ = &mut elapsed_sleep, if elapsed_active && abort_reason.is_none() => {
-                abort_reason = Some(format!("elapsed > {elapsed_deadline_ms}ms"));
+            _ = &mut elapsed_sleep, if elapsed_active && state.abort_reason.is_none() => {
+                state.abort_reason = Some(format!("elapsed > {elapsed_deadline_ms}ms"));
                 cancel.cancel();
                 break Err(RuntimeError::Cancelled("elapsed".into()));
             }
@@ -264,41 +244,15 @@ async fn eval_bind_with_watches(
                 text,
                 cumulative_tokens,
             } => {
-                tokens_seen = cumulative_tokens.max(tokens_seen);
-                window.push_str(&text);
-                if window.len() > 512 {
-                    let drop = window.len() - 512;
-                    window.drain(..drop);
-                }
-                if abort_reason.is_none() {
-                    for (pat, reason) in &rules.token_matches {
-                        if window.contains(pat.as_str()) {
-                            abort_reason = Some(reason.clone());
-                            break;
-                        }
-                    }
-                }
-                if abort_reason.is_none() {
-                    if let Some(limit) = rules.tokens_gt {
-                        if tokens_seen > limit {
-                            abort_reason = Some(format!("tokens_consumed > {limit}"));
-                        }
-                    }
-                }
+                state.on_chunk(&text, cumulative_tokens, started, &rules, &cancel);
             }
             NodeEvent::LlmDone { total_tokens } => {
-                tokens_seen = total_tokens.max(tokens_seen);
-                if abort_reason.is_none() {
-                    if let Some(limit) = rules.tokens_gt {
-                        if tokens_seen > limit {
-                            abort_reason = Some(format!("tokens_consumed > {limit}"));
-                        }
-                    }
-                }
+                state.on_done(total_tokens, started, &rules, &cancel);
             }
             _ => {}
         }
     }
+    let mut abort_reason = state.abort_reason;
 
     match final_result {
         _ if abort_reason.is_some() => Ok(Value::Err(RuntimeError::Aborted(
@@ -314,6 +268,148 @@ struct WatchRules {
     token_matches: Vec<(String, String)>,
     tokens_gt: Option<u64>,
     elapsed_ms_gt: Option<u64>,
+    warn_token: Vec<WarnRule>,
+    warn_tokens_gt: Vec<(u64, WarnRule)>,
+    warn_elapsed_ms_gt: Vec<(u64, WarnRule)>,
+}
+
+#[derive(Clone)]
+struct WarnRule {
+    target: String,
+    message: String,
+    pattern: String,
+}
+
+fn render_warn_msg(msg: &Option<Expr>, fallback: &str) -> String {
+    match msg {
+        Some(Expr::Literal(atman_dsl::ast::Literal::Str(s))) => s.clone(),
+        _ => fallback.to_string(),
+    }
+}
+
+struct StreamMonitor<'a> {
+    window: String,
+    tokens_seen: u64,
+    abort_reason: Option<String>,
+    fired_warn_token: std::collections::HashSet<String>,
+    fired_warn_tokens: std::collections::HashSet<u64>,
+    fired_warn_elapsed: std::collections::HashSet<u64>,
+    ctx: &'a EvalCtx<'a>,
+}
+
+impl<'a> StreamMonitor<'a> {
+    fn new(_rules: &WatchRules, ctx: &'a EvalCtx<'a>) -> Self {
+        Self {
+            window: String::new(),
+            tokens_seen: 0,
+            abort_reason: None,
+            fired_warn_token: Default::default(),
+            fired_warn_tokens: Default::default(),
+            fired_warn_elapsed: Default::default(),
+            ctx,
+        }
+    }
+
+    fn push_window(&mut self, text: &str) {
+        self.window.push_str(text);
+        if self.window.len() > 512 {
+            let drop = self.window.len() - 512;
+            self.window.drain(..drop);
+        }
+    }
+
+    fn emit_warn(&self, rule: &WarnRule, trigger: &str) {
+        if let Some(sink) = self.ctx.events {
+            sink.emit(crate::event::Event::WatchWarn {
+                seq: 0,
+                turn_id: self.ctx.turn_id.clone(),
+                flow_run_id: self.ctx.flow_run_id.clone(),
+                target: rule.target.clone(),
+                trigger: trigger.to_string(),
+                message: rule.message.clone(),
+                ts: chrono::Utc::now(),
+            });
+        }
+    }
+
+    fn check_token_warns(&mut self, rules: &WatchRules) {
+        for rule in &rules.warn_token {
+            if !self.fired_warn_token.contains(&rule.pattern)
+                && self.window.contains(rule.pattern.as_str())
+            {
+                self.fired_warn_token.insert(rule.pattern.clone());
+                self.emit_warn(rule, &format!("token({})", rule.pattern));
+            }
+        }
+    }
+
+    fn check_tokens_consumed_warns(&mut self, rules: &WatchRules) {
+        for (threshold, rule) in &rules.warn_tokens_gt {
+            if !self.fired_warn_tokens.contains(threshold) && self.tokens_seen > *threshold {
+                self.fired_warn_tokens.insert(*threshold);
+                self.emit_warn(rule, &format!("tokens_consumed>{threshold}"));
+            }
+        }
+    }
+
+    fn check_elapsed_warns(&mut self, rules: &WatchRules, started: std::time::Instant) {
+        let elapsed = started.elapsed().as_millis() as u64;
+        for (threshold, rule) in &rules.warn_elapsed_ms_gt {
+            if !self.fired_warn_elapsed.contains(threshold) && elapsed > *threshold {
+                self.fired_warn_elapsed.insert(*threshold);
+                self.emit_warn(rule, &format!("elapsed>{threshold}ms"));
+            }
+        }
+    }
+
+    fn on_chunk(
+        &mut self,
+        text: &str,
+        cumulative_tokens: u64,
+        started: std::time::Instant,
+        rules: &WatchRules,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) {
+        self.tokens_seen = cumulative_tokens.max(self.tokens_seen);
+        self.push_window(text);
+        if self.abort_reason.is_none() {
+            for (pat, reason) in &rules.token_matches {
+                if self.window.contains(pat.as_str()) {
+                    self.abort_reason = Some(reason.clone());
+                    cancel.cancel();
+                    break;
+                }
+            }
+        }
+        if self.abort_reason.is_none()
+            && let Some(limit) = rules.tokens_gt
+            && self.tokens_seen > limit
+        {
+            self.abort_reason = Some(format!("tokens_consumed > {limit}"));
+            cancel.cancel();
+        }
+        self.check_token_warns(rules);
+        self.check_tokens_consumed_warns(rules);
+        self.check_elapsed_warns(rules, started);
+    }
+
+    fn on_done(
+        &mut self,
+        total_tokens: u64,
+        started: std::time::Instant,
+        rules: &WatchRules,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) {
+        self.tokens_seen = total_tokens.max(self.tokens_seen);
+        if self.abort_reason.is_none()
+            && let Some(limit) = rules.tokens_gt
+            && self.tokens_seen > limit
+        {
+            self.abort_reason = Some(format!("tokens_consumed > {limit}"));
+        }
+        self.check_tokens_consumed_warns(rules);
+        self.check_elapsed_warns(rules, started);
+    }
 }
 
 fn collect_watch_rules(watches: &[&WatchDecl]) -> WatchRules {
@@ -324,15 +420,31 @@ fn collect_watch_rules(watches: &[&WatchDecl]) -> WatchRules {
                 .actions
                 .iter()
                 .any(|a| matches!(a, WatchAction::Abort { .. }));
-            if !has_abort {
+            let warn_msg_expr = on.actions.iter().find_map(|a| match a {
+                WatchAction::Warn { msg } => Some(msg),
+                _ => None,
+            });
+            if !has_abort && warn_msg_expr.is_none() {
                 continue;
             }
             match &on.event {
                 WatchEvent::Token { patterns } => {
                     for p in patterns {
-                        rules
-                            .token_matches
-                            .push((p.clone(), format!("token match: {p}")));
+                        if has_abort {
+                            rules
+                                .token_matches
+                                .push((p.clone(), format!("token match: {p}")));
+                        }
+                        if let Some(msg_expr) = warn_msg_expr {
+                            rules.warn_token.push(WarnRule {
+                                target: w.target.name.clone(),
+                                message: render_warn_msg(
+                                    msg_expr,
+                                    &format!("watch warn: token `{p}`"),
+                                ),
+                                pattern: p.clone(),
+                            });
+                        }
                     }
                 }
                 WatchEvent::TokensConsumed { cmp, value }
@@ -343,10 +455,25 @@ fn collect_watch_rules(watches: &[&WatchDecl]) -> WatchRules {
                     } else {
                         *value
                     };
-                    rules.tokens_gt = Some(match rules.tokens_gt {
-                        Some(existing) => existing.min(threshold),
-                        None => threshold,
-                    });
+                    if has_abort {
+                        rules.tokens_gt = Some(match rules.tokens_gt {
+                            Some(existing) => existing.min(threshold),
+                            None => threshold,
+                        });
+                    }
+                    if let Some(msg_expr) = warn_msg_expr {
+                        rules.warn_tokens_gt.push((
+                            threshold,
+                            WarnRule {
+                                target: w.target.name.clone(),
+                                message: render_warn_msg(
+                                    msg_expr,
+                                    &format!("watch warn: tokens_consumed > {threshold}"),
+                                ),
+                                pattern: format!("tokens_consumed>{threshold}"),
+                            },
+                        ));
+                    }
                 }
                 WatchEvent::Elapsed { cmp, duration_ms }
                     if matches!(cmp, CmpOp::Gt | CmpOp::Ge) =>
@@ -356,10 +483,25 @@ fn collect_watch_rules(watches: &[&WatchDecl]) -> WatchRules {
                     } else {
                         *duration_ms
                     };
-                    rules.elapsed_ms_gt = Some(match rules.elapsed_ms_gt {
-                        Some(existing) => existing.min(threshold),
-                        None => threshold,
-                    });
+                    if has_abort {
+                        rules.elapsed_ms_gt = Some(match rules.elapsed_ms_gt {
+                            Some(existing) => existing.min(threshold),
+                            None => threshold,
+                        });
+                    }
+                    if let Some(msg_expr) = warn_msg_expr {
+                        rules.warn_elapsed_ms_gt.push((
+                            threshold,
+                            WarnRule {
+                                target: w.target.name.clone(),
+                                message: render_warn_msg(
+                                    msg_expr,
+                                    &format!("watch warn: elapsed > {threshold}ms"),
+                                ),
+                                pattern: format!("elapsed>{threshold}ms"),
+                            },
+                        ));
+                    }
                 }
                 _ => {}
             }

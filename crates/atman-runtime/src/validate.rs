@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use atman_dsl::ast::{Arg, Expr, FlowDecl, Node, Stmt};
+use atman_dsl::ast::{Arg, Expr, FlowDecl, Node, Stmt, WatchEvent};
 
 use crate::tool::ToolRegistry;
 
@@ -11,12 +11,23 @@ pub enum ValidationError {
 
     #[error("undefined tool `{0}`")]
     UndefinedTool(String),
+
+    #[error(
+        "watch on `{target}` uses event `{event}`, but bind is a {target_kind} node — expected one of {expected}"
+    )]
+    WatchEventMismatch {
+        target: String,
+        event: String,
+        target_kind: String,
+        expected: String,
+    },
 }
 
 pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
     let mut scope: HashSet<String> = flow.params.iter().map(|(id, _)| id.name.clone()).collect();
-    walk_stmts(&flow.body, &mut scope, tools, &mut errors);
+    let mut kinds: HashMap<String, &'static str> = HashMap::new();
+    walk_stmts(&flow.body, &mut scope, &mut kinds, tools, &mut errors);
     if errors.is_empty() {
         Ok(())
     } else {
@@ -24,9 +35,42 @@ pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<Validat
     }
 }
 
+fn infer_node_kind(value: &Expr) -> Option<&'static str> {
+    match value {
+        Expr::Node(Node::Llm { .. }) => Some("llm"),
+        Expr::Node(Node::ToolCall { path, .. }) => {
+            let name = path
+                .iter()
+                .map(|i| i.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            if name == "bash.exec" {
+                Some("bash.exec")
+            } else {
+                Some("tool_call")
+            }
+        }
+        Expr::Node(Node::Fanout { .. }) => Some("fanout"),
+        Expr::Node(Node::UserConfirm { .. }) => Some("user_confirm"),
+        Expr::Node(Node::Subflow { .. }) => Some("subflow"),
+        Expr::Node(Node::FixUntilTestPasses { .. }) => Some("fix_until"),
+        Expr::Node(Node::Message { .. }) => Some("message"),
+        _ => None,
+    }
+}
+
+fn watch_event_expected_kinds(event: &WatchEvent) -> &'static [&'static str] {
+    match event {
+        WatchEvent::Token { .. } => &["llm"],
+        WatchEvent::TokensConsumed { .. } => &["llm"],
+        WatchEvent::Elapsed { .. } => &["llm", "bash.exec", "tool_call", "subflow", "fix_until"],
+    }
+}
+
 fn walk_stmts(
     stmts: &[Stmt],
     scope: &mut HashSet<String>,
+    kinds: &mut HashMap<String, &'static str>,
     tools: &ToolRegistry,
     errors: &mut Vec<ValidationError>,
 ) {
@@ -34,20 +78,46 @@ fn walk_stmts(
         match stmt {
             Stmt::Bind { name, value } => {
                 walk_expr(value, scope, tools, errors);
+                if let Some(k) = infer_node_kind(value) {
+                    kinds.insert(name.name.clone(), k);
+                }
                 scope.insert(name.name.clone());
             }
             Stmt::When { cond, body } => {
                 walk_expr(cond, scope, tools, errors);
-                walk_stmts(body, scope, tools, errors);
+                walk_stmts(body, scope, kinds, tools, errors);
             }
             Stmt::Return { value } => walk_expr(value, scope, tools, errors),
             Stmt::Expr(e) => walk_expr(e, scope, tools, errors),
             Stmt::Watch(w) => {
                 if !scope.contains(&w.target.name) {
                     errors.push(ValidationError::UndefinedVar(w.target.name.clone()));
+                    continue;
+                }
+                let Some(target_kind) = kinds.get(&w.target.name).copied() else {
+                    continue;
+                };
+                for on in &w.on_blocks {
+                    let expected = watch_event_expected_kinds(&on.event);
+                    if !expected.contains(&target_kind) {
+                        errors.push(ValidationError::WatchEventMismatch {
+                            target: w.target.name.clone(),
+                            event: watch_event_label(&on.event).into(),
+                            target_kind: target_kind.into(),
+                            expected: expected.join(", "),
+                        });
+                    }
                 }
             }
         }
+    }
+}
+
+fn watch_event_label(event: &WatchEvent) -> &'static str {
+    match event {
+        WatchEvent::Token { .. } => "token",
+        WatchEvent::TokensConsumed { .. } => "tokens_consumed",
+        WatchEvent::Elapsed { .. } => "elapsed",
     }
 }
 
@@ -209,6 +279,38 @@ mod tests {
         let file = parse_file(src).unwrap();
         let errs = validate(&file.flows[0], &registry_with_fs()).unwrap_err();
         assert!(errs.len() >= 2);
+    }
+
+    #[test]
+    fn watch_on_llm_bind_with_token_event_is_ok() {
+        let src = r#"flow r() -> string {
+    x = llm { model: "m", prompt: "hi" }
+    watch x { on token(match: "bad") { abort("no") } }
+    return x
+}
+"#;
+        let file = parse_file(src).unwrap();
+        validate(&file.flows[0], &registry_with_fs()).expect("token on llm is fine");
+    }
+
+    #[test]
+    fn watch_token_on_non_llm_bind_is_rejected() {
+        let src = r#"flow r(p: path) -> string {
+    body = fs.read(p)
+    watch body { on token(match: "bad") { warn() } }
+    return body
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let errs = validate(&file.flows[0], &registry_with_fs()).unwrap_err();
+        let mismatch = errs
+            .iter()
+            .find(|e| matches!(e, ValidationError::WatchEventMismatch { .. }))
+            .expect("expected WatchEventMismatch");
+        let msg = mismatch.to_string();
+        assert!(msg.contains("body"), "msg: {msg}");
+        assert!(msg.contains("token"), "msg: {msg}");
+        assert!(msg.contains("llm"), "msg: {msg}");
     }
 
     #[test]

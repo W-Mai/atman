@@ -147,6 +147,16 @@ pub enum Event {
         budget_tokens: u64,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    WatchWarn {
+        #[serde(default)]
+        seq: u64,
+        turn_id: Option<TurnId>,
+        flow_run_id: Option<FlowRunId>,
+        target: String,
+        trigger: String,
+        message: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 impl Event {
@@ -164,7 +174,8 @@ impl Event {
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
             | Event::ContextCompact { seq, .. }
-            | Event::ContextTruncated { seq, .. } => *seq = new_seq,
+            | Event::ContextTruncated { seq, .. }
+            | Event::WatchWarn { seq, .. } => *seq = new_seq,
         }
     }
 
@@ -182,7 +193,8 @@ impl Event {
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
             | Event::ContextCompact { seq, .. }
-            | Event::ContextTruncated { seq, .. } => *seq,
+            | Event::ContextTruncated { seq, .. }
+            | Event::WatchWarn { seq, .. } => *seq,
         }
     }
 }
