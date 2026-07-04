@@ -59,6 +59,36 @@ fn cloned_sink_shares_counter_state() {
 }
 
 #[test]
+fn next_seq_peek_does_not_advance_counter() {
+    let sink = EventSink::new();
+    let a = sink.next_seq_peek();
+    let b = sink.next_seq_peek();
+    let c = sink.next_seq_peek();
+    assert_eq!(a, 1);
+    assert_eq!(b, 1);
+    assert_eq!(
+        c, 1,
+        "peek must be idempotent — anchor labels rely on this being non-reserving"
+    );
+    sink.emit(make_flow_start());
+    assert_eq!(sink.next_seq_peek(), 2);
+}
+
+#[test]
+fn reserve_seq_advances_counter_atomically() {
+    let sink = EventSink::new();
+    let a = sink.reserve_seq();
+    let b = sink.reserve_seq();
+    let c = sink.reserve_seq();
+    assert_eq!((a, b, c), (1, 2, 3));
+    assert_eq!(
+        sink.next_seq_peek(),
+        4,
+        "peek after 3 reservations must see counter=3, next=4"
+    );
+}
+
+#[test]
 fn seq_is_serialized_to_json() {
     let sink = EventSink::new();
     sink.emit(make_flow_start());

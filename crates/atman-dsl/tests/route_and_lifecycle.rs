@@ -98,6 +98,45 @@ flow chat() -> string {
 }
 
 #[test]
+fn parses_all_four_lifecycle_variants() {
+    let src = r#"on session.start { x = 1 }
+on session.end { x = 2 }
+on turn.start { x = 3 }
+on turn.end { x = 4 }
+
+flow t() -> Int { return 0 }
+"#;
+    let file = parse_file(src).unwrap();
+    assert_eq!(file.lifecycles.len(), 4);
+    assert!(matches!(
+        file.lifecycles[0].event,
+        LifecycleEvent::SessionStart
+    ));
+    assert!(matches!(
+        file.lifecycles[1].event,
+        LifecycleEvent::SessionEnd
+    ));
+    assert!(matches!(
+        file.lifecycles[2].event,
+        LifecycleEvent::TurnStart
+    ));
+    assert!(matches!(file.lifecycles[3].event, LifecycleEvent::TurnEnd));
+}
+
+#[test]
+fn unknown_lifecycle_event_rejected_with_helpful_message() {
+    let src = r#"on flow.start { x = 1 }
+flow t() -> Int { return 0 }
+"#;
+    let err = parse_file(src).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unknown lifecycle") || msg.contains("flow.start"),
+        "expected diagnostic mentioning lifecycle/flow.start, got: {msg}"
+    );
+}
+
+#[test]
 fn duplicate_default_route_rejected() {
     let src = r#"default_route { flow: a }
 default_route { flow: b }
