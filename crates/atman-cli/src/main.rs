@@ -690,6 +690,14 @@ async fn cmd_repl() -> Result<()> {
     }
     attach_memory_stores(&mut executor, session.dir(), false)?;
 
+    let lifecycles = match config_dir() {
+        Ok(cfg) => atman_runtime::lifecycle::LifecycleRunner::from_dir(&cfg),
+        Err(_) => atman_runtime::lifecycle::LifecycleRunner::new(),
+    };
+    lifecycles
+        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
+        .await;
+
     if let Err(e) = run_boot_flow(&executor).await {
         eprintln!("[atman] boot flow error: {e}");
     }
@@ -733,6 +741,7 @@ async fn cmd_repl() -> Result<()> {
         run_turn_with_interjection(
             &session,
             &executor,
+            &lifecycles,
             &text,
             &mut pending,
             kind,
@@ -741,6 +750,10 @@ async fn cmd_repl() -> Result<()> {
         )
         .await;
     }
+
+    lifecycles
+        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
+        .await;
 
     session.shutdown().await;
     drop(executor);
@@ -798,6 +811,7 @@ enum TurnKind {
 async fn run_turn_with_interjection(
     session: &Session,
     executor: &Executor,
+    lifecycles: &atman_runtime::lifecycle::LifecycleRunner,
     raw_line: &str,
     pending: &mut PendingUserMessage,
     kind: TurnKind,
@@ -810,6 +824,9 @@ async fn run_turn_with_interjection(
     let turn_id = atman_runtime::event::TurnId::now();
     let user_msg = build_user_message(&text, &attachments, turn_id.clone());
     session.begin_turn(user_msg);
+    lifecycles
+        .fire(executor, atman_dsl::ast::LifecycleEvent::TurnStart)
+        .await;
 
     let flow_fut = async {
         match kind {
@@ -841,6 +858,9 @@ async fn run_turn_with_interjection(
         Ok(v) => println!("{}", render_value(&v)),
         Err(e) => eprintln!("error: {e}"),
     }
+    lifecycles
+        .fire(executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
+        .await;
     session.end_turn();
 }
 

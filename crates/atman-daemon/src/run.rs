@@ -112,12 +112,17 @@ async fn run_flow_inner(
     let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
         events: session.sink().clone(),
         mock: false,
-        config_dir,
+        config_dir: config_dir.clone(),
         project_root: project_root.clone(),
         home_dir,
     })
     .await?;
     let mut executor = outcome.executor;
+
+    let lifecycles = match &config_dir {
+        Some(c) => atman_runtime::lifecycle::LifecycleRunner::from_dir(c),
+        None => atman_runtime::lifecycle::LifecycleRunner::new(),
+    };
 
     let confession_root = project_root.join(".atman");
     let _ = std::fs::create_dir_all(&confession_root);
@@ -155,12 +160,19 @@ async fn run_flow_inner(
         );
     }
 
+    lifecycles
+        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
+        .await;
+
     let turn_id = atman_runtime::event::TurnId::now();
     let user_msg = atman_runtime::message::Message::user_text(
         turn_id.clone(),
         format!("daemon run {} flow={flow_name}", path.display()),
     );
     session.begin_turn(user_msg);
+    lifecycles
+        .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
+        .await;
     let _result = executor
         .run_in_turn_with_run_id(
             &parsed,
@@ -171,6 +183,12 @@ async fn run_flow_inner(
             Some(run_id),
         )
         .await;
+    lifecycles
+        .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
+        .await;
     session.end_turn();
+    lifecycles
+        .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
+        .await;
     Ok(())
 }

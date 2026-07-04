@@ -9,6 +9,7 @@ pub mod exec;
 pub mod executor;
 pub mod hunk;
 pub mod injection;
+pub mod lifecycle;
 pub mod mcp;
 pub mod memory;
 pub mod message;

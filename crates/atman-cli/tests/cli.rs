@@ -224,6 +224,62 @@ fn repl_runs_boot_flow_at_startup() {
 }
 
 #[test]
+fn repl_fires_dsl_on_session_start_body_at_startup() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    std::fs::write(
+        cfg.path().join("lifecycle.at"),
+        r#"on session.start {
+    memory.todo.set(
+        where: "boot",
+        why: "dsl lifecycle",
+        how: "on session.start",
+        expected_result: "todo persisted"
+    )
+}
+"#,
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b":exit\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let sessions_dir = data.path().join("sessions");
+    let sid_dir = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let todos_path = sid_dir.join("todos.jsonl");
+    assert!(
+        todos_path.exists(),
+        "expected todos.jsonl at {}",
+        todos_path.display()
+    );
+    let contents = std::fs::read_to_string(&todos_path).unwrap();
+    assert!(
+        contents.contains("dsl lifecycle"),
+        "todos.jsonl: {contents}"
+    );
+}
+
+#[test]
 fn repl_route_dsl_dispatches_by_prefix() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
