@@ -1102,14 +1102,23 @@ pre{white-space:pre-wrap;word-break:break-all;margin:0;font-family:'SF Mono',Men
 .type{color:#79c0ff;font-weight:600}
 .ts{color:#6e7681;font-size:10px}
 </style></head><body>
-<h1>atman monitor · <span id="hint">select a session</span></h1>
+<h1>atman monitor · <span id="hint">select a session</span> <small id="mode" style="color:#6e7681;font-weight:400;font-size:12px"></small></h1>
 <div class="row">
   <div class="pane" style="flex:0 0 260px" id="sessions"><em>loading sessions…</em></div>
   <div class="pane" id="events"><em>← pick a session on the left</em></div>
 </div>
 <script>
+const params = new URLSearchParams(location.search);
+const daemonBase = params.get('daemon') || '';
+const daemonToken = params.get('token') || '';
+const useSse = daemonBase.length > 0;
+document.getElementById('mode').textContent = useSse ? '· sse mode via ' + daemonBase : '· file-tail mode (poll 5s)';
+let activeSse = null;
+
 async function fetchJson(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status);return r.json();}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function eventBlock(e){return `<div class="event ${esc(e.type||'')}"><span class="type">${esc(e.type||'?')}</span> <span class="ts">${esc(e.ts||'')}</span><pre>${esc(JSON.stringify(e,null,2))}</pre></div>`;}
+
 async function loadSessions(){
   const list=await fetchJson('/api/sessions');
   const el=document.getElementById('sessions');
@@ -1120,10 +1129,28 @@ async function loadSessions(){
 async function loadEvents(sid){
   document.getElementById('hint').textContent=sid;
   document.querySelectorAll('.sess').forEach(n=>n.classList.toggle('active',n.dataset.id===sid));
-  const ev=await fetchJson('/api/sessions/'+encodeURIComponent(sid)+'/events');
   const box=document.getElementById('events');
-  if(!ev.length){box.innerHTML='<em>empty session</em>';return;}
-  box.innerHTML=ev.map(e=>`<div class="event ${esc(e.type||'')}"><span class="type">${esc(e.type||'?')}</span> <span class="ts">${esc(e.ts||'')}</span><pre>${esc(JSON.stringify(e,null,2))}</pre></div>`).join('');
+  if(activeSse){activeSse.close();activeSse=null;}
+  if(useSse){
+    const url = daemonBase + '/events?session_id=' + encodeURIComponent(sid) + (daemonToken?'&token='+encodeURIComponent(daemonToken):'');
+    box.innerHTML='<em>connecting sse…</em>';
+    const es = new EventSource(url);
+    activeSse = es;
+    let first = true;
+    es.addEventListener('event', ev => {
+      try {
+        const e = JSON.parse(ev.data);
+        if(first){box.innerHTML='';first=false;}
+        box.insertAdjacentHTML('beforeend', eventBlock(e));
+        box.scrollTop = box.scrollHeight;
+      }catch(_){}
+    });
+    es.onerror = () => {box.insertAdjacentHTML('beforeend','<div class="event error"><span class="type">sse disconnected</span></div>');};
+  } else {
+    const ev = await fetchJson('/api/sessions/'+encodeURIComponent(sid)+'/events');
+    if(!ev.length){box.innerHTML='<em>empty session</em>';return;}
+    box.innerHTML=ev.map(eventBlock).join('');
+  }
 }
 loadSessions();
 setInterval(loadSessions,5000);

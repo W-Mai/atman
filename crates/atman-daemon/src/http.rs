@@ -123,19 +123,35 @@ async fn require_bearer(
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) else {
-        return (StatusCode::UNAUTHORIZED, "missing Authorization header").into_response();
-    };
-    let Ok(auth_str) = auth.to_str() else {
-        return (StatusCode::UNAUTHORIZED, "invalid Authorization header").into_response();
-    };
-    let Some(token) = auth_str.strip_prefix("Bearer ") else {
-        return (StatusCode::UNAUTHORIZED, "expected Bearer scheme").into_response();
-    };
-    if !constant_time_eq(token.as_bytes(), state.auth_token.as_bytes()) {
+    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION)
+        && let Ok(auth_str) = auth.to_str()
+        && let Some(token) = auth_str.strip_prefix("Bearer ")
+    {
+        if constant_time_eq(token.as_bytes(), state.auth_token.as_bytes()) {
+            return next.run(req).await;
+        }
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    next.run(req).await
+    // EventSource in browsers cannot set headers, so accept ?token=<t> as a fallback on GET.
+    if req.method() == axum::http::Method::GET
+        && let Some(q) = req.uri().query()
+    {
+        for pair in q.split('&') {
+            if let Some(rest) = pair.strip_prefix("token=") {
+                let decoded = urlencoding::decode(rest)
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| rest.to_string());
+                if constant_time_eq(decoded.as_bytes(), state.auth_token.as_bytes()) {
+                    return next.run(req).await;
+                }
+            }
+        }
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        "missing or invalid Authorization / token",
+    )
+        .into_response()
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
