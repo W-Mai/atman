@@ -12,7 +12,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -59,15 +59,25 @@ pub struct SseQuery {
 async fn sse_handler(
     State(state): State<Arc<HttpState>>,
     Query(q): Query<SseQuery>,
+    headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::io::Error>>>, (StatusCode, String)> {
     let events_path = state
         .daemon
         .sessions_root()
         .join(q.session_id.0.to_string())
         .join("events.jsonl");
-    let start = q.since_seq.unwrap_or(0);
-    let stream = tail_events_stream(events_path, start);
+    let start = q.since_seq.or_else(|| last_event_id(&headers)).unwrap_or(0);
+    let prelude =
+        futures::stream::once(async { Ok(Event::default().retry(Duration::from_millis(3000))) });
+    let stream = prelude.chain(tail_events_stream(events_path, start));
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+fn last_event_id(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
 }
 
 fn tail_events_stream(

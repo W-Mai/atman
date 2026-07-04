@@ -1122,8 +1122,13 @@ pre{white-space:pre-wrap;word-break:break-all;margin:0;font-family:'SF Mono',Men
 .event.error{border-left-color:#f85149}
 .type{color:#79c0ff;font-weight:600}
 .ts{color:#6e7681;font-size:10px}
+.pill{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;vertical-align:middle}
+.pill.hidden{display:none}
+.pill.connecting{background:#5a4a1a;color:#f0c674}
+.pill.connected{background:#1a4a2a;color:#7ee787}
+.pill.disconnected{background:#4a1a1a;color:#f85149}
 </style></head><body>
-<h1>atman monitor · <span id="hint">select a session</span> <small id="mode" style="color:#6e7681;font-weight:400;font-size:12px"></small></h1>
+<h1>atman monitor · <span id="hint">select a session</span> <small id="mode" style="color:#6e7681;font-weight:400;font-size:12px"></small><span id="ssePill" class="pill hidden"></span></h1>
 <div class="row">
   <div class="pane" style="flex:0 0 260px" id="sessions"><em>loading sessions…</em></div>
   <div class="pane" id="events"><em>← pick a session on the left</em></div>
@@ -1139,6 +1144,12 @@ let activeSse = null;
 async function fetchJson(url){const r=await fetch(url);if(!r.ok)throw new Error(r.status);return r.json();}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function eventBlock(e){return `<div class="event ${esc(e.type||'')}"><span class="type">${esc(e.type||'?')}</span> <span class="ts">${esc(e.ts||'')}</span><pre>${esc(JSON.stringify(e,null,2))}</pre></div>`;}
+function setSseState(state){
+  const pill=document.getElementById('ssePill');
+  if(!state){pill.className='pill hidden';pill.textContent='';return;}
+  const label={connecting:'SSE: connecting…',connected:'SSE: live',disconnected:'SSE: reconnecting…'}[state]||state;
+  pill.className='pill '+state;pill.textContent=label;
+}
 
 async function loadSessions(){
   const list=await fetchJson('/api/sessions');
@@ -1155,9 +1166,11 @@ async function loadEvents(sid){
   if(useSse){
     const url = daemonBase + '/events?session_id=' + encodeURIComponent(sid) + (daemonToken?'&token='+encodeURIComponent(daemonToken):'');
     box.innerHTML='<em>connecting sse…</em>';
+    setSseState('connecting');
     const es = new EventSource(url);
     activeSse = es;
     let first = true;
+    es.onopen = () => { setSseState('connected'); };
     es.addEventListener('event', ev => {
       try {
         const e = JSON.parse(ev.data);
@@ -1166,8 +1179,9 @@ async function loadEvents(sid){
         box.scrollTop = box.scrollHeight;
       }catch(_){}
     });
-    es.onerror = () => {box.insertAdjacentHTML('beforeend','<div class="event error"><span class="type">sse disconnected</span></div>');};
+    es.onerror = () => { setSseState('disconnected'); };
   } else {
+    setSseState(null);
     const ev = await fetchJson('/api/sessions/'+encodeURIComponent(sid)+'/events');
     if(!ev.length){box.innerHTML='<em>empty session</em>';return;}
     box.innerHTML=ev.map(eventBlock).join('');
