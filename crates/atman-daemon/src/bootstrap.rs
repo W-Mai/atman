@@ -57,13 +57,26 @@ pub fn attach_memory_stores(
     confession_root: &Path,
     spec_root: &Path,
 ) {
+    let project_index = match atman_runtime::index::AnchorIndex::open_project(confession_root) {
+        Ok(idx) => Some(Arc::new(idx)),
+        Err(e) => {
+            eprintln!(
+                "[atman] project anchor index unavailable at {} — memory dual-write disabled: {e}",
+                confession_root.display()
+            );
+            None
+        }
+    };
     let todo_store = Arc::new(atman_runtime::memory::todo::TodoStore::at(session_dir));
-    let confession_store = Arc::new(atman_runtime::memory::confession::ConfessionStore::at(
-        confession_root,
-    ));
-    let spec_store = Arc::new(atman_runtime::memory::spec::SpecStore::new(
-        spec_root.to_path_buf(),
-    ));
+    let mut confession_store =
+        atman_runtime::memory::confession::ConfessionStore::at(confession_root);
+    let mut spec_store = atman_runtime::memory::spec::SpecStore::new(spec_root.to_path_buf());
+    if let Some(idx) = &project_index {
+        confession_store = confession_store.with_index(idx.clone());
+        spec_store = spec_store.with_index(idx.clone());
+    }
+    let confession_store = Arc::new(confession_store);
+    let spec_store = Arc::new(spec_store);
     tools::register_memory(&mut executor.tools, todo_store, confession_store);
     tools::register_spec_memory(&mut executor.tools, spec_store);
 }

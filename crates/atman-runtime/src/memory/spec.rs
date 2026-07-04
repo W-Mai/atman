@@ -1,9 +1,11 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use super::MemoryId;
 use crate::error::RuntimeError;
+use crate::index::AnchorIndex;
 
 const PHASES: &[&str] = &[
     "research",
@@ -35,11 +37,20 @@ pub struct SpecDeviation {
 #[derive(Clone)]
 pub struct SpecStore {
     root: PathBuf,
+    anchor_index: Option<Arc<AnchorIndex>>,
 }
 
 impl SpecStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            anchor_index: None,
+        }
+    }
+
+    pub fn with_index(mut self, index: Arc<AnchorIndex>) -> Self {
+        self.anchor_index = Some(index);
+        self
     }
 
     fn feature_dir(&self, feature: &str) -> PathBuf {
@@ -100,6 +111,14 @@ impl SpecStore {
             ts: chrono::Utc::now(),
         };
         super::append_jsonl(&self.entries_path(feature), &entry).await?;
+        if let Some(idx) = &self.anchor_index
+            && let Err(e) = insert_entry(idx, &entry)
+        {
+            eprintln!(
+                "[atman] spec entry index insert failed (id={}): {e}",
+                entry.id
+            );
+        }
         Ok(entry)
     }
 
@@ -125,6 +144,14 @@ impl SpecStore {
             ts: chrono::Utc::now(),
         };
         super::append_jsonl(&self.deviations_path(feature), &dev).await?;
+        if let Some(idx) = &self.anchor_index
+            && let Err(e) = insert_deviation(idx, &dev)
+        {
+            eprintln!(
+                "[atman] spec deviation index insert failed (id={}): {e}",
+                dev.id
+            );
+        }
         Ok(dev)
     }
 
@@ -135,6 +162,47 @@ impl SpecStore {
     pub async fn entries(&self, feature: &str) -> Result<Vec<SpecEntry>, RuntimeError> {
         super::read_jsonl(&self.entries_path(feature)).await
     }
+}
+
+fn insert_entry(index: &AnchorIndex, entry: &SpecEntry) -> rusqlite::Result<()> {
+    let conn = index.conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO spec_entries (id, feature, phase, content, ts) VALUES (?, ?, ?, ?, ?)",
+        rusqlite::params![
+            entry.id.to_string(),
+            entry.feature,
+            entry.phase,
+            entry.content,
+            entry.ts.to_rfc3339(),
+        ],
+    )?;
+    let rowid = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT OR REPLACE INTO spec_entries_fts (rowid, content) VALUES (?, ?)",
+        rusqlite::params![rowid, entry.content],
+    )?;
+    Ok(())
+}
+
+fn insert_deviation(index: &AnchorIndex, dev: &SpecDeviation) -> rusqlite::Result<()> {
+    let conn = index.conn();
+    conn.execute(
+        "INSERT OR REPLACE INTO spec_deviations (id, feature, section, delta, reason, ts) VALUES (?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            dev.id.to_string(),
+            dev.feature,
+            dev.section,
+            dev.delta,
+            dev.reason,
+            dev.ts.to_rfc3339(),
+        ],
+    )?;
+    let rowid = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT OR REPLACE INTO spec_deviations_fts (rowid, delta, reason) VALUES (?, ?, ?)",
+        rusqlite::params![rowid, dev.delta, dev.reason],
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,6 +329,71 @@ mod tests {
         let devs = s.deviations("x").await.unwrap();
         assert_eq!(devs.len(), 2);
         assert_eq!(s.status("x").await.unwrap().deviation_count, 2);
+    }
+
+    #[tokio::test]
+    async fn update_and_deviate_dual_write_to_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = std::sync::Arc::new(AnchorIndex::open_project(dir.path()).unwrap());
+        let s = SpecStore::new(dir.path().to_path_buf()).with_index(index.clone());
+        s.update(
+            "feat_x",
+            "research",
+            "supercalifragilistic research notes".into(),
+        )
+        .await
+        .unwrap();
+        s.update(
+            "feat_x",
+            "design",
+            "midordermetamorphosis design notes".into(),
+        )
+        .await
+        .unwrap();
+        s.deviate(
+            "feat_x",
+            "sec".into(),
+            "hyperloquacious delta text".into(),
+            "quintessentialpolyphony reason text".into(),
+        )
+        .await
+        .unwrap();
+
+        let conn = index.conn();
+        let entry_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spec_entries",
+                rusqlite::params![],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let dev_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spec_deviations",
+                rusqlite::params![],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entry_count, 2);
+        assert_eq!(dev_count, 1);
+
+        let entry_fts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spec_entries_fts WHERE spec_entries_fts MATCH ?",
+                rusqlite::params!["supercalifragilistic"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(entry_fts, 1);
+
+        let dev_fts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM spec_deviations_fts WHERE spec_deviations_fts MATCH ?",
+                rusqlite::params!["quintessentialpolyphony"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dev_fts, 1);
     }
 
     #[tokio::test]

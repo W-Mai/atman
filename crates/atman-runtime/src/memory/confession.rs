@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::RuntimeError;
+use crate::index::AnchorIndex;
 use crate::memory::{MemoryId, append_jsonl, read_jsonl};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,13 +61,23 @@ impl Confession {
 pub struct ConfessionStore {
     dir: PathBuf,
     index_path: PathBuf,
+    anchor_index: Option<Arc<AnchorIndex>>,
 }
 
 impl ConfessionStore {
     pub fn at(scope_dir: impl AsRef<Path>) -> Self {
         let dir = scope_dir.as_ref().to_path_buf();
         let index_path = dir.join("confessions.jsonl");
-        Self { dir, index_path }
+        Self {
+            dir,
+            index_path,
+            anchor_index: None,
+        }
+    }
+
+    pub fn with_index(mut self, index: Arc<AnchorIndex>) -> Self {
+        self.anchor_index = Some(index);
+        self
     }
 
     pub async fn append(&self, confession: Confession) -> Result<MemoryId, RuntimeError> {
@@ -78,7 +90,61 @@ impl ConfessionStore {
             .await
             .map_err(|e| RuntimeError::ToolFailed(format!("write {}: {e}", md_path.display())))?;
         append_jsonl(&self.index_path, &confession).await?;
+        if let Some(idx) = &self.anchor_index
+            && let Err(e) = insert_confession(idx, &confession)
+        {
+            eprintln!("[atman] confession index insert failed (id={id}): {e}");
+        }
         Ok(id)
+    }
+
+    pub async fn find_by_trigger_fts(
+        &self,
+        query: &str,
+    ) -> Result<Option<Vec<Confession>>, RuntimeError> {
+        let Some(idx) = self.anchor_index.as_deref() else {
+            return Ok(None);
+        };
+        let conn = idx.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.trigger, c.rule_violated, c.what_i_did, c.why, c.mitigation, c.created_at \
+                 FROM confessions c \
+                 JOIN confessions_fts f ON f.rowid = c.rowid \
+                 WHERE f.confessions_fts MATCH ? \
+                 ORDER BY c.rowid",
+            )
+            .map_err(|e| RuntimeError::ToolFailed(format!("fts prepare: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params![query], |row| {
+                let created_at: String = row.get(6)?;
+                let created = chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                let id_str: String = row.get(0)?;
+                let id = uuid::Uuid::parse_str(&id_str)
+                    .map(MemoryId)
+                    .unwrap_or_else(|_| MemoryId::now());
+                Ok(Confession {
+                    id,
+                    trigger: row.get(1)?,
+                    rule_violated: row.get(2)?,
+                    what_i_did: row.get(3)?,
+                    why: row.get(4)?,
+                    mitigation: row.get(5)?,
+                    anchors: Vec::new(),
+                    created_at: created,
+                })
+            })
+            .map_err(|e| RuntimeError::ToolFailed(format!("fts query: {e}")))?;
+        let mut out = Vec::new();
+        for r in rows {
+            match r {
+                Ok(c) => out.push(c),
+                Err(e) => return Err(RuntimeError::ToolFailed(format!("fts row: {e}"))),
+            }
+        }
+        Ok(Some(out))
     }
 
     pub async fn list(&self) -> Result<Vec<Confession>, RuntimeError> {
@@ -100,6 +166,51 @@ impl ConfessionStore {
     pub fn index_path(&self) -> &Path {
         &self.index_path
     }
+}
+
+fn insert_confession(index: &AnchorIndex, c: &Confession) -> rusqlite::Result<()> {
+    let conn = index.conn();
+    let body = c.render_md();
+    conn.execute(
+        "INSERT OR REPLACE INTO confessions \
+           (id, trigger, rule_violated, what_i_did, why, mitigation, body, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            c.id.to_string(),
+            c.trigger,
+            c.rule_violated,
+            c.what_i_did,
+            c.why,
+            c.mitigation,
+            body,
+            c.created_at.to_rfc3339(),
+        ],
+    )?;
+    let rowid: i64 = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT OR REPLACE INTO confessions_fts \
+           (rowid, trigger, rule_violated, what_i_did, why, mitigation, body) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            rowid,
+            c.trigger,
+            c.rule_violated,
+            c.what_i_did,
+            c.why,
+            c.mitigation,
+            body,
+        ],
+    )?;
+    for anchor in &c.anchors {
+        if let Some((kind, r)) = anchor.split_once(':') {
+            conn.execute(
+                "INSERT INTO anchors (kind, ref, subject_kind, subject_id, session_id, created_at) \
+                 VALUES (?, ?, 'confession', ?, NULL, ?)",
+                rusqlite::params![kind, r, c.id.to_string(), c.created_at.to_rfc3339()],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -155,6 +266,69 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = ConfessionStore::at(dir.path());
         assert!(store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn append_with_index_populates_confessions_and_fts() {
+        let dir = TempDir::new().unwrap();
+        let index = Arc::new(AnchorIndex::open_project(dir.path()).unwrap());
+        let store = ConfessionStore::at(dir.path()).with_index(index.clone());
+        let mut c = sample("comment discipline yet again", "no-narrative-comments");
+        c.anchors = vec!["flow_run:00000000-0000-0000-0000-000000000001".into()];
+        store.append(c).await.unwrap();
+
+        let conn = index.conn();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM confessions",
+                rusqlite::params![],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let fts_hit: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM confessions_fts WHERE confessions_fts MATCH ?",
+                rusqlite::params!["narrative"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_hit, 1, "fts should find `narrative` in rule_violated");
+
+        let anchor_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM anchors WHERE kind='flow_run'",
+                rusqlite::params![],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(anchor_count, 1);
+    }
+
+    #[tokio::test]
+    async fn find_by_trigger_fts_returns_none_without_index() {
+        let dir = TempDir::new().unwrap();
+        let store = ConfessionStore::at(dir.path());
+        assert!(store.find_by_trigger_fts("x").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn find_by_trigger_fts_returns_matching_rows() {
+        let dir = TempDir::new().unwrap();
+        let index = Arc::new(AnchorIndex::open_project(dir.path()).unwrap());
+        let store = ConfessionStore::at(dir.path()).with_index(index);
+        store
+            .append(sample("boot flow crash", "no-panic-in-boot"))
+            .await
+            .unwrap();
+        store
+            .append(sample("type safety again", "no-as-any"))
+            .await
+            .unwrap();
+        let hits = store.find_by_trigger_fts("boot").await.unwrap().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_violated, "no-panic-in-boot");
     }
 
     #[tokio::test]
