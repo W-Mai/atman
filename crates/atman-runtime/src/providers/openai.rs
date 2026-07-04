@@ -53,11 +53,24 @@ impl OpenAiProvider {
         for m in &req.messages {
             wire_messages.push(build_wire_message(m));
         }
+        let tools: Vec<WireToolSpec> = req
+            .tools
+            .iter()
+            .map(|t| WireToolSpec {
+                kind: "function",
+                function: WireToolFunction {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.input_schema.clone(),
+                },
+            })
+            .collect();
         ChatCompletionsRequest {
             model: req.model.clone(),
             stream,
             max_tokens: self.max_tokens,
             messages: wire_messages,
+            tools,
         }
     }
 
@@ -453,6 +466,23 @@ struct ChatCompletionsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireToolSpec>,
+}
+
+#[derive(Serialize)]
+struct WireToolSpec {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireToolFunction,
+}
+
+#[derive(Serialize)]
+struct WireToolFunction {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    parameters: serde_json::Value,
 }
 
 #[derive(Serialize)]

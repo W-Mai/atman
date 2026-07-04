@@ -47,25 +47,44 @@ impl AnthropicProvider {
         self
     }
 
-    fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
+    fn build_body(&self, req: &LlmRequest, stream: bool) -> MessagesRequest {
         let mut wire_messages = Vec::with_capacity(req.messages.len());
         for (idx, m) in req.messages.iter().enumerate() {
             let is_last_user =
                 idx + 1 == req.messages.len() && m.role == MessageRole::User && req.cache_prompt;
             wire_messages.push(build_wire_message(m, is_last_user));
         }
-        let body = MessagesRequest {
+        let tools: Vec<WireTool> = req
+            .tools
+            .iter()
+            .map(|t| WireTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema.clone(),
+            })
+            .collect();
+        MessagesRequest {
             model: req.model.clone(),
             max_tokens: self.max_tokens,
             stream,
             system: req.system.clone(),
             messages: wire_messages,
-        };
+            tools,
+        }
+    }
+
+    fn build_request(&self, req: &LlmRequest, stream: bool) -> reqwest::RequestBuilder {
+        let body = self.build_body(req, stream);
         self.client
             .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", &self.anthropic_version)
             .json(&body)
+    }
+
+    #[doc(hidden)]
+    pub fn wire_body_bytes(&self, req: &LlmRequest, stream: bool) -> Vec<u8> {
+        serde_json::to_vec(&self.build_body(req, stream)).expect("serialize wire body")
     }
 }
 
@@ -371,6 +390,16 @@ struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
     messages: Vec<WireMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool>,
+}
+
+#[derive(Serialize)]
+struct WireTool {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    input_schema: serde_json::Value,
 }
 
 #[derive(Serialize)]

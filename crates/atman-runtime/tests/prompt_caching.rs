@@ -44,6 +44,7 @@ async fn cache_prompt_true_sends_ephemeral_cache_control() {
             input: Value::Unit,
             schema: None,
             cache_prompt: true,
+            tools: Vec::new(),
         })
         .await
         .unwrap();
@@ -81,6 +82,7 @@ async fn cache_prompt_false_sends_plain_string_content() {
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
+            tools: Vec::new(),
         })
         .await
         .unwrap();

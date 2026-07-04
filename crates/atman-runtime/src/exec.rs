@@ -199,6 +199,7 @@ async fn eval_bind_with_watches(
         input,
         schema: None,
         cache_prompt,
+        tools: Vec::new(),
     });
     let cancel = obs.cancel.clone();
     let mut events = obs.events;

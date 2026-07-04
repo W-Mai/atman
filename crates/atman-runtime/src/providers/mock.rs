@@ -209,6 +209,7 @@ mod tests {
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
+            tools: Vec::new(),
         }
     }
 

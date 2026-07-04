@@ -48,6 +48,7 @@ async fn openai_non_streaming_returns_tool_use_parts_from_tool_calls() {
             input: Value::Unit,
             schema: None,
             cache_prompt: false,
+            tools: Vec::new(),
         })
         .await
         .expect("call ok");
@@ -96,6 +97,7 @@ async fn openai_streaming_accumulates_tool_calls_across_chunks() {
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
+        tools: Vec::new(),
     });
     let am = obs.output.await.expect("streaming call ok");
     let tool_use = am

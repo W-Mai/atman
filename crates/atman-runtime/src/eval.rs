@@ -172,6 +172,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut cache_prompt = false;
             let mut context_budget: Option<u64> = None;
             let mut fallback_expr: Option<&Expr> = None;
+            let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
             for (k, v) in kwargs {
                 match k.name.as_str() {
                     "schema" => continue,
@@ -185,6 +186,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             Err(msg) => return Value::Err(RuntimeError::ToolFailed(msg)),
                         };
                         retry_kinds = Some(idents);
+                        continue;
+                    }
+                    "tools" => {
+                        match resolve_tool_specs(v, ctx.tools) {
+                            Ok(specs) => tool_specs = specs,
+                            Err(msg) => return Value::Err(RuntimeError::ToolFailed(msg)),
+                        }
                         continue;
                     }
                     _ => {}
@@ -360,6 +368,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     input: input.clone(),
                     schema: None,
                     cache_prompt,
+                    tools: tool_specs.clone(),
                 };
                 let start = std::time::Instant::now();
                 let outcome = provider.call(req).await;
@@ -853,6 +862,47 @@ pub struct TruncationStat {
     pub result_chars: usize,
     pub dropped_chars: usize,
     pub budget_tokens: u64,
+}
+
+fn resolve_tool_specs(
+    expr: &Expr,
+    tools: &crate::tool::ToolRegistry,
+) -> Result<Vec<crate::tool::ToolSpec>, String> {
+    let items = match expr {
+        Expr::List(items) => items,
+        _ => {
+            return Err(
+                "llm.tools: expected a list of tool references like [fs.read, bash.exec]".into(),
+            );
+        }
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let name = match tool_ref_name(item) {
+            Some(n) => n,
+            None => {
+                return Err(format!(
+                    "llm.tools: item is not a tool reference (want ident or ident.method): {item:?}"
+                ));
+            }
+        };
+        let tool = tools
+            .get(&name)
+            .ok_or_else(|| format!("llm.tools: unknown tool `{name}`"))?;
+        out.push(crate::tool::tool_spec(tool.as_ref()));
+    }
+    Ok(out)
+}
+
+fn tool_ref_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(id) => Some(id.name.clone()),
+        Expr::Member { base, field } => {
+            let base = tool_ref_name(base)?;
+            Some(format!("{base}.{}", field.name))
+        }
+        _ => None,
+    }
 }
 
 fn parse_error_kind_list(

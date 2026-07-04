@@ -70,6 +70,7 @@ fn fixed_request() -> LlmRequest {
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
+        tools: Vec::new(),
     }
 }
 
@@ -102,6 +103,7 @@ fn openai_wire_body_tool_use_input_key_order_is_stable() {
         input: Value::Unit,
         schema: None,
         cache_prompt: false,
+        tools: Vec::new(),
     };
     let body = p.wire_body_bytes(&req, false);
     let s = std::str::from_utf8(&body).unwrap();
@@ -112,6 +114,50 @@ fn openai_wire_body_tool_use_input_key_order_is_stable() {
         z < a && a < m,
         "tool_use input JSON keys reordered — serde_json preserve_order broken? body={s}"
     );
+}
+
+#[test]
+fn openai_wire_body_carries_tool_specs_as_function_calls() {
+    let p = provider();
+    let mut req = fixed_request();
+    req.tools = vec![
+        atman_runtime::tool::ToolSpec {
+            name: "fs.read".to_string(),
+            description: Some("read a file".into()),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+        },
+        atman_runtime::tool::ToolSpec {
+            name: "bash.exec".to_string(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+        },
+    ];
+    let body: serde_json::Value = serde_json::from_slice(&p.wire_body_bytes(&req, false)).unwrap();
+    let tools = body["tools"].as_array().expect("tools array present");
+    assert_eq!(tools.len(), 2);
+    let first = &tools[0];
+    assert_eq!(first["type"].as_str(), Some("function"));
+    assert_eq!(first["function"]["name"].as_str(), Some("fs.read"));
+    assert_eq!(
+        first["function"]["description"].as_str(),
+        Some("read a file")
+    );
+    assert!(first["function"]["parameters"]["properties"]["path"].is_object());
+    let second = &tools[1];
+    assert_eq!(second["function"]["name"].as_str(), Some("bash.exec"));
+    assert!(second["function"].get("description").is_none());
+}
+
+#[test]
+fn openai_wire_body_omits_tools_field_when_list_empty() {
+    let p = provider();
+    let req = fixed_request();
+    let body: serde_json::Value = serde_json::from_slice(&p.wire_body_bytes(&req, false)).unwrap();
+    assert!(body.get("tools").is_none(), "body: {body}");
 }
 
 #[test]
