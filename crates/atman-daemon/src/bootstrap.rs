@@ -154,9 +154,16 @@ struct RawMcpConfigFile {
 #[derive(Debug, Deserialize)]
 struct RawMcpConfig {
     name: String,
-    command: String,
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    auth_token: Option<String>,
     #[serde(default)]
     tier: Option<u8>,
     #[serde(default)]
@@ -170,12 +177,21 @@ pub fn parse_mcp_configs(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig>
     };
     file.mcp
         .into_iter()
-        .map(|raw| atman_runtime::mcp::McpServerConfig {
-            name: raw.name,
-            command: raw.command,
-            args: raw.args,
-            tier: tier_from_int(raw.tier.unwrap_or(3)),
-            timeout_ms: raw.timeout_ms.unwrap_or(30_000),
+        .map(|raw| {
+            let transport = match raw.transport.as_deref() {
+                Some("http") => atman_runtime::mcp::TransportKind::Http,
+                _ => atman_runtime::mcp::TransportKind::Stdio,
+            };
+            atman_runtime::mcp::McpServerConfig {
+                name: raw.name,
+                transport,
+                command: raw.command.unwrap_or_default(),
+                args: raw.args,
+                url: raw.url,
+                auth_token: raw.auth_token,
+                tier: tier_from_int(raw.tier.unwrap_or(3)),
+                timeout_ms: raw.timeout_ms.unwrap_or(30_000),
+            }
         })
         .collect()
 }

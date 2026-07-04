@@ -337,8 +337,8 @@ async fn cmd_run(
     for outcome in &mcp_status {
         match outcome {
             Ok(s) => eprintln!(
-                "[atman] mcp `{}` connected ({} tools)",
-                s.name, s.tool_count
+                "[atman] mcp `{}` connected via {} ({} tools)",
+                s.name, s.transport, s.tool_count
             ),
             Err(e) => eprintln!("[atman] mcp boot: {e}"),
         }
@@ -684,8 +684,8 @@ async fn cmd_repl() -> Result<()> {
     for outcome in &mcp_status {
         match outcome {
             Ok(s) => println!(
-                "[atman] mcp `{}` connected ({} tools)",
-                s.name, s.tool_count
+                "[atman] mcp `{}` connected via {} ({} tools)",
+                s.name, s.transport, s.tool_count
             ),
             Err(e) => eprintln!("[atman] mcp boot: {e}"),
         }
@@ -1463,15 +1463,19 @@ async fn cmd_doctor() -> Result<()> {
         let statuses =
             atman_runtime::mcp::register_from_configs(&mut probe_registry, &mcp_configs).await;
         for (cfg, status) in mcp_configs.iter().zip(statuses.iter()) {
+            let source = match cfg.transport {
+                atman_runtime::mcp::TransportKind::Stdio => {
+                    format!("stdio: {} {}", cfg.command, cfg.args.join(" "))
+                        .trim()
+                        .to_string()
+                }
+                atman_runtime::mcp::TransportKind::Http => {
+                    format!("http: {}", cfg.url.as_deref().unwrap_or("<missing url>"))
+                }
+            };
             match status {
-                Ok(s) => println!(
-                    "  [✓] {:<20} {} tools ({} {})",
-                    cfg.name,
-                    s.tool_count,
-                    cfg.command,
-                    cfg.args.join(" ")
-                ),
-                Err(e) => println!("  [✗] {:<20} {}", cfg.name, e.error),
+                Ok(s) => println!("  [✓] {:<20} {} tools · {source}", cfg.name, s.tool_count),
+                Err(e) => println!("  [✗] {:<20} {} · {}", cfg.name, e.error, source),
             }
         }
     }

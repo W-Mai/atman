@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -10,8 +11,19 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::error::RuntimeError;
+use crate::tool::BoxFut;
 
 type PendingCalls = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, McpError>>>>>;
+
+pub trait McpTransport: Send + Sync {
+    fn call<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> BoxFut<'a, Result<serde_json::Value, McpError>>;
+
+    fn kind(&self) -> &'static str;
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct JsonRpcRequest {
@@ -81,6 +93,20 @@ pub struct McpStdioTransport {
     timeout_ms: u64,
 }
 
+impl McpTransport for McpStdioTransport {
+    fn call<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> BoxFut<'a, Result<serde_json::Value, McpError>> {
+        Box::pin(self.call_stdio(method, params))
+    }
+
+    fn kind(&self) -> &'static str {
+        "stdio"
+    }
+}
+
 impl McpStdioTransport {
     pub async fn spawn(cmd: &str, args: &[String], timeout_ms: u64) -> Result<Self, McpError> {
         let mut child = Command::new(cmd)
@@ -115,7 +141,7 @@ impl McpStdioTransport {
         })
     }
 
-    pub async fn call(
+    async fn call_stdio(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -209,21 +235,161 @@ async fn reader_loop(stdout: ChildStdout, pending: PendingCalls) {
     }
 }
 
+pub struct McpHttpTransport {
+    url: String,
+    auth_token: Option<String>,
+    client: reqwest::Client,
+    next_id: AtomicU64,
+    timeout_ms: u64,
+    retry_attempts: u32,
+}
+
+impl McpHttpTransport {
+    pub fn new(url: impl Into<String>, auth_token: Option<String>, timeout_ms: u64) -> Self {
+        Self {
+            url: url.into(),
+            auth_token,
+            client: reqwest::Client::new(),
+            next_id: AtomicU64::new(1),
+            timeout_ms,
+            retry_attempts: 3,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    async fn call_http(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpError> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        let call_timeout = Duration::from_millis(self.timeout_ms);
+        let attempt_result = tokio::time::timeout(call_timeout, async {
+            let mut delay_ms = 100u64;
+            let mut last_err: Option<McpError> = None;
+            for attempt in 0..=self.retry_attempts {
+                let mut req = self.client.post(&self.url).json(&body);
+                if let Some(t) = &self.auth_token {
+                    req = req.bearer_auth(t);
+                }
+                match req.send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        if status.is_success() {
+                            let text = resp
+                                .text()
+                                .await
+                                .map_err(|e| McpError::Io(format!("mcp http body: {e}")))?;
+                            let parsed: JsonRpcResponse = serde_json::from_str(&text)
+                                .map_err(|e| McpError::Protocol(format!("mcp http parse: {e}")))?;
+                            if let Some(err) = parsed.error {
+                                return Err(McpError::ServerError {
+                                    code: err.code,
+                                    message: err.message,
+                                });
+                            }
+                            return Ok(parsed.result.unwrap_or(serde_json::Value::Null));
+                        }
+                        if status.is_server_error() {
+                            last_err =
+                                Some(McpError::Io(format!("mcp http {status}: server error")));
+                            if attempt < self.retry_attempts {
+                                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                                delay_ms = (delay_ms * 5).min(2000);
+                                continue;
+                            }
+                        }
+                        let body_text = resp.text().await.unwrap_or_default();
+                        return Err(McpError::Io(format!("mcp http {status}: {body_text}")));
+                    }
+                    Err(e) => {
+                        last_err = Some(McpError::Io(format!("mcp http send: {e}")));
+                        if attempt < self.retry_attempts {
+                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                            delay_ms = (delay_ms * 5).min(2000);
+                            continue;
+                        }
+                    }
+                }
+            }
+            Err(last_err.unwrap_or(McpError::Disconnected))
+        })
+        .await;
+        match attempt_result {
+            Ok(inner) => inner,
+            Err(_) => Err(McpError::Timeout {
+                timeout_ms: self.timeout_ms,
+                method: method.into(),
+            }),
+        }
+    }
+}
+
+impl McpTransport for McpHttpTransport {
+    fn call<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> BoxFut<'a, Result<serde_json::Value, McpError>> {
+        Box::pin(self.call_http(method, params))
+    }
+
+    fn kind(&self) -> &'static str {
+        "http"
+    }
+}
+
 pub struct McpClient {
     pub name: String,
-    transport: Arc<McpStdioTransport>,
+    transport: Arc<dyn McpTransport>,
     pub tools: Vec<McpToolSchema>,
 }
 
 impl McpClient {
-    pub async fn connect(
+    pub async fn connect_stdio(
         name: impl Into<String>,
         cmd: &str,
         args: &[String],
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
-        let name = name.into();
-        let transport = Arc::new(McpStdioTransport::spawn(cmd, args, timeout_ms).await?);
+        let transport: Arc<dyn McpTransport> =
+            Arc::new(McpStdioTransport::spawn(cmd, args, timeout_ms).await?);
+        Self::finish_connect(name.into(), transport).await
+    }
+
+    pub async fn connect_http(
+        name: impl Into<String>,
+        url: impl Into<String>,
+        auth_token: Option<String>,
+        timeout_ms: u64,
+    ) -> Result<Self, McpError> {
+        let transport: Arc<dyn McpTransport> =
+            Arc::new(McpHttpTransport::new(url, auth_token, timeout_ms));
+        Self::finish_connect(name.into(), transport).await
+    }
+
+    pub async fn connect_with_transport(
+        name: impl Into<String>,
+        transport: Arc<dyn McpTransport>,
+    ) -> Result<Self, McpError> {
+        Self::finish_connect(name.into(), transport).await
+    }
+
+    async fn finish_connect(
+        name: String,
+        transport: Arc<dyn McpTransport>,
+    ) -> Result<Self, McpError> {
         let init_params = serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -240,6 +406,10 @@ impl McpClient {
             transport,
             tools,
         })
+    }
+
+    pub fn transport_kind(&self) -> &'static str {
+        self.transport.kind()
     }
 
     pub async fn call_tool(
@@ -348,12 +518,63 @@ impl crate::tool::Tool for McpToolAdapter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportKind {
+    #[default]
+    Stdio,
+    Http,
+}
+
 pub struct McpServerConfig {
     pub name: String,
+    #[allow(clippy::field_reassign_with_default)]
+    pub transport: TransportKind,
     pub command: String,
     pub args: Vec<String>,
+    pub url: Option<String>,
+    pub auth_token: Option<String>,
     pub tier: crate::tool::Tier,
     pub timeout_ms: u64,
+}
+
+impl McpServerConfig {
+    pub fn stdio(
+        name: impl Into<String>,
+        command: impl Into<String>,
+        args: Vec<String>,
+        tier: crate::tool::Tier,
+        timeout_ms: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            transport: TransportKind::Stdio,
+            command: command.into(),
+            args,
+            url: None,
+            auth_token: None,
+            tier,
+            timeout_ms,
+        }
+    }
+
+    pub fn http(
+        name: impl Into<String>,
+        url: impl Into<String>,
+        auth_token: Option<String>,
+        tier: crate::tool::Tier,
+        timeout_ms: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            transport: TransportKind::Http,
+            command: String::new(),
+            args: Vec::new(),
+            url: Some(url.into()),
+            auth_token,
+            tier,
+            timeout_ms,
+        }
+    }
 }
 
 pub async fn register_from_configs(
@@ -362,10 +583,22 @@ pub async fn register_from_configs(
 ) -> Vec<Result<McpClientStatus, McpBootError>> {
     let mut out = Vec::with_capacity(configs.len());
     for cfg in configs {
-        let outcome = McpClient::connect(&cfg.name, &cfg.command, &cfg.args, cfg.timeout_ms).await;
+        let outcome = match cfg.transport {
+            TransportKind::Stdio => {
+                McpClient::connect_stdio(&cfg.name, &cfg.command, &cfg.args, cfg.timeout_ms).await
+            }
+            TransportKind::Http => match cfg.url.as_deref() {
+                Some(url) => {
+                    McpClient::connect_http(&cfg.name, url, cfg.auth_token.clone(), cfg.timeout_ms)
+                        .await
+                }
+                None => Err(McpError::Protocol("http transport requires `url`".into())),
+            },
+        };
         match outcome {
             Ok(client) => {
                 let tool_count = client.tools.len();
+                let transport_kind = client.transport_kind();
                 let arc_client = Arc::new(client);
                 for tool in &arc_client.tools {
                     let adapter = McpToolAdapter::new(arc_client.clone(), &tool.name, cfg.tier);
@@ -374,6 +607,7 @@ pub async fn register_from_configs(
                 out.push(Ok(McpClientStatus {
                     name: cfg.name.clone(),
                     tool_count,
+                    transport: transport_kind,
                 }));
             }
             Err(e) => out.push(Err(McpBootError {
@@ -389,6 +623,7 @@ pub async fn register_from_configs(
 pub struct McpClientStatus {
     pub name: String,
     pub tool_count: usize,
+    pub transport: &'static str,
 }
 
 #[derive(Debug, thiserror::Error)]

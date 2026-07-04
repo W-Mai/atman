@@ -48,13 +48,13 @@ async fn mcp_server_discovers_tools_and_calls_them_via_registry() {
     let dir = tempfile::tempdir().unwrap();
     let script = write_script(dir.path(), "mock_mcp.py", MOCK_SERVER);
     let mut reg = ToolRegistry::new();
-    let cfg = McpServerConfig {
-        name: "demo".into(),
-        command: "python3".into(),
-        args: vec![script.display().to_string()],
-        tier: Tier::Three,
-        timeout_ms: 5000,
-    };
+    let cfg = McpServerConfig::stdio(
+        "demo",
+        "python3",
+        vec![script.display().to_string()],
+        Tier::Three,
+        5000,
+    );
     let statuses = register_from_configs(&mut reg, &[cfg]).await;
     assert_eq!(statuses.len(), 1);
     let Ok(status) = &statuses[0] else {
@@ -62,6 +62,7 @@ async fn mcp_server_discovers_tools_and_calls_them_via_registry() {
     };
     assert_eq!(status.name, "demo");
     assert_eq!(status.tool_count, 1);
+    assert_eq!(status.transport, "stdio");
 
     let tool = reg
         .get("demo.echo")
@@ -91,13 +92,13 @@ async fn mcp_server_discovers_tools_and_calls_them_via_registry() {
 #[tokio::test]
 async fn mcp_boot_error_when_command_missing_returns_err_but_does_not_panic() {
     let mut reg = ToolRegistry::new();
-    let cfg = McpServerConfig {
-        name: "missing".into(),
-        command: "/no/such/binary/at/all".into(),
-        args: vec![],
-        tier: Tier::Three,
-        timeout_ms: 500,
-    };
+    let cfg = McpServerConfig::stdio(
+        "missing",
+        "/no/such/binary/at/all",
+        vec![],
+        Tier::Three,
+        500,
+    );
     let statuses = register_from_configs(&mut reg, &[cfg]).await;
     assert_eq!(statuses.len(), 1);
     assert!(
@@ -118,13 +119,13 @@ async fn mcp_qualified_tool_name_is_server_dot_tool() {
     let mut reg = ToolRegistry::new();
     register_from_configs(
         &mut reg,
-        &[McpServerConfig {
-            name: "srv-a".into(),
-            command: "python3".into(),
-            args: vec![script.display().to_string()],
-            tier: Tier::Three,
-            timeout_ms: 5000,
-        }],
+        &[McpServerConfig::stdio(
+            "srv-a",
+            "python3",
+            vec![script.display().to_string()],
+            Tier::Three,
+            5000,
+        )],
     )
     .await;
     assert!(reg.get("srv-a.echo").is_some());
@@ -140,20 +141,20 @@ async fn mcp_two_servers_register_under_distinct_namespaces() {
     let statuses = register_from_configs(
         &mut reg,
         &[
-            McpServerConfig {
-                name: "a".into(),
-                command: "python3".into(),
-                args: vec![s1.display().to_string()],
-                tier: Tier::Three,
-                timeout_ms: 5000,
-            },
-            McpServerConfig {
-                name: "b".into(),
-                command: "python3".into(),
-                args: vec![s2.display().to_string()],
-                tier: Tier::Three,
-                timeout_ms: 5000,
-            },
+            McpServerConfig::stdio(
+                "a",
+                "python3",
+                vec![s1.display().to_string()],
+                Tier::Three,
+                5000,
+            ),
+            McpServerConfig::stdio(
+                "b",
+                "python3",
+                vec![s2.display().to_string()],
+                Tier::Three,
+                5000,
+            ),
         ],
     )
     .await;
