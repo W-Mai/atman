@@ -88,23 +88,27 @@ impl Session {
         let ts = chrono::Utc::now();
         let event = match msg.role {
             MessageRole::User => Event::UserMsg {
+                seq: 0,
                 turn_id: msg.turn_id.clone(),
                 message: msg.clone(),
                 ts,
             },
             MessageRole::Assistant => Event::AssistantMsg {
+                seq: 0,
                 turn_id: msg.turn_id.clone(),
                 flow_run_id,
                 message: msg.clone(),
                 ts,
             },
             MessageRole::Tool => Event::ToolResultMsg {
+                seq: 0,
                 turn_id: msg.turn_id.clone(),
                 flow_run_id,
                 message: msg.clone(),
                 ts,
             },
             MessageRole::System => Event::SystemMsg {
+                seq: 0,
                 turn_id: msg.turn_id.clone(),
                 message: msg.clone(),
                 ts,
@@ -127,6 +131,7 @@ impl Session {
         *self.current_turn.lock().unwrap() = Some(turn_id.clone());
         *self.flow_cancel.lock().unwrap() = CancellationToken::new();
         self.sink.emit(Event::TurnStart {
+            seq: 0,
             turn_id: turn_id.clone(),
             ts: chrono::Utc::now(),
         });
@@ -145,7 +150,11 @@ impl Session {
                 }
             }
             drop(q);
-            self.sink.emit(Event::TurnEnd { turn_id, ts: now });
+            self.sink.emit(Event::TurnEnd {
+                seq: 0,
+                turn_id,
+                ts: now,
+            });
         }
     }
 
@@ -172,6 +181,7 @@ impl Session {
         let inj = Injection::with_level(turn_id.clone(), text, level, redirect_target);
         let id = inj.id.clone();
         self.sink.emit(Event::UserInject {
+            seq: 0,
             turn_id,
             injection: inj.clone(),
             ts: inj.created_at,

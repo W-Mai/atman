@@ -131,6 +131,7 @@ mod tests {
         let tx = writer.sender();
         for i in 0..5 {
             tx.send(Event::FlowStart {
+                seq: 0,
                 run_id: FlowRunId::now(),
                 flow_name: format!("flow_{i}"),
                 ts: chrono::Utc::now(),
@@ -158,6 +159,7 @@ mod tests {
         writer
             .sender()
             .send(Event::FlowEnd {
+                seq: 0,
                 run_id: FlowRunId::now(),
                 flow_name: "t".into(),
                 status: FlowStatus::Errored {

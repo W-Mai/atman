@@ -95,6 +95,7 @@ mod tests {
 
     fn ok_call(model: &str, provider: &str, in_tok: u64, out_tok: u64) -> Event {
         Event::LlmCall {
+            seq: 0,
             model: model.into(),
             provider: provider.into(),
             usage: TokenUsage {
@@ -110,6 +111,7 @@ mod tests {
 
     fn err_call(model: &str) -> Event {
         Event::LlmCall {
+            seq: 0,
             model: model.into(),
             provider: "p".into(),
             usage: TokenUsage {
@@ -160,12 +162,14 @@ mod tests {
         let run_id = FlowRunId::now();
         let events = vec![
             Event::FlowStart {
+                seq: 0,
                 run_id: run_id.clone(),
                 flow_name: "t".into(),
                 ts: chrono::Utc::now(),
             },
             ok_call("m", "p", 5, 5),
             Event::FlowEnd {
+                seq: 0,
                 run_id,
                 flow_name: "t".into(),
                 status: FlowStatus::Ok,

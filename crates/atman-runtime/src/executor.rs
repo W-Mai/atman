@@ -113,6 +113,7 @@ impl Executor {
     ) -> Result<Value, RuntimeError> {
         let run_id = run_id.unwrap_or_else(FlowRunId::now);
         self.events.emit(Event::FlowStart {
+            seq: 0,
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
             ts: chrono::Utc::now(),
@@ -143,6 +144,7 @@ impl Executor {
             },
         };
         self.events.emit(Event::FlowEnd {
+            seq: 0,
             run_id,
             flow_name: flow.name.name.clone(),
             status,

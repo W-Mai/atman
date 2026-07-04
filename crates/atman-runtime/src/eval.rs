@@ -362,6 +362,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 };
                 if let Some(sink) = ctx.events {
                     sink.emit(crate::event::Event::LlmCall {
+                        seq: 0,
                         model: model.clone(),
                         provider: provider.name().to_string(),
                         usage,

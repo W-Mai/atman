@@ -42,17 +42,23 @@ impl std::fmt::Display for TurnId {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     FlowStart {
+        #[serde(default)]
+        seq: u64,
         run_id: FlowRunId,
         flow_name: String,
         ts: chrono::DateTime<chrono::Utc>,
     },
     FlowEnd {
+        #[serde(default)]
+        seq: u64,
         run_id: FlowRunId,
         flow_name: String,
         status: FlowStatus,
         ts: chrono::DateTime<chrono::Utc>,
     },
     LlmCall {
+        #[serde(default)]
+        seq: u64,
         model: String,
         provider: String,
         usage: crate::provider::TokenUsage,
@@ -61,41 +67,57 @@ pub enum Event {
         ts: chrono::DateTime<chrono::Utc>,
     },
     TurnStart {
+        #[serde(default)]
+        seq: u64,
         turn_id: TurnId,
         ts: chrono::DateTime<chrono::Utc>,
     },
     TurnEnd {
+        #[serde(default)]
+        seq: u64,
         turn_id: TurnId,
         ts: chrono::DateTime<chrono::Utc>,
     },
     UserMsg {
+        #[serde(default)]
+        seq: u64,
         turn_id: TurnId,
         message: crate::message::Message,
         ts: chrono::DateTime<chrono::Utc>,
     },
     AssistantMsg {
+        #[serde(default)]
+        seq: u64,
         turn_id: TurnId,
         flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
         ts: chrono::DateTime<chrono::Utc>,
     },
     ToolResultMsg {
+        #[serde(default)]
+        seq: u64,
         turn_id: TurnId,
         flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
         ts: chrono::DateTime<chrono::Utc>,
     },
     SystemMsg {
+        #[serde(default)]
+        seq: u64,
         turn_id: TurnId,
         message: crate::message::Message,
         ts: chrono::DateTime<chrono::Utc>,
     },
     UserInject {
+        #[serde(default)]
+        seq: u64,
         turn_id: TurnId,
         injection: crate::injection::Injection,
         ts: chrono::DateTime<chrono::Utc>,
     },
     ContentFilterHit {
+        #[serde(default)]
+        seq: u64,
         turn_id: Option<TurnId>,
         flow_run_id: Option<FlowRunId>,
         provider: String,
@@ -105,6 +127,8 @@ pub enum Event {
         ts: chrono::DateTime<chrono::Utc>,
     },
     ContextCompact {
+        #[serde(default)]
+        seq: u64,
         session_id: String,
         before_tokens: u64,
         after_tokens: u64,
@@ -112,6 +136,42 @@ pub enum Event {
         compacted_range_end: u64,
         ts: chrono::DateTime<chrono::Utc>,
     },
+}
+
+impl Event {
+    pub fn set_seq(&mut self, new_seq: u64) {
+        match self {
+            Event::FlowStart { seq, .. }
+            | Event::FlowEnd { seq, .. }
+            | Event::LlmCall { seq, .. }
+            | Event::TurnStart { seq, .. }
+            | Event::TurnEnd { seq, .. }
+            | Event::UserMsg { seq, .. }
+            | Event::AssistantMsg { seq, .. }
+            | Event::ToolResultMsg { seq, .. }
+            | Event::SystemMsg { seq, .. }
+            | Event::UserInject { seq, .. }
+            | Event::ContentFilterHit { seq, .. }
+            | Event::ContextCompact { seq, .. } => *seq = new_seq,
+        }
+    }
+
+    pub fn seq(&self) -> u64 {
+        match self {
+            Event::FlowStart { seq, .. }
+            | Event::FlowEnd { seq, .. }
+            | Event::LlmCall { seq, .. }
+            | Event::TurnStart { seq, .. }
+            | Event::TurnEnd { seq, .. }
+            | Event::UserMsg { seq, .. }
+            | Event::AssistantMsg { seq, .. }
+            | Event::ToolResultMsg { seq, .. }
+            | Event::SystemMsg { seq, .. }
+            | Event::UserInject { seq, .. }
+            | Event::ContentFilterHit { seq, .. }
+            | Event::ContextCompact { seq, .. } => *seq,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +236,7 @@ pub struct Observable<T> {
 pub struct EventSink {
     events: Arc<Mutex<Vec<Event>>>,
     forwarder: Option<mpsc::UnboundedSender<Event>>,
+    seq_counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EventSink {
@@ -188,7 +249,12 @@ impl EventSink {
         self
     }
 
-    pub fn emit(&self, event: Event) {
+    pub fn emit(&self, mut event: Event) {
+        let next = self
+            .seq_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        event.set_seq(next);
         if let Some(tx) = &self.forwarder {
             let _ = tx.send(event.clone());
         }
