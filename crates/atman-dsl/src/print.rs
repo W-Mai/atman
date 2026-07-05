@@ -121,7 +121,9 @@ fn write_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
     let pad = "    ".repeat(indent);
     match stmt {
         Stmt::Bind { name, value } => {
-            write!(out, "{pad}{} = ", name.name).unwrap();
+            out.push_str(&pad);
+            write_pattern(out, name);
+            out.push_str(" = ");
             write_expr(out, value, indent);
             out.push('\n');
         }
@@ -145,6 +147,25 @@ fn write_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
             out.push('\n');
         }
         Stmt::Watch(w) => write_watch(out, w, indent),
+    }
+}
+
+fn write_pattern(out: &mut String, pat: &Pattern) {
+    match pat {
+        Pattern::Ident(id) => out.push_str(&id.name),
+        Pattern::Struct { fields } => {
+            out.push_str("{ ");
+            for (i, f) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&f.source.name);
+                if let Some(rename) = &f.rename {
+                    write!(out, ": {}", rename.name).unwrap();
+                }
+            }
+            out.push_str(" }");
+        }
     }
 }
 

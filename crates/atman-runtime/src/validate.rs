@@ -78,10 +78,15 @@ fn walk_stmts(
         match stmt {
             Stmt::Bind { name, value } => {
                 walk_expr(value, scope, tools, errors);
-                if let Some(k) = infer_node_kind(value) {
-                    kinds.insert(name.name.clone(), k);
+                let bound = name.bound_names();
+                if let Some(k) = infer_node_kind(value)
+                    && let Some(single) = name.as_single_ident()
+                {
+                    kinds.insert(single.name.clone(), k);
                 }
-                scope.insert(name.name.clone());
+                for n in bound {
+                    scope.insert(n);
+                }
             }
             Stmt::When { cond, body } => {
                 walk_expr(cond, scope, tools, errors);

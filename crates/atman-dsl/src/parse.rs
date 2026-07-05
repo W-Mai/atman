@@ -298,10 +298,67 @@ fn parse_stmt(input: ParseStream) -> Result<Stmt> {
         let name = to_ident(input.parse::<syn::Ident>()?);
         input.parse::<Token![=]>()?;
         let value = parse_expr(input)?;
-        return Ok(Stmt::Bind { name, value });
+        return Ok(Stmt::Bind {
+            name: Pattern::Ident(name),
+            value,
+        });
+    }
+    if input.peek(token::Brace) && looks_like_destructure(input) {
+        let pattern = parse_struct_pattern(input)?;
+        input.parse::<Token![=]>()?;
+        let value = parse_expr(input)?;
+        return Ok(Stmt::Bind {
+            name: pattern,
+            value,
+        });
     }
     let expr = parse_expr(input)?;
     Ok(Stmt::Expr(expr))
+}
+
+fn looks_like_destructure(input: ParseStream) -> bool {
+    let fork = input.fork();
+    let attempt = (|| -> Result<bool> {
+        let inner;
+        braced!(inner in fork);
+        if inner.is_empty() {
+            return Ok(false);
+        }
+        <syn::Ident as syn::ext::IdentExt>::parse_any(&inner)?;
+        if inner.peek(Token![:]) {
+            inner.parse::<Token![:]>()?;
+            <syn::Ident as syn::ext::IdentExt>::parse_any(&inner)?;
+        }
+        if !inner.peek(Token![,]) && !inner.is_empty() {
+            return Ok(false);
+        }
+        Ok(fork.peek(Token![=]))
+    })();
+    attempt.unwrap_or(false)
+}
+
+fn parse_struct_pattern(input: ParseStream) -> Result<Pattern> {
+    let content;
+    braced!(content in input);
+    let mut fields = Vec::new();
+    while !content.is_empty() {
+        let source = to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(&content)?);
+        let rename = if content.peek(Token![:]) {
+            content.parse::<Token![:]>()?;
+            Some(to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(
+                &content,
+            )?))
+        } else {
+            None
+        };
+        fields.push(PatternField { source, rename });
+        if content.peek(Token![,]) {
+            content.parse::<Token![,]>()?;
+        } else {
+            break;
+        }
+    }
+    Ok(Pattern::Struct { fields })
 }
 
 fn parse_expr(input: ParseStream) -> Result<Expr> {

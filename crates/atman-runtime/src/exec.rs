@@ -53,7 +53,10 @@ fn exec_stmt<'a>(
     Box::pin(async move {
         match stmt {
             Stmt::Bind { name, value } => {
-                let v = if let Some(ws) = watches.get(&name.name) {
+                let watch_target = name.as_single_ident().map(|id| id.name.clone());
+                let v = if let Some(target) = watch_target.as_ref()
+                    && let Some(ws) = watches.get(target)
+                {
                     match eval_bind_with_watches(value, env, ctx, ws).await {
                         Ok(v) => v,
                         Err(e) => return StmtOutcome::Err(e),
@@ -64,7 +67,40 @@ fn exec_stmt<'a>(
                 if let Value::Err(e) = v {
                     return StmtOutcome::Err(e);
                 }
-                env.bind(name.name.clone(), v);
+                match name {
+                    atman_dsl::ast::Pattern::Ident(id) => {
+                        env.bind(id.name.clone(), v);
+                    }
+                    atman_dsl::ast::Pattern::Struct { fields } => {
+                        let atman_runtime_value = match v {
+                            crate::value::Value::Struct(pairs) => pairs,
+                            other => {
+                                return StmtOutcome::Err(
+                                    crate::error::RuntimeError::TypeMismatch {
+                                        expected: "struct for destructuring bind".into(),
+                                        actual: other.kind_name().into(),
+                                    },
+                                );
+                            }
+                        };
+                        for field in fields {
+                            let Some(found) = atman_runtime_value
+                                .iter()
+                                .find(|(k, _)| k == &field.source.name)
+                            else {
+                                return StmtOutcome::Err(crate::error::RuntimeError::MissingArg(
+                                    format!(
+                                        "destructure: struct has no field `{}`",
+                                        field.source.name
+                                    ),
+                                ));
+                            };
+                            let target =
+                                field.rename.as_ref().unwrap_or(&field.source).name.clone();
+                            env.bind(target, found.1.clone());
+                        }
+                    }
+                }
                 StmtOutcome::Continue
             }
             Stmt::When { cond, body } => {

@@ -152,8 +152,39 @@ pub enum FanoutCollect {
 pub type Kwargs = Vec<(Ident, Expr)>;
 
 #[derive(Debug, Clone)]
+pub enum Pattern {
+    Ident(Ident),
+    Struct { fields: Vec<PatternField> },
+}
+
+#[derive(Debug, Clone)]
+pub struct PatternField {
+    pub source: Ident,
+    pub rename: Option<Ident>,
+}
+
+impl Pattern {
+    pub fn bound_names(&self) -> Vec<String> {
+        match self {
+            Pattern::Ident(id) => vec![id.name.clone()],
+            Pattern::Struct { fields } => fields
+                .iter()
+                .map(|f| f.rename.as_ref().unwrap_or(&f.source).name.clone())
+                .collect(),
+        }
+    }
+
+    pub fn as_single_ident(&self) -> Option<&Ident> {
+        match self {
+            Pattern::Ident(id) => Some(id),
+            Pattern::Struct { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Stmt {
-    Bind { name: Ident, value: Expr },
+    Bind { name: Pattern, value: Expr },
     When { cond: Expr, body: Vec<Stmt> },
     Return { value: Expr },
     Expr(Expr),
