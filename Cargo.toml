@@ -37,6 +37,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 utoipa     = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 rusqlite   = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
 regex      = "1"
+blake3     = "1"
 
 [profile.release]
 lto = "thin"

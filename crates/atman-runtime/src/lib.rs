@@ -7,6 +7,7 @@ pub mod event;
 pub mod event_writer;
 pub mod exec;
 pub mod executor;
+pub mod flow_meta;
 pub mod hunk;
 pub mod index;
 pub mod injection;
