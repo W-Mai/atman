@@ -125,8 +125,11 @@ impl Tool for PreviewPush {
         Box::pin(async move {
             let topic = extract_string(&args, "topic", 0)?;
             let title = extract_string(&args, "title", 1)?;
-            let content = extract_string(&args, "content", 2)?;
             let kind = extract_optional_string(&args, "kind").unwrap_or_else(|| "markdown".into());
+            let content = match kind.as_str() {
+                "image" | "diff" => extract_optional_string(&args, "content").unwrap_or_default(),
+                _ => extract_string(&args, "content", 2)?,
+            };
 
             if content.len() > self.config.max_body_bytes {
                 return Err(RuntimeError::ToolFailed(format!(
@@ -148,7 +151,7 @@ impl Tool for PreviewPush {
                 .await
                 .map_err(|e| RuntimeError::ToolFailed(format!("preview.push: {e}")))?;
 
-            let block = build_block(&kind, &content)?;
+            let block = build_block(&kind, &content, &args, self.config.max_body_bytes)?;
             let url = format!(
                 "{}/api/projects/{pid}/topics/{topic}/blocks",
                 self.config.base_url
@@ -236,17 +239,115 @@ fn is_connection_refused(e: &reqwest::Error) -> bool {
         || e.is_connect()
 }
 
-fn build_block(kind: &str, content: &str) -> Result<serde_json::Value, RuntimeError> {
+fn build_block(
+    kind: &str,
+    content: &str,
+    args: &ToolArgs,
+    max_body_bytes: usize,
+) -> Result<serde_json::Value, RuntimeError> {
     Ok(match kind {
         "markdown" => serde_json::json!({ "kind": "markdown", "content": content }),
         "mermaid" => serde_json::json!({ "kind": "mermaid", "source": content }),
         "html" => serde_json::json!({ "kind": "html", "fragment": content }),
+        "image" => build_image_block(args, max_body_bytes)?,
+        "diff" => build_diff_block(content, args)?,
         other => {
             return Err(RuntimeError::ToolFailed(format!(
-                "preview.push: unsupported kind `{other}` (want markdown | mermaid | html)"
+                "preview.push: unsupported kind `{other}` (want markdown | mermaid | html | image | diff)"
             )));
         }
     })
+}
+
+fn build_image_block(
+    args: &ToolArgs,
+    max_body_bytes: usize,
+) -> Result<serde_json::Value, RuntimeError> {
+    let base64 = extract_optional_string(args, "image_base64");
+    let path = extract_optional_string(args, "image_path");
+    let (b64, media_type) = match (base64, path) {
+        (Some(b), _) => (b, extract_optional_string(args, "media_type")),
+        (None, Some(p)) => {
+            let bytes = std::fs::read(&p).map_err(|e| {
+                RuntimeError::ToolFailed(format!("preview.push image_path {p}: {e}"))
+            })?;
+            if bytes.len() > max_body_bytes {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "preview.push: image_path {} bytes exceeds max_body_bytes {max_body_bytes}; upload endpoint not implemented",
+                    bytes.len()
+                )));
+            }
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let media = guess_media_type(&p);
+            (encoded, Some(media))
+        }
+        _ => {
+            return Err(RuntimeError::ToolFailed(
+                "preview.push image: expect one of image_base64 or image_path".into(),
+            ));
+        }
+    };
+    if b64.len() > max_body_bytes {
+        return Err(RuntimeError::ToolFailed(format!(
+            "preview.push image: base64 {} bytes exceeds max_body_bytes {max_body_bytes}",
+            b64.len()
+        )));
+    }
+    let mut block = serde_json::json!({ "kind": "image", "image_base64": b64 });
+    if let Some(m) = media_type
+        && let Some(obj) = block.as_object_mut()
+    {
+        obj.insert("media_type".to_string(), serde_json::Value::String(m));
+    }
+    Ok(block)
+}
+
+fn build_diff_block(content: &str, args: &ToolArgs) -> Result<serde_json::Value, RuntimeError> {
+    let raw_diff = extract_optional_string(args, "raw_diff");
+    let commit_sha = extract_optional_string(args, "commit_sha");
+    let repo_path = extract_optional_string(args, "repo_path");
+    if let (Some(sha), Some(repo)) = (commit_sha.as_ref(), repo_path.as_ref()) {
+        return Ok(serde_json::json!({
+            "kind": "diff",
+            "mode": "commit_diff",
+            "commit_sha": sha,
+            "repo_path": repo,
+        }));
+    }
+    let patch = raw_diff.or_else(|| {
+        if content.is_empty() {
+            None
+        } else {
+            Some(content.to_string())
+        }
+    });
+    let Some(patch) = patch else {
+        return Err(RuntimeError::ToolFailed(
+            "preview.push diff: expect either (commit_sha + repo_path) or raw_diff / content"
+                .into(),
+        ));
+    };
+    Ok(serde_json::json!({
+        "kind": "diff",
+        "mode": "raw_diff",
+        "patch_text": patch,
+    }))
+}
+
+fn guess_media_type(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png".into()
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg".into()
+    } else if lower.ends_with(".gif") {
+        "image/gif".into()
+    } else if lower.ends_with(".webp") {
+        "image/webp".into()
+    } else {
+        "application/octet-stream".into()
+    }
 }
 
 fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, RuntimeError> {
@@ -460,6 +561,220 @@ mod tests {
         };
         let err = tool.call(args, &ctx).await.unwrap_err();
         assert!(format!("{err}").contains("unsupported kind"));
+    }
+
+    async fn mount_project_and_topic(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/api/projects"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "p",
+                "slug": "p",
+                "id_source": "fallback_random",
+                "project_paths": [],
+                "agents_md_was_injected": false,
+                "url": "http://x",
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p/topics"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "t",
+                "url": "",
+                "blocks_endpoint": "",
+                "assets_endpoint": ""
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn push_image_base64_lands_as_image_block_with_media_type() {
+        let server = MockServer::start().await;
+        mount_project_and_topic(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p/topics/t/blocks"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "kind": "image",
+                "image_base64": "iVBOR",
+                "media_type": "image/png",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "b_img",
+                "position": 0,
+                "rendered_html_preview_url": "http://x/b_img",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tool = PreviewPush::new(cfg(server.uri()));
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str("t".into()), Value::Str("T".into())],
+            named: vec![
+                ("kind".into(), Value::Str("image".into())),
+                ("image_base64".into(), Value::Str("iVBOR".into())),
+                ("media_type".into(), Value::Str("image/png".into())),
+            ],
+        };
+        let v = tool.call(args, &ctx).await.unwrap();
+        let Value::Struct(fields) = v else {
+            panic!("expected struct");
+        };
+        assert!(matches!(
+            &fields.iter().find(|(k, _)| k == "status").unwrap().1,
+            Value::Str(s) if s == "ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn push_image_path_reads_bytes_and_encodes_base64() {
+        let server = MockServer::start().await;
+        mount_project_and_topic(&server).await;
+        let tmp = tempfile::NamedTempFile::with_suffix(".png").unwrap();
+        std::fs::write(tmp.path(), b"fake-png-bytes").unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p/topics/t/blocks"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "kind": "image",
+                "media_type": "image/png",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "b_img_path",
+                "position": 0,
+                "rendered_html_preview_url": "http://x",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tool = PreviewPush::new(cfg(server.uri()));
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str("t".into()), Value::Str("T".into())],
+            named: vec![
+                ("kind".into(), Value::Str("image".into())),
+                (
+                    "image_path".into(),
+                    Value::Str(tmp.path().display().to_string()),
+                ),
+            ],
+        };
+        let v = tool.call(args, &ctx).await.unwrap();
+        let Value::Struct(fields) = v else {
+            panic!("expected struct");
+        };
+        assert!(matches!(
+            &fields.iter().find(|(k, _)| k == "status").unwrap().1,
+            Value::Str(s) if s == "ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn push_diff_raw_diff_carries_patch_text() {
+        let server = MockServer::start().await;
+        mount_project_and_topic(&server).await;
+        let patch = "--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n";
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p/topics/t/blocks"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "kind": "diff",
+                "mode": "raw_diff",
+                "patch_text": patch,
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "b_diff",
+                "position": 0,
+                "rendered_html_preview_url": "http://x/diff",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tool = PreviewPush::new(cfg(server.uri()));
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str("t".into()), Value::Str("T".into())],
+            named: vec![
+                ("kind".into(), Value::Str("diff".into())),
+                ("raw_diff".into(), Value::Str(patch.into())),
+            ],
+        };
+        let v = tool.call(args, &ctx).await.unwrap();
+        let Value::Struct(fields) = v else {
+            panic!("expected struct");
+        };
+        assert!(matches!(
+            &fields.iter().find(|(k, _)| k == "status").unwrap().1,
+            Value::Str(s) if s == "ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn push_diff_commit_sha_switches_mode() {
+        let server = MockServer::start().await;
+        mount_project_and_topic(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p/topics/t/blocks"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "kind": "diff",
+                "mode": "commit_diff",
+                "commit_sha": "abc123",
+                "repo_path": "/repo",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "b_diff_sha",
+                "position": 0,
+                "rendered_html_preview_url": "http://x/diff_sha",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tool = PreviewPush::new(cfg(server.uri()));
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str("t".into()), Value::Str("T".into())],
+            named: vec![
+                ("kind".into(), Value::Str("diff".into())),
+                ("commit_sha".into(), Value::Str("abc123".into())),
+                ("repo_path".into(), Value::Str("/repo".into())),
+            ],
+        };
+        let v = tool.call(args, &ctx).await.unwrap();
+        let Value::Struct(fields) = v else {
+            panic!("expected struct");
+        };
+        assert!(matches!(
+            &fields.iter().find(|(k, _)| k == "status").unwrap().1,
+            Value::Str(s) if s == "ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn push_image_without_data_returns_error() {
+        let tool = PreviewPush::new(cfg("http://127.0.0.1:1".into()));
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str("t".into()), Value::Str("T".into())],
+            named: vec![("kind".into(), Value::Str("image".into()))],
+        };
+        let err = tool.call(args, &ctx).await;
+        match err {
+            Err(RuntimeError::ToolFailed(msg)) => {
+                assert!(
+                    msg.contains("image_base64") || msg.contains("image_path"),
+                    "err: {msg}"
+                );
+            }
+            Ok(Value::Struct(fields))
+                if matches!(
+                    &fields.iter().find(|(k, _)| k == "status").unwrap().1,
+                    Value::Str(s) if s == "unavailable"
+                ) => {}
+            other => panic!("expected image data error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
