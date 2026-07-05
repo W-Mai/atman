@@ -43,6 +43,8 @@ enum Cmd {
     },
     Cost {
         session_id: Option<String>,
+        #[arg(long, conflicts_with = "session_id")]
+        all: bool,
     },
     Doctor,
     RebuildIndex,
@@ -196,7 +198,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Session {
             action: SessionAction::Gc,
         }) => cmd_session_gc().await,
-        Some(Cmd::Cost { session_id }) => cmd_cost(session_id).await,
+        Some(Cmd::Cost { session_id, all }) => cmd_cost(session_id, all).await,
         Some(Cmd::Doctor) => cmd_doctor().await,
         Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
         Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
@@ -1466,10 +1468,11 @@ fn parse_suggest_model(text: &str) -> Option<String> {
     None
 }
 
-async fn cmd_cost(session_id: Option<String>) -> Result<()> {
-    use std::collections::BTreeMap;
-
+async fn cmd_cost(session_id: Option<String>, all: bool) -> Result<()> {
     let root = data_dir()?;
+    if all {
+        return cmd_cost_all(&root).await;
+    }
     let sid = match session_id {
         Some(s) => s,
         None => latest_session(&root)?
@@ -1479,11 +1482,116 @@ async fn cmd_cost(session_id: Option<String>) -> Result<()> {
     if !path.exists() {
         bail!("events file not found: {}", path.display());
     }
-
     let contents = tokio::fs::read_to_string(&path).await?;
-    let mut by_model: BTreeMap<String, (u64, u64, u64, u64, u64)> = BTreeMap::new();
-    let mut total_calls = 0u64;
-    for line in contents.lines() {
+    let summary = aggregate_cost(&contents);
+    print_cost_summary(&format!("session {sid}"), &summary);
+    Ok(())
+}
+
+async fn cmd_cost_all(root: &Path) -> Result<()> {
+    let sessions_dir = root.join("sessions");
+    if !sessions_dir.exists() {
+        bail!("no sessions under {}", sessions_dir.display());
+    }
+    let mut per_session: Vec<(String, CostSummary)> = Vec::new();
+    let mut combined = CostSummary::default();
+    let mut sessions_walked = 0u64;
+    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&sessions_dir)
+        .with_context(|| format!("read_dir {}", sessions_dir.display()))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let sid = entry.file_name().to_string_lossy().to_string();
+        let events = entry.path().join("events.jsonl");
+        if !events.exists() {
+            continue;
+        }
+        let contents = match tokio::fs::read_to_string(&events).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let summary = aggregate_cost(&contents);
+        if summary.total_calls == 0 {
+            continue;
+        }
+        sessions_walked += 1;
+        combined.merge(&summary);
+        per_session.push((sid, summary));
+    }
+    if per_session.is_empty() {
+        println!(
+            "[atman] cost --all: no llm_call events found under {}",
+            sessions_dir.display()
+        );
+        return Ok(());
+    }
+    println!("[atman] cost across {sessions_walked} session(s)");
+    println!();
+    print_cost_summary("all sessions", &combined);
+    println!();
+    println!("per-session totals (calls | in | cached | out | wall_ms):");
+    for (sid, summary) in &per_session {
+        let (calls, input, cached, output, wall) = summary.grand_totals();
+        println!("  {sid:<40} {calls:>6} {input:>10} {cached:>10} {output:>10} {wall:>10}");
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct CostSummary {
+    by_model: std::collections::BTreeMap<String, ModelTotals>,
+    total_calls: u64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct ModelTotals {
+    calls: u64,
+    input: u64,
+    cached: u64,
+    output: u64,
+    wall_ms: u64,
+}
+
+impl CostSummary {
+    fn record(&mut self, model: String, input: u64, cached: u64, output: u64, wall_ms: u64) {
+        let entry = self.by_model.entry(model).or_default();
+        entry.calls += 1;
+        entry.input += input;
+        entry.cached += cached;
+        entry.output += output;
+        entry.wall_ms += wall_ms;
+        self.total_calls += 1;
+    }
+
+    fn merge(&mut self, other: &CostSummary) {
+        for (model, m) in &other.by_model {
+            let entry = self.by_model.entry(model.clone()).or_default();
+            entry.calls += m.calls;
+            entry.input += m.input;
+            entry.cached += m.cached;
+            entry.output += m.output;
+            entry.wall_ms += m.wall_ms;
+        }
+        self.total_calls += other.total_calls;
+    }
+
+    fn grand_totals(&self) -> (u64, u64, u64, u64, u64) {
+        let mut acc = (0u64, 0u64, 0u64, 0u64, 0u64);
+        for m in self.by_model.values() {
+            acc.0 += m.calls;
+            acc.1 += m.input;
+            acc.2 += m.cached;
+            acc.3 += m.output;
+            acc.4 += m.wall_ms;
+        }
+        acc
+    }
+}
+
+fn aggregate_cost(events_jsonl: &str) -> CostSummary {
+    let mut summary = CostSummary::default();
+    for line in events_jsonl.lines() {
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
@@ -1496,29 +1604,25 @@ async fn cmd_cost(session_id: Option<String>) -> Result<()> {
         let cached = v["usage"]["cached_input"].as_u64().unwrap_or(0);
         let output = v["usage"]["output"].as_u64().unwrap_or(0);
         let wall = v["wallclock_ms"].as_u64().unwrap_or(0);
-        let entry = by_model.entry(model).or_insert((0, 0, 0, 0, 0));
-        entry.0 += 1;
-        entry.1 += input;
-        entry.2 += cached;
-        entry.3 += output;
-        entry.4 += wall;
-        total_calls += 1;
+        summary.record(model, input, cached, output, wall);
     }
+    summary
+}
 
-    println!("session: {sid}");
-    println!("total llm_calls: {total_calls}");
+fn print_cost_summary(header: &str, summary: &CostSummary) {
+    println!("{header}");
+    println!("total llm_calls: {}", summary.total_calls);
     println!();
     println!(
         "{:<32} {:>6} {:>10} {:>10} {:>10} {:>10}",
         "model", "calls", "in", "cached", "out", "wall_ms"
     );
-    for (model, (calls, input, cached, output, wall)) in &by_model {
+    for (model, m) in &summary.by_model {
         println!(
             "{:<32} {:>6} {:>10} {:>10} {:>10} {:>10}",
-            model, calls, input, cached, output, wall
+            model, m.calls, m.input, m.cached, m.output, m.wall_ms
         );
     }
-    Ok(())
 }
 
 const MONITOR_HTML: &str = r##"<!doctype html>
