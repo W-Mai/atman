@@ -10,6 +10,7 @@ pub mod executor;
 pub mod hunk;
 pub mod index;
 pub mod injection;
+pub mod injection_classifier;
 pub mod lifecycle;
 pub mod mcp;
 pub mod memory;
