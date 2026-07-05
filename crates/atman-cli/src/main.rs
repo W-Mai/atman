@@ -6,6 +6,8 @@ use directories::ProjectDirs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod suggest;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "atman",
@@ -728,7 +730,14 @@ async fn cmd_repl() -> Result<()> {
             continue;
         }
         if let Some(rest) = line.strip_prefix(':') {
-            if !handle_builtin(rest.trim(), sid.as_str(), &mut pending) {
+            let trimmed = rest.trim();
+            if trimmed == "suggest" || trimmed.starts_with("suggest ") {
+                if let Err(e) = handle_suggest(&executor, &session, &mut input_rx).await {
+                    eprintln!("[atman] :suggest: {e}");
+                }
+                continue;
+            }
+            if !handle_builtin(trimmed, sid.as_str(), &mut pending) {
                 break;
             }
             continue;
@@ -1122,6 +1131,7 @@ fn handle_builtin(cmd: &str, sid: &str, pending: &mut PendingUserMessage) -> boo
             println!(":cost                — cost summary for current session");
             println!(":attach <path>       — attach file to next turn");
             println!(":attach clear|list   — manage pending attachments");
+            println!(":suggest             — ask meta-LLM for a reusable flow from recent turns");
             println!("@./path or @/abs     — inline attach in bare input");
             true
         }
@@ -1139,6 +1149,169 @@ fn handle_builtin(cmd: &str, sid: &str, pending: &mut PendingUserMessage) -> boo
             true
         }
     }
+}
+
+async fn handle_suggest(
+    executor: &Executor,
+    session: &Session,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> Result<()> {
+    let events = session
+        .events_path()
+        .context("session has no events path (dry-run?)")?;
+    let transcript = suggest::read_recent_events(events, suggest::recent_turns_limit())?;
+    if transcript.trim().is_empty() {
+        println!("[atman] :suggest — no recent turns yet; talk a bit first.");
+        return Ok(());
+    }
+
+    let model = load_suggest_model();
+    let provider = executor
+        .providers
+        .resolve(&model)
+        .with_context(|| format!("no provider resolves model `{model}` — configure one first"))?;
+
+    println!("[atman] :suggest — asking `{model}` to spot a reusable pattern…");
+    let reply = suggest::generate_suggestion(provider, &model, &transcript).await?;
+    if reply.trim() == "NO_SUGGESTION" {
+        println!("[atman] :suggest — model saw no reusable pattern.");
+        return Ok(());
+    }
+    let Some(dsl_src) = suggest::extract_code_block(&reply) else {
+        println!("[atman] :suggest — model reply did not contain a fenced code block:");
+        println!("{}", reply.trim());
+        return Ok(());
+    };
+
+    let flow_name = match suggest::extract_flow_name(&dsl_src) {
+        Ok(n) => n,
+        Err(e) => {
+            println!("[atman] :suggest — suggested flow is not valid: {e}");
+            println!("---\n{dsl_src}\n---");
+            return Ok(());
+        }
+    };
+    let parsed = parse_file(&dsl_src)?;
+    if let Err(errs) = atman_runtime::validate::validate(&parsed.flows[0], &executor.tools) {
+        println!("[atman] :suggest — validation rejected the suggestion:");
+        for e in errs {
+            println!("  · {e:?}");
+        }
+        println!("---\n{dsl_src}\n---");
+        return Ok(());
+    }
+
+    let has_shell = dsl_src.contains("bash.exec") || dsl_src.contains("shell.");
+    println!("[atman] suggested flow `{flow_name}`:");
+    println!("---\n{dsl_src}\n---");
+    if has_shell {
+        println!("[atman] note: this flow calls shell tools — accept only if you trust it.");
+    }
+    println!(
+        "[atman] accept? [y] yes / [n] no / [e] print path so you can edit the buffered draft"
+    );
+
+    let choice = loop {
+        let Some(line) = input_rx.recv().await else {
+            println!("[atman] :suggest — input closed, discarding.");
+            return Ok(());
+        };
+        match line.trim() {
+            "y" | "Y" | "yes" => break 'y',
+            "n" | "N" | "no" | "" => break 'n',
+            "e" | "E" | "edit" => break 'e',
+            other => {
+                println!("[atman] answer with y / n / e (got `{other}`)");
+            }
+        }
+    };
+
+    if choice == 'n' {
+        println!("[atman] :suggest — discarded.");
+        return Ok(());
+    }
+
+    let cfg = config_dir()?;
+    let cmd_dir = cfg.join("commands");
+    std::fs::create_dir_all(&cmd_dir)?;
+    let mut final_name = flow_name.clone();
+    let mut target = cmd_dir.join(format!("{final_name}.at"));
+    if target.exists() {
+        final_name = format!("{flow_name}_v2");
+        target = cmd_dir.join(format!("{final_name}.at"));
+        println!(
+            "[atman] :suggest — `{flow_name}.at` exists; writing as `{final_name}.at` instead"
+        );
+    }
+    let final_src = if final_name == flow_name {
+        dsl_src.clone()
+    } else {
+        dsl_src.replacen(
+            &format!("flow {flow_name}"),
+            &format!("flow {final_name}"),
+            1,
+        )
+    };
+    std::fs::write(&target, format!("{final_src}\n"))
+        .with_context(|| format!("write {}", target.display()))?;
+
+    let routes_at = cfg.join("routes.at");
+    let mut routes_body = std::fs::read_to_string(&routes_at).unwrap_or_default();
+    if !routes_body.ends_with('\n') && !routes_body.is_empty() {
+        routes_body.push('\n');
+    }
+    let trigger = format!("{final_name} ");
+    routes_body.push_str(&suggest::route_line(&final_name, &trigger));
+    std::fs::write(&routes_at, routes_body)
+        .with_context(|| format!("append route to {}", routes_at.display()))?;
+
+    println!(
+        "[atman] :suggest — accepted. wrote {} and appended route \"{}\" → {}",
+        target.display(),
+        trigger,
+        final_name
+    );
+    if choice == 'e' {
+        println!("[atman] :suggest — open {} to edit.", target.display());
+    }
+    Ok(())
+}
+
+fn load_suggest_model() -> String {
+    let default = "gpt-4o-mini".to_string();
+    let Ok(cfg) = config_dir() else {
+        return default;
+    };
+    let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
+        return default;
+    };
+    parse_suggest_model(&text).unwrap_or(default)
+}
+
+fn parse_suggest_model(text: &str) -> Option<String> {
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name) = rest.strip_suffix(']')
+        {
+            in_section = name.trim() == "suggest";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == "model" {
+            return Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
 }
 
 async fn cmd_cost(session_id: Option<String>) -> Result<()> {
