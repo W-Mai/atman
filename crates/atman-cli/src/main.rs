@@ -156,6 +156,13 @@ enum LogsAction {
         #[arg(long)]
         follow: bool,
     },
+    Stream {
+        session_id: Option<String>,
+        #[arg(long, default_value_t = 65099)]
+        port: u16,
+        #[arg(long)]
+        since_seq: Option<u64>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -189,6 +196,14 @@ async fn main() -> Result<()> {
                     follow,
                 },
         }) => cmd_logs_tail(session_id, n, follow).await,
+        Some(Cmd::Logs {
+            action:
+                LogsAction::Stream {
+                    session_id,
+                    port,
+                    since_seq,
+                },
+        }) => cmd_logs_stream(session_id, port, since_seq).await,
         Some(Cmd::Session {
             action: SessionAction::List,
         }) => cmd_session_list().await,
@@ -266,11 +281,31 @@ async fn cmd_daemon_run(file: PathBuf, follow: bool, port: u16) -> Result<()> {
     if !follow {
         return Ok(());
     }
+    stream_daemon_events(&client, &base, &cfg.auth_token, &sid, None, true).await?;
+    Ok(())
+}
+
+async fn stream_daemon_events(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    sid: &str,
+    since_seq: Option<u64>,
+    stop_on_flow_end: bool,
+) -> Result<()> {
+    let mut url = format!("{base}/events?session_id={sid}");
+    if let Some(seq) = since_seq {
+        url.push_str(&format!("&since_seq={seq}"));
+    }
     let sse = client
-        .get(format!("{base}/events?session_id={sid}"))
-        .bearer_auth(&cfg.auth_token)
+        .get(&url)
+        .bearer_auth(token)
         .send()
-        .await?;
+        .await
+        .with_context(|| format!("GET {url} (is atman-daemon running?)"))?;
+    if !sse.status().is_success() {
+        bail!("daemon SSE returned HTTP {}", sse.status());
+    }
     use futures::StreamExt;
     let mut stream = sse.bytes_stream();
     let mut buf = Vec::new();
@@ -282,7 +317,7 @@ async fn cmd_daemon_run(file: PathBuf, follow: bool, port: u16) -> Result<()> {
             let text = String::from_utf8_lossy(&line).trim().to_string();
             if let Some(data) = text.strip_prefix("data: ") {
                 println!("{data}");
-                if data.contains("\"flow_end\"") {
+                if stop_on_flow_end && data.contains("\"flow_end\"") {
                     return Ok(());
                 }
             }
@@ -2538,6 +2573,25 @@ fn flow_name_from_source_or_path(source: &str, path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+async fn cmd_logs_stream(
+    session_id: Option<String>,
+    port: u16,
+    since_seq: Option<u64>,
+) -> Result<()> {
+    let root = data_dir()?;
+    let sid = match session_id {
+        Some(s) => s,
+        None => latest_session(&root)?
+            .with_context(|| format!("no sessions found under {}", root.display()))?,
+    };
+    let cfg_path = atman_daemon::config::default_config_path()?;
+    let cfg = atman_daemon::config::DaemonConfig::load_or_init(&cfg_path)?;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    eprintln!("[atman] streaming events for session {sid} from {base}/events");
+    stream_daemon_events(&client, &base, &cfg.auth_token, &sid, since_seq, false).await
 }
 
 async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Result<()> {

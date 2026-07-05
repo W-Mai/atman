@@ -34,4 +34,6 @@ tower-http.workspace   = true
 
 [dev-dependencies]
 atman-runtime = { path = "../atman-runtime" }
+atman-daemon = { path = "../atman-daemon" }
+tokio-util.workspace = true
 tempfile = "3"
