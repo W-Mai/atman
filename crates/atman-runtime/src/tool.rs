@@ -58,6 +58,7 @@ pub struct ToolCtx {
     pub registry: Option<std::sync::Arc<ToolRegistry>>,
     pub sandbox: Option<std::sync::Arc<dyn crate::sandbox::Sandbox>>,
     pub events: Option<crate::event::EventSink>,
+    pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
 }
 
 impl ToolCtx {
@@ -89,6 +90,11 @@ impl ToolCtx {
 
     pub fn with_events(mut self, events: crate::event::EventSink) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    pub fn with_stdout_broadcast(mut self, tx: tokio::sync::broadcast::Sender<String>) -> Self {
+        self.stdout_broadcast = Some(tx);
         self
     }
 }
