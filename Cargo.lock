@@ -206,6 +206,7 @@ dependencies = [
  "chrono",
  "eventsource-stream",
  "futures",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

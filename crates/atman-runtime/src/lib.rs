@@ -17,6 +17,7 @@ pub mod message;
 pub mod migration;
 pub mod provider;
 pub mod providers;
+pub mod redact;
 pub mod rendezvous;
 pub mod sandbox;
 pub mod session;
