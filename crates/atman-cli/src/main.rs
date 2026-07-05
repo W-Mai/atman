@@ -703,6 +703,8 @@ async fn cmd_repl() -> Result<()> {
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
         .await;
 
+    let classifier = build_interjection_classifier();
+
     if let Err(e) = run_boot_flow(&executor).await {
         eprintln!("[atman] boot flow error: {e}");
     }
@@ -747,6 +749,7 @@ async fn cmd_repl() -> Result<()> {
             &session,
             &executor,
             &lifecycles,
+            classifier.as_ref(),
             &text,
             &mut pending,
             kind,
@@ -817,6 +820,9 @@ async fn run_turn_with_interjection(
     session: &Session,
     executor: &Executor,
     lifecycles: &atman_runtime::lifecycle::LifecycleRunner,
+    classifier: Option<
+        &std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>,
+    >,
     raw_line: &str,
     pending: &mut PendingUserMessage,
     kind: TurnKind,
@@ -852,7 +858,7 @@ async fn run_turn_with_interjection(
             biased;
             r = &mut flow_fut => break r,
             Some(line) = input_rx.recv() => {
-                if !consume_interjection_input(&line, session) {
+                if !consume_interjection_input(&line, session, classifier).await {
                     pushback.push_back(line);
                 }
             }
@@ -872,8 +878,15 @@ async fn run_turn_with_interjection(
 /// Returns true if the line was fully consumed as an interjection (`!nudge` / `!course-correct` /
 /// `!redirect` / `!stop`) or reported as a busy-warning, false if it should be pushed back for the
 /// main loop (e.g. `:exit` or a normal command arriving before the current flow finishes).
-fn consume_interjection_input(line: &str, session: &Session) -> bool {
+async fn consume_interjection_input(
+    line: &str,
+    session: &Session,
+    classifier: Option<
+        &std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>,
+    >,
+) -> bool {
     use atman_runtime::injection::InjectionLevel;
+    use atman_runtime::injection_classifier::{ClassifierSource, source_tag};
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return true;
@@ -914,10 +927,19 @@ fn consume_interjection_input(line: &str, session: &Session) -> bool {
         }
         return true;
     }
-    if let Some(text) = trimmed
-        .strip_prefix("!nudge ")
-        .or_else(|| trimmed.strip_prefix('!'))
-    {
+    if let Some(text) = trimmed.strip_prefix("!nudge ") {
+        let text = text.trim();
+        if text.is_empty() {
+            eprintln!("[atman] usage: !nudge <text>");
+            return true;
+        }
+        match session.enqueue_injection(text) {
+            Ok(id) => println!("[atman] nudge queued ({id}) — will inject at next llm node"),
+            Err(e) => eprintln!("[atman] nudge rejected: {e}"),
+        }
+        return true;
+    }
+    if let Some(text) = trimmed.strip_prefix('!') {
         let text = text.trim();
         if text.is_empty() {
             eprintln!(
@@ -931,7 +953,54 @@ fn consume_interjection_input(line: &str, session: &Session) -> bool {
         }
         return true;
     }
-    false
+    let Some(classifier) = classifier else {
+        return false;
+    };
+    let cls = classifier.classify(trimmed).await;
+    let source = source_tag(cls.source);
+    match cls.level {
+        InjectionLevel::L4HardStop => {
+            session.cancel_flow();
+            let _ = session.enqueue_injection_with_level(
+                trimmed,
+                InjectionLevel::L4HardStop,
+                cls.redirect_target,
+            );
+            println!("[atman] L4 stop queued ({source}): {trimmed}");
+        }
+        InjectionLevel::L3Redirect => {
+            let target = cls.redirect_target.clone();
+            match session.enqueue_injection_with_level(
+                trimmed,
+                InjectionLevel::L3Redirect,
+                target.clone(),
+            ) {
+                Ok(id) => println!(
+                    "[atman] L3 redirect queued ({id}, {source}) → {}",
+                    target.as_deref().unwrap_or("<no target>")
+                ),
+                Err(e) => eprintln!("[atman] L3 redirect rejected: {e}"),
+            }
+        }
+        InjectionLevel::L2CourseCorrect => {
+            match session.enqueue_injection_with_level(
+                trimmed,
+                InjectionLevel::L2CourseCorrect,
+                None,
+            ) {
+                Ok(id) => {
+                    println!("[atman] L2 course-correct queued ({id}, {source}): {trimmed}")
+                }
+                Err(e) => eprintln!("[atman] L2 course-correct rejected: {e}"),
+            }
+        }
+        InjectionLevel::L1Nudge => match session.enqueue_injection(trimmed) {
+            Ok(id) => println!("[atman] L1 nudge queued ({id}, {source}): {trimmed}"),
+            Err(e) => eprintln!("[atman] L1 nudge rejected: {e}"),
+        },
+    }
+    let _ = ClassifierSource::Default;
+    true
 }
 
 fn extract_at_paths(line: &str) -> (String, Vec<std::path::PathBuf>) {
@@ -1533,6 +1602,58 @@ fn attach_memory_stores(
 
 fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {
     atman_daemon::bootstrap::load_preview_config(config_dir().ok().as_deref())
+}
+
+fn build_interjection_classifier()
+-> Option<std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>> {
+    let cfg_dir = config_dir().ok()?;
+    let text = std::fs::read_to_string(cfg_dir.join("config.toml")).ok()?;
+    let mode = parse_interjection_mode(&text);
+    match mode.as_deref() {
+        Some("off") => None,
+        Some("rule") | None => Some(std::sync::Arc::new(
+            atman_runtime::injection_classifier::RuleClassifier::default(),
+        )),
+        Some("llm") => Some(std::sync::Arc::new(
+            atman_runtime::injection_classifier::ComposedClassifier::new(
+                atman_runtime::injection_classifier::RuleClassifier::default(),
+            ),
+        )),
+        Some(other) => {
+            eprintln!(
+                "[atman] unknown [interjection] classifier = `{other}` — falling back to rule"
+            );
+            Some(std::sync::Arc::new(
+                atman_runtime::injection_classifier::RuleClassifier::default(),
+            ))
+        }
+    }
+}
+
+fn parse_interjection_mode(text: &str) -> Option<String> {
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name) = rest.strip_suffix(']')
+        {
+            in_section = name.trim() == "interjection";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == "classifier" {
+            return Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
 }
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
