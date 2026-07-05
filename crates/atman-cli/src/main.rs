@@ -78,7 +78,7 @@ enum MigrateAction {
         storage: Option<PathBuf>,
     },
     Import {
-        session_id: String,
+        session_id: Option<String>,
         #[arg(long, default_value = "opencode")]
         from: String,
         #[arg(long)]
@@ -2014,9 +2014,13 @@ async fn cmd_migrate(action: MigrateAction) -> Result<()> {
                 bail!("migrate import: pass either --out <path> or --into new");
             }
             let source = build_migration_source(&from, storage)?;
-            let messages = source.load_messages(&session_id)?;
+            let resolved_id = match session_id {
+                Some(id) => id,
+                None => pick_session_interactively(source.as_ref(), &from)?,
+            };
+            let messages = source.load_messages(&resolved_id)?;
             if messages.is_empty() {
-                bail!("session {session_id} loaded 0 messages — nothing to import");
+                bail!("session {resolved_id} loaded 0 messages — nothing to import");
             }
             if let Some(out_path) = out {
                 if let Some(parent) = out_path.parent()
@@ -2041,7 +2045,7 @@ async fn cmd_migrate(action: MigrateAction) -> Result<()> {
                 std::fs::write(&out_path, body)
                     .with_context(|| format!("write {}", out_path.display()))?;
                 println!(
-                    "[atman] migrate: wrote {} messages from {from}/{session_id} to {}",
+                    "[atman] migrate: wrote {} messages from {from}/{resolved_id} to {}",
                     messages.len(),
                     out_path.display()
                 );
@@ -2055,7 +2059,7 @@ async fn cmd_migrate(action: MigrateAction) -> Result<()> {
             replay_messages_into(&session, source.source_tag(), &messages);
             session.shutdown().await;
             println!(
-                "[atman] migrate: replayed {} messages from {from}/{session_id} into new session {sid}",
+                "[atman] migrate: replayed {} messages from {from}/{resolved_id} into new session {sid}",
                 messages.len()
             );
             if let Some(p) = events {
@@ -2064,6 +2068,42 @@ async fn cmd_migrate(action: MigrateAction) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn pick_session_interactively(
+    source: &dyn migrate_source::MigrationSource,
+    from: &str,
+) -> Result<String> {
+    let sessions = source.discover_sessions()?;
+    if sessions.is_empty() {
+        bail!("migrate import: no sessions in {from} storage — nothing to pick from");
+    }
+    eprintln!("[atman] {from} sessions (newest first):");
+    for (i, s) in sessions.iter().enumerate() {
+        eprintln!("  {:>3}. {}  ms={}  {}", i + 1, s.id, s.created_ms, s.title);
+    }
+    eprint!("[atman] pick number 1-{} (blank cancels): ", sessions.len());
+    use std::io::{BufRead, Write};
+    let _ = std::io::stderr().flush();
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    if stdin.lock().read_line(&mut line)? == 0 {
+        bail!("migrate import: stdin closed before a pick");
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        bail!("migrate import: no pick given, aborted");
+    }
+    let idx: usize = trimmed
+        .parse()
+        .with_context(|| format!("`{trimmed}` is not a number"))?;
+    if idx == 0 || idx > sessions.len() {
+        bail!(
+            "migrate import: pick {idx} out of range 1..={}",
+            sessions.len()
+        );
+    }
+    Ok(sessions[idx - 1].id.clone())
 }
 
 fn replay_messages_into(

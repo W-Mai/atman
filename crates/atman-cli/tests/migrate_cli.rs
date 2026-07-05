@@ -106,6 +106,113 @@ fn migrate_list_reports_empty_when_storage_missing() {
 }
 
 #[test]
+fn migrate_import_picker_reads_stdin_selection() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_fixture(tmp.path());
+    let out_file = tmp.path().join("picked.jsonl");
+    let mut cmd = Command::new(atman_bin());
+    cmd.args([
+        "migrate",
+        "import",
+        "--from",
+        "opencode",
+        "--storage",
+        tmp.path().to_str().unwrap(),
+        "--out",
+        out_file.to_str().unwrap(),
+    ])
+    .current_dir(tmp.path())
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn atman migrate import");
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b"1\n").unwrap();
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "picker exit: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listing = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        listing.contains("ses_abc") && listing.contains("pick number 1-2"),
+        "picker menu missing, stderr={listing}"
+    );
+    let body = std::fs::read_to_string(&out_file).unwrap();
+    assert_eq!(body.lines().count(), 2);
+    assert!(body.contains("please investigate"));
+}
+
+#[test]
+fn migrate_import_picker_rejects_out_of_range_pick() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_fixture(tmp.path());
+    let out_file = tmp.path().join("bad.jsonl");
+    let mut cmd = Command::new(atman_bin());
+    cmd.args([
+        "migrate",
+        "import",
+        "--from",
+        "opencode",
+        "--storage",
+        tmp.path().to_str().unwrap(),
+        "--out",
+        out_file.to_str().unwrap(),
+    ])
+    .current_dir(tmp.path())
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn atman migrate import");
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b"99\n").unwrap();
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        !output.status.success(),
+        "want failure on out-of-range pick"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("out of range"),
+        "want out-of-range hint, stderr={stderr}"
+    );
+    assert!(!out_file.exists(), "no file should be written on abort");
+}
+
+#[test]
+fn migrate_import_picker_empty_pick_aborts() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_fixture(tmp.path());
+    let out_file = tmp.path().join("empty.jsonl");
+    let mut cmd = Command::new(atman_bin());
+    cmd.args([
+        "migrate",
+        "import",
+        "--from",
+        "opencode",
+        "--storage",
+        tmp.path().to_str().unwrap(),
+        "--out",
+        out_file.to_str().unwrap(),
+    ])
+    .current_dir(tmp.path())
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn atman migrate import");
+    use std::io::Write;
+    child.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    let output = child.wait_with_output().expect("wait");
+    assert!(!output.status.success(), "want failure on empty pick");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no pick given"),
+        "want abort hint, stderr={stderr}"
+    );
+}
+
+#[test]
 fn migrate_import_into_new_writes_session_events() {
     let tmp = tempfile::tempdir().unwrap();
     seed_fixture(tmp.path());
