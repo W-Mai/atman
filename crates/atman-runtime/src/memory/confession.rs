@@ -62,6 +62,7 @@ pub struct ConfessionStore {
     dir: PathBuf,
     index_path: PathBuf,
     anchor_index: Option<Arc<AnchorIndex>>,
+    redactor: Option<Arc<crate::redact::Redactor>>,
 }
 
 impl ConfessionStore {
@@ -72,6 +73,7 @@ impl ConfessionStore {
             dir,
             index_path,
             anchor_index: None,
+            redactor: None,
         }
     }
 
@@ -80,7 +82,13 @@ impl ConfessionStore {
         self
     }
 
+    pub fn with_redactor(mut self, redactor: Arc<crate::redact::Redactor>) -> Self {
+        self.redactor = Some(redactor);
+        self
+    }
+
     pub async fn append(&self, confession: Confession) -> Result<MemoryId, RuntimeError> {
+        let confession = self.redact_if_needed(confession);
         let id = confession.id.clone();
         tokio::fs::create_dir_all(&self.dir)
             .await
@@ -96,6 +104,18 @@ impl ConfessionStore {
             eprintln!("[atman] confession index insert failed (id={id}): {e}");
         }
         Ok(id)
+    }
+
+    fn redact_if_needed(&self, mut c: Confession) -> Confession {
+        let Some(r) = &self.redactor else {
+            return c;
+        };
+        c.trigger = r.redact(&c.trigger).0;
+        c.rule_violated = r.redact(&c.rule_violated).0;
+        c.what_i_did = r.redact(&c.what_i_did).0;
+        c.why = r.redact(&c.why).0;
+        c.mitigation = r.redact(&c.mitigation).0;
+        c
     }
 
     pub async fn find_by_trigger_fts(

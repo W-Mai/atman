@@ -27,13 +27,91 @@ pub struct SandboxConfig {
     pub template_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RedactConfig {
+    pub enabled: bool,
+    pub partial: bool,
+    pub allowlist: Vec<String>,
+    pub custom_patterns: Vec<(String, String)>,
+}
+
+pub fn load_redact_config(config_dir: Option<&Path>) -> RedactConfig {
+    let Some(dir) = config_dir else {
+        return RedactConfig::default();
+    };
+    let path = dir.join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return RedactConfig::default();
+    };
+    parse_redact_config(&text)
+}
+
+pub fn parse_redact_config(text: &str) -> RedactConfig {
+    #[derive(Debug, Deserialize, Default)]
+    struct RawPattern {
+        kind: String,
+        regex: String,
+    }
+    #[derive(Debug, Deserialize, Default)]
+    struct RawRedact {
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        allowlist: Vec<String>,
+        #[serde(default)]
+        custom_patterns: Vec<RawPattern>,
+    }
+    #[derive(Debug, Deserialize, Default)]
+    struct RawRedactFile {
+        #[serde(default)]
+        redact: RawRedact,
+    }
+    let file: RawRedactFile = match toml::from_str(text) {
+        Ok(f) => f,
+        Err(_) => return RedactConfig::default(),
+    };
+    RedactConfig {
+        enabled: file.redact.enabled,
+        partial: file.redact.mode.as_deref() == Some("partial"),
+        allowlist: file.redact.allowlist,
+        custom_patterns: file
+            .redact
+            .custom_patterns
+            .into_iter()
+            .map(|p| (p.kind, p.regex))
+            .collect(),
+    }
+}
+
+pub fn build_redactor(config_dir: Option<&Path>) -> Option<Arc<atman_runtime::redact::Redactor>> {
+    let cfg = load_redact_config(config_dir);
+    if !cfg.enabled {
+        return None;
+    }
+    let mut pairs: Vec<(&str, &str)> = atman_runtime::redact::BUILTIN_PATTERNS.to_vec();
+    for (k, r) in &cfg.custom_patterns {
+        pairs.push((k.as_str(), r.as_str()));
+    }
+    let mode = if cfg.partial {
+        atman_runtime::redact::RedactMode::Partial
+    } else {
+        atman_runtime::redact::RedactMode::Full
+    };
+    let redactor =
+        atman_runtime::redact::Redactor::from_pairs(&pairs, mode).with_allowlist(cfg.allowlist);
+    Some(Arc::new(redactor))
+}
+
 pub struct BootstrapOutcome {
     pub executor: Executor,
     pub mcp_status: Vec<Result<atman_runtime::mcp::McpClientStatus, String>>,
 }
 
 pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> {
-    let mut executor = Executor::with_events(opts.events);
+    let events = opts.events.clone();
+    let mut executor = Executor::with_events(events);
 
     let fetch_rule = build_fetch_rule(&opts.project_root, opts.home_dir.as_deref()).await;
     tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
@@ -154,6 +232,16 @@ pub fn attach_memory_stores(
     confession_root: &Path,
     spec_root: &Path,
 ) {
+    attach_memory_stores_with_redactor(executor, session_dir, confession_root, spec_root, None);
+}
+
+pub fn attach_memory_stores_with_redactor(
+    executor: &mut Executor,
+    session_dir: &Path,
+    confession_root: &Path,
+    spec_root: &Path,
+    redactor: Option<Arc<atman_runtime::redact::Redactor>>,
+) {
     let project_index = match atman_runtime::index::AnchorIndex::open_project(confession_root) {
         Ok(idx) => Some(Arc::new(idx)),
         Err(e) => {
@@ -171,6 +259,9 @@ pub fn attach_memory_stores(
     if let Some(idx) = &project_index {
         confession_store = confession_store.with_index(idx.clone());
         spec_store = spec_store.with_index(idx.clone());
+    }
+    if let Some(r) = &redactor {
+        confession_store = confession_store.with_redactor(r.clone());
     }
     let confession_store = Arc::new(confession_store);
     let spec_store = Arc::new(spec_store);

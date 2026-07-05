@@ -30,7 +30,8 @@ impl RunLauncher {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
 
-        let session = atman_runtime::Session::open(state.data_dir())
+        let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
+        let session = atman_runtime::Session::open_with_redactor(state.data_dir(), redactor)
             .with_context(|| format!("opening session under {}", state.data_dir().display()))?;
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
@@ -132,11 +133,13 @@ async fn run_flow_inner(
         .unwrap_or(session.dir())
         .join("specs");
     let _ = std::fs::create_dir_all(&spec_root);
-    crate::bootstrap::attach_memory_stores(
+    let redactor = crate::bootstrap::build_redactor(config_dir.as_deref());
+    crate::bootstrap::attach_memory_stores_with_redactor(
         &mut executor,
         session.dir(),
         &confession_root,
         &spec_root,
+        redactor,
     );
     if let Some(state) = daemon_state {
         executor.tool_ctx.prompt_resolver =

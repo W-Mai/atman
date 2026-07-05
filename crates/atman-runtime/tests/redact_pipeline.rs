@@ -69,6 +69,55 @@ async fn events_jsonl_partial_mode_keeps_prefix_and_suffix() {
 }
 
 #[tokio::test]
+async fn confession_store_redacts_before_writing_body_and_jsonl() {
+    use atman_runtime::memory::MemoryId;
+    use atman_runtime::memory::confession::{Confession, ConfessionStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfessionStore::at(dir.path()).with_redactor(Arc::new(Redactor::builtin()));
+    let confession = Confession {
+        id: MemoryId::now(),
+        trigger: "leaked openai key sk-abcdefghijklmnop1234567890".to_string(),
+        rule_violated: "no-secrets".to_string(),
+        what_i_did: "pasted the key into a prompt".to_string(),
+        why: "hurried".to_string(),
+        mitigation: "rotate sk-abcdefghijklmnop1234567890 asap".to_string(),
+        anchors: vec![],
+        created_at: chrono::Utc::now(),
+    };
+    store.append(confession).await.unwrap();
+
+    let mut jsonl_seen = false;
+    let mut md_seen = false;
+    for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let body = std::fs::read_to_string(entry.path()).unwrap();
+        if name == "confessions.jsonl" {
+            jsonl_seen = true;
+            assert!(
+                !body.contains("sk-abcdefghijklmnop1234567890"),
+                "jsonl leaks: {body}"
+            );
+            assert!(
+                body.contains("<REDACTED:openai_api_key>"),
+                "jsonl missing marker: {body}"
+            );
+        } else if name.ends_with(".md") {
+            md_seen = true;
+            assert!(
+                !body.contains("sk-abcdefghijklmnop1234567890"),
+                "md leaks: {body}"
+            );
+            assert!(
+                body.contains("<REDACTED:openai_api_key>"),
+                "md missing marker: {body}"
+            );
+        }
+    }
+    assert!(jsonl_seen && md_seen, "expected both jsonl and md files");
+}
+
+#[tokio::test]
 async fn events_jsonl_without_redactor_keeps_secret_verbatim() {
     let dir = tempfile::tempdir().unwrap();
     let writer = EventWriter::spawn_with(dir.path(), None).unwrap();

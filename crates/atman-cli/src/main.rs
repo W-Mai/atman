@@ -318,11 +318,13 @@ async fn cmd_run(
 
     let args = parse_args(&raw_args)?;
 
+    let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
     let session = if ephemeral {
         Session::open_ephemeral()
     } else {
         let root = data_dir()?;
-        Session::open(&root).with_context(|| format!("opening session under {}", root.display()))?
+        Session::open_with_redactor(&root, redactor.clone())
+            .with_context(|| format!("opening session under {}", root.display()))?
     };
 
     if let Some(path) = session.events_path() {
@@ -670,7 +672,8 @@ async fn cmd_repl() -> Result<()> {
     );
 
     let root = data_dir()?;
-    let session = Session::open(&root)
+    let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
+    let session = Session::open_with_redactor(&root, redactor.clone())
         .with_context(|| format!("opening session under {}", root.display()))?;
     if let Some(path) = session.events_path() {
         println!("[atman] session={} events={}", session.id(), path.display());
@@ -1517,11 +1520,13 @@ fn attach_memory_stores(
         std::fs::create_dir_all(&spec_root).ok();
         (session_dir.to_path_buf(), confession_root, spec_root)
     };
-    atman_daemon::bootstrap::attach_memory_stores(
+    let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
+    atman_daemon::bootstrap::attach_memory_stores_with_redactor(
         executor,
         &session_scope,
         &confession_root,
         &spec_root,
+        redactor,
     );
     Ok(())
 }
