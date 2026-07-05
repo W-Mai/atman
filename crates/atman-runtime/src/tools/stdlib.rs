@@ -732,6 +732,7 @@ impl Tool for DispatchAll {
                             .clone()
                             .unwrap_or_else(crate::event::TurnId::now),
                     };
+                    emit_tool_result(ctx, &msg);
                     out.push(Value::Message(msg));
                     continue;
                 };
@@ -765,11 +766,25 @@ impl Tool for DispatchAll {
                         .clone()
                         .unwrap_or_else(crate::event::TurnId::now),
                 };
+                emit_tool_result(ctx, &msg);
                 out.push(Value::Message(msg));
             }
             Ok(Value::List(out))
         })
     }
+}
+
+fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) {
+    let Some(sink) = &ctx.events else {
+        return;
+    };
+    sink.emit(crate::event::Event::ToolResultMsg {
+        seq: 0,
+        turn_id: msg.turn_id.clone(),
+        flow_run_id: ctx.flow_run_id.clone(),
+        message: msg.clone(),
+        ts: chrono::Utc::now(),
+    });
 }
 
 fn render_tool_result_text(v: &Value) -> String {

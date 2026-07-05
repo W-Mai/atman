@@ -142,6 +142,11 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     ctx.events.map(|s| s.next_seq_peek()),
                 )
                 .with_registry(std::sync::Arc::new(ctx.tools.clone()));
+            let ctx_with_anchors = if let Some(sink) = ctx.events {
+                ctx_with_anchors.with_events(sink.clone())
+            } else {
+                ctx_with_anchors
+            };
             let ctx_with_anchors = if matches!(tool.tier(), crate::tool::Tier::Four) {
                 ctx_with_anchors
             } else {

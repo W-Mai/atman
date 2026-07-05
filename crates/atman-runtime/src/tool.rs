@@ -57,6 +57,7 @@ pub struct ToolCtx {
     pub prompt_resolver: Option<std::sync::Arc<dyn crate::rendezvous::PromptResolver>>,
     pub registry: Option<std::sync::Arc<ToolRegistry>>,
     pub sandbox: Option<std::sync::Arc<dyn crate::sandbox::Sandbox>>,
+    pub events: Option<crate::event::EventSink>,
 }
 
 impl ToolCtx {
@@ -83,6 +84,11 @@ impl ToolCtx {
 
     pub fn with_sandbox(mut self, sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox>) -> Self {
         self.sandbox = Some(sandbox);
+        self
+    }
+
+    pub fn with_events(mut self, events: crate::event::EventSink) -> Self {
+        self.events = Some(events);
         self
     }
 }

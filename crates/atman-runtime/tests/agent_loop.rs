@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::error::RuntimeError;
-use atman_runtime::event::{NodeEvent, Observable, TurnId};
+use atman_runtime::event::{Event, EventSink, NodeEvent, Observable, TurnId};
 use atman_runtime::message::{Message, MessagePart, MessageRole};
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::tool::BoxFut;
@@ -143,7 +143,8 @@ async fn agent_flow_dispatches_tool_use_and_returns_final_text() {
         AgentTurn::FinalText("summary: file said hello".into()),
     ]));
 
-    let mut ex = Executor::new();
+    let sink = EventSink::new();
+    let mut ex = Executor::with_events(sink.clone());
     tools::register_tier_zero(&mut ex.tools);
     ex.providers.register(provider.clone());
     let file = parse_file(agent_source()).unwrap();
@@ -166,6 +167,34 @@ async fn agent_flow_dispatches_tool_use_and_returns_final_text() {
         provider.calls.load(Ordering::SeqCst),
         2,
         "two llm turns expected"
+    );
+
+    let tool_results: Vec<_> = sink
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::ToolResultMsg { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tool_results.len(),
+        1,
+        "dispatch_all should emit exactly one tool_result_msg event"
+    );
+    let content = tool_results[0]
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            atman_runtime::message::MessagePart::ToolResult { content, .. } => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .expect("tool_result_msg should have a ToolResult part");
+    assert!(
+        content.contains("world of atman"),
+        "tool_result content should carry the file body, got: {content}"
     );
 }
 
