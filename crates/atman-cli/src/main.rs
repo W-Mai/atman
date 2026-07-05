@@ -6,6 +6,7 @@ use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod migrate_source;
 mod suggest;
 mod sync;
 
@@ -61,6 +62,29 @@ enum Cmd {
     Sync {
         #[command(subcommand)]
         action: SyncAction,
+    },
+    Migrate {
+        #[command(subcommand)]
+        action: MigrateAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MigrateAction {
+    List {
+        #[arg(long, default_value = "opencode")]
+        from: String,
+        #[arg(long)]
+        storage: Option<PathBuf>,
+    },
+    Import {
+        session_id: String,
+        #[arg(long, default_value = "opencode")]
+        from: String,
+        #[arg(long)]
+        storage: Option<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -188,6 +212,7 @@ async fn main() -> Result<()> {
         }) => cmd_daemon_rotate_token().await,
         Some(Cmd::Flow { action }) => cmd_flow(action).await,
         Some(Cmd::Sync { action }) => cmd_sync(action).await,
+        Some(Cmd::Migrate { action }) => cmd_migrate(action).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Run { file, follow, port },
         }) => cmd_daemon_run(file, follow, port).await,
@@ -1956,6 +1981,81 @@ fn parse_interjection_mode(text: &str) -> Option<String> {
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
     atman_daemon::bootstrap::load_mcp_configs(config_dir().ok().as_deref())
+}
+
+async fn cmd_migrate(action: MigrateAction) -> Result<()> {
+    match action {
+        MigrateAction::List { from, storage } => {
+            let source = build_migration_source(&from, storage)?;
+            let sessions = source.discover_sessions()?;
+            if sessions.is_empty() {
+                println!(
+                    "[atman] migrate --from {from}: no sessions found (storage empty or unreadable)"
+                );
+                return Ok(());
+            }
+            println!("[atman] {from} sessions (newest first):");
+            for (i, s) in sessions.iter().enumerate() {
+                let when = format!("ms={}", s.created_ms);
+                println!("  {:>3}. {}  {}  {}", i + 1, s.id, when, s.title);
+            }
+            Ok(())
+        }
+        MigrateAction::Import {
+            session_id,
+            from,
+            storage,
+            out,
+        } => {
+            let source = build_migration_source(&from, storage)?;
+            let messages = source.load_messages(&session_id)?;
+            if messages.is_empty() {
+                bail!("session {session_id} loaded 0 messages — nothing to import");
+            }
+            if let Some(parent) = out.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("mkdir {}", parent.display()))?;
+            }
+            let mut lines = Vec::with_capacity(messages.len());
+            for m in &messages {
+                let record = serde_json::json!({
+                    "role": m.role.as_str(),
+                    "text": m.text,
+                    "agent": m.agent,
+                    "model": m.model,
+                    "created_ms": m.created_ms,
+                    "source": source.source_tag(),
+                });
+                lines.push(record.to_string());
+            }
+            let body = lines.join("\n") + "\n";
+            std::fs::write(&out, body).with_context(|| format!("write {}", out.display()))?;
+            println!(
+                "[atman] migrate: wrote {} messages from {from}/{session_id} to {}",
+                messages.len(),
+                out.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn build_migration_source(
+    kind: &str,
+    storage: Option<PathBuf>,
+) -> Result<Box<dyn migrate_source::MigrationSource>> {
+    match kind {
+        "opencode" => {
+            let root = match storage {
+                Some(p) => p,
+                None => migrate_source::OpencodeSource::default_root()?,
+            };
+            Ok(Box::new(migrate_source::OpencodeSource::new(root)))
+        }
+        other => bail!("unknown migration source `{other}` (want: opencode)"),
+    }
 }
 
 async fn cmd_sync(action: SyncAction) -> Result<()> {
