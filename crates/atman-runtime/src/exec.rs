@@ -10,6 +10,51 @@ use crate::provider::LlmRequest;
 use crate::tool::{BoxFut, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
+fn bind_pattern(
+    pattern: &atman_dsl::ast::Pattern,
+    value: Value,
+    env: &mut Env,
+) -> Result<(), RuntimeError> {
+    use atman_dsl::ast::{Pattern, PatternFieldBinding};
+    match pattern {
+        Pattern::Ident(id) => {
+            env.bind(id.name.clone(), value);
+            Ok(())
+        }
+        Pattern::Struct { fields } => {
+            let pairs = match value {
+                Value::Struct(pairs) => pairs,
+                other => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "struct for destructuring bind".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            };
+            for field in fields {
+                let Some((_, matched)) = pairs.iter().find(|(k, _)| k == &field.source.name) else {
+                    return Err(RuntimeError::MissingArg(format!(
+                        "destructure: struct has no field `{}`",
+                        field.source.name
+                    )));
+                };
+                match &field.binding {
+                    PatternFieldBinding::Same => {
+                        env.bind(field.source.name.clone(), matched.clone());
+                    }
+                    PatternFieldBinding::Rename(target) => {
+                        env.bind(target.name.clone(), matched.clone());
+                    }
+                    PatternFieldBinding::Nested(inner) => {
+                        bind_pattern(inner, matched.clone(), env)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 pub enum StmtOutcome {
     Continue,
     Return(Value),
@@ -67,39 +112,8 @@ fn exec_stmt<'a>(
                 if let Value::Err(e) = v {
                     return StmtOutcome::Err(e);
                 }
-                match name {
-                    atman_dsl::ast::Pattern::Ident(id) => {
-                        env.bind(id.name.clone(), v);
-                    }
-                    atman_dsl::ast::Pattern::Struct { fields } => {
-                        let atman_runtime_value = match v {
-                            crate::value::Value::Struct(pairs) => pairs,
-                            other => {
-                                return StmtOutcome::Err(
-                                    crate::error::RuntimeError::TypeMismatch {
-                                        expected: "struct for destructuring bind".into(),
-                                        actual: other.kind_name().into(),
-                                    },
-                                );
-                            }
-                        };
-                        for field in fields {
-                            let Some(found) = atman_runtime_value
-                                .iter()
-                                .find(|(k, _)| k == &field.source.name)
-                            else {
-                                return StmtOutcome::Err(crate::error::RuntimeError::MissingArg(
-                                    format!(
-                                        "destructure: struct has no field `{}`",
-                                        field.source.name
-                                    ),
-                                ));
-                            };
-                            let target =
-                                field.rename.as_ref().unwrap_or(&field.source).name.clone();
-                            env.bind(target, found.1.clone());
-                        }
-                    }
+                if let Err(e) = bind_pattern(name, v, env) {
+                    return StmtOutcome::Err(e);
                 }
                 StmtOutcome::Continue
             }

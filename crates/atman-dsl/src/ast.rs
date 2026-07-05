@@ -160,17 +160,35 @@ pub enum Pattern {
 #[derive(Debug, Clone)]
 pub struct PatternField {
     pub source: Ident,
-    pub rename: Option<Ident>,
+    pub binding: PatternFieldBinding,
+}
+
+#[derive(Debug, Clone)]
+pub enum PatternFieldBinding {
+    Same,
+    Rename(Ident),
+    Nested(Box<Pattern>),
 }
 
 impl Pattern {
     pub fn bound_names(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_bound_names(&mut out);
+        out
+    }
+
+    fn collect_bound_names(&self, out: &mut Vec<String>) {
         match self {
-            Pattern::Ident(id) => vec![id.name.clone()],
-            Pattern::Struct { fields } => fields
-                .iter()
-                .map(|f| f.rename.as_ref().unwrap_or(&f.source).name.clone())
-                .collect(),
+            Pattern::Ident(id) => out.push(id.name.clone()),
+            Pattern::Struct { fields } => {
+                for f in fields {
+                    match &f.binding {
+                        PatternFieldBinding::Same => out.push(f.source.name.clone()),
+                        PatternFieldBinding::Rename(target) => out.push(target.name.clone()),
+                        PatternFieldBinding::Nested(inner) => inner.collect_bound_names(out),
+                    }
+                }
+            }
         }
     }
 

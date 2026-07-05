@@ -327,7 +327,12 @@ fn looks_like_destructure(input: ParseStream) -> bool {
         <syn::Ident as syn::ext::IdentExt>::parse_any(&inner)?;
         if inner.peek(Token![:]) {
             inner.parse::<Token![:]>()?;
-            <syn::Ident as syn::ext::IdentExt>::parse_any(&inner)?;
+            if inner.peek(token::Brace) {
+                let _nested;
+                braced!(_nested in inner);
+            } else {
+                <syn::Ident as syn::ext::IdentExt>::parse_any(&inner)?;
+            }
         }
         if !inner.peek(Token![,]) && !inner.is_empty() {
             return Ok(false);
@@ -343,15 +348,19 @@ fn parse_struct_pattern(input: ParseStream) -> Result<Pattern> {
     let mut fields = Vec::new();
     while !content.is_empty() {
         let source = to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(&content)?);
-        let rename = if content.peek(Token![:]) {
+        let binding = if content.peek(Token![:]) {
             content.parse::<Token![:]>()?;
-            Some(to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(
-                &content,
-            )?))
+            if content.peek(token::Brace) {
+                PatternFieldBinding::Nested(Box::new(parse_struct_pattern(&content)?))
+            } else {
+                PatternFieldBinding::Rename(to_ident(
+                    <syn::Ident as syn::ext::IdentExt>::parse_any(&content)?,
+                ))
+            }
         } else {
-            None
+            PatternFieldBinding::Same
         };
-        fields.push(PatternField { source, rename });
+        fields.push(PatternField { source, binding });
         if content.peek(Token![,]) {
             content.parse::<Token![,]>()?;
         } else {

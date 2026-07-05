@@ -160,8 +160,15 @@ fn write_pattern(out: &mut String, pat: &Pattern) {
                     out.push_str(", ");
                 }
                 out.push_str(&f.source.name);
-                if let Some(rename) = &f.rename {
-                    write!(out, ": {}", rename.name).unwrap();
+                match &f.binding {
+                    PatternFieldBinding::Same => {}
+                    PatternFieldBinding::Rename(target) => {
+                        write!(out, ": {}", target.name).unwrap();
+                    }
+                    PatternFieldBinding::Nested(inner) => {
+                        out.push_str(": ");
+                        write_pattern(out, inner);
+                    }
                 }
             }
             out.push_str(" }");
