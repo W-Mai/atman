@@ -1896,6 +1896,34 @@ async fn cmd_rebuild_index() -> Result<()> {
     Ok(())
 }
 
+enum ProviderHealth {
+    Reachable(u16),
+    Unreachable(String),
+}
+
+async fn probe_provider(base_url: &str, timeout_ms: u64) -> ProviderHealth {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return ProviderHealth::Unreachable(format!("client init: {e}")),
+    };
+    match client.get(base_url).send().await {
+        Ok(resp) => ProviderHealth::Reachable(resp.status().as_u16()),
+        Err(e) => {
+            let msg = if e.is_timeout() {
+                format!("timeout after {timeout_ms}ms")
+            } else if e.is_connect() {
+                format!("connect: {e}")
+            } else {
+                e.to_string()
+            };
+            ProviderHealth::Unreachable(msg)
+        }
+    }
+}
+
 async fn cmd_doctor() -> Result<()> {
     let data = data_dir()?;
     let cfg = config_dir()?;
@@ -1942,17 +1970,40 @@ async fn cmd_doctor() -> Result<()> {
     );
     println!();
     println!("providers:");
-    for (name, env) in [
-        ("anthropic", "ANTHROPIC_API_KEY"),
-        ("openai", "OPENAI_API_KEY"),
-        ("glm (anthropic compat)", "ATMAN_TEST_GLM_KEY"),
-    ] {
-        let mark = if std::env::var(env).is_ok() {
-            "✓"
+    let probes = [
+        (
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "https://api.anthropic.com",
+        ),
+        (
+            "openai",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "https://api.openai.com/v1",
+        ),
+        (
+            "glm (anthropic compat)",
+            "ATMAN_TEST_GLM_KEY",
+            "ATMAN_TEST_GLM_BASE_URL",
+            "https://open.bigmodel.cn/api/anthropic",
+        ),
+    ];
+    for (name, env, base_env, default_base) in probes {
+        let key_set = std::env::var(env).is_ok();
+        let base = std::env::var(base_env).unwrap_or_else(|_| default_base.to_string());
+        let key_mark = if key_set { "✓" } else { "✗" };
+        if key_set {
+            let health = probe_provider(&base, 3000).await;
+            let health_mark = match &health {
+                ProviderHealth::Reachable(status) => format!("reachable (HTTP {status})"),
+                ProviderHealth::Unreachable(reason) => format!("unreachable: {reason}"),
+            };
+            println!("  [{key_mark}] {name:<28} ${env}  → {base}  [{health_mark}]");
         } else {
-            "✗"
-        };
-        println!("  [{mark}] {name:<28} ${env}");
+            println!("  [{key_mark}] {name:<28} ${env}  → {base}  [skipped: no api key]");
+        }
     }
     println!();
     let pcfg = load_preview_config();
