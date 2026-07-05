@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod suggest;
+mod sync;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,6 +58,25 @@ enum Cmd {
         #[command(subcommand)]
         action: FlowAction,
     },
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SyncAction {
+    Init {
+        url: String,
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    Push {
+        #[arg(long)]
+        message: Option<String>,
+    },
+    Pull,
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -167,6 +187,7 @@ async fn main() -> Result<()> {
             action: DaemonAction::RotateToken,
         }) => cmd_daemon_rotate_token().await,
         Some(Cmd::Flow { action }) => cmd_flow(action).await,
+        Some(Cmd::Sync { action }) => cmd_sync(action).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Run { file, follow, port },
         }) => cmd_daemon_run(file, follow, port).await,
@@ -1935,6 +1956,71 @@ fn parse_interjection_mode(text: &str) -> Option<String> {
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
     atman_daemon::bootstrap::load_mcp_configs(config_dir().ok().as_deref())
+}
+
+async fn cmd_sync(action: SyncAction) -> Result<()> {
+    let env = sync::SyncEnv::discover()?;
+    match action {
+        SyncAction::Init { url, branch } => {
+            let report = sync::init(&env, &url, branch.as_deref())?;
+            if report.already_initialised {
+                println!(
+                    "[atman] sync: {} was already a git repo — remote reset to {}, branch {}",
+                    env.memory_root.display(),
+                    report.remote_url,
+                    report.branch
+                );
+            } else {
+                println!(
+                    "[atman] sync: initialised {} @ branch {} → {}",
+                    env.memory_root.display(),
+                    report.branch,
+                    report.remote_url
+                );
+            }
+            if report.wrote_gitignore {
+                println!("[atman] sync: wrote .gitignore");
+            }
+            Ok(())
+        }
+        SyncAction::Push { message } => {
+            let report = sync::push(&env, message.as_deref())?;
+            if report.committed {
+                println!("[atman] sync: committed local changes");
+            } else {
+                println!("[atman] sync: nothing to commit — pushing existing branch");
+            }
+            println!("[atman] sync: pushed {} to origin", report.branch);
+            if !report.stderr_tail.is_empty() {
+                println!("[atman] sync: {}", report.stderr_tail);
+            }
+            Ok(())
+        }
+        SyncAction::Pull => {
+            let out = sync::pull(&env)?;
+            print!("{out}");
+            Ok(())
+        }
+        SyncAction::Status => {
+            let report = sync::status(&env)?;
+            if !report.initialised {
+                println!(
+                    "[atman] sync: {} is not a memory repo yet — run `atman sync init <url>`",
+                    env.memory_root.display()
+                );
+                return Ok(());
+            }
+            if let Some(b) = &report.branch {
+                println!("[atman] sync: branch {b}");
+            }
+            if report.porcelain.trim().is_empty() {
+                println!("[atman] sync: working tree clean");
+            } else {
+                print!("{}", report.porcelain);
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_flow(action: FlowAction) -> Result<()> {
