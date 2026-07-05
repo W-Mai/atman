@@ -149,6 +149,145 @@ async fn safety_deny_mode_blocks_and_never_calls_provider() {
 }
 
 #[tokio::test]
+async fn safety_auto_rewrite_retries_after_provider_content_filter_error() {
+    use atman_runtime::event::{NodeEvent, Observable};
+    use atman_runtime::message::{Message, MessageRole};
+    use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RewriteProvider {
+        calls: AtomicUsize,
+    }
+
+    impl Provider for RewriteProvider {
+        fn name(&self) -> &str {
+            "rewrite-mock"
+        }
+
+        fn call<'a>(
+            &'a self,
+            req: LlmRequest,
+        ) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let has_rewrite_prefix = req
+                .messages
+                .last()
+                .map(|m| m.text_concat().contains("rewrite the following"))
+                .unwrap_or(false);
+            let turn = req
+                .messages
+                .first()
+                .map(|m| m.turn_id.clone())
+                .unwrap_or_else(atman_runtime::event::TurnId::now);
+            Box::pin(async move {
+                if n == 0 {
+                    Err(RuntimeError::ToolFailed(
+                        "anthropic http 400: content_filter block".into(),
+                    ))
+                } else {
+                    assert!(has_rewrite_prefix, "second call must see rewritten prompt");
+                    Ok(AssistantMessage {
+                        message: Message {
+                            role: MessageRole::Assistant,
+                            parts: vec![atman_runtime::message::MessagePart::Text {
+                                text: "safe answer".into(),
+                            }],
+                            turn_id: turn,
+                        },
+                        stop_reason: StopReason::End,
+                        token_usage: TokenUsage::default(),
+                    })
+                }
+            })
+        }
+
+        fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+            use tokio::sync::broadcast;
+            use tokio_util::sync::CancellationToken;
+            let (tx, events) = broadcast::channel(4);
+            let cancel = CancellationToken::new();
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let turn = req
+                .messages
+                .first()
+                .map(|m| m.turn_id.clone())
+                .unwrap_or_else(atman_runtime::event::TurnId::now);
+            let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
+                Box::pin(async move {
+                    let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+                    if n == 0 {
+                        Err(RuntimeError::ToolFailed(
+                            "anthropic http 400: content_filter block".into(),
+                        ))
+                    } else {
+                        Ok(AssistantMessage {
+                            message: Message {
+                                role: MessageRole::Assistant,
+                                parts: vec![atman_runtime::message::MessagePart::Text {
+                                    text: "safe answer".into(),
+                                }],
+                                turn_id: turn,
+                            },
+                            stop_reason: StopReason::End,
+                            token_usage: TokenUsage::default(),
+                        })
+                    }
+                });
+            Observable {
+                output,
+                events,
+                cancel,
+            }
+        }
+    }
+
+    let src = r#"
+flow t(prompt: string) -> string {
+    return llm { model: "rewrite-mock", prompt: prompt, retry: 1 }
+}
+"#;
+    let cfg = SafetyConfig {
+        enabled: true,
+        mode: SafetyMode::Warn,
+        auto_rewrite: true,
+        classifier: Arc::new(NoopClassifier),
+    };
+    let sink = EventSink::new();
+    let provider = Arc::new(RewriteProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let mut ex = Executor::with_events(sink.clone()).with_safety(cfg);
+    ex.providers.register(provider.clone());
+    let file = parse_file(src).unwrap();
+    let out = ex
+        .run(
+            &file,
+            "t",
+            vec![("prompt".into(), Value::Str("dangerous question".into()))],
+        )
+        .await
+        .unwrap();
+    match out {
+        Value::Str(s) => assert_eq!(s, "safe answer"),
+        other => panic!("expected safe answer, got {other:?}"),
+    }
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        2,
+        "auto rewrite should retry exactly once"
+    );
+    let rewrites: Vec<String> = sink
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::ContentFilterHit { action, .. } if action == "rewritten" => Some(action),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rewrites.len(), 1, "one rewritten action event expected");
+}
+
+#[tokio::test]
 async fn safety_noop_classifier_passes_through() {
     let cfg = SafetyConfig {
         enabled: true,

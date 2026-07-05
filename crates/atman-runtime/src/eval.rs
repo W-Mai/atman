@@ -375,6 +375,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 }
             }
             let prompt = prompt_for_budget;
+            let mut rewrite_used = false;
             if let Some(safety) = ctx.safety
                 && safety.enabled
             {
@@ -476,6 +477,38 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         return crate::provider::assistant_message_to_value(&am);
                     }
                     Err(e) => {
+                        if !rewrite_used
+                            && let Some(safety) = ctx.safety
+                            && safety.enabled
+                            && safety.auto_rewrite
+                            && matches!(e.kind(), crate::error::ErrorKind::ContentFilter)
+                        {
+                            rewrite_used = true;
+                            if let Some(last) = final_messages.last_mut()
+                                && let Some(part) = last.parts.iter_mut().find_map(|p| match p {
+                                    crate::message::MessagePart::Text { text } => Some(text),
+                                    _ => None,
+                                })
+                            {
+                                *part = format!(
+                                    "Please rewrite the following in a neutral, safety-compliant way and answer it:\n{part}"
+                                );
+                            }
+                            if let Some(sink) = ctx.events {
+                                sink.emit(crate::event::Event::ContentFilterHit {
+                                    seq: 0,
+                                    turn_id: Some(turn_id.clone()),
+                                    flow_run_id: ctx.flow_run_id.clone(),
+                                    provider: provider.name().to_string(),
+                                    model: model.clone(),
+                                    category: "auto_rewrite".to_string(),
+                                    action: "rewritten".to_string(),
+                                    ts: chrono::Utc::now(),
+                                });
+                            }
+                            last_err = Some(e);
+                            continue;
+                        }
                         if let Some(allowed) = retry_kinds_ref
                             && attempt < retry_count
                             && !allowed.contains(&e.kind())
