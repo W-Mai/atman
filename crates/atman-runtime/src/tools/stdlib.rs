@@ -844,6 +844,225 @@ fn extract_list(args: &ToolArgs, name: &str, pos: usize) -> Result<Vec<Value>, R
     }
 }
 
+async fn call_named_unary(
+    ctx: &ToolCtx,
+    fn_name: &str,
+    element: Value,
+) -> Result<Value, RuntimeError> {
+    let Some(registry) = ctx.registry.as_ref() else {
+        return Err(RuntimeError::ToolFailed(format!(
+            "list combinator: no tool registry available to resolve `{fn_name}`"
+        )));
+    };
+    let Some(tool) = registry.get(fn_name) else {
+        return Err(RuntimeError::UndefinedTool(fn_name.to_string()));
+    };
+    let args = ToolArgs {
+        positional: vec![element],
+        named: Vec::new(),
+    };
+    tool.call(args, ctx).await
+}
+
+async fn call_named_binary(
+    ctx: &ToolCtx,
+    fn_name: &str,
+    a: Value,
+    b: Value,
+) -> Result<Value, RuntimeError> {
+    let Some(registry) = ctx.registry.as_ref() else {
+        return Err(RuntimeError::ToolFailed(format!(
+            "list combinator: no tool registry available to resolve `{fn_name}`"
+        )));
+    };
+    let Some(tool) = registry.get(fn_name) else {
+        return Err(RuntimeError::UndefinedTool(fn_name.to_string()));
+    };
+    let args = ToolArgs {
+        positional: vec![a, b],
+        named: Vec::new(),
+    };
+    tool.call(args, ctx).await
+}
+
+fn value_as_bool(v: Value, fn_name: &str) -> Result<bool, RuntimeError> {
+    match v {
+        Value::Bool(b) => Ok(b),
+        other => Err(RuntimeError::TypeMismatch {
+            expected: format!("bool returned by `{fn_name}`"),
+            actual: other.kind_name().into(),
+        }),
+    }
+}
+
+pub struct ListMap;
+
+impl Tool for ListMap {
+    fn name(&self) -> &str {
+        "list_map"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Apply a named tool to each item in a list; returns the transformed list.")
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let items = extract_list(&args, "list", 0)?;
+            let fn_name = extract_string(&args, "fn_name", 1)?;
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                out.push(call_named_unary(ctx, &fn_name, it).await?);
+            }
+            Ok(Value::List(out))
+        })
+    }
+}
+
+pub struct ListFilter;
+
+impl Tool for ListFilter {
+    fn name(&self) -> &str {
+        "list_filter"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Keep items where the named predicate tool returns true.")
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let items = extract_list(&args, "list", 0)?;
+            let fn_name = extract_string(&args, "fn_name", 1)?;
+            let mut out = Vec::new();
+            for it in items {
+                let keep =
+                    value_as_bool(call_named_unary(ctx, &fn_name, it.clone()).await?, &fn_name)?;
+                if keep {
+                    out.push(it);
+                }
+            }
+            Ok(Value::List(out))
+        })
+    }
+}
+
+pub struct ListFind;
+
+impl Tool for ListFind {
+    fn name(&self) -> &str {
+        "list_find"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Return the first item where the named predicate tool returns true, else unit.")
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let items = extract_list(&args, "list", 0)?;
+            let fn_name = extract_string(&args, "fn_name", 1)?;
+            for it in items {
+                let hit =
+                    value_as_bool(call_named_unary(ctx, &fn_name, it.clone()).await?, &fn_name)?;
+                if hit {
+                    return Ok(it);
+                }
+            }
+            Ok(Value::Unit)
+        })
+    }
+}
+
+pub struct ListAny;
+
+impl Tool for ListAny {
+    fn name(&self) -> &str {
+        "list_any"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("True if the named predicate tool returns true for any item.")
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let items = extract_list(&args, "list", 0)?;
+            let fn_name = extract_string(&args, "fn_name", 1)?;
+            for it in items {
+                let hit = value_as_bool(call_named_unary(ctx, &fn_name, it).await?, &fn_name)?;
+                if hit {
+                    return Ok(Value::Bool(true));
+                }
+            }
+            Ok(Value::Bool(false))
+        })
+    }
+}
+
+pub struct ListAll;
+
+impl Tool for ListAll {
+    fn name(&self) -> &str {
+        "list_all"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("True if the named predicate tool returns true for every item.")
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let items = extract_list(&args, "list", 0)?;
+            let fn_name = extract_string(&args, "fn_name", 1)?;
+            for it in items {
+                let hit = value_as_bool(call_named_unary(ctx, &fn_name, it).await?, &fn_name)?;
+                if !hit {
+                    return Ok(Value::Bool(false));
+                }
+            }
+            Ok(Value::Bool(true))
+        })
+    }
+}
+
+pub struct ListReduce;
+
+impl Tool for ListReduce {
+    fn name(&self) -> &str {
+        "list_reduce"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Fold a list left-to-right using a named binary tool: fn(acc, elem) -> acc'. \
+             Takes an initial accumulator value.",
+        )
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let items = extract_list(&args, "list", 0)?;
+            let fn_name = extract_string(&args, "fn_name", 1)?;
+            let init = match args.named("init") {
+                Some(v) => v.clone(),
+                None => args.positional(2)?.clone(),
+            };
+            let mut acc = init;
+            for it in items {
+                acc = call_named_binary(ctx, &fn_name, acc, it).await?;
+            }
+            Ok(acc)
+        })
+    }
+}
+
 pub struct ComposeEmailPreview;
 
 impl Tool for ComposeEmailPreview {
@@ -933,5 +1152,229 @@ mod tests {
             preview,
             "To: a@x.com, b@x.com\nSubject: Deploy status\n---\nSee attached"
         );
+    }
+
+    use crate::tool::ToolRegistry;
+    use std::sync::Arc;
+
+    struct IsBig;
+    impl Tool for IsBig {
+        fn name(&self) -> &str {
+            "is_big"
+        }
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+        fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async move {
+                match args.positional(0)? {
+                    Value::Int(n) => Ok(Value::Bool(*n > 10)),
+                    other => Err(RuntimeError::TypeMismatch {
+                        expected: "int".into(),
+                        actual: other.kind_name().into(),
+                    }),
+                }
+            })
+        }
+    }
+
+    struct Double;
+    impl Tool for Double {
+        fn name(&self) -> &str {
+            "double"
+        }
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+        fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async move {
+                match args.positional(0)? {
+                    Value::Int(n) => Ok(Value::Int(n * 2)),
+                    other => Err(RuntimeError::TypeMismatch {
+                        expected: "int".into(),
+                        actual: other.kind_name().into(),
+                    }),
+                }
+            })
+        }
+    }
+
+    struct AddInts;
+    impl Tool for AddInts {
+        fn name(&self) -> &str {
+            "add_ints"
+        }
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+        fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async move {
+                let a = match args.positional(0)? {
+                    Value::Int(n) => *n,
+                    other => {
+                        return Err(RuntimeError::TypeMismatch {
+                            expected: "int".into(),
+                            actual: other.kind_name().into(),
+                        });
+                    }
+                };
+                let b = match args.positional(1)? {
+                    Value::Int(n) => *n,
+                    other => {
+                        return Err(RuntimeError::TypeMismatch {
+                            expected: "int".into(),
+                            actual: other.kind_name().into(),
+                        });
+                    }
+                };
+                Ok(Value::Int(a + b))
+            })
+        }
+    }
+
+    fn combinator_ctx() -> ToolCtx {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(IsBig));
+        reg.register(Arc::new(Double));
+        reg.register(Arc::new(AddInts));
+        ToolCtx::new().with_registry(Arc::new(reg))
+    }
+
+    fn call_args(items: Vec<Value>, fn_name: &str) -> ToolArgs {
+        ToolArgs {
+            positional: vec![Value::List(items), Value::Str(fn_name.into())],
+            named: Vec::new(),
+        }
+    }
+
+    fn ints(xs: &[i64]) -> Vec<Value> {
+        xs.iter().copied().map(Value::Int).collect()
+    }
+
+    fn expect_int(v: &Value) -> i64 {
+        match v {
+            Value::Int(n) => *n,
+            other => panic!("want int, got {other:?}"),
+        }
+    }
+
+    fn expect_bool(v: &Value) -> bool {
+        match v {
+            Value::Bool(b) => *b,
+            other => panic!("want bool, got {other:?}"),
+        }
+    }
+
+    fn expect_ints(v: &Value) -> Vec<i64> {
+        match v {
+            Value::List(xs) => xs.iter().map(expect_int).collect(),
+            other => panic!("want list, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_map_applies_named_tool_to_every_item() {
+        let ctx = combinator_ctx();
+        let out = ListMap
+            .call(call_args(ints(&[1, 2, 3]), "double"), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(expect_ints(&out), vec![2, 4, 6]);
+    }
+
+    #[tokio::test]
+    async fn list_filter_keeps_only_true_predicates() {
+        let ctx = combinator_ctx();
+        let out = ListFilter
+            .call(call_args(ints(&[1, 20, 3, 30]), "is_big"), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(expect_ints(&out), vec![20, 30]);
+    }
+
+    #[tokio::test]
+    async fn list_find_returns_first_hit_or_unit() {
+        let ctx = combinator_ctx();
+        let hit = ListFind
+            .call(call_args(ints(&[1, 20, 3]), "is_big"), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(expect_int(&hit), 20);
+        let miss = ListFind
+            .call(call_args(ints(&[1, 2, 3]), "is_big"), &ctx)
+            .await
+            .unwrap();
+        assert!(matches!(miss, Value::Unit));
+    }
+
+    #[tokio::test]
+    async fn list_any_and_all_short_circuit_correctly() {
+        let ctx = combinator_ctx();
+        let any_hit = ListAny
+            .call(call_args(ints(&[1, 20, 3]), "is_big"), &ctx)
+            .await
+            .unwrap();
+        assert!(expect_bool(&any_hit));
+        let any_miss = ListAny
+            .call(call_args(ints(&[1, 2, 3]), "is_big"), &ctx)
+            .await
+            .unwrap();
+        assert!(!expect_bool(&any_miss));
+        let all_hit = ListAll
+            .call(call_args(ints(&[20, 30]), "is_big"), &ctx)
+            .await
+            .unwrap();
+        assert!(expect_bool(&all_hit));
+        let all_miss = ListAll
+            .call(call_args(ints(&[20, 1]), "is_big"), &ctx)
+            .await
+            .unwrap();
+        assert!(!expect_bool(&all_miss));
+    }
+
+    #[tokio::test]
+    async fn list_reduce_folds_with_init() {
+        let ctx = combinator_ctx();
+        let args = ToolArgs {
+            positional: vec![
+                Value::List(ints(&[1, 2, 3, 4])),
+                Value::Str("add_ints".into()),
+                Value::Int(0),
+            ],
+            named: Vec::new(),
+        };
+        let out = ListReduce.call(args, &ctx).await.unwrap();
+        assert_eq!(expect_int(&out), 10);
+    }
+
+    #[tokio::test]
+    async fn combinator_reports_undefined_tool_by_name() {
+        let ctx = combinator_ctx();
+        let err = ListMap
+            .call(call_args(ints(&[1]), "nope"), &ctx)
+            .await
+            .unwrap_err();
+        match &err {
+            RuntimeError::UndefinedTool(n) => assert_eq!(n, "nope"),
+            other => panic!("want UndefinedTool(nope), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn combinator_rejects_non_bool_from_predicate() {
+        let ctx = combinator_ctx();
+        let err = ListFilter
+            .call(call_args(ints(&[1, 2]), "double"), &ctx)
+            .await
+            .unwrap_err();
+        match &err {
+            RuntimeError::TypeMismatch { expected, .. } => {
+                assert!(
+                    expected.contains("bool"),
+                    "want bool-mismatch, got expected={expected:?}"
+                );
+            }
+            other => panic!("want TypeMismatch, got {other:?}"),
+        }
     }
 }
