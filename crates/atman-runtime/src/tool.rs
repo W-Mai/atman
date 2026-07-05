@@ -56,6 +56,7 @@ pub struct ToolCtx {
     pub event_seq: Option<u64>,
     pub prompt_resolver: Option<std::sync::Arc<dyn crate::rendezvous::PromptResolver>>,
     pub registry: Option<std::sync::Arc<ToolRegistry>>,
+    pub sandbox: Option<std::sync::Arc<dyn crate::sandbox::Sandbox>>,
 }
 
 impl ToolCtx {
@@ -77,6 +78,11 @@ impl ToolCtx {
 
     pub fn with_registry(mut self, registry: std::sync::Arc<ToolRegistry>) -> Self {
         self.registry = Some(registry);
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox>) -> Self {
+        self.sandbox = Some(sandbox);
         self
     }
 }

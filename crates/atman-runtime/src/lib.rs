@@ -18,6 +18,7 @@ pub mod migration;
 pub mod provider;
 pub mod providers;
 pub mod rendezvous;
+pub mod sandbox;
 pub mod session;
 pub mod tool;
 pub mod tool_naming;

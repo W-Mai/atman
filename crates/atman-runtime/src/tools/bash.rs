@@ -32,16 +32,22 @@ impl Tool for BashExec {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let cmd = extract_string(&args, "cmd", 0)?;
             let start = Instant::now();
-            let output = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .output()
-                .await
-                .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec spawn: {e}")))?;
+            let cwd = std::env::current_dir()
+                .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec cwd: {e}")))?;
+            let output = if let Some(sandbox) = &ctx.sandbox {
+                sandbox.spawn(&["sh", "-c", &cmd], &[], &cwd).await?
+            } else {
+                tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .await
+                    .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec spawn: {e}")))?
+            };
             let duration_ms = start.elapsed().as_millis() as i64;
             let exit = output.status.code().unwrap_or(-1) as i64;
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

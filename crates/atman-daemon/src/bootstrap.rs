@@ -6,6 +6,7 @@ use atman_runtime::event::EventSink;
 use atman_runtime::providers::anthropic::AnthropicProvider;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::providers::openai::OpenAiProvider;
+use atman_runtime::sandbox::Sandbox;
 use atman_runtime::{Executor, Value, tools};
 use serde::Deserialize;
 
@@ -15,6 +16,15 @@ pub struct BootstrapOptions {
     pub config_dir: Option<PathBuf>,
     pub project_root: PathBuf,
     pub home_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SandboxConfig {
+    pub enabled: bool,
+    pub strict: bool,
+    pub extra_read: Vec<PathBuf>,
+    pub extra_write: Vec<PathBuf>,
+    pub template_path: Option<PathBuf>,
 }
 
 pub struct BootstrapOutcome {
@@ -33,6 +43,11 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         load_preview_config(opts.config_dir.as_deref()),
     );
     register_providers_from_env(&mut executor);
+    if let Some(sandbox) =
+        build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
+    {
+        executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
+    }
     let mcp_configs = load_mcp_configs(opts.config_dir.as_deref());
     let mcp_status_raw =
         atman_runtime::mcp::register_from_configs(&mut executor.tools, &mcp_configs).await;
@@ -49,6 +64,88 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         executor,
         mcp_status,
     })
+}
+
+fn build_sandbox(
+    project_root: &Path,
+    config_dir: Option<&Path>,
+) -> Result<Option<Arc<dyn atman_runtime::sandbox::Sandbox>>> {
+    let cfg = load_sandbox_config(config_dir);
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    let template = match &cfg.template_path {
+        Some(p) => std::fs::read_to_string(p)
+            .with_context(|| format!("read sandbox template {}", p.display()))?,
+        None => atman_runtime::sandbox::DEFAULT_PROFILE.to_string(),
+    };
+    let sandbox = atman_runtime::sandbox::SandboxExec::new(project_root)
+        .with_extra_read(cfg.extra_read.clone())
+        .with_extra_write(cfg.extra_write.clone())
+        .with_template(template);
+    if !sandbox.is_available() {
+        if cfg.strict {
+            anyhow::bail!("sandbox enabled + strict, but sandbox-exec not available on this host");
+        }
+        eprintln!(
+            "[atman] sandbox enabled but sandbox-exec not available; falling back to no-sandbox path"
+        );
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(sandbox)))
+}
+
+pub fn load_sandbox_config(config_dir: Option<&Path>) -> SandboxConfig {
+    let Some(dir) = config_dir else {
+        return SandboxConfig::default();
+    };
+    let path = dir.join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return SandboxConfig::default();
+    };
+    parse_sandbox_config(&text)
+}
+
+pub fn parse_sandbox_config(text: &str) -> SandboxConfig {
+    #[derive(Debug, Deserialize, Default)]
+    struct RawSandbox {
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        strict: bool,
+        #[serde(default)]
+        extra_read: Vec<String>,
+        #[serde(default)]
+        extra_write: Vec<String>,
+        #[serde(default)]
+        template_path: Option<String>,
+    }
+    #[derive(Debug, Deserialize, Default)]
+    struct RawSandboxFile {
+        #[serde(default)]
+        sandbox: RawSandbox,
+    }
+    let file: RawSandboxFile = match toml::from_str(text) {
+        Ok(f) => f,
+        Err(_) => return SandboxConfig::default(),
+    };
+    SandboxConfig {
+        enabled: file.sandbox.enabled,
+        strict: file.sandbox.strict,
+        extra_read: file
+            .sandbox
+            .extra_read
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        extra_write: file
+            .sandbox
+            .extra_write
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        template_path: file.sandbox.template_path.map(PathBuf::from),
+    }
 }
 
 pub fn attach_memory_stores(

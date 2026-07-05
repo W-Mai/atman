@@ -142,6 +142,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     ctx.events.map(|s| s.next_seq_peek()),
                 )
                 .with_registry(std::sync::Arc::new(ctx.tools.clone()));
+            let ctx_with_anchors = if matches!(tool.tier(), crate::tool::Tier::Four) {
+                ctx_with_anchors
+            } else {
+                let mut c = ctx_with_anchors;
+                c.sandbox = None;
+                c
+            };
             match tool
                 .call(ToolArgs { positional, named }, &ctx_with_anchors)
                 .await
