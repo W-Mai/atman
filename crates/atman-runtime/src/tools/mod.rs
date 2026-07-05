@@ -4,6 +4,7 @@ use crate::tool::ToolRegistry;
 
 pub mod bash;
 pub mod fs;
+pub mod git;
 pub mod hunk;
 pub mod memory;
 pub mod memory_stubs;
@@ -45,6 +46,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(stdlib::ListAny));
     reg.register(Arc::new(stdlib::ListAll));
     reg.register(Arc::new(stdlib::ListReduce));
+    reg.register(Arc::new(git::GitDiff));
     reg.register(Arc::new(test::TestRun));
     reg.register(Arc::new(hunk::FsEdit));
     reg.register(Arc::new(hunk::HunkApply));
