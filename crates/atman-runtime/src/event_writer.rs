@@ -216,7 +216,8 @@ fn extract_ts(event: &Event) -> String {
         | Event::ContextTruncated { ts, .. }
         | Event::WatchWarn { ts, .. }
         | Event::PendingPrompt { ts, .. }
-        | Event::PromptResolved { ts, .. } => ts.to_rfc3339(),
+        | Event::PromptResolved { ts, .. }
+        | Event::LlmPartialCall { ts, .. } => ts.to_rfc3339(),
     }
 }
 
@@ -238,6 +239,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::WatchWarn { .. } => "watch_warn",
         Event::PendingPrompt { .. } => "pending_prompt",
         Event::PromptResolved { .. } => "prompt_resolved",
+        Event::LlmPartialCall { .. } => "llm_partial_call",
     }
 }
 
@@ -276,6 +278,14 @@ fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
             ..
         }
         | Event::WatchWarn {
+            turn_id,
+            flow_run_id,
+            ..
+        } => (
+            turn_id.as_ref().map(|t| t.0.to_string()),
+            flow_run_id.as_ref().map(|r| r.0.to_string()),
+        ),
+        Event::LlmPartialCall {
             turn_id,
             flow_run_id,
             ..

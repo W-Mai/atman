@@ -25,6 +25,13 @@ pub enum RuntimeError {
 
     #[error("redirect to flow `{0}`")]
     Redirect(String),
+
+    #[error("l2 restart: {correction_text}")]
+    L2Restart {
+        correction_text: String,
+        partial_output: String,
+        partial_tokens: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -93,6 +100,7 @@ impl RuntimeError {
             RuntimeError::Cancelled(_) => ErrorKind::Cancelled,
             RuntimeError::Aborted(_) => ErrorKind::UserError,
             RuntimeError::Redirect(_) => ErrorKind::Cancelled,
+            RuntimeError::L2Restart { .. } => ErrorKind::UserError,
             RuntimeError::ToolFailed(msg) => classify_tool_failed(msg),
         }
     }

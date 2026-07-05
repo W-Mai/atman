@@ -157,6 +157,17 @@ pub enum Event {
         message: String,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    LlmPartialCall {
+        #[serde(default)]
+        seq: u64,
+        turn_id: Option<TurnId>,
+        flow_run_id: Option<FlowRunId>,
+        model: String,
+        provider: String,
+        tokens_before_abort: u64,
+        restart_reason: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
     PendingPrompt {
         #[serde(default)]
         seq: u64,
@@ -192,7 +203,8 @@ impl Event {
             | Event::ContextTruncated { seq, .. }
             | Event::WatchWarn { seq, .. }
             | Event::PendingPrompt { seq, .. }
-            | Event::PromptResolved { seq, .. } => *seq = new_seq,
+            | Event::PromptResolved { seq, .. }
+            | Event::LlmPartialCall { seq, .. } => *seq = new_seq,
         }
     }
 
@@ -213,7 +225,8 @@ impl Event {
             | Event::ContextTruncated { seq, .. }
             | Event::WatchWarn { seq, .. }
             | Event::PendingPrompt { seq, .. }
-            | Event::PromptResolved { seq, .. } => *seq,
+            | Event::PromptResolved { seq, .. }
+            | Event::LlmPartialCall { seq, .. } => *seq,
         }
     }
 }

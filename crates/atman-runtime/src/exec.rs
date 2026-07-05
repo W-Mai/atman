@@ -290,6 +290,7 @@ fn render_warn_msg(msg: &Option<Expr>, fallback: &str) -> String {
 
 struct StreamMonitor<'a> {
     window: String,
+    text_captured: String,
     tokens_seen: u64,
     abort_reason: Option<String>,
     fired_warn_token: std::collections::HashSet<String>,
@@ -302,6 +303,7 @@ impl<'a> StreamMonitor<'a> {
     fn new(_rules: &WatchRules, ctx: &'a EvalCtx<'a>) -> Self {
         Self {
             window: String::new(),
+            text_captured: String::new(),
             tokens_seen: 0,
             abort_reason: None,
             fired_warn_token: Default::default(),
@@ -317,6 +319,7 @@ impl<'a> StreamMonitor<'a> {
             let drop = self.window.len() - 512;
             self.window.drain(..drop);
         }
+        self.text_captured.push_str(text);
     }
 
     fn emit_warn(&self, rule: &WarnRule, trigger: &str) {

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -32,6 +33,7 @@ pub struct Session {
     messages: Mutex<Vec<Message>>,
     current_turn: Mutex<Option<TurnId>>,
     injection_queue: Mutex<Vec<Injection>>,
+    injection_tx: broadcast::Sender<Injection>,
     flow_cancel: Mutex<CancellationToken>,
 }
 
@@ -51,6 +53,7 @@ impl Session {
         if let Some(r) = redactor {
             sink = sink.with_redactor(r);
         }
+        let (injection_tx, _) = broadcast::channel(32);
         Ok(Self {
             id,
             dir,
@@ -59,11 +62,13 @@ impl Session {
             messages: Mutex::new(Vec::new()),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
+            injection_tx,
             flow_cancel: Mutex::new(CancellationToken::new()),
         })
     }
 
     pub fn open_ephemeral() -> Self {
+        let (injection_tx, _) = broadcast::channel(32);
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -72,6 +77,7 @@ impl Session {
             messages: Mutex::new(Vec::new()),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
+            injection_tx,
             flow_cancel: Mutex::new(CancellationToken::new()),
         }
     }
@@ -196,8 +202,13 @@ impl Session {
             injection: inj.clone(),
             ts: inj.created_at,
         });
-        self.injection_queue.lock().unwrap().push(inj);
+        self.injection_queue.lock().unwrap().push(inj.clone());
+        let _ = self.injection_tx.send(inj);
         Ok(id)
+    }
+
+    pub fn subscribe_injections(&self) -> broadcast::Receiver<Injection> {
+        self.injection_tx.subscribe()
     }
 
     pub fn mark_injection_consumed(&self, id: &InjectionId) {
