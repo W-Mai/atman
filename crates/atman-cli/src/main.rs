@@ -762,10 +762,29 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     let source =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let parsed = parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
-    if parsed.flows.len() != 1 {
-        bail!("{} must contain exactly one flow", path.display());
+    if parsed.flows.is_empty() {
+        bail!("{} declares no flows", path.display());
     }
-    let flow = &parsed.flows[0];
+    let flow = parsed
+        .flows
+        .iter()
+        .find(|f| f.name.name == name)
+        .or_else(|| {
+            if parsed.flows.len() == 1 {
+                parsed.flows.first()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            let names: Vec<&str> = parsed.flows.iter().map(|f| f.name.name.as_str()).collect();
+            anyhow::anyhow!(
+                "{} has {} flows but none is named `{name}` — declare a `flow {name}(...)` entry or invoke one of: {}",
+                path.display(),
+                parsed.flows.len(),
+                names.join(", ")
+            )
+        })?;
     let flow_name = flow.name.name.clone();
     let params: Vec<String> = flow.params.iter().map(|(id, _)| id.name.clone()).collect();
 

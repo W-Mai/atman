@@ -167,6 +167,16 @@ mod tests {
     }
 
     #[test]
+    fn agent_template_exposes_flow_named_agent_for_slash_resolver() {
+        let file = atman_dsl::parse::parse_file(AGENT_AT).unwrap();
+        let entry = file.flows.iter().find(|f| f.name.name == "agent");
+        assert!(
+            entry.is_some(),
+            "commands/agent.at must contain a `flow agent(...)` so slash-command resolver can find it by name (regression: 2-flow file previously errored)"
+        );
+    }
+
+    #[test]
     fn hello_template_parses_and_returns_hello() {
         let file = atman_dsl::parse::parse_file(HELLO_AT).expect("hello template must parse");
         assert_eq!(file.flows.len(), 1);
