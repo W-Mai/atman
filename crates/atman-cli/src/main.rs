@@ -134,6 +134,11 @@ enum FlowAction {
     Lint {
         path: PathBuf,
     },
+    Test {
+        path: PathBuf,
+        #[arg(long)]
+        bless: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2425,8 +2430,10 @@ async fn cmd_sync(action: SyncAction) -> Result<()> {
 }
 
 async fn cmd_flow(action: FlowAction) -> Result<()> {
-    if let FlowAction::Lint { path } = &action {
-        return cmd_flow_lint(path);
+    match &action {
+        FlowAction::Lint { path } => return cmd_flow_lint(path),
+        FlowAction::Test { path, bless } => return cmd_flow_test(path, *bless).await,
+        _ => {}
     }
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = atman_runtime::flow_registry::FlowRegistry::open(&project_root)
@@ -2445,8 +2452,149 @@ async fn cmd_flow(action: FlowAction) -> Result<()> {
             to,
             yes,
         } => cmd_flow_rollback(&registry, &flow_name, &version, to.as_deref(), yes),
-        FlowAction::Lint { .. } => unreachable!("lint handled above"),
+        FlowAction::Lint { .. } | FlowAction::Test { .. } => {
+            unreachable!("handled above")
+        }
     }
+}
+
+async fn cmd_flow_test(path: &Path, bless: bool) -> Result<()> {
+    let source =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let file = atman_dsl::parse::parse_file(&source)
+        .with_context(|| format!("parse {}", path.display()))?;
+    let cases: Vec<&atman_dsl::ast::FlowDecl> =
+        file.flows.iter().filter(|f| f.params.is_empty()).collect();
+    let skipped: Vec<String> = file
+        .flows
+        .iter()
+        .filter(|f| !f.params.is_empty())
+        .map(|f| f.name.name.clone())
+        .collect();
+    if cases.is_empty() {
+        println!(
+            "[atman] flow test: {} has no 0-param flows; nothing to run",
+            path.display()
+        );
+        if !skipped.is_empty() {
+            println!("  skipped flows requiring args: {}", skipped.join(", "));
+        }
+        return Ok(());
+    }
+
+    let mut ex = atman_runtime::Executor::new();
+    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    ex.providers.register(std::sync::Arc::new(
+        atman_runtime::providers::mock::MockProvider::new("mock")
+            .with_fallback(atman_runtime::Value::Str("[mock reply]".into())),
+    ));
+
+    let mut recorded: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    for flow in &cases {
+        match ex.run(&file, flow.name.name.as_str(), vec![]).await {
+            Ok(v) => {
+                recorded.insert(flow.name.name.clone(), v.to_json());
+            }
+            Err(e) => errors.push((flow.name.name.clone(), format!("{e}"))),
+        }
+    }
+    if !errors.is_empty() {
+        for (name, msg) in &errors {
+            eprintln!("[atman] flow test: {name} raised {msg}");
+        }
+        bail!("flow test: {} flow(s) errored", errors.len());
+    }
+
+    let snap_path = snap_path_for(path);
+    let existing = if snap_path.exists() {
+        Some(load_snapshot(&snap_path)?)
+    } else {
+        None
+    };
+    match (existing, bless) {
+        (None, _) => {
+            write_snapshot(&snap_path, &recorded)?;
+            println!(
+                "[atman] flow test: wrote fresh snapshot {} ({} case(s))",
+                snap_path.display(),
+                recorded.len()
+            );
+        }
+        (Some(_), true) => {
+            write_snapshot(&snap_path, &recorded)?;
+            println!(
+                "[atman] flow test: refreshed snapshot {} ({} case(s))",
+                snap_path.display(),
+                recorded.len()
+            );
+        }
+        (Some(prev), false) => {
+            let mut mismatches: Vec<String> = Vec::new();
+            let mut prev_names: std::collections::BTreeSet<&String> = prev.keys().collect();
+            for (name, cur) in &recorded {
+                match prev.get(name) {
+                    Some(old) if old == cur => {
+                        prev_names.remove(name);
+                    }
+                    Some(_) => {
+                        prev_names.remove(name);
+                        mismatches.push(name.clone());
+                    }
+                    None => mismatches.push(format!("{name} (new)")),
+                }
+            }
+            for orphan in prev_names {
+                mismatches.push(format!("{orphan} (removed)"));
+            }
+            if mismatches.is_empty() {
+                println!(
+                    "[atman] flow test: {} case(s) match {}",
+                    recorded.len(),
+                    snap_path.display()
+                );
+            } else {
+                for name in &mismatches {
+                    println!("[atman] flow test drift: {name}");
+                }
+                bail!(
+                    "flow test: {} case(s) drifted — re-run with --bless to accept",
+                    mismatches.len()
+                );
+            }
+        }
+    }
+    if !skipped.is_empty() {
+        println!(
+            "[atman] flow test: skipped flows requiring args: {}",
+            skipped.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn snap_path_for(flow_path: &Path) -> PathBuf {
+    let name = flow_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "flow".to_string());
+    flow_path.with_file_name(format!("{name}.snap.json"))
+}
+
+fn load_snapshot(path: &Path) -> Result<std::collections::BTreeMap<String, serde_json::Value>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let map: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    Ok(map)
+}
+
+fn write_snapshot(
+    path: &Path,
+    snap: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<()> {
+    let text = serde_json::to_string_pretty(snap)?;
+    std::fs::write(path, format!("{text}\n")).with_context(|| format!("write {}", path.display()))
 }
 
 fn cmd_flow_lint(path: &Path) -> Result<()> {
