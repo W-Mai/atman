@@ -83,8 +83,10 @@ enum MigrateAction {
         from: String,
         #[arg(long)]
         storage: Option<PathBuf>,
-        #[arg(long)]
-        out: PathBuf,
+        #[arg(long, conflicts_with = "into")]
+        out: Option<PathBuf>,
+        #[arg(long, conflicts_with = "out", value_parser = ["new"])]
+        into: Option<String>,
     },
 }
 
@@ -2006,39 +2008,93 @@ async fn cmd_migrate(action: MigrateAction) -> Result<()> {
             from,
             storage,
             out,
+            into,
         } => {
+            if out.is_none() && into.is_none() {
+                bail!("migrate import: pass either --out <path> or --into new");
+            }
             let source = build_migration_source(&from, storage)?;
             let messages = source.load_messages(&session_id)?;
             if messages.is_empty() {
                 bail!("session {session_id} loaded 0 messages — nothing to import");
             }
-            if let Some(parent) = out.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("mkdir {}", parent.display()))?;
+            if let Some(out_path) = out {
+                if let Some(parent) = out_path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("mkdir {}", parent.display()))?;
+                }
+                let mut lines = Vec::with_capacity(messages.len());
+                for m in &messages {
+                    let record = serde_json::json!({
+                        "role": m.role.as_str(),
+                        "text": m.text,
+                        "agent": m.agent,
+                        "model": m.model,
+                        "created_ms": m.created_ms,
+                        "source": source.source_tag(),
+                    });
+                    lines.push(record.to_string());
+                }
+                let body = lines.join("\n") + "\n";
+                std::fs::write(&out_path, body)
+                    .with_context(|| format!("write {}", out_path.display()))?;
+                println!(
+                    "[atman] migrate: wrote {} messages from {from}/{session_id} to {}",
+                    messages.len(),
+                    out_path.display()
+                );
+                return Ok(());
             }
-            let mut lines = Vec::with_capacity(messages.len());
-            for m in &messages {
-                let record = serde_json::json!({
-                    "role": m.role.as_str(),
-                    "text": m.text,
-                    "agent": m.agent,
-                    "model": m.model,
-                    "created_ms": m.created_ms,
-                    "source": source.source_tag(),
-                });
-                lines.push(record.to_string());
-            }
-            let body = lines.join("\n") + "\n";
-            std::fs::write(&out, body).with_context(|| format!("write {}", out.display()))?;
+            let root = data_dir()?;
+            let session = Session::open(&root)
+                .with_context(|| format!("open a fresh atman session under {}", root.display()))?;
+            let sid = session.id().to_string();
+            let events = session.events_path().map(|p| p.display().to_string());
+            replay_messages_into(&session, source.source_tag(), &messages);
+            session.shutdown().await;
             println!(
-                "[atman] migrate: wrote {} messages from {from}/{session_id} to {}",
-                messages.len(),
-                out.display()
+                "[atman] migrate: replayed {} messages from {from}/{session_id} into new session {sid}",
+                messages.len()
             );
+            if let Some(p) = events {
+                println!("[atman] migrate: events → {p}");
+            }
             Ok(())
         }
+    }
+}
+
+fn replay_messages_into(
+    session: &Session,
+    source_tag: &str,
+    messages: &[migrate_source::ImportedMessage],
+) {
+    for m in messages {
+        let turn_id = atman_runtime::event::TurnId::now();
+        let text = if let Some(agent) = &m.agent {
+            format!("[migrated from {source_tag}, agent={agent}]\n{}", m.text)
+        } else {
+            format!("[migrated from {source_tag}]\n{}", m.text)
+        };
+        let msg = match m.role {
+            migrate_source::MessageRole::User => {
+                atman_runtime::message::Message::user_text(turn_id, text)
+            }
+            migrate_source::MessageRole::Assistant => {
+                atman_runtime::message::Message::assistant_text(turn_id, text)
+            }
+            migrate_source::MessageRole::System => {
+                atman_runtime::message::Message::system_text(turn_id, text)
+            }
+            migrate_source::MessageRole::Tool => atman_runtime::message::Message {
+                role: atman_runtime::message::MessageRole::Tool,
+                parts: vec![atman_runtime::message::MessagePart::Text { text }],
+                turn_id,
+            },
+        };
+        session.append_message(msg, None);
     }
 }
 

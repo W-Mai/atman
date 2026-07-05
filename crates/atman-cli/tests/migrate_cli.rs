@@ -106,6 +106,93 @@ fn migrate_list_reports_empty_when_storage_missing() {
 }
 
 #[test]
+fn migrate_import_into_new_writes_session_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_fixture(tmp.path());
+    let storage = tmp.path().to_str().unwrap();
+    let data = tmp.path().join("atman_data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let out = Command::new(atman_bin())
+        .args([
+            "migrate",
+            "import",
+            "ses_abc",
+            "--from",
+            "opencode",
+            "--storage",
+            storage,
+            "--into",
+            "new",
+        ])
+        .current_dir(tmp.path())
+        .env("ATMAN_DATA_DIR", data.to_str().unwrap())
+        .env("ATMAN_DISABLE_MIGRATION", "1")
+        .output()
+        .expect("spawn atman");
+    assert!(
+        out.status.success(),
+        "import --into new exit: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("replayed 2 messages"),
+        "want replay count, got: {stdout}"
+    );
+
+    let sessions_root = data.join("sessions");
+    let session_dirs: Vec<_> = std::fs::read_dir(&sessions_root)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(
+        session_dirs.len(),
+        1,
+        "want one session dir: {session_dirs:?}"
+    );
+    let events = std::fs::read_to_string(session_dirs[0].join("events.jsonl")).unwrap();
+    let user_hits = events
+        .lines()
+        .filter(|l| l.contains("\"type\":\"user_msg\""))
+        .count();
+    let asst_hits = events
+        .lines()
+        .filter(|l| l.contains("\"type\":\"assistant_msg\""))
+        .count();
+    assert_eq!(user_hits, 1, "want 1 user_msg event: {events}");
+    assert_eq!(asst_hits, 1, "want 1 assistant_msg event: {events}");
+    assert!(
+        events.contains("migrated from opencode"),
+        "want provenance tag in event body: {events}"
+    );
+}
+
+#[test]
+fn migrate_import_without_out_or_into_bails() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_fixture(tmp.path());
+    let (_, stderr, code) = run(
+        tmp.path(),
+        &[
+            "migrate",
+            "import",
+            "ses_abc",
+            "--from",
+            "opencode",
+            "--storage",
+            tmp.path().to_str().unwrap(),
+        ],
+    );
+    assert_ne!(code, 0, "want failure without sink");
+    assert!(
+        stderr.contains("--out") && stderr.contains("--into"),
+        "want sink-required hint, got: {stderr}"
+    );
+}
+
+#[test]
 fn migrate_import_writes_jsonl_transcript() {
     let tmp = tempfile::tempdir().unwrap();
     seed_fixture(tmp.path());
