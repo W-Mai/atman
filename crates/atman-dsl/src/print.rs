@@ -32,6 +32,7 @@ pub fn print_file(file: &File) -> String {
             LifecycleEvent::SessionEnd => "session.end",
             LifecycleEvent::TurnStart => "turn.start",
             LifecycleEvent::TurnEnd => "turn.end",
+            LifecycleEvent::ContextCompact => "session.context_compact",
         };
         writeln!(out, "on {event_str} {{").unwrap();
         write_stmts(&mut out, &lc.body, 1);

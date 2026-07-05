@@ -139,13 +139,14 @@ fn parse_lifecycle(input: ParseStream) -> Result<LifecycleDecl> {
     let event = match (scope.to_string().as_str(), hook.to_string().as_str()) {
         ("session", "start") => LifecycleEvent::SessionStart,
         ("session", "end") => LifecycleEvent::SessionEnd,
+        ("session", "context_compact") => LifecycleEvent::ContextCompact,
         ("turn", "start") => LifecycleEvent::TurnStart,
         ("turn", "end") => LifecycleEvent::TurnEnd,
         (s, h) => {
             return Err(syn::Error::new(
                 hook.span(),
                 format!(
-                    "unknown lifecycle `{s}.{h}` (want session.start|session.end|turn.start|turn.end)"
+                    "unknown lifecycle `{s}.{h}` (want session.start|session.end|session.context_compact|turn.start|turn.end)"
                 ),
             ));
         }

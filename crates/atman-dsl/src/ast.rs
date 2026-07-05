@@ -228,6 +228,7 @@ pub enum LifecycleEvent {
     SessionEnd,
     TurnStart,
     TurnEnd,
+    ContextCompact,
 }
 
 #[derive(Debug, Clone)]

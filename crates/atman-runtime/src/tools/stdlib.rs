@@ -228,7 +228,7 @@ impl Tool for ReplaceMessagesRange {
     fn tier(&self) -> Tier {
         Tier::Zero
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let messages = extract_message_list(&args, "messages", 0)?;
             let start = extract_int(&args, "start", 1)? as usize;
@@ -240,6 +240,16 @@ impl Tool for ReplaceMessagesRange {
                     messages.len()
                 )));
             }
+            let before_tokens = crate::compaction::estimate_tokens_for_messages(&messages);
+            let seq_span = messages
+                .get(start..end.min(messages.len()))
+                .and_then(|slice| {
+                    Some((
+                        slice.first().map(|_| start as u64)?,
+                        slice.last().map(|_| end.saturating_sub(1) as u64)?,
+                    ))
+                })
+                .unwrap_or((start as u64, end.saturating_sub(1) as u64));
             let range = crate::compaction::CompactRange {
                 start,
                 end,
@@ -249,8 +259,33 @@ impl Tool for ReplaceMessagesRange {
                 .first()
                 .map(|m| m.turn_id.clone())
                 .unwrap_or_else(crate::event::TurnId::now);
-            let out =
-                crate::compaction::replace_range_with_summary(&messages, &range, summary, turn_id);
+            let footer = format!(
+                "\n\n[atman:compact seq_start={} seq_end={} count={}]",
+                seq_span.0,
+                seq_span.1,
+                end - start
+            );
+            let annotated = format!("{summary}{footer}");
+            let out = crate::compaction::replace_range_with_summary(
+                &messages, &range, annotated, turn_id,
+            );
+            let after_tokens = crate::compaction::estimate_tokens_for_messages(&out);
+            if let Some(sink) = &ctx.events {
+                sink.mark_compacted();
+                sink.emit(crate::event::Event::ContextCompact {
+                    seq: 0,
+                    session_id: ctx
+                        .turn_id
+                        .as_ref()
+                        .map(|t| t.0.to_string())
+                        .unwrap_or_default(),
+                    before_tokens,
+                    after_tokens,
+                    compacted_range_start: seq_span.0,
+                    compacted_range_end: seq_span.1,
+                    ts: chrono::Utc::now(),
+                });
+            }
             let list: Vec<Value> = out.into_iter().map(Value::Message).collect();
             Ok(Value::List(list))
         })

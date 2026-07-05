@@ -96,6 +96,7 @@ fn lifecycle_event_slug(event: LifecycleEvent) -> &'static str {
         LifecycleEvent::SessionEnd => "session.end",
         LifecycleEvent::TurnStart => "turn.start",
         LifecycleEvent::TurnEnd => "turn.end",
+        LifecycleEvent::ContextCompact => "session.context_compact",
     }
 }
 

@@ -92,6 +92,56 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
     best
 }
 
+pub fn find_compact_summaries(messages: &[Message]) -> Vec<CompactSummary> {
+    let mut out = Vec::new();
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role != MessageRole::System {
+            continue;
+        }
+        let text = msg.text_concat();
+        if let Some(summary) = parse_compact_footer(&text, idx) {
+            out.push(summary);
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactSummary {
+    pub message_index: usize,
+    pub seq_start: u64,
+    pub seq_end: u64,
+    pub count: usize,
+}
+
+fn parse_compact_footer(text: &str, idx: usize) -> Option<CompactSummary> {
+    let start_marker = "[atman:compact ";
+    let start = text.rfind(start_marker)?;
+    let after = &text[start + start_marker.len()..];
+    let end = after.find(']')?;
+    let inner = &after[..end];
+    let mut seq_start = None;
+    let mut seq_end = None;
+    let mut count = None;
+    for token in inner.split_whitespace() {
+        let Some((k, v)) = token.split_once('=') else {
+            continue;
+        };
+        match k {
+            "seq_start" => seq_start = v.parse().ok(),
+            "seq_end" => seq_end = v.parse().ok(),
+            "count" => count = v.parse().ok(),
+            _ => {}
+        }
+    }
+    Some(CompactSummary {
+        message_index: idx,
+        seq_start: seq_start?,
+        seq_end: seq_end?,
+        count: count?,
+    })
+}
+
 pub fn replace_range_with_summary(
     messages: &[Message],
     range: &CompactRange,
