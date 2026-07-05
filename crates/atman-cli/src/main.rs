@@ -131,6 +131,9 @@ enum FlowAction {
         #[arg(long)]
         yes: bool,
     },
+    Lint {
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2422,6 +2425,9 @@ async fn cmd_sync(action: SyncAction) -> Result<()> {
 }
 
 async fn cmd_flow(action: FlowAction) -> Result<()> {
+    if let FlowAction::Lint { path } = &action {
+        return cmd_flow_lint(path);
+    }
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry = atman_runtime::flow_registry::FlowRegistry::open(&project_root)
         .with_context(|| format!("open flow registry under {}", project_root.display()))?;
@@ -2439,7 +2445,30 @@ async fn cmd_flow(action: FlowAction) -> Result<()> {
             to,
             yes,
         } => cmd_flow_rollback(&registry, &flow_name, &version, to.as_deref(), yes),
+        FlowAction::Lint { .. } => unreachable!("lint handled above"),
     }
+}
+
+fn cmd_flow_lint(path: &Path) -> Result<()> {
+    let source =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let file = atman_dsl::parse::parse_file(&source)
+        .with_context(|| format!("parse {}", path.display()))?;
+    let hits = atman_runtime::flow_lint::lint_file(&file);
+    if hits.is_empty() {
+        println!("[atman] flow lint: {} — clean", path.display());
+        return Ok(());
+    }
+    for hit in &hits {
+        println!(
+            "{}:{}:{}: {}",
+            path.display(),
+            hit.flow,
+            hit.rule.slug(),
+            hit.message
+        );
+    }
+    bail!("flow lint: {} hit(s)", hits.len());
 }
 
 fn cmd_flow_snapshot(
