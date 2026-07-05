@@ -21,6 +21,7 @@ pub struct FlowRevision {
     pub ts: chrono::DateTime<chrono::Utc>,
     pub author: Option<String>,
     pub source_tag: String,
+    pub origin_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,7 @@ impl FlowRegistry {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(SCHEMA)
             .with_context(|| format!("apply schema on {}", path.display()))?;
+        migrate(&conn).with_context(|| format!("migrate registry at {}", path.display()))?;
         Ok(Self {
             path,
             conn: Mutex::new(conn),
@@ -57,11 +59,21 @@ impl FlowRegistry {
         flow_name: &str,
         content: &str,
         meta: &FlowMeta,
+        origin_path: Option<&Path>,
     ) -> Result<SnapshotOutcome> {
         let content_hash = FlowMeta::short_hash(content);
-        if let Some(latest) = self.latest(flow_name)?
+        let origin_str = origin_path.map(|p| p.to_string_lossy().into_owned());
+        if let Some(mut latest) = self.latest(flow_name)?
             && latest.content_hash == content_hash
         {
+            if latest.origin_path.is_none() && origin_str.is_some() {
+                let conn = self.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE flow_revisions SET origin_path = ?1 WHERE id = ?2",
+                    params![origin_str, latest.id],
+                )?;
+                latest.origin_path = origin_str.clone();
+            }
             return Ok(SnapshotOutcome::UnchangedFromLatest(latest));
         }
         let ts = chrono::Utc::now();
@@ -72,8 +84,8 @@ impl FlowRegistry {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO flow_revisions \
-             (flow_name, version, content, content_hash, ts, author, source_tag) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (flow_name, version, content, content_hash, ts, author, source_tag, origin_path) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 flow_name,
                 meta.version,
@@ -82,6 +94,7 @@ impl FlowRegistry {
                 ts.to_rfc3339(),
                 meta.author,
                 source_tag,
+                origin_str,
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -94,13 +107,14 @@ impl FlowRegistry {
             ts,
             author: meta.author.clone(),
             source_tag: source_tag.to_string(),
+            origin_path: origin_str,
         }))
     }
 
     pub fn list_versions(&self, flow_name: &str) -> Result<Vec<FlowRevision>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, flow_name, version, content, content_hash, ts, author, source_tag \
+            "SELECT id, flow_name, version, content, content_hash, ts, author, source_tag, origin_path \
              FROM flow_revisions WHERE flow_name = ?1 ORDER BY id DESC",
         )?;
         let rows = stmt.query_map([flow_name], row_to_revision)?;
@@ -114,7 +128,7 @@ impl FlowRegistry {
     pub fn latest(&self, flow_name: &str) -> Result<Option<FlowRevision>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, flow_name, version, content, content_hash, ts, author, source_tag \
+            "SELECT id, flow_name, version, content, content_hash, ts, author, source_tag, origin_path \
              FROM flow_revisions WHERE flow_name = ?1 ORDER BY id DESC LIMIT 1",
             [flow_name],
             row_to_revision,
@@ -131,7 +145,7 @@ impl FlowRegistry {
         let conn = self.conn.lock().unwrap();
         let exact = conn
             .query_row(
-                "SELECT id, flow_name, version, content, content_hash, ts, author, source_tag \
+                "SELECT id, flow_name, version, content, content_hash, ts, author, source_tag, origin_path \
                  FROM flow_revisions WHERE flow_name = ?1 AND version = ?2 \
                  ORDER BY id DESC LIMIT 1",
                 params![flow_name, version_or_hash],
@@ -149,7 +163,7 @@ impl FlowRegistry {
         }
         let prefix_pattern = format!("{stripped}%");
         conn.query_row(
-            "SELECT id, flow_name, version, content, content_hash, ts, author, source_tag \
+            "SELECT id, flow_name, version, content, content_hash, ts, author, source_tag, origin_path \
              FROM flow_revisions WHERE flow_name = ?1 AND content_hash LIKE ?2 \
              ORDER BY id DESC LIMIT 1",
             params![flow_name, prefix_pattern],
@@ -196,7 +210,24 @@ fn row_to_revision(row: &rusqlite::Row<'_>) -> rusqlite::Result<FlowRevision> {
         ts,
         author: row.get(6)?,
         source_tag: row.get(7)?,
+        origin_path: row.get(8)?,
     })
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    let mut has_origin = false;
+    let mut stmt = conn.prepare("PRAGMA table_info(flow_revisions)")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for name in rows {
+        if name? == "origin_path" {
+            has_origin = true;
+        }
+    }
+    drop(stmt);
+    if !has_origin {
+        conn.execute("ALTER TABLE flow_revisions ADD COLUMN origin_path TEXT", [])?;
+    }
+    Ok(())
 }
 
 const SCHEMA: &str = r#"
@@ -208,7 +239,8 @@ CREATE TABLE IF NOT EXISTS flow_revisions (
     content_hash TEXT NOT NULL,
     ts TEXT NOT NULL,
     author TEXT,
-    source_tag TEXT NOT NULL
+    source_tag TEXT NOT NULL,
+    origin_path TEXT
 );
 CREATE INDEX IF NOT EXISTS flow_revisions_by_name_id
     ON flow_revisions (flow_name, id DESC);
@@ -241,6 +273,7 @@ mod tests {
                 "greet",
                 "flow greet() { return 1 }",
                 &mk_meta("0.1.0", FlowMetaSource::Sidecar),
+                None,
             )
             .unwrap();
         let SnapshotOutcome::Inserted(rev) = out else {
@@ -249,6 +282,7 @@ mod tests {
         assert_eq!(rev.flow_name, "greet");
         assert_eq!(rev.version, "0.1.0");
         assert_eq!(rev.source_tag, "sidecar");
+        assert!(rev.origin_path.is_none());
         assert_eq!(reg.count("greet").unwrap(), 1);
     }
 
@@ -257,10 +291,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = FlowRegistry::open(dir.path()).unwrap();
         let src = "flow greet() { return 1 }";
-        reg.snapshot("greet", src, &mk_meta("0.1.0", FlowMetaSource::Sidecar))
-            .unwrap();
+        reg.snapshot(
+            "greet",
+            src,
+            &mk_meta("0.1.0", FlowMetaSource::Sidecar),
+            None,
+        )
+        .unwrap();
         let again = reg
-            .snapshot("greet", src, &mk_meta("0.1.0", FlowMetaSource::Sidecar))
+            .snapshot(
+                "greet",
+                src,
+                &mk_meta("0.1.0", FlowMetaSource::Sidecar),
+                None,
+            )
             .unwrap();
         assert!(matches!(again, SnapshotOutcome::UnchangedFromLatest(_)));
         assert_eq!(reg.count("greet").unwrap(), 1);
@@ -274,12 +318,14 @@ mod tests {
             "greet",
             "flow greet() { return 1 }",
             &mk_meta("0.1.0", FlowMetaSource::Sidecar),
+            None,
         )
         .unwrap();
         reg.snapshot(
             "greet",
             "flow greet() { return 2 }",
             &mk_meta("0.2.0", FlowMetaSource::Sidecar),
+            None,
         )
         .unwrap();
         assert_eq!(reg.count("greet").unwrap(), 2);
@@ -297,6 +343,7 @@ mod tests {
             "greet",
             "flow greet() { return 1 }",
             &mk_meta("0.1.0", FlowMetaSource::Sidecar),
+            None,
         )
         .unwrap();
         let hit = reg.find_by_version("greet", "0.1.0").unwrap().unwrap();
@@ -314,6 +361,7 @@ mod tests {
             "greet",
             src,
             &mk_meta(&format!("hash:{hash}"), FlowMetaSource::HashFallback),
+            None,
         )
         .unwrap();
         let short_prefix: String = hash.chars().take(6).collect();
@@ -337,18 +385,21 @@ mod tests {
             "b_flow",
             "flow b_flow() { return 1 }",
             &mk_meta("1", FlowMetaSource::Sidecar),
+            None,
         )
         .unwrap();
         reg.snapshot(
             "a_flow",
             "flow a_flow() { return 1 }",
             &mk_meta("1", FlowMetaSource::Sidecar),
+            None,
         )
         .unwrap();
         reg.snapshot(
             "a_flow",
             "flow a_flow() { return 2 }",
             &mk_meta("2", FlowMetaSource::Sidecar),
+            None,
         )
         .unwrap();
         let names = reg.flow_names().unwrap();
@@ -359,9 +410,9 @@ mod tests {
     fn latest_returns_most_recent_revision() {
         let dir = tempfile::tempdir().unwrap();
         let reg = FlowRegistry::open(dir.path()).unwrap();
-        reg.snapshot("greet", "a", &mk_meta("0.1", FlowMetaSource::Sidecar))
+        reg.snapshot("greet", "a", &mk_meta("0.1", FlowMetaSource::Sidecar), None)
             .unwrap();
-        reg.snapshot("greet", "b", &mk_meta("0.2", FlowMetaSource::Sidecar))
+        reg.snapshot("greet", "b", &mk_meta("0.2", FlowMetaSource::Sidecar), None)
             .unwrap();
         let latest = reg.latest("greet").unwrap().unwrap();
         assert_eq!(latest.version, "0.2");
@@ -376,11 +427,105 @@ mod tests {
             "a",
             "x",
             &mk_meta("hash:aaaa", FlowMetaSource::HashFallback),
+            None,
         )
         .unwrap();
-        reg.snapshot("b", "y", &mk_meta("1.0", FlowMetaSource::Sidecar))
+        reg.snapshot("b", "y", &mk_meta("1.0", FlowMetaSource::Sidecar), None)
             .unwrap();
         assert_eq!(reg.latest("a").unwrap().unwrap().source_tag, "hash");
         assert_eq!(reg.latest("b").unwrap().unwrap().source_tag, "sidecar");
+    }
+
+    #[test]
+    fn snapshot_records_origin_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = FlowRegistry::open(dir.path()).unwrap();
+        let out = reg
+            .snapshot(
+                "greet",
+                "flow greet() { return 1 }",
+                &mk_meta("0.1.0", FlowMetaSource::Sidecar),
+                Some(Path::new("/tmp/greet.at")),
+            )
+            .unwrap();
+        let SnapshotOutcome::Inserted(rev) = out else {
+            panic!("expected inserted");
+        };
+        assert_eq!(rev.origin_path.as_deref(), Some("/tmp/greet.at"));
+        let latest = reg.latest("greet").unwrap().unwrap();
+        assert_eq!(latest.origin_path.as_deref(), Some("/tmp/greet.at"));
+    }
+
+    #[test]
+    fn unchanged_snapshot_backfills_missing_origin_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = FlowRegistry::open(dir.path()).unwrap();
+        let src = "flow greet() { return 1 }";
+        reg.snapshot(
+            "greet",
+            src,
+            &mk_meta("0.1.0", FlowMetaSource::Sidecar),
+            None,
+        )
+        .unwrap();
+        let outcome = reg
+            .snapshot(
+                "greet",
+                src,
+                &mk_meta("0.1.0", FlowMetaSource::Sidecar),
+                Some(Path::new("/tmp/greet.at")),
+            )
+            .unwrap();
+        let SnapshotOutcome::UnchangedFromLatest(rev) = outcome else {
+            panic!("expected UnchangedFromLatest");
+        };
+        assert_eq!(rev.origin_path.as_deref(), Some("/tmp/greet.at"));
+        let latest = reg.latest("greet").unwrap().unwrap();
+        assert_eq!(latest.origin_path.as_deref(), Some("/tmp/greet.at"));
+        assert_eq!(reg.count("greet").unwrap(), 1);
+    }
+
+    #[test]
+    fn open_migrates_legacy_registry_without_origin_path_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join(".atman").join("flow-registry.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE flow_revisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    flow_name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    author TEXT,
+                    source_tag TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO flow_revisions \
+                 (flow_name, version, content, content_hash, ts, author, source_tag) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    "legacy",
+                    "0.1",
+                    "flow legacy() { return 1 }",
+                    "abcd",
+                    "2026-07-05T00:00:00Z",
+                    Option::<String>::None,
+                    "sidecar",
+                ],
+            )
+            .unwrap();
+        }
+        let reg = FlowRegistry::open(dir.path()).unwrap();
+        let latest = reg.latest("legacy").unwrap().unwrap();
+        assert_eq!(latest.origin_path, None);
+        assert_eq!(latest.version, "0.1");
     }
 }

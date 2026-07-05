@@ -222,6 +222,60 @@ fn flow_rollback_inside_git_repo_with_yes_prints_hint_and_writes() {
 }
 
 #[test]
+fn flow_rollback_without_to_uses_stored_origin_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let flow_path = root.join("greet.at");
+    std::fs::write(&flow_path, "flow greet() { return 1 }\n").unwrap();
+    let (_, err, code) = run(root, &["flow", "snapshot", "greet.at"]);
+    assert_eq!(code, 0, "snapshot v1: {err}");
+
+    std::fs::write(&flow_path, "flow greet() { return 2 }\n").unwrap();
+    let (_, err, code) = run(root, &["flow", "snapshot", "greet.at"]);
+    assert_eq!(code, 0, "snapshot v2: {err}");
+
+    let hash_v1 = atman_runtime::flow_meta::FlowMeta::short_hash("flow greet() { return 1 }\n");
+    let (out, err, code) = run(root, &["flow", "rollback", "greet", &hash_v1, "--yes"]);
+    assert_eq!(code, 0, "rollback exit: stderr={err}\nstdout={out}");
+    assert!(
+        out.contains("using stored origin"),
+        "want origin hint on stdout, got: {out}"
+    );
+    let restored = std::fs::read_to_string(&flow_path).unwrap();
+    assert_eq!(restored, "flow greet() { return 1 }\n");
+}
+
+#[test]
+fn flow_rollback_explicit_to_overrides_stored_origin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let flow_path = root.join("greet.at");
+    std::fs::write(&flow_path, "flow greet() { return 1 }\n").unwrap();
+    let (_, err, code) = run(root, &["flow", "snapshot", "greet.at"]);
+    assert_eq!(code, 0, "snapshot: {err}");
+    let hash_v1 = atman_runtime::flow_meta::FlowMeta::short_hash("flow greet() { return 1 }\n");
+    let alt = root.join("elsewhere.at");
+    let (out, err, code) = run(
+        root,
+        &[
+            "flow",
+            "rollback",
+            "greet",
+            &hash_v1,
+            "--to",
+            alt.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(code, 0, "rollback exit: stderr={err}");
+    assert!(
+        !out.contains("using stored origin"),
+        "explicit --to should not fall through to origin hint: {out}"
+    );
+    assert!(alt.exists(), "explicit target should be written");
+}
+
+#[test]
 fn flow_diff_between_two_revisions() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

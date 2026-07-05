@@ -124,7 +124,7 @@ enum FlowAction {
         flow_name: String,
         version: String,
         #[arg(long)]
-        to: PathBuf,
+        to: Option<PathBuf>,
         #[arg(long)]
         yes: bool,
     },
@@ -1418,7 +1418,7 @@ fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_dsl::ast
     };
     for flow in &parsed.flows {
         let name = &flow.name.name;
-        match registry.snapshot(name, source, &meta) {
+        match registry.snapshot(name, source, &meta, Some(source_path)) {
             Ok(atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev)) => eprintln!(
                 "[atman] auto_snapshot: {name} @ {} (id={})",
                 rev.version, rev.id
@@ -2203,7 +2203,7 @@ async fn cmd_flow(action: FlowAction) -> Result<()> {
             version,
             to,
             yes,
-        } => cmd_flow_rollback(&registry, &flow_name, &version, &to, yes),
+        } => cmd_flow_rollback(&registry, &flow_name, &version, to.as_deref(), yes),
     }
 }
 
@@ -2219,7 +2219,8 @@ fn cmd_flow_snapshot(
         meta.author = Some(a);
     }
     let name = flow_name_from_source_or_path(&content, path);
-    let outcome = registry.snapshot(&name, &content, &meta)?;
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let outcome = registry.snapshot(&name, &content, &meta, Some(canonical.as_path()))?;
     match outcome {
         atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev) => println!(
             "[atman] snapshot ok: {} @ {} (id={}) — source={}",
@@ -2293,52 +2294,72 @@ fn cmd_flow_rollback(
     registry: &atman_runtime::flow_registry::FlowRegistry,
     flow_name: &str,
     version: &str,
-    target: &Path,
+    target: Option<&Path>,
     assume_yes: bool,
 ) -> Result<()> {
     let rev = registry
         .find_by_version(flow_name, version)?
         .with_context(|| format!("no revision matches `{version}` for `{flow_name}`"))?;
-    if target.is_dir() {
+    let (target_buf, target_source) = match target {
+        Some(t) => (t.to_path_buf(), "--to"),
+        None => {
+            let origin = rev.origin_path.as_deref().with_context(|| {
+                format!(
+                    "no --to given and revision {} for `{flow_name}` has no stored origin path — pass --to <file>",
+                    rev.version
+                )
+            })?;
+            println!(
+                "[atman] no --to given; using stored origin {} from revision id={}",
+                origin, rev.id
+            );
+            (PathBuf::from(origin), "origin")
+        }
+    };
+    let target_path = target_buf.as_path();
+    if target_path.is_dir() {
         bail!(
-            "--to {} is a directory (want a file path)",
-            target.display()
+            "{target_source} {} is a directory (want a file path)",
+            target_path.display()
         );
     }
-    if let Some(git_root) = git_root_containing(target) {
+    if let Some(git_root) = git_root_containing(target_path) {
         eprintln!(
             "[atman] note: {} lives inside git repo at {}. `git checkout <sha> -- {}` may be a safer rollback path.",
-            target.display(),
+            target_path.display(),
             git_root.display(),
-            target.display()
+            target_path.display()
         );
         if !assume_yes {
             bail!(
                 "rollback aborted — re-run with --yes to overwrite {} anyway",
-                target.display()
+                target_path.display()
             );
         }
     }
-    if target.exists() && !assume_yes {
+    if target_path.exists() && !assume_yes {
         eprintln!(
             "[atman] refusing to overwrite {} without --yes (would replace with {} @ {}, id={})",
-            target.display(),
+            target_path.display(),
             flow_name,
             rev.version,
             rev.id
         );
         bail!("rollback aborted");
     }
-    if let Some(parent) = target.parent() {
+    if let Some(parent) = target_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
-    std::fs::write(target, &rev.content).with_context(|| format!("write {}", target.display()))?;
+    std::fs::write(target_path, &rev.content)
+        .with_context(|| format!("write {}", target_path.display()))?;
     println!(
         "[atman] rolled back {} to {} (id={}) at {}",
         flow_name,
         rev.version,
         rev.id,
-        target.display()
+        target_path.display()
     );
     Ok(())
 }
