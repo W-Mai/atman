@@ -391,6 +391,10 @@ async fn cmd_run(
         bail!("flow validation failed with {} error(s)", errs.len());
     }
 
+    if load_auto_snapshot() {
+        auto_snapshot_flows(&file, &source, &parsed);
+    }
+
     let turn_id = atman_runtime::event::TurnId::now();
     let user_msg = atman_runtime::message::Message::user_text(
         turn_id.clone(),
@@ -1305,6 +1309,76 @@ async fn handle_suggest(
         println!("[atman] :suggest — open {} to edit.", target.display());
     }
     Ok(())
+}
+
+fn load_auto_snapshot() -> bool {
+    if let Ok(v) = std::env::var("ATMAN_AUTO_SNAPSHOT")
+        && matches!(v.trim(), "1" | "true" | "yes" | "on")
+    {
+        return true;
+    }
+    let Ok(cfg) = config_dir() else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
+        return false;
+    };
+    parse_auto_snapshot(&text).unwrap_or(false)
+}
+
+fn parse_auto_snapshot(text: &str) -> Option<bool> {
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name) = rest.strip_suffix(']')
+        {
+            in_section = name.trim() == "registry";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == "auto_snapshot" {
+            return Some(matches!(v.trim(), "true" | "1" | "\"true\"" | "yes"));
+        }
+    }
+    None
+}
+
+fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_dsl::ast::File) {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let registry = match atman_runtime::flow_registry::FlowRegistry::open(&project_root) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[atman] auto_snapshot: open registry failed: {e}");
+            return;
+        }
+    };
+    let meta = match atman_runtime::flow_meta::FlowMeta::from_source(source_path, source) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[atman] auto_snapshot: read meta failed: {e}");
+            return;
+        }
+    };
+    for flow in &parsed.flows {
+        let name = &flow.name.name;
+        match registry.snapshot(name, source, &meta) {
+            Ok(atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev)) => eprintln!(
+                "[atman] auto_snapshot: {name} @ {} (id={})",
+                rev.version, rev.id
+            ),
+            Ok(atman_runtime::flow_registry::SnapshotOutcome::UnchangedFromLatest(_)) => {}
+            Err(e) => eprintln!("[atman] auto_snapshot: {name}: {e}"),
+        }
+    }
 }
 
 fn load_suggest_model() -> String {

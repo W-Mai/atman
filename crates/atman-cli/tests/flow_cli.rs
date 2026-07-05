@@ -70,6 +70,62 @@ fn flow_versions_on_unknown_flow_is_ok_and_prints_hint() {
 }
 
 #[test]
+fn atman_run_auto_snapshots_when_env_flag_is_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let flow_path = root.join("hello.at");
+    std::fs::write(&flow_path, "flow hello() { return 1 }\n").unwrap();
+
+    let out = Command::new(atman_bin())
+        .args(["run", "hello.at", "--ephemeral"])
+        .current_dir(root)
+        .env("ATMAN_AUTO_SNAPSHOT", "1")
+        .env("ATMAN_DISABLE_MIGRATION", "1")
+        .output()
+        .expect("spawn atman run");
+    assert!(
+        out.status.success(),
+        "atman run exit: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (versions_out, err, code) = run(root, &["flow", "versions", "hello"]);
+    assert_eq!(code, 0, "versions exit: stderr={err}");
+    assert!(
+        versions_out.contains("hash:"),
+        "auto_snapshot should leave a revision, got:\n{versions_out}"
+    );
+}
+
+#[test]
+fn atman_run_does_not_auto_snapshot_without_env_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let flow_path = root.join("hello.at");
+    std::fs::write(&flow_path, "flow hello() { return 1 }\n").unwrap();
+
+    let out = Command::new(atman_bin())
+        .args(["run", "hello.at", "--ephemeral"])
+        .current_dir(root)
+        .env_remove("ATMAN_AUTO_SNAPSHOT")
+        .env("ATMAN_DISABLE_MIGRATION", "1")
+        .output()
+        .expect("spawn atman run");
+    assert!(
+        out.status.success(),
+        "atman run exit: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (versions_out, err, code) = run(root, &["flow", "versions", "hello"]);
+    assert_eq!(code, 0, "versions exit: stderr={err}");
+    assert!(
+        versions_out.contains("no revisions"),
+        "no snapshot expected, got:\n{versions_out}"
+    );
+}
+
+#[test]
 fn flow_diff_between_two_revisions() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
