@@ -125,6 +125,102 @@ fn atman_run_does_not_auto_snapshot_without_env_flag() {
     );
 }
 
+fn have_git() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_init(dir: &std::path::Path) {
+    let out = Command::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(dir)
+        .output()
+        .expect("git init");
+    assert!(
+        out.status.success(),
+        "git init: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn flow_rollback_inside_git_repo_warns_and_aborts_without_yes() {
+    if !have_git() {
+        eprintln!("skip: git binary not on PATH");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let flow_path = root.join("g.at");
+    std::fs::write(&flow_path, "flow g() { return 1 }\n").unwrap();
+    let (_, err, code) = run(root, &["flow", "snapshot", "g.at"]);
+    assert_eq!(code, 0, "snapshot: {err}");
+    git_init(root);
+    let hash = atman_runtime::flow_meta::FlowMeta::short_hash("flow g() { return 1 }\n");
+
+    let target = root.join("restored.at");
+    let (out, err, code) = run(
+        root,
+        &[
+            "flow",
+            "rollback",
+            "g",
+            &hash,
+            "--to",
+            target.to_str().unwrap(),
+        ],
+    );
+    assert_ne!(code, 0, "expected abort inside git repo without --yes");
+    assert!(
+        err.contains("git checkout") || out.contains("git checkout"),
+        "want git-checkout hint, stdout={out} stderr={err}"
+    );
+    assert!(
+        !target.exists(),
+        "target should not have been written on abort"
+    );
+}
+
+#[test]
+fn flow_rollback_inside_git_repo_with_yes_prints_hint_and_writes() {
+    if !have_git() {
+        eprintln!("skip: git binary not on PATH");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let flow_path = root.join("g.at");
+    std::fs::write(&flow_path, "flow g() { return 1 }\n").unwrap();
+    let (_, err, code) = run(root, &["flow", "snapshot", "g.at"]);
+    assert_eq!(code, 0, "snapshot: {err}");
+    git_init(root);
+    let hash = atman_runtime::flow_meta::FlowMeta::short_hash("flow g() { return 1 }\n");
+
+    let target = root.join("restored.at");
+    let (out, err, code) = run(
+        root,
+        &[
+            "flow",
+            "rollback",
+            "g",
+            &hash,
+            "--to",
+            target.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(code, 0, "rollback --yes exit: stderr={err}\nstdout={out}");
+    assert!(
+        err.contains("git checkout") || out.contains("git checkout"),
+        "hint should still print with --yes, stdout={out} stderr={err}"
+    );
+    let restored = std::fs::read_to_string(&target).unwrap();
+    assert_eq!(restored, "flow g() { return 1 }\n");
+}
+
 #[test]
 fn flow_diff_between_two_revisions() {
     let tmp = tempfile::tempdir().unwrap();

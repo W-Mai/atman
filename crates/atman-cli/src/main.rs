@@ -2242,6 +2242,20 @@ fn cmd_flow_rollback(
             target.display()
         );
     }
+    if let Some(git_root) = git_root_containing(target) {
+        eprintln!(
+            "[atman] note: {} lives inside git repo at {}. `git checkout <sha> -- {}` may be a safer rollback path.",
+            target.display(),
+            git_root.display(),
+            target.display()
+        );
+        if !assume_yes {
+            bail!(
+                "rollback aborted — re-run with --yes to overwrite {} anyway",
+                target.display()
+            );
+        }
+    }
     if target.exists() && !assume_yes {
         eprintln!(
             "[atman] refusing to overwrite {} without --yes (would replace with {} @ {}, id={})",
@@ -2264,6 +2278,27 @@ fn cmd_flow_rollback(
         target.display()
     );
     Ok(())
+}
+
+fn git_root_containing(target: &Path) -> Option<PathBuf> {
+    let probe_dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(probe_dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if line.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(line))
+    }
 }
 
 fn flow_name_from_source_or_path(source: &str, path: &Path) -> String {
