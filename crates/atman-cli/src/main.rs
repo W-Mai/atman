@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod migrate_source;
+mod repl_completer;
 mod suggest;
 mod sync;
 
@@ -911,15 +912,19 @@ fn spawn_stdin_reader(tx: tokio::sync::mpsc::UnboundedSender<String>) {
             }
         } else {
             use rustyline::error::ReadlineError;
-            use rustyline::{Config, DefaultEditor};
+            use rustyline::history::DefaultHistory;
+            use rustyline::{Config, Editor};
             let config = Config::builder().auto_add_history(true).build();
-            let mut editor: DefaultEditor = match DefaultEditor::with_config(config) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("[atman] rustyline init failed: {e}");
-                    return;
-                }
-            };
+            let completer = repl_completer::AtmanCompleter::new(config_dir().ok());
+            let mut editor: Editor<repl_completer::AtmanCompleter, DefaultHistory> =
+                match Editor::with_config(config) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("[atman] rustyline init failed: {e}");
+                        return;
+                    }
+                };
+            editor.set_helper(Some(completer));
             loop {
                 match editor.readline("atman> ") {
                     Ok(l) => {
