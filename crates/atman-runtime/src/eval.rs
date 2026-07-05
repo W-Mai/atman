@@ -16,6 +16,7 @@ pub struct EvalCtx<'a> {
     pub flow_run_id: Option<crate::event::FlowRunId>,
     pub session: Option<&'a crate::session::Session>,
     pub flow_cancel: tokio_util::sync::CancellationToken,
+    pub safety: Option<&'a crate::safety::SafetyConfig>,
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -374,6 +375,49 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 }
             }
             let prompt = prompt_for_budget;
+            if let Some(safety) = ctx.safety
+                && safety.enabled
+            {
+                let scan_text = final_messages
+                    .last()
+                    .map(|m| m.text_concat())
+                    .unwrap_or_else(|| prompt.clone());
+                let verdict = match safety.classifier.scan(&scan_text).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[atman] safety scan skipped: {e}");
+                        crate::safety::ScanVerdict::Pass
+                    }
+                };
+                if !verdict.is_pass()
+                    && let Some(sink) = ctx.events
+                {
+                    let action = match (&verdict, safety.mode) {
+                        (crate::safety::ScanVerdict::Deny(_), crate::safety::SafetyMode::Deny) => {
+                            "blocked"
+                        }
+                        _ => "warned",
+                    };
+                    for category in verdict.categories() {
+                        sink.emit(crate::event::Event::ContentFilterHit {
+                            seq: 0,
+                            turn_id: Some(turn_id.clone()),
+                            flow_run_id: ctx.flow_run_id.clone(),
+                            provider: safety.classifier.kind().to_string(),
+                            model: model.clone(),
+                            category: category.clone(),
+                            action: action.to_string(),
+                            ts: chrono::Utc::now(),
+                        });
+                    }
+                }
+                if verdict.is_deny() && safety.mode == crate::safety::SafetyMode::Deny {
+                    let cats = verdict.categories().join(", ");
+                    return Value::Err(RuntimeError::ToolFailed(format!(
+                        "safety: content_filter blocked prompt (categories: {cats})"
+                    )));
+                }
+            }
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
             for attempt in 0..=retry_count {
@@ -1152,6 +1196,7 @@ mod tests {
             flow_run_id: None,
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -1246,6 +1291,7 @@ mod tests {
             flow_run_id: None,
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -1284,6 +1330,7 @@ mod tests {
             flow_run_id: None,
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
         };
 
         let mut env = Env::new();
@@ -1323,6 +1370,7 @@ mod tests {
             flow_run_id: None,
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -1357,6 +1405,7 @@ mod tests {
             flow_run_id: None,
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
         };
 
         let src = r#"flow t() {
@@ -1396,6 +1445,7 @@ mod tests {
             flow_run_id: None,
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -1425,6 +1475,7 @@ mod tests {
             flow_run_id: None,
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -1469,6 +1520,7 @@ flow parent(x: Int) -> Int {
             None,
             None,
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1502,6 +1554,7 @@ flow parent(x: Int) -> Int {
             None,
             None,
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
         .unwrap_err();
@@ -1534,6 +1587,7 @@ flow parent(x: Int) -> Int {
             flow_run_id: None,
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
         };
 
         let mut env = Env::new();

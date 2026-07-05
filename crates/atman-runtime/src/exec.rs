@@ -531,6 +531,7 @@ pub async fn exec_flow(
         None,
         None,
         tokio_util::sync::CancellationToken::new(),
+        None,
     )
     .await
 }
@@ -548,6 +549,7 @@ pub async fn exec_flow_with_siblings(
     flow_run_id: Option<crate::event::FlowRunId>,
     session: Option<&crate::session::Session>,
     flow_cancel: tokio_util::sync::CancellationToken,
+    safety: Option<&crate::safety::SafetyConfig>,
 ) -> Result<Value, RuntimeError> {
     let mut env = Env::new();
     for (name, value) in args {
@@ -564,6 +566,7 @@ pub async fn exec_flow_with_siblings(
         flow_run_id,
         session,
         flow_cancel,
+        safety,
     };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),

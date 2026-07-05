@@ -15,6 +15,7 @@ pub struct Executor {
     pub providers: ProviderRegistry,
     pub events: EventSink,
     pub tool_ctx: ToolCtx,
+    pub safety: Option<crate::safety::SafetyConfig>,
 }
 
 impl Executor {
@@ -24,6 +25,7 @@ impl Executor {
             providers: ProviderRegistry::new(),
             events: EventSink::new(),
             tool_ctx: ToolCtx::new(),
+            safety: None,
         }
     }
 
@@ -33,7 +35,13 @@ impl Executor {
             providers: ProviderRegistry::new(),
             events,
             tool_ctx: ToolCtx::new(),
+            safety: None,
         }
+    }
+
+    pub fn with_safety(mut self, safety: crate::safety::SafetyConfig) -> Self {
+        self.safety = Some(safety);
+        self
     }
 
     pub async fn run(
@@ -131,6 +139,7 @@ impl Executor {
             Some(run_id.clone()),
             session,
             flow_cancel.clone(),
+            self.safety.as_ref(),
         );
         let result = tokio::select! {
             biased;
