@@ -57,6 +57,10 @@ pub enum Expr {
         func: Ident,
         args: Vec<Expr>,
     },
+    Pipe {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     Struct(Vec<(Ident, Expr)>),
     List(Vec<Expr>),
     Node(Node),

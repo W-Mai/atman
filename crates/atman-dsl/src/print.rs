@@ -241,6 +241,11 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
             }
             out.push(')');
         }
+        Expr::Pipe { lhs, rhs } => {
+            write_expr(out, lhs, indent);
+            out.push_str(" |> ");
+            write_expr(out, rhs, indent);
+        }
         Expr::Struct(fields) => {
             out.push_str("{ ");
             for (i, (name, value)) in fields.iter().enumerate() {

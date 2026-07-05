@@ -88,6 +88,114 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
         Expr::Call { .. } => Value::Err(RuntimeError::ToolFailed(
             "bare function call not supported; use namespaced tool call".into(),
         )),
+        Expr::Pipe { lhs, rhs } => eval_pipe(lhs, rhs, env, ctx).await,
+    }
+}
+
+async fn eval_pipe<'a>(lhs: &'a Expr, rhs: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    let piped = eval_expr(lhs, env, ctx).await;
+    if piped.is_err() {
+        return piped;
+    }
+    match rhs {
+        Expr::Node(Node::ToolCall { path, args }) => {
+            dispatch_tool_call(path, args, vec![piped], env, ctx).await
+        }
+        other => Value::Err(RuntimeError::ToolFailed(format!(
+            "pipe rhs must be a tool call like `ns.tool(...)`, got {}",
+            expr_shape(other)
+        ))),
+    }
+}
+
+fn expr_shape(e: &Expr) -> &'static str {
+    match e {
+        Expr::Literal(_) => "literal",
+        Expr::Ident(_) => "identifier",
+        Expr::FileRef(_) => "file ref",
+        Expr::Member { .. } => "member access",
+        Expr::Binary { .. } => "binary expr",
+        Expr::Unary { .. } => "unary expr",
+        Expr::Call { .. } => "bare call",
+        Expr::Pipe { .. } => "pipe expr",
+        Expr::Struct(_) => "struct literal",
+        Expr::List(_) => "list literal",
+        Expr::Node(_) => "flow node",
+    }
+}
+
+async fn dispatch_tool_call<'a>(
+    path: &'a [atman_dsl::ast::Ident],
+    args: &'a [Arg],
+    prefix_positional: Vec<Value>,
+    env: &'a Env,
+    ctx: &'a EvalCtx<'a>,
+) -> Value {
+    if ctx.flow_cancel.is_cancelled() {
+        return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
+    }
+    let name = tool_name(path);
+    let tool = match ctx.tools.get(&name) {
+        Some(t) => t,
+        None => {
+            if is_type_annotation(path) {
+                return Value::Unit;
+            }
+            return Value::Err(RuntimeError::UndefinedTool(name));
+        }
+    };
+    if matches!(tool.tier(), crate::tool::Tier::Four) && !contract_allows_shell(ctx.contract) {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "tool `{name}` is Tier 4 (shell); flow contract must declare `capabilities {{ shell: true }}`"
+        )));
+    }
+    let mut positional = prefix_positional;
+    let mut named = Vec::new();
+    for arg in args {
+        match arg {
+            Arg::Positional(e) => {
+                let v = eval_expr(e, env, ctx).await;
+                if v.is_err() {
+                    return v;
+                }
+                positional.push(v);
+            }
+            Arg::Named { name, value } => {
+                let v = eval_expr(value, env, ctx).await;
+                if v.is_err() {
+                    return v;
+                }
+                named.push((name.name.clone(), v));
+            }
+        }
+    }
+    let ctx_with_anchors = ctx
+        .tool_ctx
+        .clone()
+        .with_anchors(
+            ctx.turn_id.clone(),
+            ctx.flow_run_id.clone(),
+            ctx.events.map(|s| s.next_seq_peek()),
+        )
+        .with_registry(std::sync::Arc::new(ctx.tools.clone()));
+    let ctx_with_anchors = if let Some(sink) = ctx.events {
+        ctx_with_anchors.with_events(sink.clone())
+    } else {
+        ctx_with_anchors
+    };
+    let ctx_with_anchors = if matches!(tool.tier(), crate::tool::Tier::Four) {
+        ctx_with_anchors
+    } else {
+        let mut c = ctx_with_anchors;
+        c.sandbox = None;
+        c
+    };
+    match tool
+        .call(ToolArgs { positional, named }, &ctx_with_anchors)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => Value::Err(e),
     }
 }
 
@@ -96,73 +204,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
         return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
     match node {
-        Node::ToolCall { path, args } => {
-            let name = tool_name(path);
-            let tool = match ctx.tools.get(&name) {
-                Some(t) => t,
-                None => {
-                    if is_type_annotation(path) {
-                        return Value::Unit;
-                    }
-                    return Value::Err(RuntimeError::UndefinedTool(name));
-                }
-            };
-            if matches!(tool.tier(), crate::tool::Tier::Four)
-                && !contract_allows_shell(ctx.contract)
-            {
-                return Value::Err(RuntimeError::ToolFailed(format!(
-                    "tool `{name}` is Tier 4 (shell); flow contract must declare `capabilities {{ shell: true }}`"
-                )));
-            }
-            let mut positional = Vec::new();
-            let mut named = Vec::new();
-            for arg in args {
-                match arg {
-                    Arg::Positional(e) => {
-                        let v = eval_expr(e, env, ctx).await;
-                        if v.is_err() {
-                            return v;
-                        }
-                        positional.push(v);
-                    }
-                    Arg::Named { name, value } => {
-                        let v = eval_expr(value, env, ctx).await;
-                        if v.is_err() {
-                            return v;
-                        }
-                        named.push((name.name.clone(), v));
-                    }
-                }
-            }
-            let ctx_with_anchors = ctx
-                .tool_ctx
-                .clone()
-                .with_anchors(
-                    ctx.turn_id.clone(),
-                    ctx.flow_run_id.clone(),
-                    ctx.events.map(|s| s.next_seq_peek()),
-                )
-                .with_registry(std::sync::Arc::new(ctx.tools.clone()));
-            let ctx_with_anchors = if let Some(sink) = ctx.events {
-                ctx_with_anchors.with_events(sink.clone())
-            } else {
-                ctx_with_anchors
-            };
-            let ctx_with_anchors = if matches!(tool.tier(), crate::tool::Tier::Four) {
-                ctx_with_anchors
-            } else {
-                let mut c = ctx_with_anchors;
-                c.sandbox = None;
-                c
-            };
-            match tool
-                .call(ToolArgs { positional, named }, &ctx_with_anchors)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => Value::Err(e),
-            }
-        }
+        Node::ToolCall { path, args } => dispatch_tool_call(path, args, Vec::new(), env, ctx).await,
         Node::Fanout { items, collect } => match collect {
             atman_dsl::ast::FanoutCollect::All => {
                 let futs = items.iter().map(|item| eval_expr(item, env, ctx));

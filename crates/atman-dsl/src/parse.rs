@@ -308,9 +308,24 @@ fn parse_expr(input: ParseStream) -> Result<Expr> {
     parse_expr_bp(input, 0)
 }
 
+const PIPE_BP: u8 = 0;
+
 fn parse_expr_bp(input: ParseStream, min_bp: u8) -> Result<Expr> {
     let mut lhs = parse_expr_primary(input)?;
     loop {
+        if peek_pipe(input) {
+            if PIPE_BP < min_bp {
+                break;
+            }
+            input.parse::<Token![|]>()?;
+            input.parse::<Token![>]>()?;
+            let rhs = parse_expr_bp(input, PIPE_BP + 1)?;
+            lhs = Expr::Pipe {
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+            continue;
+        }
         let op = peek_binop(input);
         let Some((op, bp)) = op else { break };
         if bp < min_bp {
@@ -325,6 +340,10 @@ fn parse_expr_bp(input: ParseStream, min_bp: u8) -> Result<Expr> {
         };
     }
     Ok(lhs)
+}
+
+fn peek_pipe(input: ParseStream) -> bool {
+    input.peek(Token![|]) && input.peek2(Token![>]) && !input.peek(Token![||])
 }
 
 fn peek_binop(input: ParseStream) -> Option<(BinOp, u8)> {
