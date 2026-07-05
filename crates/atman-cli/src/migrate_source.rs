@@ -47,6 +47,219 @@ pub trait MigrationSource {
     fn load_messages(&self, session_id: &str) -> Result<Vec<ImportedMessage>>;
 }
 
+pub struct KiroCliSource {
+    sessions_root: PathBuf,
+}
+
+impl KiroCliSource {
+    pub fn new(sessions_root: PathBuf) -> Self {
+        Self { sessions_root }
+    }
+
+    pub fn default_root() -> Result<PathBuf> {
+        let home = home_dir().context("no HOME directory available")?;
+        Ok(home.join(".kiro").join("sessions").join("cli"))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct KiroSessionMeta {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KiroTurn {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    data: serde_json::Value,
+}
+
+impl MigrationSource for KiroCliSource {
+    fn source_tag(&self) -> &'static str {
+        "kiro-cli"
+    }
+
+    fn discover_sessions(&self) -> Result<Vec<SessionRef>> {
+        if !self.sessions_root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in read_dir(&self.sessions_root)? {
+            let e = entry?;
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("read {}", path.display()))?;
+            let Ok(meta) = serde_json::from_str::<KiroSessionMeta>(&text) else {
+                continue;
+            };
+            let id = match meta.session_id.clone() {
+                Some(id) => id,
+                None => path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            let created_ms = meta
+                .created_at
+                .as_deref()
+                .and_then(parse_rfc3339_ms)
+                .unwrap_or(0);
+            out.push(SessionRef {
+                id: id.clone(),
+                title: meta.title.unwrap_or(id),
+                created_ms,
+                source_tag: "kiro-cli".to_string(),
+                project_dir: meta.cwd,
+                raw_meta_path: path,
+            });
+        }
+        out.sort_by_key(|s| std::cmp::Reverse(s.created_ms));
+        Ok(out)
+    }
+
+    fn load_messages(&self, session_id: &str) -> Result<Vec<ImportedMessage>> {
+        let jsonl = self.sessions_root.join(format!("{session_id}.jsonl"));
+        if !jsonl.exists() {
+            bail!(
+                "no transcript for kiro session {session_id} at {}",
+                jsonl.display()
+            );
+        }
+        let text =
+            std::fs::read_to_string(&jsonl).with_context(|| format!("read {}", jsonl.display()))?;
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(turn) = serde_json::from_str::<KiroTurn>(trimmed) else {
+                continue;
+            };
+            let role = match turn.kind.as_str() {
+                "Prompt" => MessageRole::User,
+                "AssistantMessage" => MessageRole::Assistant,
+                "ToolResults" => MessageRole::Tool,
+                _ => continue,
+            };
+            let created_ms = turn
+                .data
+                .get("meta")
+                .and_then(|m| m.get("timestamp"))
+                .and_then(|t| t.as_i64())
+                .map(|s| s.saturating_mul(1000))
+                .unwrap_or(0);
+            let content = turn.data.get("content").and_then(|c| c.as_array());
+            let Some(parts) = content else {
+                continue;
+            };
+            let text = collect_kiro_parts(parts, role);
+            if text.trim().is_empty() {
+                continue;
+            }
+            out.push(ImportedMessage {
+                role,
+                text,
+                agent: None,
+                model: None,
+                created_ms,
+            });
+        }
+        Ok(out)
+    }
+}
+
+fn parse_rfc3339_ms(s: &str) -> Option<i64> {
+    let dt = chrono_like_parse(s)?;
+    Some(dt)
+}
+
+fn chrono_like_parse(s: &str) -> Option<i64> {
+    let trimmed = s.trim_end_matches('Z');
+    let (date, rest) = trimmed.split_once('T')?;
+    let (time_part, frac) = match rest.find('.') {
+        Some(dot) => (&rest[..dot], &rest[dot..]),
+        None => (rest, ""),
+    };
+    let date_parts: Vec<&str> = date.split('-').collect();
+    let time_parts: Vec<&str> = time_part.split(':').collect();
+    if date_parts.len() != 3 || time_parts.len() != 3 {
+        return None;
+    }
+    let y: i32 = date_parts[0].parse().ok()?;
+    let mo: u32 = date_parts[1].parse().ok()?;
+    let d: u32 = date_parts[2].parse().ok()?;
+    let h: u32 = time_parts[0].parse().ok()?;
+    let mi: u32 = time_parts[1].parse().ok()?;
+    let s: f64 = format!("{}{}", time_parts[2], frac).parse().ok()?;
+    let secs =
+        days_from_civil(y, mo, d) * 86_400 + i64::from(h) * 3600 + i64::from(mi) * 60 + s as i64;
+    Some(secs.saturating_mul(1000))
+}
+
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let m = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * m + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    i64::from(era) * 146_097 + i64::from(doe) - 719_468
+}
+
+fn collect_kiro_parts(parts: &[serde_json::Value], role: MessageRole) -> String {
+    let mut buf = String::new();
+    for part in parts {
+        let kind = part.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        match kind {
+            "text" => {
+                if let Some(t) = part.get("data").and_then(|d| d.as_str())
+                    && !t.is_empty()
+                {
+                    push_with_sep(&mut buf, t);
+                }
+            }
+            "toolResult" if matches!(role, MessageRole::Tool) => {
+                let Some(inner) = part
+                    .get("data")
+                    .and_then(|d| d.get("content"))
+                    .and_then(|c| c.as_array())
+                else {
+                    continue;
+                };
+                for sub in inner {
+                    if sub.get("kind").and_then(|k| k.as_str()) == Some("text")
+                        && let Some(t) = sub.get("data").and_then(|d| d.as_str())
+                    {
+                        push_with_sep(&mut buf, t);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    buf
+}
+
+fn push_with_sep(buf: &mut String, s: &str) {
+    if !buf.is_empty() {
+        buf.push_str("\n\n");
+    }
+    buf.push_str(s);
+}
+
 pub struct OpencodeSource {
     storage_root: PathBuf,
 }
@@ -372,6 +585,78 @@ mod tests {
         assert!(
             err.to_string().contains("no messages directory"),
             "want missing-dir error, got: {err}"
+        );
+    }
+
+    fn seed_kiro_fixture(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(
+            root.join("aaa.json"),
+            r#"{"session_id":"aaa","cwd":"/proj","created_at":"2026-04-09T18:52:46.845470Z",
+                "title":"newer chat"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("bbb.json"),
+            r#"{"session_id":"bbb","cwd":"/proj","created_at":"2026-01-01T00:00:00.000000Z",
+                "title":"older chat"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("aaa.jsonl"),
+            r#"{"version":"v1","kind":"Prompt","data":{"content":[{"kind":"text","data":"hello"}],"meta":{"timestamp":1000}}}
+{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"greetings"},{"kind":"toolUse","data":{"toolUseId":"tu1"}}]}}
+{"version":"v1","kind":"ToolResults","data":{"content":[{"kind":"toolResult","data":{"content":[{"kind":"text","data":"read some files"}]}}]}}
+{"version":"v1","kind":"Unknown","data":{"content":[{"kind":"text","data":"ignore me"}]}}
+"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn kiro_discover_sessions_sorted_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cli");
+        seed_kiro_fixture(&root);
+        let src = KiroCliSource::new(root);
+        let sessions = src.discover_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].id, "aaa");
+        assert_eq!(sessions[0].title, "newer chat");
+        assert!(sessions[0].created_ms > sessions[1].created_ms);
+    }
+
+    #[test]
+    fn kiro_load_messages_maps_kinds_to_roles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cli");
+        seed_kiro_fixture(&root);
+        let src = KiroCliSource::new(root);
+        let msgs = src.load_messages("aaa").unwrap();
+        assert_eq!(
+            msgs.len(),
+            3,
+            "want prompt/assistant/toolresult only: {msgs:?}"
+        );
+        assert_eq!(msgs[0].role, MessageRole::User);
+        assert_eq!(msgs[0].text, "hello");
+        assert_eq!(msgs[0].created_ms, 1_000_000);
+        assert_eq!(msgs[1].role, MessageRole::Assistant);
+        assert_eq!(msgs[1].text, "greetings");
+        assert_eq!(msgs[2].role, MessageRole::Tool);
+        assert_eq!(msgs[2].text, "read some files");
+    }
+
+    #[test]
+    fn kiro_missing_transcript_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cli");
+        seed_kiro_fixture(&root);
+        let src = KiroCliSource::new(root);
+        let err = src.load_messages("nope").unwrap_err();
+        assert!(
+            err.to_string().contains("no transcript"),
+            "want missing hint: {err}"
         );
     }
 

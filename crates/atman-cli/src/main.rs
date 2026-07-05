@@ -2110,7 +2110,14 @@ fn build_migration_source(
             };
             Ok(Box::new(migrate_source::OpencodeSource::new(root)))
         }
-        other => bail!("unknown migration source `{other}` (want: opencode)"),
+        "kiro-cli" => {
+            let root = match storage {
+                Some(p) => p,
+                None => migrate_source::KiroCliSource::default_root()?,
+            };
+            Ok(Box::new(migrate_source::KiroCliSource::new(root)))
+        }
+        other => bail!("unknown migration source `{other}` (want: opencode | kiro-cli)"),
     }
 }
 

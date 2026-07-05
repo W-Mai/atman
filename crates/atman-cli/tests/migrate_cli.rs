@@ -227,6 +227,77 @@ fn migrate_import_writes_jsonl_transcript() {
     assert_eq!(second["model"], "opencode/big-pickle");
 }
 
+fn seed_kiro_fixture(root: &Path) {
+    std::fs::create_dir_all(root).unwrap();
+    std::fs::write(
+        root.join("aaa.json"),
+        r#"{"session_id":"aaa","cwd":"/proj","created_at":"2026-04-09T18:52:46.845470Z",
+            "title":"kiro chat"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("aaa.jsonl"),
+        r#"{"version":"v1","kind":"Prompt","data":{"content":[{"kind":"text","data":"kiro hello"}],"meta":{"timestamp":1000}}}
+{"version":"v1","kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"kiro reply"}]}}
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn migrate_list_from_kiro_cli_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cli");
+    seed_kiro_fixture(&root);
+    let (out, err, code) = run(
+        tmp.path(),
+        &[
+            "migrate",
+            "list",
+            "--from",
+            "kiro-cli",
+            "--storage",
+            root.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "list exit: stderr={err}");
+    assert!(out.contains("aaa"), "want aaa listed: {out}");
+    assert!(out.contains("kiro chat"), "want title: {out}");
+}
+
+#[test]
+fn migrate_import_from_kiro_writes_jsonl() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("cli");
+    seed_kiro_fixture(&root);
+    let out_file = tmp.path().join("kiro.jsonl");
+    let (stdout, stderr, code) = run(
+        tmp.path(),
+        &[
+            "migrate",
+            "import",
+            "aaa",
+            "--from",
+            "kiro-cli",
+            "--storage",
+            root.to_str().unwrap(),
+            "--out",
+            out_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "import exit: stderr={stderr}\nstdout={stdout}");
+    let body = std::fs::read_to_string(&out_file).unwrap();
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(lines.len(), 2, "want 2 messages, got:\n{body}");
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(first["role"], "user");
+    assert_eq!(first["text"], "kiro hello");
+    assert_eq!(first["source"], "kiro-cli");
+    assert_eq!(second["role"], "assistant");
+    assert_eq!(second["text"], "kiro reply");
+}
+
 #[test]
 fn migrate_import_unknown_session_errors() {
     let tmp = tempfile::tempdir().unwrap();
