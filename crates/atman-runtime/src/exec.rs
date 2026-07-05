@@ -191,22 +191,92 @@ async fn eval_bind_with_watches(
     };
 
     let rules = collect_watch_rules(watches);
-    let user_msg = crate::provider::user_text_message(prompt.clone());
-    let obs = provider.call_streaming(LlmRequest {
-        model,
-        messages: vec![user_msg],
-        system: None,
-        input,
-        schema: None,
-        cache_prompt,
-        tools: Vec::new(),
-    });
+    let mut restart_count = 0u32;
+    let mut correction: Option<String> = None;
+    let mut prior_partial: Option<String> = None;
+    loop {
+        let mut messages = Vec::with_capacity(3);
+        if let Some(partial) = &prior_partial {
+            messages.push(crate::message::Message::assistant_text(
+                ctx.turn_id
+                    .clone()
+                    .unwrap_or_else(crate::event::TurnId::now),
+                format!("[partial output before user correction]\n{partial}"),
+            ));
+        }
+        if let Some(corr) = &correction {
+            messages.push(crate::provider::user_text_message(format!(
+                "<user_correction>{corr}</user_correction>\n\n{prompt}"
+            )));
+        } else {
+            messages.push(crate::provider::user_text_message(prompt.clone()));
+        }
+        let req = LlmRequest {
+            model: model.clone(),
+            messages,
+            system: None,
+            input: input.clone(),
+            schema: None,
+            cache_prompt,
+            tools: Vec::new(),
+        };
+        let outcome = run_streaming_once(provider.as_ref(), req, &rules, ctx).await;
+        match outcome {
+            StreamOutcome::L2Restart {
+                correction_text,
+                partial_output,
+                partial_tokens,
+            } if restart_count < 3 => {
+                if let Some(sink) = ctx.events {
+                    sink.emit(crate::event::Event::LlmPartialCall {
+                        seq: 0,
+                        turn_id: ctx.turn_id.clone(),
+                        flow_run_id: ctx.flow_run_id.clone(),
+                        model: model.clone(),
+                        provider: provider.name().to_string(),
+                        tokens_before_abort: partial_tokens,
+                        restart_reason: "l2_course_correct".to_string(),
+                        ts: chrono::Utc::now(),
+                    });
+                }
+                restart_count += 1;
+                correction = Some(correction_text);
+                prior_partial = Some(partial_output);
+                continue;
+            }
+            StreamOutcome::L2Restart { .. } => {
+                return Ok(Value::Err(RuntimeError::ToolFailed(
+                    "l2 restart exhausted 3x, giving up".into(),
+                )));
+            }
+            StreamOutcome::Done(value) => return Ok(value),
+        }
+    }
+}
+
+enum StreamOutcome {
+    Done(Value),
+    L2Restart {
+        correction_text: String,
+        partial_output: String,
+        partial_tokens: u64,
+    },
+}
+
+async fn run_streaming_once<'a>(
+    provider: &dyn crate::provider::Provider,
+    req: LlmRequest,
+    rules: &WatchRules,
+    ctx: &EvalCtx<'a>,
+) -> StreamOutcome {
+    let mut inj_rx = ctx.session.map(|s| s.subscribe_injections());
+    let obs = provider.call_streaming(req);
     let cancel = obs.cancel.clone();
     let mut events = obs.events;
     let output = obs.output;
     tokio::pin!(output);
 
-    let mut state = StreamMonitor::new(&rules, ctx);
+    let mut state = StreamMonitor::new(rules, ctx);
     let elapsed_active = rules.elapsed_ms_gt.is_some();
     let elapsed_deadline_ms = rules.elapsed_ms_gt.unwrap_or(u64::MAX / 2);
     let elapsed_sleep = tokio::time::sleep(tokio::time::Duration::from_millis(
@@ -215,19 +285,37 @@ async fn eval_bind_with_watches(
     tokio::pin!(elapsed_sleep);
     let started = std::time::Instant::now();
 
+    let mut l2_correction: Option<String> = None;
     let final_result = loop {
         tokio::select! {
             biased;
             ev = events.recv() => {
                 match ev {
                     Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
-                        state.on_chunk(&text, cumulative_tokens, started, &rules, &cancel);
+                        state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
                     }
                     Ok(NodeEvent::LlmDone { total_tokens }) => {
-                        state.on_done(total_tokens, started, &rules, &cancel);
+                        state.on_done(total_tokens, started, rules, &cancel);
                     }
                     Ok(_) => {}
                     Err(_) => {}
+                }
+            }
+            inj_msg = poll_injection(&mut inj_rx), if inj_rx.is_some() && l2_correction.is_none() => {
+                if let Some(inj) = inj_msg
+                    && ctx.turn_id.as_ref().is_some_and(|t| &inj.turn_id == t)
+                {
+                    match inj.level {
+                        crate::injection::InjectionLevel::L2CourseCorrect => {
+                            cancel.cancel();
+                            l2_correction = Some(inj.text.clone());
+                        }
+                        crate::injection::InjectionLevel::L4HardStop => {
+                            cancel.cancel();
+                            break Err(RuntimeError::Cancelled("hard stop from user".into()));
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ = &mut elapsed_sleep, if elapsed_active && state.abort_reason.is_none() => {
@@ -245,22 +333,43 @@ async fn eval_bind_with_watches(
                 text,
                 cumulative_tokens,
             } => {
-                state.on_chunk(&text, cumulative_tokens, started, &rules, &cancel);
+                state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
             }
             NodeEvent::LlmDone { total_tokens } => {
-                state.on_done(total_tokens, started, &rules, &cancel);
+                state.on_done(total_tokens, started, rules, &cancel);
             }
             _ => {}
         }
     }
-    let mut abort_reason = state.abort_reason;
 
+    if let Some(correction) = l2_correction {
+        return StreamOutcome::L2Restart {
+            correction_text: correction,
+            partial_output: state.text_captured.clone(),
+            partial_tokens: state.tokens_seen,
+        };
+    }
+
+    let mut abort_reason = state.abort_reason;
     match final_result {
-        _ if abort_reason.is_some() => Ok(Value::Err(RuntimeError::Aborted(
+        _ if abort_reason.is_some() => StreamOutcome::Done(Value::Err(RuntimeError::Aborted(
             abort_reason.take().unwrap_or_default(),
         ))),
-        Ok(am) => Ok(crate::provider::assistant_message_to_value(&am)),
-        Err(e) => Ok(Value::Err(e)),
+        Ok(am) => StreamOutcome::Done(crate::provider::assistant_message_to_value(&am)),
+        Err(e) => StreamOutcome::Done(Value::Err(e)),
+    }
+}
+
+async fn poll_injection(
+    rx: &mut Option<tokio::sync::broadcast::Receiver<crate::injection::Injection>>,
+) -> Option<crate::injection::Injection> {
+    let rx = rx.as_mut()?;
+    loop {
+        match rx.recv().await {
+            Ok(inj) => return Some(inj),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(_) => return None,
+        }
     }
 }
 
