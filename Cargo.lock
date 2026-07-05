@@ -150,6 +150,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "tokio",
  "toml",

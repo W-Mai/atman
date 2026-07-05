@@ -3,7 +3,7 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::{Executor, Session, Value};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod suggest;
@@ -52,6 +52,35 @@ enum Cmd {
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
+    },
+    Flow {
+        #[command(subcommand)]
+        action: FlowAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FlowAction {
+    Snapshot {
+        path: PathBuf,
+        #[arg(long)]
+        author: Option<String>,
+    },
+    Versions {
+        flow_name: String,
+    },
+    Diff {
+        flow_name: String,
+        from: String,
+        to: String,
+    },
+    Rollback {
+        flow_name: String,
+        version: String,
+        #[arg(long)]
+        to: PathBuf,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -137,6 +166,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Daemon {
             action: DaemonAction::RotateToken,
         }) => cmd_daemon_rotate_token().await,
+        Some(Cmd::Flow { action }) => cmd_flow(action).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Run { file, follow, port },
         }) => cmd_daemon_run(file, follow, port).await,
@@ -1831,6 +1861,160 @@ fn parse_interjection_mode(text: &str) -> Option<String> {
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
     atman_daemon::bootstrap::load_mcp_configs(config_dir().ok().as_deref())
+}
+
+async fn cmd_flow(action: FlowAction) -> Result<()> {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let registry = atman_runtime::flow_registry::FlowRegistry::open(&project_root)
+        .with_context(|| format!("open flow registry under {}", project_root.display()))?;
+    match action {
+        FlowAction::Snapshot { path, author } => cmd_flow_snapshot(&registry, &path, author),
+        FlowAction::Versions { flow_name } => cmd_flow_versions(&registry, &flow_name),
+        FlowAction::Diff {
+            flow_name,
+            from,
+            to,
+        } => cmd_flow_diff(&registry, &flow_name, &from, &to),
+        FlowAction::Rollback {
+            flow_name,
+            version,
+            to,
+            yes,
+        } => cmd_flow_rollback(&registry, &flow_name, &version, &to, yes),
+    }
+}
+
+fn cmd_flow_snapshot(
+    registry: &atman_runtime::flow_registry::FlowRegistry,
+    path: &Path,
+    author_override: Option<String>,
+) -> Result<()> {
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut meta = atman_runtime::flow_meta::FlowMeta::from_source(path, &content)?;
+    if let Some(a) = author_override {
+        meta.author = Some(a);
+    }
+    let name = flow_name_from_source_or_path(&content, path);
+    let outcome = registry.snapshot(&name, &content, &meta)?;
+    match outcome {
+        atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev) => println!(
+            "[atman] snapshot ok: {} @ {} (id={}) — source={}",
+            rev.flow_name, rev.version, rev.id, rev.source_tag
+        ),
+        atman_runtime::flow_registry::SnapshotOutcome::UnchangedFromLatest(rev) => println!(
+            "[atman] snapshot skipped: {} unchanged since {} (id={})",
+            rev.flow_name, rev.version, rev.id
+        ),
+    }
+    println!("[atman] registry: {}", registry.path().display());
+    Ok(())
+}
+
+fn cmd_flow_versions(
+    registry: &atman_runtime::flow_registry::FlowRegistry,
+    flow_name: &str,
+) -> Result<()> {
+    let versions = registry.list_versions(flow_name)?;
+    if versions.is_empty() {
+        println!("[atman] no revisions for `{flow_name}` (run `atman flow snapshot <path>` first)");
+        return Ok(());
+    }
+    println!(
+        "{:>4}  {:<20}  {:<10}  {:<25}  hash",
+        "id", "version", "source", "timestamp"
+    );
+    for r in versions {
+        println!(
+            "{:>4}  {:<20}  {:<10}  {:<25}  {}",
+            r.id,
+            r.version,
+            r.source_tag,
+            r.ts.to_rfc3339(),
+            r.content_hash
+        );
+    }
+    Ok(())
+}
+
+fn cmd_flow_diff(
+    registry: &atman_runtime::flow_registry::FlowRegistry,
+    flow_name: &str,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    let from_rev = registry
+        .find_by_version(flow_name, from)?
+        .with_context(|| format!("no revision matches `{from}` for `{flow_name}`"))?;
+    let to_rev = registry
+        .find_by_version(flow_name, to)?
+        .with_context(|| format!("no revision matches `{to}` for `{flow_name}`"))?;
+    println!(
+        "--- {flow_name} @ {} (id={})",
+        from_rev.version, from_rev.id
+    );
+    println!("+++ {flow_name} @ {} (id={})", to_rev.version, to_rev.id);
+    let diff = similar::TextDiff::from_lines(&from_rev.content, &to_rev.content);
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            similar::ChangeTag::Delete => "-",
+            similar::ChangeTag::Insert => "+",
+            similar::ChangeTag::Equal => " ",
+        };
+        print!("{sign}{change}");
+    }
+    Ok(())
+}
+
+fn cmd_flow_rollback(
+    registry: &atman_runtime::flow_registry::FlowRegistry,
+    flow_name: &str,
+    version: &str,
+    target: &Path,
+    assume_yes: bool,
+) -> Result<()> {
+    let rev = registry
+        .find_by_version(flow_name, version)?
+        .with_context(|| format!("no revision matches `{version}` for `{flow_name}`"))?;
+    if target.is_dir() {
+        bail!(
+            "--to {} is a directory (want a file path)",
+            target.display()
+        );
+    }
+    if target.exists() && !assume_yes {
+        eprintln!(
+            "[atman] refusing to overwrite {} without --yes (would replace with {} @ {}, id={})",
+            target.display(),
+            flow_name,
+            rev.version,
+            rev.id
+        );
+        bail!("rollback aborted");
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    std::fs::write(target, &rev.content).with_context(|| format!("write {}", target.display()))?;
+    println!(
+        "[atman] rolled back {} to {} (id={}) at {}",
+        flow_name,
+        rev.version,
+        rev.id,
+        target.display()
+    );
+    Ok(())
+}
+
+fn flow_name_from_source_or_path(source: &str, path: &Path) -> String {
+    if let Ok(file) = atman_dsl::parse::parse_file(source)
+        && let Some(first) = file.flows.first()
+    {
+        return first.name.name.clone();
+    }
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Result<()> {

@@ -27,9 +27,11 @@ directories.workspace  = true
 serde_json.workspace   = true
 rustyline.workspace    = true
 serde.workspace        = true
+similar.workspace      = true
 toml.workspace         = true
 axum.workspace         = true
 tower-http.workspace   = true
 
 [dev-dependencies]
+atman-runtime = { path = "../atman-runtime" }
 tempfile = "3"
