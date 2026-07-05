@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::event::Event;
 use crate::index::AnchorIndex;
+use crate::redact::Redactor;
 
 const BATCH_SIZE: usize = 100;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -21,6 +22,13 @@ pub struct EventWriter {
 
 impl EventWriter {
     pub fn spawn(session_dir: impl AsRef<Path>) -> std::io::Result<Self> {
+        Self::spawn_with(session_dir, None)
+    }
+
+    pub fn spawn_with(
+        session_dir: impl AsRef<Path>,
+        redactor: Option<Arc<Redactor>>,
+    ) -> std::io::Result<Self> {
         let session_dir = session_dir.as_ref().to_path_buf();
         let events_path = session_dir.join("events.jsonl");
         std::fs::create_dir_all(&session_dir)?;
@@ -38,8 +46,10 @@ impl EventWriter {
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let file_path = events_path.clone();
         let index_clone = index.clone();
+        let redactor_clone = redactor.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = writer_loop(rx, stop_rx, &file_path, index_clone).await {
+            if let Err(e) = writer_loop(rx, stop_rx, &file_path, index_clone, redactor_clone).await
+            {
                 eprintln!("[atman] event writer failed: {e}");
             }
         });
@@ -74,6 +84,7 @@ async fn writer_loop(
     mut stop_rx: oneshot::Receiver<()>,
     path: &Path,
     index: Option<Arc<AnchorIndex>>,
+    redactor: Option<Arc<Redactor>>,
 ) -> std::io::Result<()> {
     let file = tokio::fs::OpenOptions::new()
         .create(true)
@@ -89,14 +100,14 @@ async fn writer_loop(
             biased;
             _ = &mut stop_rx => {
                 while let Ok(event) = rx.try_recv() {
-                    write_event(&mut buf, &event, index.as_deref()).await?;
+                    write_event(&mut buf, &event, index.as_deref(), redactor.as_deref()).await?;
                 }
                 break;
             }
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Some(event) => {
-                        write_event(&mut buf, &event, index.as_deref()).await?;
+                        write_event(&mut buf, &event, index.as_deref(), redactor.as_deref()).await?;
                         since_flush += 1;
                         if since_flush >= BATCH_SIZE {
                             buf.flush().await?;
@@ -122,13 +133,9 @@ async fn write_event(
     buf: &mut tokio::io::BufWriter<tokio::fs::File>,
     event: &Event,
     index: Option<&AnchorIndex>,
+    redactor: Option<&Redactor>,
 ) -> std::io::Result<()> {
-    let line = serde_json::to_string(event).unwrap_or_else(|e| {
-        format!(
-            "{{\"type\":\"encode_error\",\"error\":{:?}}}",
-            e.to_string()
-        )
-    });
+    let line = serialize_event(event, redactor);
     buf.write_all(line.as_bytes()).await?;
     buf.write_all(b"\n").await?;
     if let Some(idx) = index
@@ -140,6 +147,33 @@ async fn write_event(
         );
     }
     Ok(())
+}
+
+fn serialize_event(event: &Event, redactor: Option<&Redactor>) -> String {
+    let Some(r) = redactor else {
+        return serde_json::to_string(event).unwrap_or_else(|e| {
+            format!(
+                "{{\"type\":\"encode_error\",\"error\":{:?}}}",
+                e.to_string()
+            )
+        });
+    };
+    let mut value = match serde_json::to_value(event) {
+        Ok(v) => v,
+        Err(e) => {
+            return format!(
+                "{{\"type\":\"encode_error\",\"error\":{:?}}}",
+                e.to_string()
+            );
+        }
+    };
+    r.redact_json(&mut value);
+    serde_json::to_string(&value).unwrap_or_else(|e| {
+        format!(
+            "{{\"type\":\"encode_error\",\"error\":{:?}}}",
+            e.to_string()
+        )
+    })
 }
 
 fn insert_event_row(

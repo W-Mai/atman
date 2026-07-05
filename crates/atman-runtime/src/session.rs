@@ -37,10 +37,20 @@ pub struct Session {
 
 impl Session {
     pub fn open(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        Self::open_with_redactor(root, None)
+    }
+
+    pub fn open_with_redactor(
+        root: impl AsRef<Path>,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+    ) -> std::io::Result<Self> {
         let id = SessionId::now();
         let dir = root.as_ref().join("sessions").join(id.to_string());
-        let writer = EventWriter::spawn(&dir)?;
-        let sink = EventSink::new().with_forwarder(writer.sender());
+        let writer = EventWriter::spawn_with(&dir, redactor.clone())?;
+        let mut sink = EventSink::new().with_forwarder(writer.sender());
+        if let Some(r) = redactor {
+            sink = sink.with_redactor(r);
+        }
         Ok(Self {
             id,
             dir,

@@ -281,6 +281,7 @@ pub struct EventSink {
     events: Arc<Mutex<Vec<Event>>>,
     forwarder: Option<mpsc::UnboundedSender<Event>>,
     seq_counter: Arc<std::sync::atomic::AtomicU64>,
+    redactor: Option<Arc<crate::redact::Redactor>>,
 }
 
 impl EventSink {
@@ -290,6 +291,11 @@ impl EventSink {
 
     pub fn with_forwarder(mut self, tx: mpsc::UnboundedSender<Event>) -> Self {
         self.forwarder = Some(tx);
+        self
+    }
+
+    pub fn with_redactor(mut self, redactor: Arc<crate::redact::Redactor>) -> Self {
+        self.redactor = Some(redactor);
         self
     }
 
@@ -319,6 +325,10 @@ impl EventSink {
             let _ = tx.send(event.clone());
         }
         self.events.lock().expect("event sink poisoned").push(event);
+    }
+
+    pub fn redactor(&self) -> Option<Arc<crate::redact::Redactor>> {
+        self.redactor.clone()
     }
 
     pub fn drain(&self) -> Vec<Event> {
