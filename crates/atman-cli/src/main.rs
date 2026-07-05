@@ -6,6 +6,7 @@ use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod init;
 mod migrate_source;
 mod repl_completer;
 mod suggest;
@@ -48,6 +49,7 @@ enum Cmd {
         all: bool,
     },
     Doctor,
+    Init,
     RebuildIndex,
     Version,
     Monitor {
@@ -224,6 +226,7 @@ async fn main() -> Result<()> {
         }) => cmd_session_gc().await,
         Some(Cmd::Cost { session_id, all }) => cmd_cost(session_id, all).await,
         Some(Cmd::Doctor) => cmd_doctor().await,
+        Some(Cmd::Init) => cmd_init().await,
         Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
         Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
         Some(Cmd::Daemon {
@@ -1930,6 +1933,49 @@ async fn probe_provider(base_url: &str, timeout_ms: u64) -> ProviderHealth {
             ProviderHealth::Unreachable(msg)
         }
     }
+}
+
+async fn cmd_init() -> Result<()> {
+    let cfg = config_dir()?;
+    let rep = init::init_config_dir(&cfg)?;
+    if rep.written.is_empty() {
+        println!(
+            "[atman] init: {} already fully populated ({} file(s) preserved)",
+            rep.config_dir.display(),
+            rep.skipped.len()
+        );
+    } else {
+        println!(
+            "[atman] init: wrote {} template(s) under {}",
+            rep.written.len(),
+            rep.config_dir.display()
+        );
+        for p in &rep.written {
+            if let Ok(rel) = p.strip_prefix(&rep.config_dir) {
+                println!("  + {}", rel.display());
+            } else {
+                println!("  + {}", p.display());
+            }
+        }
+        if !rep.skipped.is_empty() {
+            println!(
+                "  {} file(s) already existed, left untouched",
+                rep.skipped.len()
+            );
+        }
+    }
+    println!();
+    println!("next steps:");
+    println!("  1. export an api key:  export ANTHROPIC_API_KEY=...");
+    println!("  2. sanity check:       atman doctor");
+    println!("  3. start REPL:         atman");
+    println!("     · plain text goes to the code agent (see commands/agent.at)");
+    println!("     · /hello runs commands/hello.at");
+    println!("     · :goal <text> anchors the session (never evicted from context)");
+    println!("     · the agent auto-tracks todos + the last 10 turns of history");
+    println!("  4. see docs/quickstart.md for a walkthrough,");
+    println!("     docs/context-strategy.md for how goal / todos / recent_turns compose.");
+    Ok(())
 }
 
 async fn cmd_doctor() -> Result<()> {
