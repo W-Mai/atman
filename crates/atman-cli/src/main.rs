@@ -2781,20 +2781,7 @@ fn git_root_containing(target: &Path) -> Option<PathBuf> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(probe_dir)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if line.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(line))
-    }
+    atman_runtime::git::discover_toplevel(probe_dir).ok()
 }
 
 fn flow_name_from_source_or_path(source: &str, path: &Path) -> String {

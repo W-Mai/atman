@@ -10,6 +10,7 @@ pub mod executor;
 pub mod flow_lint;
 pub mod flow_meta;
 pub mod flow_registry;
+pub mod git;
 pub mod hunk;
 pub mod index;
 pub mod injection;

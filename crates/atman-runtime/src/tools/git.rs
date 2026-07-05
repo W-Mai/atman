@@ -1,7 +1,7 @@
-use std::path::Path;
-use std::process::Stdio;
+use std::path::PathBuf;
 
 use crate::error::RuntimeError;
+use crate::git;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -18,9 +18,9 @@ impl Tool for GitDiff {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Shell out to `git diff <range>` and return { diff, files } so an LLM can \
-             receive only the changed text, not entire files. Optional `paths` filter maps \
-             to `-- <paths...>`. Read-only, runs in the current working directory.",
+            "Return { diff, files } for the given git ref range so an LLM can receive only the \
+             changed text, not entire files. Optional `paths` narrows the diff to those \
+             pathspecs. Backed by libgit2 (read-only, no shell spawn).",
         )
     }
 
@@ -41,52 +41,21 @@ impl Tool for GitDiff {
             let range = extract_string(&args, "range", 0)?;
             let paths = extract_string_list(&args, "paths", 1).unwrap_or_default();
             let cwd = match args.named("cwd") {
-                Some(Value::Str(s)) => std::path::PathBuf::from(s),
+                Some(Value::Str(s)) => PathBuf::from(s),
                 _ => std::env::current_dir()
                     .map_err(|e| RuntimeError::ToolFailed(format!("git.diff cwd: {e}")))?,
             };
-            run_git_diff(&range, &paths, &cwd).await
+            let out = git::diff_range(&cwd, &range, &paths)
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.diff: {e}")))?;
+            Ok(Value::Struct(vec![
+                ("diff".into(), Value::Str(out.body)),
+                (
+                    "files".into(),
+                    Value::List(out.files.into_iter().map(Value::Str).collect()),
+                ),
+            ]))
         })
     }
-}
-
-async fn run_git_diff(range: &str, paths: &[String], cwd: &Path) -> ToolResult {
-    let files = git_command(cwd, &["diff", "--name-only", range], paths).await?;
-    let diff = git_command(cwd, &["diff", range], paths).await?;
-    let files_list: Vec<Value> = files
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| Value::Str(l.to_string()))
-        .collect();
-    Ok(Value::Struct(vec![
-        ("diff".into(), Value::Str(diff)),
-        ("files".into(), Value::List(files_list)),
-    ]))
-}
-
-async fn git_command(cwd: &Path, args: &[&str], paths: &[String]) -> Result<String, RuntimeError> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args(args).current_dir(cwd);
-    if !paths.is_empty() {
-        cmd.arg("--");
-        for p in paths {
-            cmd.arg(p);
-        }
-    }
-    let output = cmd
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| RuntimeError::ToolFailed(format!("git.diff spawn: {e}")))?;
-    if !output.status.success() {
-        return Err(RuntimeError::ToolFailed(format!(
-            "git {} exit {}: {}",
-            args.join(" "),
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, RuntimeError> {
@@ -142,66 +111,41 @@ fn extract_string_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::GitCli;
     use std::path::Path;
-    use std::process::Command;
 
     fn have_git() -> bool {
-        Command::new("git")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        GitCli::ensure_available().is_ok()
     }
 
-    fn seed_repo_with_two_commits(dir: &Path) {
-        for (args, expect_ok) in [
-            (vec!["init", "--initial-branch=main"], true),
-            (vec!["config", "user.email", "t@atman.local"], true),
-            (vec!["config", "user.name", "atman test"], true),
-            (vec!["config", "commit.gpgsign", "false"], true),
+    fn seed_two_commits(dir: &Path) {
+        let cli = GitCli::at(dir);
+        cli.init("main").unwrap();
+        for (k, v) in [
+            ("user.email", "t@atman.local"),
+            ("user.name", "atman test"),
+            ("commit.gpgsign", "false"),
         ] {
-            let out = Command::new("git")
-                .args(&args)
-                .current_dir(dir)
-                .output()
-                .expect("git");
-            assert!(
-                out.status.success() || !expect_ok,
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            cli.run(&["config", k, v]).unwrap();
         }
         std::fs::write(dir.join("a.txt"), "line one\n").unwrap();
         std::fs::write(dir.join("b.txt"), "b\n").unwrap();
-        run_ok(dir, &["add", "."]);
-        run_ok(dir, &["commit", "-m", "initial"]);
+        cli.add_all().unwrap();
+        cli.commit("initial").unwrap();
         std::fs::write(dir.join("a.txt"), "line one\nline two\n").unwrap();
         std::fs::write(dir.join("c.txt"), "new file\n").unwrap();
-        run_ok(dir, &["add", "."]);
-        run_ok(dir, &["commit", "-m", "second"]);
-    }
-
-    fn run_ok(dir: &Path, args: &[&str]) {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("git");
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        cli.add_all().unwrap();
+        cli.commit("second").unwrap();
     }
 
     #[tokio::test]
-    async fn diff_between_two_commits_reports_touched_files_and_body() {
+    async fn diff_returns_body_and_files() {
         if !have_git() {
             eprintln!("skip: git not on PATH");
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        seed_repo_with_two_commits(tmp.path());
+        seed_two_commits(tmp.path());
         let ctx = ToolCtx::new();
         let args = ToolArgs {
             positional: vec![Value::Str("HEAD~1..HEAD".into())],
@@ -224,9 +168,9 @@ mod tests {
                     None
                 }
             })
-            .expect("want diff field");
+            .unwrap();
         assert!(diff.contains("+line two"), "want addition, got:\n{diff}");
-        assert!(diff.contains("+new file"), "want new file body:\n{diff}");
+        assert!(diff.contains("+new file"), "want new file:\n{diff}");
         let files = fields
             .iter()
             .find(|(k, _)| k == "files")
@@ -237,29 +181,23 @@ mod tests {
                     None
                 }
             })
-            .expect("want files field");
+            .unwrap();
         let names: Vec<String> = files
             .into_iter()
             .filter_map(|v| if let Value::Str(s) = v { Some(s) } else { None })
             .collect();
-        assert!(
-            names.contains(&"a.txt".to_string()),
-            "want a.txt: {names:?}"
-        );
-        assert!(
-            names.contains(&"c.txt".to_string()),
-            "want c.txt: {names:?}"
-        );
+        assert!(names.contains(&"a.txt".to_string()), "files={names:?}");
+        assert!(names.contains(&"c.txt".to_string()), "files={names:?}");
     }
 
     #[tokio::test]
-    async fn diff_paths_filter_narrows_to_named_files() {
+    async fn diff_paths_filter_narrows() {
         if !have_git() {
-            eprintln!("skip: git not on PATH");
+            eprintln!("skip");
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        seed_repo_with_two_commits(tmp.path());
+        seed_two_commits(tmp.path());
         let ctx = ToolCtx::new();
         let args = ToolArgs {
             positional: vec![Value::Str("HEAD~1..HEAD".into())],
@@ -276,7 +214,7 @@ mod tests {
         };
         let v = GitDiff.call(args, &ctx).await.unwrap();
         let Value::Struct(fields) = v else {
-            panic!("expected struct");
+            panic!("struct");
         };
         let files = fields
             .iter()
@@ -293,43 +231,11 @@ mod tests {
             .into_iter()
             .filter_map(|v| if let Value::Str(s) = v { Some(s) } else { None })
             .collect();
-        assert_eq!(
-            names,
-            vec!["a.txt".to_string()],
-            "path filter should scope: {names:?}"
-        );
+        assert_eq!(names, vec!["a.txt".to_string()], "files={names:?}");
     }
 
     #[tokio::test]
-    async fn diff_invalid_range_surfaces_stderr() {
-        if !have_git() {
-            eprintln!("skip: git not on PATH");
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        seed_repo_with_two_commits(tmp.path());
-        let ctx = ToolCtx::new();
-        let args = ToolArgs {
-            positional: vec![Value::Str("nope_ref..other_nope".into())],
-            named: vec![(
-                "cwd".into(),
-                Value::Str(tmp.path().to_string_lossy().into()),
-            )],
-        };
-        let err = GitDiff.call(args, &ctx).await.unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("git diff") || msg.contains("unknown"),
-            "want git error, got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn diff_outside_git_repo_reports_error() {
-        if !have_git() {
-            eprintln!("skip");
-            return;
-        }
+    async fn diff_outside_git_repo_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = ToolCtx::new();
         let args = ToolArgs {
@@ -342,8 +248,32 @@ mod tests {
         let err = GitDiff.call(args, &ctx).await.unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("git diff") && msg.contains("exit"),
-            "want git diff exit error, got: {msg}"
+            msg.contains("not a git repository"),
+            "want repo error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_invalid_range_errors() {
+        if !have_git() {
+            eprintln!("skip");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        seed_two_commits(tmp.path());
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str("nope_ref..other_nope".into())],
+            named: vec![(
+                "cwd".into(),
+                Value::Str(tmp.path().to_string_lossy().into()),
+            )],
+        };
+        let err = GitDiff.call(args, &ctx).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("libgit2") || msg.contains("revspec"),
+            "err={msg}"
         );
     }
 }
