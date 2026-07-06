@@ -85,7 +85,37 @@ fn load_goal(dir: &Path) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum TranscriptEntry {
+    Message(Message),
+    FlowGraph {
+        run_id: String,
+        flow_name: String,
+        graph: crate::nodegraph::FlowGraph,
+    },
+    FlowNodeStatus {
+        run_id: String,
+        node_id: String,
+        status: crate::event::FlowNodeStatus,
+    },
+    FlowDone {
+        run_id: String,
+        ok: bool,
+    },
+}
+
 fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
+    let entries = replay_transcript_from(path)?;
+    let mut out = Vec::new();
+    for entry in entries {
+        if let TranscriptEntry::Message(m) = entry {
+            out.push(m);
+        }
+    }
+    Ok(out)
+}
+
+pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, SessionOpenError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -106,17 +136,60 @@ fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
             continue;
         };
         let ty = v["type"].as_str().unwrap_or("");
-        if !matches!(
-            ty,
-            "user_msg" | "assistant_msg" | "tool_result_msg" | "system_msg"
-        ) {
-            continue;
-        }
-        let Some(m) = v.get("message") else {
-            continue;
-        };
-        if let Ok(msg) = serde_json::from_value::<Message>(m.clone()) {
-            out.push(msg);
+        match ty {
+            "user_msg" | "assistant_msg" | "tool_result_msg" | "system_msg" => {
+                if let Some(m) = v.get("message")
+                    && let Ok(msg) = serde_json::from_value::<Message>(m.clone())
+                {
+                    out.push(TranscriptEntry::Message(msg));
+                }
+            }
+            "flow_graph" => {
+                let run_id = v["run_id"].as_str().unwrap_or("").to_string();
+                let flow_name = v
+                    .get("graph")
+                    .and_then(|g| g["flow_name"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(g) = v.get("graph")
+                    && let Ok(graph) =
+                        serde_json::from_value::<crate::nodegraph::FlowGraph>(g.clone())
+                {
+                    out.push(TranscriptEntry::FlowGraph {
+                        run_id,
+                        flow_name,
+                        graph,
+                    });
+                }
+            }
+            "flow_node_start" => {
+                let run_id = v["run_id"].as_str().unwrap_or("").to_string();
+                let node_id = v["node_id"].as_str().unwrap_or("").to_string();
+                out.push(TranscriptEntry::FlowNodeStatus {
+                    run_id,
+                    node_id,
+                    status: crate::event::FlowNodeStatus::Ok,
+                });
+            }
+            "flow_node_end" => {
+                let run_id = v["run_id"].as_str().unwrap_or("").to_string();
+                let node_id = v["node_id"].as_str().unwrap_or("").to_string();
+                let status: crate::event::FlowNodeStatus = v
+                    .get("status")
+                    .and_then(|s| serde_json::from_value(s.clone()).ok())
+                    .unwrap_or(crate::event::FlowNodeStatus::Ok);
+                out.push(TranscriptEntry::FlowNodeStatus {
+                    run_id,
+                    node_id,
+                    status,
+                });
+            }
+            "flow_end" => {
+                let run_id = v["run_id"].as_str().unwrap_or("").to_string();
+                let ok = v["status"]["kind"].as_str() == Some("ok");
+                out.push(TranscriptEntry::FlowDone { run_id, ok });
+            }
+            _ => {}
         }
     }
     Ok(out)
@@ -252,6 +325,13 @@ impl Session {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub fn transcript_replay(&self) -> Vec<TranscriptEntry> {
+        let Some(path) = self.events_path() else {
+            return Vec::new();
+        };
+        replay_transcript_from(path).unwrap_or_default()
     }
 
     pub fn events_path(&self) -> Option<&Path> {

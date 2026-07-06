@@ -1,56 +1,120 @@
+use std::collections::HashMap;
+use std::time::Instant;
+
+use atman_runtime::TranscriptEntry;
+use atman_runtime::event::FlowNodeStatus;
 use atman_runtime::message::{Message, MessagePart, MessageRole};
 
 use crate::app::{NoteLevel, OutputItem, ToolStatus};
 
 const TOOL_RESULT_MAX_CHARS: usize = 200;
 
+pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
+    let mut out: Vec<OutputItem> = Vec::new();
+    let mut flow_panel_idx: HashMap<String, usize> = HashMap::new();
+    for entry in entries {
+        match entry {
+            TranscriptEntry::Message(msg) => flatten_message(msg, &mut out),
+            TranscriptEntry::FlowGraph {
+                run_id,
+                flow_name,
+                graph,
+            } => {
+                let idx = out.len();
+                out.push(OutputItem::FlowPanel {
+                    run_id: run_id.clone(),
+                    flow_name: flow_name.clone(),
+                    graph: graph.clone(),
+                    node_states: HashMap::new(),
+                    started_at: Instant::now(),
+                    ended_at: None,
+                    expanded: false,
+                });
+                flow_panel_idx.insert(run_id.clone(), idx);
+            }
+            TranscriptEntry::FlowNodeStatus {
+                run_id,
+                node_id,
+                status,
+            } => {
+                if let Some(&idx) = flow_panel_idx.get(run_id)
+                    && let Some(OutputItem::FlowPanel { node_states, .. }) = out.get_mut(idx)
+                {
+                    node_states.insert(node_id.clone(), status.clone());
+                }
+            }
+            TranscriptEntry::FlowDone { run_id, ok } => {
+                if let Some(&idx) = flow_panel_idx.get(run_id)
+                    && let Some(OutputItem::FlowPanel {
+                        ended_at,
+                        node_states,
+                        ..
+                    }) = out.get_mut(idx)
+                {
+                    *ended_at = Some(Instant::now());
+                    if !*ok {
+                        node_states
+                            .entry("__flow__".to_string())
+                            .or_insert(FlowNodeStatus::Err);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>) {
+    match msg.role {
+        MessageRole::User => {
+            let text = msg.text_concat();
+            if !text.trim().is_empty() {
+                out.push(OutputItem::UserTurn { text });
+            }
+            out.push(OutputItem::Divider);
+        }
+        MessageRole::Assistant => {
+            for part in &msg.parts {
+                match part {
+                    MessagePart::Text { text } => {
+                        out.push(OutputItem::AssistantMd {
+                            md: text.clone(),
+                            streaming: false,
+                        });
+                    }
+                    MessagePart::ToolUse { id, name, input } => {
+                        out.push(OutputItem::ToolCall {
+                            tool: name.clone(),
+                            args: format_input_preview(input),
+                            status: ToolStatus::Ok,
+                            result: None,
+                            tool_use_id: Some(id.clone()),
+                        });
+                    }
+                    MessagePart::ToolResult { .. } | MessagePart::Image { .. } => {}
+                }
+            }
+        }
+        MessageRole::Tool => {
+            for part in &msg.parts {
+                if let MessagePart::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } = part
+                {
+                    attach_tool_result(out, tool_use_id, content, *is_error);
+                }
+            }
+        }
+        MessageRole::System => {}
+    }
+}
+
 pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {
     let mut out: Vec<OutputItem> = Vec::new();
     for msg in messages {
-        match msg.role {
-            MessageRole::User => {
-                let text = msg.text_concat();
-                if !text.trim().is_empty() {
-                    out.push(OutputItem::UserTurn { text });
-                }
-                out.push(OutputItem::Divider);
-            }
-            MessageRole::Assistant => {
-                for part in &msg.parts {
-                    match part {
-                        MessagePart::Text { text } => {
-                            out.push(OutputItem::AssistantMd {
-                                md: text.clone(),
-                                streaming: false,
-                            });
-                        }
-                        MessagePart::ToolUse { id, name, input } => {
-                            out.push(OutputItem::ToolCall {
-                                tool: name.clone(),
-                                args: format_input_preview(input),
-                                status: ToolStatus::Ok,
-                                result: None,
-                                tool_use_id: Some(id.clone()),
-                            });
-                        }
-                        MessagePart::ToolResult { .. } | MessagePart::Image { .. } => {}
-                    }
-                }
-            }
-            MessageRole::Tool => {
-                for part in &msg.parts {
-                    if let MessagePart::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error,
-                    } = part
-                    {
-                        attach_tool_result(&mut out, tool_use_id, content, *is_error);
-                    }
-                }
-            }
-            MessageRole::System => {}
-        }
+        flatten_message(msg, &mut out);
     }
     out
 }

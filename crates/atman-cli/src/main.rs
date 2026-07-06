@@ -909,7 +909,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
     let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
-        let initial_items = atman_tui::history::flatten_messages(&session.messages());
+        let initial_items = atman_tui::history::flatten_transcript(&session.transcript_replay());
         let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<atman_tui::TuiControl>();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let session_for_ctrl = std::sync::Arc::clone(&session);
