@@ -1212,6 +1212,10 @@ fn render_stream_frame(
             emit(printer, format!("  {mark} {tool} → {preview}\n"));
         }
         StreamFrame::Note(s) => render_note(printer, s),
+        StreamFrame::FlowGraph { .. }
+        | StreamFrame::FlowNodeStart { .. }
+        | StreamFrame::FlowNodeEnd { .. }
+        | StreamFrame::FlowDone { .. } => {}
     }
 }
 

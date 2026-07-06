@@ -280,6 +280,10 @@ impl AppState {
                     level: NoteLevel::Info,
                 });
             }
+            StreamFrame::FlowGraph { .. }
+            | StreamFrame::FlowNodeStart { .. }
+            | StreamFrame::FlowNodeEnd { .. }
+            | StreamFrame::FlowDone { .. } => {}
         }
     }
 

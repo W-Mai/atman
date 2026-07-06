@@ -28,7 +28,6 @@ async fn session_writes_events_to_jsonl_file() {
 
     let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
     let lines: Vec<&str> = contents.lines().collect();
-    assert_eq!(lines.len(), 3, "expected flow_start, llm_call, flow_end");
 
     let types: Vec<String> = lines
         .iter()
@@ -37,7 +36,10 @@ async fn session_writes_events_to_jsonl_file() {
             v["type"].as_str().unwrap().to_string()
         })
         .collect();
-    assert_eq!(types, vec!["flow_start", "llm_call", "flow_end"]);
+    assert_eq!(
+        types,
+        vec!["flow_start", "flow_graph", "llm_call", "flow_end"]
+    );
 }
 
 #[tokio::test]

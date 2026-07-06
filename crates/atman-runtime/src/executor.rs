@@ -126,6 +126,21 @@ impl Executor {
             flow_name: flow.name.name.clone(),
             ts: chrono::Utc::now(),
         });
+        let graph = crate::nodegraph::extract_graph(flow);
+        self.events.emit(Event::FlowGraph {
+            seq: 0,
+            run_id: run_id.clone(),
+            graph: graph.clone(),
+            ts: chrono::Utc::now(),
+        });
+        if let Some(sess) = session {
+            let _ = sess
+                .stream_tx()
+                .send(crate::stream::StreamFrame::FlowGraph {
+                    run_id: run_id.0.to_string(),
+                    graph,
+                });
+        }
         let flow_cancel = session.map(|s| s.flow_cancel_token()).unwrap_or_default();
         let exec_fut = exec_flow_with_siblings(
             flow,
@@ -154,11 +169,18 @@ impl Executor {
         };
         self.events.emit(Event::FlowEnd {
             seq: 0,
-            run_id,
+            run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
-            status,
+            status: status.clone(),
             ts: chrono::Utc::now(),
         });
+        if let Some(sess) = session {
+            let _ = sess.stream_tx().send(crate::stream::StreamFrame::FlowDone {
+                run_id: run_id.0.to_string(),
+                flow_name: flow.name.name.clone(),
+                ok: matches!(status, FlowStatus::Ok),
+            });
+        }
         result
     }
 }

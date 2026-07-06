@@ -183,6 +183,39 @@ pub enum Event {
         answer: serde_json::Value,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    FlowGraph {
+        #[serde(default)]
+        seq: u64,
+        run_id: FlowRunId,
+        graph: crate::nodegraph::FlowGraph,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    FlowNodeStart {
+        #[serde(default)]
+        seq: u64,
+        run_id: FlowRunId,
+        node_id: String,
+        kind: crate::nodegraph::NodeKind,
+        label: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    FlowNodeEnd {
+        #[serde(default)]
+        seq: u64,
+        run_id: FlowRunId,
+        node_id: String,
+        status: FlowNodeStatus,
+        output_preview: Option<String>,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowNodeStatus {
+    Ok,
+    Err,
+    Cancelled,
 }
 
 impl Event {
@@ -204,7 +237,10 @@ impl Event {
             | Event::WatchWarn { seq, .. }
             | Event::PendingPrompt { seq, .. }
             | Event::PromptResolved { seq, .. }
-            | Event::LlmPartialCall { seq, .. } => *seq = new_seq,
+            | Event::LlmPartialCall { seq, .. }
+            | Event::FlowGraph { seq, .. }
+            | Event::FlowNodeStart { seq, .. }
+            | Event::FlowNodeEnd { seq, .. } => *seq = new_seq,
         }
     }
 
@@ -226,7 +262,10 @@ impl Event {
             | Event::WatchWarn { seq, .. }
             | Event::PendingPrompt { seq, .. }
             | Event::PromptResolved { seq, .. }
-            | Event::LlmPartialCall { seq, .. } => *seq,
+            | Event::LlmPartialCall { seq, .. }
+            | Event::FlowGraph { seq, .. }
+            | Event::FlowNodeStart { seq, .. }
+            | Event::FlowNodeEnd { seq, .. } => *seq,
         }
     }
 }

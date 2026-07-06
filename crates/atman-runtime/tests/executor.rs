@@ -22,11 +22,11 @@ async fn executor_runs_flow_and_emits_start_end() {
     assert!(matches!(out, Value::Int(5)));
 
     let events = ex.events.snapshot();
-    assert_eq!(events.len(), 2);
     assert!(matches!(events[0], Event::FlowStart { .. }));
-    match &events[1] {
-        Event::FlowEnd { status, .. } => assert!(matches!(status, FlowStatus::Ok)),
-        other => panic!("expected FlowEnd, got {other:?}"),
+    assert!(matches!(events[1], Event::FlowGraph { .. }));
+    match events.last() {
+        Some(Event::FlowEnd { status, .. }) => assert!(matches!(status, FlowStatus::Ok)),
+        other => panic!("expected FlowEnd last, got {other:?}"),
     }
 }
 
