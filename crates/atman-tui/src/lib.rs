@@ -109,15 +109,22 @@ async fn run_frames(
                 }
             }
             frame = handle.stream_rx.recv() => {
-                if let Ok(frame) = frame {
-                    app.apply_stream_frame(frame);
-                    interrupt_prompt = false;
+                match frame {
+                    Ok(frame) => {
+                        app.apply_stream_frame(frame);
+                        interrupt_prompt = false;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        app.record_lag(n, std::time::Instant::now());
+                        interrupt_prompt = false;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             note = recv_note(handle.note_rx.as_mut()) => {
                 if let Some(n) = note {
                     let (text, level) = n.into_parts();
-                    app.items.push(app::OutputItem::SystemNote { text, level });
+                    app.push_note(text, level);
                 }
             }
         }

@@ -1,4 +1,8 @@
+use std::time::{Duration, Instant};
+
 use atman_runtime::stream::StreamFrame;
+
+const LAG_COOLDOWN: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone)]
 pub enum OutputItem {
@@ -48,6 +52,9 @@ pub struct AppState {
     pub session_id: String,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
+    last_lag_note_idx: Option<usize>,
+    last_lag_at: Option<Instant>,
+    last_lag_count: u64,
 }
 
 impl AppState {
@@ -107,6 +114,18 @@ impl AppState {
         }
     }
 
+    pub fn push_item(&mut self, item: OutputItem) {
+        self.items.push(item);
+        self.reset_lag_state();
+    }
+
+    pub fn push_note(&mut self, text: impl Into<String>, level: NoteLevel) {
+        self.push_item(OutputItem::SystemNote {
+            text: text.into(),
+            level,
+        });
+    }
+
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         match frame {
             StreamFrame::LlmChunk { text, .. } => {
@@ -114,9 +133,10 @@ impl AppState {
                     && *streaming
                 {
                     md.push_str(&text);
+                    self.reset_lag_state();
                     return;
                 }
-                self.items.push(OutputItem::AssistantMd {
+                self.push_item(OutputItem::AssistantMd {
                     md: text,
                     streaming: true,
                 });
@@ -127,9 +147,10 @@ impl AppState {
                     *streaming = false;
                 }
                 self.streaming = false;
+                self.reset_lag_state();
             }
             StreamFrame::ToolUseStart { tool, args_preview } => {
-                self.items.push(OutputItem::ToolCall {
+                self.push_item(OutputItem::ToolCall {
                     tool,
                     args: args_preview,
                     status: ToolStatus::Running,
@@ -149,12 +170,13 @@ impl AppState {
                     {
                         *status = if ok { ToolStatus::Ok } else { ToolStatus::Err };
                         *result = Some(preview);
+                        self.reset_lag_state();
                         return;
                     }
                 }
             }
             StreamFrame::Note(text) => {
-                self.items.push(OutputItem::SystemNote {
+                self.push_item(OutputItem::SystemNote {
                     text,
                     level: NoteLevel::Info,
                 });
@@ -162,8 +184,36 @@ impl AppState {
         }
     }
 
+    pub fn record_lag(&mut self, dropped: u64, now: Instant) {
+        let within_cooldown = self
+            .last_lag_at
+            .map(|t| now.duration_since(t) < LAG_COOLDOWN)
+            .unwrap_or(false);
+        if within_cooldown
+            && let Some(idx) = self.last_lag_note_idx
+            && let Some(OutputItem::SystemNote { text, .. }) = self.items.get_mut(idx)
+        {
+            self.last_lag_count = self.last_lag_count.saturating_add(dropped);
+            *text = format!("dropped {} stream frames", self.last_lag_count);
+            self.last_lag_at = Some(now);
+            return;
+        }
+        self.last_lag_count = dropped;
+        self.items.push(OutputItem::SystemNote {
+            text: format!("dropped {dropped} stream frames"),
+            level: NoteLevel::Warn,
+        });
+        self.last_lag_note_idx = Some(self.items.len() - 1);
+        self.last_lag_at = Some(now);
+    }
+
+    fn reset_lag_state(&mut self) {
+        self.last_lag_note_idx = None;
+        self.last_lag_count = 0;
+    }
+
     pub fn push_user_turn(&mut self, text: String) {
-        self.items.push(OutputItem::UserTurn { text });
+        self.push_item(OutputItem::UserTurn { text });
         self.items.push(OutputItem::Divider);
     }
 }
@@ -328,5 +378,73 @@ mod tests {
         app.scroll_to_tail();
         app.resolve_scroll(100, 20);
         assert_eq!(app.pending_below_rows(), 0);
+    }
+
+    #[test]
+    fn record_lag_within_cooldown_merges_into_last_note() {
+        let mut app = AppState::new("s".into(), None);
+        let t0 = Instant::now();
+        app.record_lag(5, t0);
+        app.record_lag(10, t0 + Duration::from_millis(100));
+        app.record_lag(20, t0 + Duration::from_millis(200));
+        let notes: Vec<_> = app
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                OutputItem::SystemNote { text, level } => Some((text.clone(), *level)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].0, "dropped 35 stream frames");
+        assert_eq!(notes[0].1, NoteLevel::Warn);
+    }
+
+    #[test]
+    fn record_lag_after_cooldown_starts_new_note() {
+        let mut app = AppState::new("s".into(), None);
+        let t0 = Instant::now();
+        app.record_lag(5, t0);
+        app.record_lag(7, t0 + Duration::from_millis(400));
+        let lag_notes: Vec<_> = app
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                OutputItem::SystemNote { text, .. } if text.starts_with("dropped ") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lag_notes,
+            vec!["dropped 5 stream frames", "dropped 7 stream frames"]
+        );
+    }
+
+    #[test]
+    fn record_lag_state_resets_when_new_stream_frame_arrives() {
+        let mut app = AppState::new("s".into(), None);
+        let t0 = Instant::now();
+        app.record_lag(5, t0);
+        app.apply_stream_frame(StreamFrame::LlmChunk {
+            text: "hi".into(),
+            model: "m".into(),
+        });
+        app.record_lag(3, t0 + Duration::from_millis(50));
+        let lag_texts: Vec<_> = app
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                OutputItem::SystemNote { text, .. } if text.starts_with("dropped ") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lag_texts,
+            vec!["dropped 5 stream frames", "dropped 3 stream frames"]
+        );
     }
 }
