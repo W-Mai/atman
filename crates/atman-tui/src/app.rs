@@ -154,10 +154,51 @@ impl AppState {
     }
 
     pub fn toggle_last_tool_expansion(&mut self) -> bool {
+        if self.toggle_last_workflow_tool_node() {
+            return true;
+        }
         for item in self.items.iter().rev() {
             if let Some(id) = item.tool_use_id() {
                 let id = id.to_string();
                 self.toggle_tool_expansion(&id);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
+        if let Some(OutputItem::WorkflowPanel { expanded_nodes, .. }) =
+            self.items.get_mut(panel_index)
+        {
+            if !expanded_nodes.remove(node_id) {
+                expanded_nodes.insert(node_id.to_string());
+            }
+            self.expanded_version = self.expanded_version.wrapping_add(1);
+        }
+    }
+
+    fn toggle_last_workflow_tool_node(&mut self) -> bool {
+        use atman_runtime::workflow::WorkflowNode;
+        fn last_tool_id(nodes: &[WorkflowNode]) -> Option<String> {
+            for n in nodes.iter().rev() {
+                if let Some(id) = last_tool_id(&n.children) {
+                    return Some(id);
+                }
+                if matches!(
+                    n.kind,
+                    atman_runtime::workflow::WorkflowNodeKind::ToolCall { .. }
+                ) {
+                    return Some(n.id.clone());
+                }
+            }
+            None
+        }
+        for (idx, item) in self.items.iter().enumerate().rev() {
+            if let OutputItem::WorkflowPanel { graph, .. } = item
+                && let Some(id) = last_tool_id(&graph.root)
+            {
+                self.toggle_workflow_node(idx, &id);
                 return true;
             }
         }
@@ -892,6 +933,60 @@ mod tests {
             .expect("workflow panel present");
         assert_eq!(panel.root.len(), 1);
         assert_eq!(panel.root[0].label, "look_into");
+    }
+
+    #[test]
+    fn toggle_workflow_node_flips_expanded_membership() {
+        let mut app = AppState::new("s".into(), None);
+        app.push_item(OutputItem::WorkflowPanel {
+            turn_index: 0,
+            graph: atman_runtime::workflow::WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+            expanded_nodes: HashSet::new(),
+            panel_expanded: true,
+            started_at: Instant::now(),
+            ended_at: None,
+        });
+        let idx = app.items.len() - 1;
+        app.toggle_workflow_node(idx, "node_x");
+        if let OutputItem::WorkflowPanel { expanded_nodes, .. } = &app.items[idx] {
+            assert!(expanded_nodes.contains("node_x"));
+        }
+        app.toggle_workflow_node(idx, "node_x");
+        if let OutputItem::WorkflowPanel { expanded_nodes, .. } = &app.items[idx] {
+            assert!(!expanded_nodes.contains("node_x"));
+        }
+    }
+
+    #[test]
+    fn ctrl_o_targets_latest_workflow_tool_node() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::FlowGraph {
+            run_id: "r1".into(),
+            graph: atman_runtime::nodegraph::FlowGraph {
+                flow_name: "f".into(),
+                root: Vec::new(),
+            },
+        });
+        app.apply_stream_frame(StreamFrame::FlowNodeStart {
+            run_id: "r1".into(),
+            node_id: "stmt_0".into(),
+            kind: atman_runtime::nodegraph::NodeKind::UserConfirm,
+            label: "stmt_0".into(),
+            parent_node_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::ToolNode {
+            run_id: "r1".into(),
+            parent_node_id: "stmt_0".into(),
+            tool_use_id: "tu_last".into(),
+            tool: "fs.read".into(),
+            args_preview: "{}".into(),
+        });
+        assert!(app.toggle_last_tool_expansion());
+        let expanded = app.items.iter().find_map(|it| match it {
+            OutputItem::WorkflowPanel { expanded_nodes, .. } => Some(expanded_nodes.clone()),
+            _ => None,
+        });
+        assert!(expanded.unwrap().contains("tool:tu_last"));
     }
 
     #[test]
