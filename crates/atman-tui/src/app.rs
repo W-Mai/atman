@@ -315,6 +315,7 @@ impl AppState {
     }
 
     fn route_to_workflow_panel(&mut self, frame: &StreamFrame) {
+        let mut mutated = false;
         if let Some(OutputItem::WorkflowPanel {
             graph, ended_at, ..
         }) = self
@@ -327,6 +328,10 @@ impl AppState {
             if let StreamFrame::FlowDone { .. } = frame {
                 *ended_at = Some(Instant::now());
             }
+            mutated = true;
+        }
+        if mutated {
+            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 
@@ -682,6 +687,32 @@ mod tests {
         if let OutputItem::WorkflowPanel { expanded_nodes, .. } = &app.items[idx] {
             assert!(!expanded_nodes.contains("node_x"));
         }
+    }
+
+    #[test]
+    fn workflow_stream_mutations_bump_items_version() {
+        let mut app = AppState::new("s".into(), None);
+        let baseline = app.items_version;
+        app.apply_stream_frame(StreamFrame::FlowGraph {
+            run_id: "r1".into(),
+            graph: atman_runtime::nodegraph::FlowGraph {
+                flow_name: "f".into(),
+                root: Vec::new(),
+            },
+        });
+        let after_flow = app.items_version;
+        assert_ne!(after_flow, baseline, "FlowGraph should bump version");
+        app.apply_stream_frame(StreamFrame::ToolNode {
+            run_id: "r1".into(),
+            parent_node_id: "missing".into(),
+            tool_use_id: "tu".into(),
+            tool: "t".into(),
+            args_preview: "{}".into(),
+        });
+        assert_ne!(
+            app.items_version, after_flow,
+            "ToolNode routed to graph should still bump version"
+        );
     }
 
     #[test]
