@@ -161,14 +161,22 @@ async fn run_frames(
                             MouseEventKind::ScrollUp => app.scroll_up(3),
                             MouseEventKind::ScrollDown => app.scroll_down(3),
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some(idx) = app.hit_test(me.column, me.row)
-                                    && let Some(id) = app
+                                if let Some(idx) = app.hit_test(me.column, me.row) {
+                                    if let Some(id) = app
                                         .items
                                         .get(idx)
                                         .and_then(|it| it.tool_use_id())
                                         .map(|s| s.to_string())
-                                {
-                                    app.toggle_tool_expansion(&id);
+                                    {
+                                        app.toggle_tool_expansion(&id);
+                                    } else if let Some(id) = app
+                                        .items
+                                        .get(idx)
+                                        .and_then(|it| it.flow_run_id())
+                                        .map(|s| s.to_string())
+                                    {
+                                        app.toggle_flow_panel_expansion(&id);
+                                    }
                                 }
                             }
                             _ => {}

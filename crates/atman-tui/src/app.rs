@@ -46,6 +46,13 @@ impl OutputItem {
             _ => None,
         }
     }
+
+    pub fn flow_run_id(&self) -> Option<&str> {
+        match self {
+            OutputItem::FlowPanel { run_id, .. } => Some(run_id),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +147,21 @@ impl AppState {
             }
         }
         false
+    }
+
+    pub fn toggle_flow_panel_expansion(&mut self, run_id: &str) {
+        for item in self.items.iter_mut() {
+            if let OutputItem::FlowPanel {
+                run_id: rid,
+                expanded,
+                ..
+            } = item
+                && rid == run_id
+            {
+                *expanded = !*expanded;
+                return;
+            }
+        }
     }
 
     pub fn has_running_flow(&self) -> bool {
