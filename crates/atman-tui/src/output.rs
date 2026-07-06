@@ -21,7 +21,11 @@ fn render_item(item: &OutputItem) -> ListItem<'_> {
             Span::raw(text.clone()),
         ])]),
         OutputItem::AssistantMd { md, streaming } => {
-            let mut lines: Vec<Line<'_>> = md.lines().map(|l| Line::from(l.to_string())).collect();
+            let mut lines: Vec<Line<'_>> = if *streaming {
+                md.lines().map(|l| Line::from(l.to_string())).collect()
+            } else {
+                crate::markdown::render_markdown(md)
+            };
             if *streaming {
                 lines.push(Line::from(Span::styled(
                     "▏",
