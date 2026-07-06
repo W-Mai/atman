@@ -1,8 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use atman_runtime::event::FlowNodeStatus;
-use atman_runtime::nodegraph::FlowGraph;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::workflow::WorkflowGraph;
 
@@ -17,27 +15,11 @@ pub enum OutputItem {
         md: String,
         streaming: bool,
     },
-    ToolCall {
-        tool: String,
-        args: String,
-        status: ToolStatus,
-        result: Option<String>,
-        tool_use_id: Option<String>,
-    },
     SystemNote {
         text: String,
         level: NoteLevel,
     },
     Divider,
-    FlowPanel {
-        run_id: String,
-        flow_name: String,
-        graph: FlowGraph,
-        node_states: HashMap<String, FlowNodeStatus>,
-        started_at: Instant,
-        ended_at: Option<Instant>,
-        expanded: bool,
-    },
     WorkflowPanel {
         turn_index: usize,
         graph: WorkflowGraph,
@@ -46,22 +28,6 @@ pub enum OutputItem {
         started_at: Instant,
         ended_at: Option<Instant>,
     },
-}
-
-impl OutputItem {
-    pub fn tool_use_id(&self) -> Option<&str> {
-        match self {
-            OutputItem::ToolCall { tool_use_id, .. } => tool_use_id.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn flow_run_id(&self) -> Option<&str> {
-        match self {
-            OutputItem::FlowPanel { run_id, .. } => Some(run_id),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,17 +120,7 @@ impl AppState {
     }
 
     pub fn toggle_last_tool_expansion(&mut self) -> bool {
-        if self.toggle_last_workflow_tool_node() {
-            return true;
-        }
-        for item in self.items.iter().rev() {
-            if let Some(id) = item.tool_use_id() {
-                let id = id.to_string();
-                self.toggle_tool_expansion(&id);
-                return true;
-            }
-        }
-        false
+        self.toggle_last_workflow_tool_node()
     }
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
@@ -205,26 +161,19 @@ impl AppState {
         false
     }
 
-    pub fn toggle_flow_panel_expansion(&mut self, run_id: &str) {
-        for item in self.items.iter_mut() {
-            if let OutputItem::FlowPanel {
-                run_id: rid,
-                expanded,
-                ..
-            } = item
-                && rid == run_id
-            {
-                *expanded = !*expanded;
-                self.expanded_version = self.expanded_version.wrapping_add(1);
-                return;
-            }
+    pub fn toggle_workflow_panel_expansion(&mut self, panel_index: usize) {
+        if let Some(OutputItem::WorkflowPanel { panel_expanded, .. }) =
+            self.items.get_mut(panel_index)
+        {
+            *panel_expanded = !*panel_expanded;
+            self.expanded_version = self.expanded_version.wrapping_add(1);
         }
     }
 
-    pub fn has_running_flow(&self) -> bool {
+    pub fn has_running_workflow(&self) -> bool {
         self.items
             .iter()
-            .any(|item| matches!(item, OutputItem::FlowPanel { ended_at: None, .. }))
+            .any(|item| matches!(item, OutputItem::WorkflowPanel { ended_at: None, .. }))
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
@@ -347,129 +296,19 @@ impl AppState {
                 self.streaming = false;
                 self.reset_lag_state();
             }
-            StreamFrame::ToolUseStart {
-                tool,
-                args_preview,
-                id,
-            } => {
-                self.push_item(OutputItem::ToolCall {
-                    tool,
-                    args: args_preview,
-                    status: ToolStatus::Running,
-                    result: None,
-                    tool_use_id: Some(id),
-                });
-            }
-            StreamFrame::ToolUseDone {
-                tool, ok, preview, ..
-            } => {
-                for item in self.items.iter_mut().rev() {
-                    if let OutputItem::ToolCall {
-                        tool: t,
-                        status,
-                        result,
-                        ..
-                    } = item
-                        && t == &tool
-                        && *status == ToolStatus::Running
-                    {
-                        *status = if ok { ToolStatus::Ok } else { ToolStatus::Err };
-                        *result = Some(preview);
-                        self.reset_lag_state();
-                        return;
-                    }
-                }
-            }
+            StreamFrame::ToolUseStart { .. } | StreamFrame::ToolUseDone { .. } => {}
             StreamFrame::Note(text) => {
                 self.push_item(OutputItem::SystemNote {
                     text,
                     level: NoteLevel::Info,
                 });
             }
-            StreamFrame::FlowGraph { run_id, graph } => {
-                let frame = StreamFrame::FlowGraph {
-                    run_id: run_id.clone(),
-                    graph: graph.clone(),
-                };
-                self.push_item(OutputItem::FlowPanel {
-                    run_id,
-                    flow_name: graph.flow_name.clone(),
-                    graph,
-                    node_states: HashMap::new(),
-                    started_at: Instant::now(),
-                    ended_at: None,
-                    expanded: true,
-                });
+            frame @ (StreamFrame::FlowGraph { .. }
+            | StreamFrame::FlowNodeStart { .. }
+            | StreamFrame::FlowNodeEnd { .. }
+            | StreamFrame::FlowDone { .. }
+            | StreamFrame::ToolNode { .. }) => {
                 self.ensure_workflow_panel_and_apply(&frame);
-            }
-            StreamFrame::FlowNodeStart {
-                run_id,
-                node_id,
-                kind,
-                label,
-                parent_node_id,
-            } => {
-                if let Some(panel) = self.find_flow_panel_mut(&run_id) {
-                    panel.insert(node_id.clone(), FlowNodeStatus::Ok);
-                }
-                let frame = StreamFrame::FlowNodeStart {
-                    run_id,
-                    node_id,
-                    kind,
-                    label,
-                    parent_node_id,
-                };
-                self.route_to_workflow_panel(&frame);
-            }
-            StreamFrame::FlowNodeEnd {
-                run_id,
-                node_id,
-                status,
-                output_preview,
-                parent_node_id,
-            } => {
-                if let Some(panel) = self.find_flow_panel_mut(&run_id) {
-                    panel.insert(node_id.clone(), status.clone());
-                }
-                let frame = StreamFrame::FlowNodeEnd {
-                    run_id,
-                    node_id,
-                    status,
-                    output_preview,
-                    parent_node_id,
-                };
-                self.route_to_workflow_panel(&frame);
-            }
-            StreamFrame::FlowDone {
-                run_id,
-                ok,
-                flow_name,
-            } => {
-                if let Some(item) = self.find_flow_panel_item_mut(&run_id)
-                    && let OutputItem::FlowPanel {
-                        ended_at,
-                        expanded,
-                        node_states,
-                        ..
-                    } = item
-                {
-                    *ended_at = Some(Instant::now());
-                    *expanded = !ok;
-                    if !ok {
-                        node_states
-                            .entry("__flow__".into())
-                            .or_insert(FlowNodeStatus::Err);
-                    }
-                }
-                let frame = StreamFrame::FlowDone {
-                    run_id,
-                    flow_name,
-                    ok,
-                };
-                self.route_to_workflow_panel(&frame);
-            }
-            frame @ StreamFrame::ToolNode { .. } => {
-                self.route_to_workflow_panel(&frame);
             }
             StreamFrame::Unknown => {}
         }
@@ -518,35 +357,6 @@ impl AppState {
             });
         }
         self.route_to_workflow_panel(frame);
-    }
-
-    fn find_flow_panel_mut(
-        &mut self,
-        run_id: &str,
-    ) -> Option<&mut HashMap<String, FlowNodeStatus>> {
-        for item in self.items.iter_mut().rev() {
-            if let OutputItem::FlowPanel {
-                run_id: rid,
-                node_states,
-                ..
-            } = item
-                && rid == run_id
-            {
-                return Some(node_states);
-            }
-        }
-        None
-    }
-
-    fn find_flow_panel_item_mut(&mut self, run_id: &str) -> Option<&mut OutputItem> {
-        for item in self.items.iter_mut().rev() {
-            if let OutputItem::FlowPanel { run_id: rid, .. } = item
-                && rid == run_id
-            {
-                return Some(item);
-            }
-        }
-        None
     }
 
     pub fn record_lag(&mut self, dropped: u64, now: Instant) {
@@ -624,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_start_then_done_updates_same_item() {
+    fn tool_use_stream_frames_no_longer_push_items() {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::ToolUseStart {
             tool: "fs.read".into(),
@@ -637,51 +447,10 @@ mod tests {
             preview: "12 bytes".into(),
             id: "tc_1".into(),
         });
-        assert_eq!(app.items.len(), 1);
-        match &app.items[0] {
-            OutputItem::ToolCall {
-                tool,
-                status,
-                result,
-                ..
-            } => {
-                assert_eq!(tool, "fs.read");
-                assert_eq!(*status, ToolStatus::Ok);
-                assert_eq!(result.as_deref(), Some("12 bytes"));
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn tool_done_matches_most_recent_running_call_of_same_name() {
-        let mut app = AppState::new("s".into(), None);
-        app.apply_stream_frame(StreamFrame::ToolUseStart {
-            tool: "fs.read".into(),
-            args_preview: "a".into(),
-            id: "tc_a".into(),
-        });
-        app.apply_stream_frame(StreamFrame::ToolUseStart {
-            tool: "fs.read".into(),
-            args_preview: "b".into(),
-            id: "tc_b".into(),
-        });
-        app.apply_stream_frame(StreamFrame::ToolUseDone {
-            tool: "fs.read".into(),
-            ok: false,
-            preview: "err".into(),
-            id: "tc_b".into(),
-        });
-        assert_eq!(app.items.len(), 2);
-        let statuses: Vec<_> = app
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                OutputItem::ToolCall { status, .. } => Some(*status),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(statuses, vec![ToolStatus::Running, ToolStatus::Err]);
+        assert!(
+            app.items.is_empty(),
+            "tool traffic flows through workflow panel now"
+        );
     }
 
     #[test]
@@ -694,22 +463,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_use_start_stores_id_on_output_item() {
-        let mut app = AppState::new("s".into(), None);
-        app.apply_stream_frame(StreamFrame::ToolUseStart {
-            tool: "fs.read".into(),
-            args_preview: "foo".into(),
-            id: "tc_42".into(),
-        });
-        match &app.items[0] {
-            OutputItem::ToolCall { tool_use_id, .. } => {
-                assert_eq!(tool_use_id.as_deref(), Some("tc_42"));
-            }
-            _ => panic!("expected ToolCall"),
-        }
-    }
-
-    #[test]
     fn toggle_tool_expansion_flips_membership() {
         let mut app = AppState::new("s".into(), None);
         assert!(!app.is_tool_expanded("x"));
@@ -717,32 +470,6 @@ mod tests {
         assert!(app.is_tool_expanded("x"));
         app.toggle_tool_expansion("x");
         assert!(!app.is_tool_expanded("x"));
-    }
-
-    #[test]
-    fn toggle_last_tool_expansion_finds_latest_tool_call() {
-        let mut app = AppState::new("s".into(), None);
-        app.push_user_turn("x".into());
-        app.apply_stream_frame(StreamFrame::ToolUseStart {
-            tool: "a".into(),
-            args_preview: "".into(),
-            id: "tc_a".into(),
-        });
-        app.apply_stream_frame(StreamFrame::ToolUseStart {
-            tool: "b".into(),
-            args_preview: "".into(),
-            id: "tc_b".into(),
-        });
-        assert!(app.toggle_last_tool_expansion());
-        assert!(app.is_tool_expanded("tc_b"));
-        assert!(!app.is_tool_expanded("tc_a"));
-    }
-
-    #[test]
-    fn toggle_last_tool_expansion_returns_false_when_no_tool_call() {
-        let mut app = AppState::new("s".into(), None);
-        app.push_user_turn("hi".into());
-        assert!(!app.toggle_last_tool_expansion());
     }
 
     #[test]

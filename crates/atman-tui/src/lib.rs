@@ -138,7 +138,7 @@ async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.has_running_flow() => {
+            _ = animation_tick.tick(), if app.has_running_workflow() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
             key = key_events.next() => {
@@ -163,22 +163,11 @@ async fn run_frames(
                             MouseEventKind::ScrollUp => app.scroll_up(3),
                             MouseEventKind::ScrollDown => app.scroll_down(3),
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some(idx) = app.hit_test(me.column, me.row) {
-                                    if let Some(id) = app
-                                        .items
-                                        .get(idx)
-                                        .and_then(|it| it.tool_use_id())
-                                        .map(|s| s.to_string())
-                                    {
-                                        app.toggle_tool_expansion(&id);
-                                    } else if let Some(id) = app
-                                        .items
-                                        .get(idx)
-                                        .and_then(|it| it.flow_run_id())
-                                        .map(|s| s.to_string())
-                                    {
-                                        app.toggle_flow_panel_expansion(&id);
-                                    }
+                                if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
+                                        app.items.get(idx)
+                                {
+                                    app.toggle_workflow_panel_expansion(idx);
                                 }
                             }
                             _ => {}
@@ -564,7 +553,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             messages: &messages,
             animation_frame: app.animation_frame,
         };
-        let animation_key = if app.has_running_flow() {
+        let animation_key = if app.has_running_workflow() {
             Some(app.animation_frame)
         } else {
             None
