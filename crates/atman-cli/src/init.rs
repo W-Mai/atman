@@ -86,8 +86,9 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     contract {
         capabilities { shell: true }
     }
-    initial = user_msg(user_prompt)
-    return subflow(agent_loop, [initial], 0)
+    _prompt_lands_via_begin_turn = user_prompt
+    messages = memory.recent_turns(n: 10)
+    return subflow(agent_loop, messages, 0)
 }
 
 flow agent_loop(messages: list, iteration: int) -> string {
@@ -97,7 +98,13 @@ flow agent_loop(messages: list, iteration: int) -> string {
     reply = llm {
         model: "claude-opus-4.7"
         messages: messages
-        tools: [fs.read, fs.write, fs.list, bash.exec, hunk.review, hunk.apply, memory.confess]
+        tools: [
+            fs.read, fs.write, fs.list,
+            bash.exec,
+            hunk.review, hunk.apply,
+            memory.confess, memory.todo.set, memory.todo.done,
+            memory.goal.get
+        ]
     }
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {

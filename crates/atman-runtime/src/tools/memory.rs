@@ -71,6 +71,64 @@ impl Tool for MemoryGoalSet {
     }
 }
 
+pub struct MemoryRecentTurns;
+
+impl Tool for MemoryRecentTurns {
+    fn name(&self) -> &str {
+        "memory.recent_turns"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Return the last N Message values (user + assistant + tool_result) from the \
+             current session's event log so a flow can hand the code agent a sliding \
+             history window. Reads from disk; cost O(events file size).",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "description": "Max message count to return (default 10)"}
+            }
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let n = match args.named("n").or_else(|| args.positional(0).ok()) {
+                Some(Value::Int(k)) if *k >= 0 => *k as usize,
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "non-negative int".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+                None => 10,
+            };
+            if n == 0 {
+                return Ok(Value::List(Vec::new()));
+            }
+            let Some(msgs) = ctx.session_messages.as_ref() else {
+                return Ok(Value::List(Vec::new()));
+            };
+            let start = msgs.len().saturating_sub(n);
+            let out: Vec<Value> = msgs
+                .iter()
+                .skip(start)
+                .cloned()
+                .map(Value::Message)
+                .collect();
+            Ok(Value::List(out))
+        })
+    }
+}
+
 pub struct MemoryGoalClear {
     pub store: Arc<GoalStore>,
 }

@@ -190,6 +190,11 @@ async fn dispatch_tool_call<'a>(
         c.sandbox = None;
         c
     };
+    let ctx_with_anchors = if let Some(session) = ctx.session {
+        ctx_with_anchors.with_session_messages(std::sync::Arc::new(session.messages()))
+    } else {
+        ctx_with_anchors
+    };
     match tool
         .call(ToolArgs { positional, named }, &ctx_with_anchors)
         .await

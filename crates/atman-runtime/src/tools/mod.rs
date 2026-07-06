@@ -92,6 +92,7 @@ pub fn register_memory(
         store: goal_store.clone(),
     }));
     reg.register(Arc::new(memory::MemoryGoalClear { store: goal_store }));
+    reg.register(Arc::new(memory::MemoryRecentTurns));
 }
 
 pub fn register_spec_memory(

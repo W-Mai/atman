@@ -59,6 +59,7 @@ pub struct ToolCtx {
     pub sandbox: Option<std::sync::Arc<dyn crate::sandbox::Sandbox>>,
     pub events: Option<crate::event::EventSink>,
     pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
+    pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
 }
 
 impl ToolCtx {
@@ -95,6 +96,14 @@ impl ToolCtx {
 
     pub fn with_stdout_broadcast(mut self, tx: tokio::sync::broadcast::Sender<String>) -> Self {
         self.stdout_broadcast = Some(tx);
+        self
+    }
+
+    pub fn with_session_messages(
+        mut self,
+        msgs: std::sync::Arc<Vec<crate::message::Message>>,
+    ) -> Self {
+        self.session_messages = Some(msgs);
         self
     }
 }
