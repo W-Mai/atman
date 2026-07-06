@@ -1,11 +1,7 @@
 use std::io::{Stdout, stdout};
 
-use anyhow::{Context, Result};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
+use anyhow::Result;
+use crossterm::event::{Event as CtEvent, EventStream};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -19,11 +15,13 @@ pub mod layout;
 pub mod markdown;
 pub mod output;
 pub mod status;
+pub mod terminal_guard;
 
 use app::{AppState, NoteLevel};
 use atman_runtime::stream::StreamFrame;
 use input::{InputEditor, input_paragraph};
 use keys::{KeyAction, map as map_key};
+use terminal_guard::TerminalGuard;
 
 pub enum TuiNote {
     Info(String),
@@ -64,18 +62,10 @@ impl TuiHandle {
 }
 
 pub async fn run_tui(handle: TuiHandle) -> Result<()> {
-    enable_raw_mode().context("enable raw mode")?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture).context("enter alternate screen")?;
-    let backend = CrosstermBackend::new(out);
-    let mut terminal = Terminal::new(backend).context("terminal init")?;
-
-    let result = run_frames(&mut terminal, handle).await;
-
-    let mut out = stdout();
-    let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
-    let _ = disable_raw_mode();
-    result
+    let _guard = TerminalGuard::install()?;
+    let backend = CrosstermBackend::new(stdout());
+    let mut terminal = Terminal::new(backend)?;
+    run_frames(&mut terminal, handle).await
 }
 
 async fn run_frames(
@@ -87,6 +77,7 @@ async fn run_frames(
     let mut key_events = EventStream::new();
     let mut interrupt_prompt = false;
     let mut shutdown = handle.shutdown_rx.take();
+    let mut sigterm = build_sigterm_stream();
 
     loop {
         terminal.draw(|f| render_frame(f, &app, &editor))?;
@@ -98,6 +89,12 @@ async fn run_frames(
         tokio::select! {
             biased;
             _ = wait_shutdown(shutdown.as_mut()) => {
+                break;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                break;
+            }
+            _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
             key = key_events.next() => {
@@ -126,6 +123,31 @@ async fn run_frames(
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn build_sigterm_stream() -> Option<tokio::signal::unix::Signal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()
+}
+
+#[cfg(not(unix))]
+fn build_sigterm_stream() -> Option<()> {
+    None
+}
+
+#[cfg(unix)]
+async fn wait_sigterm(sig: Option<&mut tokio::signal::unix::Signal>) {
+    match sig {
+        Some(s) => {
+            let _ = s.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_sigterm(_sig: Option<&mut ()>) {
+    std::future::pending().await
 }
 
 async fn recv_note(rx: Option<&mut mpsc::UnboundedReceiver<TuiNote>>) -> Option<TuiNote> {
