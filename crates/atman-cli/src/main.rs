@@ -943,8 +943,9 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         if let Some(rest) = line.strip_prefix(':') {
             let trimmed = rest.trim();
             if trimmed == "suggest" || trimmed.starts_with("suggest ") {
-                if let Err(e) = handle_suggest(&executor, &session, &mut input_rx).await {
-                    eprintln!("[atman] :suggest: {e}");
+                if let Err(e) = handle_suggest(&executor, &session, &mut input_rx, &reporter).await
+                {
+                    reporter.error(format!("[atman] :suggest: {e}"));
                 }
                 continue;
             }
@@ -1032,6 +1033,10 @@ enum Reporter {
 impl Reporter {
     fn new(tui: bool, tx: tokio::sync::mpsc::UnboundedSender<atman_tui::TuiNote>) -> Self {
         if tui { Self::Tui(tx) } else { Self::Stdout }
+    }
+
+    fn is_tui(&self) -> bool {
+        matches!(self, Self::Tui(_))
     }
 
     fn info(&self, text: impl Into<String>) {
@@ -1654,13 +1659,14 @@ async fn handle_suggest(
     executor: &Executor,
     session: &Session,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    reporter: &Reporter,
 ) -> Result<()> {
     let events = session
         .events_path()
         .context("session has no events path (dry-run?)")?;
     let transcript = suggest::read_recent_events(events, suggest::recent_turns_limit())?;
     if transcript.trim().is_empty() {
-        println!("[atman] :suggest — no recent turns yet; talk a bit first.");
+        reporter.info("[atman] :suggest — no recent turns yet; talk a bit first.");
         return Ok(());
     }
 
@@ -1670,49 +1676,61 @@ async fn handle_suggest(
         .resolve(&model)
         .with_context(|| format!("no provider resolves model `{model}` — configure one first"))?;
 
-    println!("[atman] :suggest — asking `{model}` to spot a reusable pattern…");
+    reporter.info(format!(
+        "[atman] :suggest — asking `{model}` to spot a reusable pattern…"
+    ));
     let reply = suggest::generate_suggestion(provider, &model, &transcript).await?;
     if reply.trim() == "NO_SUGGESTION" {
-        println!("[atman] :suggest — model saw no reusable pattern.");
+        reporter.info("[atman] :suggest — model saw no reusable pattern.");
         return Ok(());
     }
     let Some(dsl_src) = suggest::extract_code_block(&reply) else {
-        println!("[atman] :suggest — model reply did not contain a fenced code block:");
-        println!("{}", reply.trim());
+        reporter.info("[atman] :suggest — model reply did not contain a fenced code block:");
+        reporter.info(reply.trim().to_string());
         return Ok(());
     };
 
     let flow_name = match suggest::extract_flow_name(&dsl_src) {
         Ok(n) => n,
         Err(e) => {
-            println!("[atman] :suggest — suggested flow is not valid: {e}");
-            println!("---\n{dsl_src}\n---");
+            reporter.info(format!(
+                "[atman] :suggest — suggested flow is not valid: {e}"
+            ));
+            reporter.info(format!("---\n{dsl_src}\n---"));
             return Ok(());
         }
     };
     let parsed = parse_file(&dsl_src)?;
     if let Err(errs) = atman_runtime::validate::validate(&parsed.flows[0], &executor.tools) {
-        println!("[atman] :suggest — validation rejected the suggestion:");
+        reporter.info("[atman] :suggest — validation rejected the suggestion:");
         for e in errs {
-            println!("  · {e:?}");
+            reporter.info(format!("  · {e:?}"));
         }
-        println!("---\n{dsl_src}\n---");
+        reporter.info(format!("---\n{dsl_src}\n---"));
         return Ok(());
     }
 
     let has_shell = dsl_src.contains("bash.exec") || dsl_src.contains("shell.");
-    println!("[atman] suggested flow `{flow_name}`:");
-    println!("---\n{dsl_src}\n---");
+    reporter.info(format!("[atman] suggested flow `{flow_name}`:"));
+    reporter.info(format!("---\n{dsl_src}\n---"));
     if has_shell {
-        println!("[atman] note: this flow calls shell tools — accept only if you trust it.");
+        reporter.info("[atman] note: this flow calls shell tools — accept only if you trust it.");
     }
-    println!(
-        "[atman] accept? [y] yes / [n] no / [e] print path so you can edit the buffered draft"
+
+    if reporter.is_tui() {
+        reporter.info(
+            "[atman] :suggest — TUI is read-only for this flow. Exit and re-run with ATMAN_NO_TUI=1 to accept.",
+        );
+        return Ok(());
+    }
+
+    reporter.info(
+        "[atman] accept? [y] yes / [n] no / [e] print path so you can edit the buffered draft",
     );
 
     let choice = loop {
         let Some(line) = input_rx.recv().await else {
-            println!("[atman] :suggest — input closed, discarding.");
+            reporter.info("[atman] :suggest — input closed, discarding.");
             return Ok(());
         };
         match line.trim() {
@@ -1720,13 +1738,13 @@ async fn handle_suggest(
             "n" | "N" | "no" | "" => break 'n',
             "e" | "E" | "edit" => break 'e',
             other => {
-                println!("[atman] answer with y / n / e (got `{other}`)");
+                reporter.info(format!("[atman] answer with y / n / e (got `{other}`)"));
             }
         }
     };
 
     if choice == 'n' {
-        println!("[atman] :suggest — discarded.");
+        reporter.info("[atman] :suggest — discarded.");
         return Ok(());
     }
 
@@ -1738,9 +1756,9 @@ async fn handle_suggest(
     if target.exists() {
         final_name = format!("{flow_name}_v2");
         target = cmd_dir.join(format!("{final_name}.at"));
-        println!(
+        reporter.info(format!(
             "[atman] :suggest — `{flow_name}.at` exists; writing as `{final_name}.at` instead"
-        );
+        ));
     }
     let final_src = if final_name == flow_name {
         dsl_src.clone()
@@ -1764,14 +1782,17 @@ async fn handle_suggest(
     std::fs::write(&routes_at, routes_body)
         .with_context(|| format!("append route to {}", routes_at.display()))?;
 
-    println!(
+    reporter.info(format!(
         "[atman] :suggest — accepted. wrote {} and appended route \"{}\" → {}",
         target.display(),
         trigger,
         final_name
-    );
+    ));
     if choice == 'e' {
-        println!("[atman] :suggest — open {} to edit.", target.display());
+        reporter.info(format!(
+            "[atman] :suggest — open {} to edit.",
+            target.display()
+        ));
     }
     Ok(())
 }
