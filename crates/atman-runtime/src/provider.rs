@@ -175,6 +175,11 @@ impl ProviderRegistry {
         if let Some(p) = self.providers.get(model) {
             return Some(p.clone());
         }
+        if let Some((prefix, _)) = model.split_once('/')
+            && let Some(p) = self.providers.get(prefix)
+        {
+            return Some(p.clone());
+        }
         self.default
             .as_ref()
             .and_then(|n| self.providers.get(n).cloned())
