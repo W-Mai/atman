@@ -1,19 +1,33 @@
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-pub fn input_paragraph<'a>(input: &'a str, streaming: bool) -> Paragraph<'a> {
+pub fn input_paragraph<'a>(input: &'a str, streaming: bool, pending_below: u16) -> Paragraph<'a> {
     let prompt_style = if streaming {
         Style::default().add_modifier(Modifier::DIM)
     } else {
         Style::default().add_modifier(Modifier::BOLD)
     };
+    let border_style = if streaming {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let title = if pending_below > 0 {
+        format!(" atman  ↓ {pending_below} new ")
+    } else {
+        " atman ".to_string()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
     let line = Line::from(vec![
-        Span::styled("atman> ", prompt_style),
+        Span::styled("❯ ", prompt_style),
         Span::raw(input),
         Span::styled("▏", Style::default().add_modifier(Modifier::SLOW_BLINK)),
     ]);
-    Paragraph::new(line).wrap(Wrap { trim: false })
+    Paragraph::new(line).block(block).wrap(Wrap { trim: false })
 }
 
 #[derive(Default)]

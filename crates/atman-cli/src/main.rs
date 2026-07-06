@@ -850,12 +850,12 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
 
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
-    let session = match resume_sid {
+    let session = std::sync::Arc::new(match resume_sid {
         Some(sid) => Session::open_existing_with_redactor(&root, &sid, redactor.clone())
             .with_context(|| format!("resuming session {sid} under {}", root.display()))?,
         None => Session::open_with_redactor(&root, redactor.clone())
             .with_context(|| format!("opening session under {}", root.display()))?,
-    };
+    });
     if let Some(path) = session.events_path() {
         let count = session.message_count();
         if count > 0 {
@@ -905,9 +905,18 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     }
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
-    let (tui_task, tui_shutdown) = if use_tui {
+    let (tui_task, tui_shutdown, ctrl_task) = if use_tui {
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
         let initial_items = atman_tui::history::flatten_messages(&session.messages());
+        let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<atman_tui::TuiControl>();
+        let session_for_ctrl = std::sync::Arc::clone(&session);
+        let ctrl_task = tokio::spawn(async move {
+            while let Some(msg) = ctrl_rx.recv().await {
+                match msg {
+                    atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
+                }
+            }
+        });
         let handle = atman_tui::TuiHandle {
             session_id: session.id().to_string(),
             goal: session.goal(),
@@ -915,16 +924,21 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             submit_tx: Some(input_tx),
             note_rx: Some(note_rx),
             shutdown_rx: Some(sh_rx),
+            control_tx: Some(ctrl_tx),
             initial_items,
         };
-        (Some(tokio::spawn(atman_tui::run_tui(handle))), Some(sh_tx))
+        (
+            Some(tokio::spawn(atman_tui::run_tui(handle))),
+            Some(sh_tx),
+            Some(ctrl_task),
+        )
     } else {
         drop(note_rx);
         let (printer_tx, printer_rx) = tokio::sync::oneshot::channel::<Option<ExternalPrinter>>();
         spawn_stdin_reader(input_tx, printer_tx);
         let printer = printer_rx.await.unwrap_or(None);
         spawn_stream_consumer(&session, printer).await;
-        (None, None)
+        (None, None, None)
     };
     let mut pending = PendingUserMessage::default();
     let mut pushback: VecDeque<String> = VecDeque::new();
@@ -998,7 +1012,6 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
         .await;
 
-    session.shutdown().await;
     drop(executor);
     if let Some(sh) = tui_shutdown {
         let _ = sh.send(());
@@ -1008,6 +1021,13 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             Ok(Ok(())) | Err(_) => {}
             Ok(Err(e)) => eprintln!("[atman] tui exited with error: {e}"),
         }
+    }
+    if let Some(ct) = ctrl_task {
+        let _ = ct.await;
+    }
+    match std::sync::Arc::try_unwrap(session) {
+        Ok(s) => s.shutdown().await,
+        Err(_) => eprintln!("[atman] session still had refs at shutdown; skipping graceful close"),
     }
     Ok(())
 }

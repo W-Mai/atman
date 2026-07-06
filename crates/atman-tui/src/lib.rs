@@ -40,6 +40,10 @@ impl TuiNote {
     }
 }
 
+pub enum TuiControl {
+    CancelFlow,
+}
+
 pub struct TuiHandle {
     pub session_id: String,
     pub goal: Option<String>,
@@ -47,6 +51,7 @@ pub struct TuiHandle {
     pub submit_tx: Option<mpsc::UnboundedSender<String>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    pub control_tx: Option<mpsc::UnboundedSender<TuiControl>>,
     pub initial_items: Vec<app::OutputItem>,
 }
 
@@ -59,6 +64,7 @@ impl TuiHandle {
             submit_tx: None,
             note_rx: None,
             shutdown_rx: None,
+            control_tx: None,
             initial_items: Vec::new(),
         }
     }
@@ -102,14 +108,19 @@ async fn run_frames(
                 break;
             }
             key = key_events.next() => {
-                if let Some(Ok(CtEvent::Key(ke))) = key {
-                    handle_key(
-                        map_key(ke),
-                        &mut app,
-                        &mut editor,
-                        &mut interrupt_prompt,
-                        handle.submit_tx.as_ref(),
-                    );
+                match key {
+                    Some(Ok(CtEvent::Key(ke))) => {
+                        handle_key(
+                            map_key(ke),
+                            &mut app,
+                            &mut editor,
+                            &mut interrupt_prompt,
+                            handle.submit_tx.as_ref(),
+                            handle.control_tx.as_ref(),
+                        );
+                    }
+                    Some(Ok(CtEvent::Resize(_, _))) => {}
+                    _ => {}
                 }
             }
             frame = handle.stream_rx.recv() => {
@@ -183,6 +194,7 @@ fn handle_key(
     editor: &mut InputEditor,
     interrupt_prompt: &mut bool,
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
     match action {
         KeyAction::Char(c) => {
@@ -250,15 +262,23 @@ fn handle_key(
             app.scroll_to_tail();
             *interrupt_prompt = false;
         }
+        KeyAction::Escape => {
+            if app.streaming {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::CancelFlow);
+                }
+                app.push_note("cancel requested", app::NoteLevel::Warn);
+            } else if !editor.buf().is_empty() {
+                editor.clear();
+            }
+            *interrupt_prompt = false;
+        }
         KeyAction::Interrupt => {
             if *interrupt_prompt {
                 app.should_quit = true;
             } else {
                 *interrupt_prompt = true;
-                app.items.push(app::OutputItem::SystemNote {
-                    text: "press Ctrl+C again to quit".into(),
-                    level: app::NoteLevel::Warn,
-                });
+                app.push_note("press Ctrl+C again to quit", app::NoteLevel::Warn);
             }
         }
         KeyAction::Quit => {
@@ -273,29 +293,42 @@ fn handle_key(
 fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {
     let area = f.area();
     let input_height = compute_input_height(editor.buf(), area.width);
-    let l = layout::compute(area, input_height);
+    let l = layout::compute(area, input_height, true);
     f.render_widget(
         status::render_bar(&app.session_id, app.goal.as_deref(), app.streaming),
         l.status,
     );
+    let transcript_area = l.transcript;
     if app.items.is_empty() {
-        app.resolve_scroll(0, l.output.height);
-        f.render_widget(output::empty_hint(), l.output);
+        app.resolve_scroll(0, transcript_area.height);
+        f.render_widget(output::empty_hint(), transcript_area);
     } else {
         let lines = output::build_lines(&app.items);
         let paragraph =
             ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
-        let total_rows = paragraph.line_count(l.output.width) as u16;
-        app.resolve_scroll(total_rows, l.output.height);
-        f.render_widget(paragraph.scroll((app.scroll_offset, 0)), l.output);
+        let total_rows = paragraph.line_count(transcript_area.width) as u16;
+        app.resolve_scroll(total_rows, transcript_area.height);
+        f.render_widget(paragraph.scroll((app.scroll_offset, 0)), transcript_area);
     }
-    f.render_widget(input_paragraph(editor.buf(), app.streaming), l.input);
+    if let Some(sidebar) = l.sidebar {
+        f.render_widget(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::LEFT)
+                .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
+            sidebar,
+        );
+    }
+    f.render_widget(
+        input_paragraph(editor.buf(), app.streaming, app.pending_below_rows()),
+        l.input,
+    );
 }
 
 fn compute_input_height(buf: &str, width: u16) -> u16 {
-    let prompt_len = "atman> ".len() as u16;
-    let usable = width.saturating_sub(prompt_len).max(1) as usize;
+    let border_padding: u16 = 2;
+    let prompt_len: u16 = 2;
+    let usable = width.saturating_sub(border_padding + prompt_len).max(1) as usize;
     let visible = buf.chars().count();
-    let lines = visible.div_ceil(usable);
-    (lines as u16).clamp(1, 5)
+    let lines = visible.div_ceil(usable).max(1);
+    (lines as u16 + border_padding).clamp(3, 7)
 }
