@@ -2288,7 +2288,7 @@ async fn cmd_tui_preview() -> Result<()> {
         }
         let _ = tx.send(StreamFrame::LlmDone { total_tokens: 48 });
     });
-    let result = atman_tui::run_tui(session.as_ref()).await;
+    let result = atman_tui::run_tui(atman_tui::TuiHandle::from_session(session.as_ref())).await;
     feeder.abort();
     result
 }

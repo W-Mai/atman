@@ -9,6 +9,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
 pub mod highlight;
@@ -19,18 +20,55 @@ pub mod markdown;
 pub mod output;
 pub mod status;
 
-use app::AppState;
+use app::{AppState, NoteLevel};
+use atman_runtime::stream::StreamFrame;
 use input::{InputEditor, input_paragraph};
 use keys::{KeyAction, map as map_key};
 
-pub async fn run_tui(session: &atman_runtime::Session) -> Result<()> {
+pub enum TuiNote {
+    Info(String),
+    Warn(String),
+    Error(String),
+}
+
+impl TuiNote {
+    fn into_parts(self) -> (String, NoteLevel) {
+        match self {
+            Self::Info(t) => (t, NoteLevel::Info),
+            Self::Warn(t) => (t, NoteLevel::Warn),
+            Self::Error(t) => (t, NoteLevel::Error),
+        }
+    }
+}
+
+pub struct TuiHandle {
+    pub session_id: String,
+    pub goal: Option<String>,
+    pub stream_rx: broadcast::Receiver<StreamFrame>,
+    pub submit_tx: Option<mpsc::UnboundedSender<String>>,
+    pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
+}
+
+impl TuiHandle {
+    pub fn from_session(session: &atman_runtime::Session) -> Self {
+        Self {
+            session_id: session.id().to_string(),
+            goal: session.goal(),
+            stream_rx: session.stream_subscribe(),
+            submit_tx: None,
+            note_rx: None,
+        }
+    }
+}
+
+pub async fn run_tui(handle: TuiHandle) -> Result<()> {
     enable_raw_mode().context("enable raw mode")?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture).context("enter alternate screen")?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend).context("terminal init")?;
 
-    let result = run_frames(&mut terminal, session).await;
+    let result = run_frames(&mut terminal, handle).await;
 
     let mut out = stdout();
     let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
@@ -40,13 +78,11 @@ pub async fn run_tui(session: &atman_runtime::Session) -> Result<()> {
 
 async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    session: &atman_runtime::Session,
+    mut handle: TuiHandle,
 ) -> Result<()> {
-    let goal = session.goal();
-    let mut app = AppState::new(session.id().to_string(), goal);
+    let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone());
     let mut editor = InputEditor::default();
     let mut key_events = EventStream::new();
-    let mut stream_rx = session.stream_subscribe();
     let mut interrupt_prompt = false;
 
     loop {
@@ -60,13 +96,25 @@ async fn run_frames(
             biased;
             key = key_events.next() => {
                 if let Some(Ok(CtEvent::Key(ke))) = key {
-                    handle_key(map_key(ke), &mut app, &mut editor, &mut interrupt_prompt);
+                    handle_key(
+                        map_key(ke),
+                        &mut app,
+                        &mut editor,
+                        &mut interrupt_prompt,
+                        handle.submit_tx.as_ref(),
+                    );
                 }
             }
-            frame = stream_rx.recv() => {
+            frame = handle.stream_rx.recv() => {
                 if let Ok(frame) = frame {
                     app.apply_stream_frame(frame);
                     interrupt_prompt = false;
+                }
+            }
+            note = recv_note(handle.note_rx.as_mut()) => {
+                if let Some(n) = note {
+                    let (text, level) = n.into_parts();
+                    app.items.push(app::OutputItem::SystemNote { text, level });
                 }
             }
         }
@@ -74,11 +122,19 @@ async fn run_frames(
     Ok(())
 }
 
+async fn recv_note(rx: Option<&mut mpsc::UnboundedReceiver<TuiNote>>) -> Option<TuiNote> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 fn handle_key(
     action: KeyAction,
     app: &mut AppState,
     editor: &mut InputEditor,
     interrupt_prompt: &mut bool,
+    submit_tx: Option<&mpsc::UnboundedSender<String>>,
 ) {
     match action {
         KeyAction::Char(c) => {
@@ -91,7 +147,10 @@ fn handle_key(
         }
         KeyAction::Submit => {
             if let Some(line) = editor.submit() {
-                app.push_user_turn(line);
+                app.push_user_turn(line.clone());
+                if let Some(tx) = submit_tx {
+                    let _ = tx.send(line);
+                }
             }
             *interrupt_prompt = false;
         }
