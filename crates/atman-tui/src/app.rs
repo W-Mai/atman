@@ -51,7 +51,7 @@ pub enum NoteLevel {
     Error,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AppState {
     pub items: Vec<OutputItem>,
     pub input: String,
@@ -69,6 +69,7 @@ pub struct AppState {
     pub cheatsheet_open: bool,
     pub flow_names: Vec<(String, String)>,
     pub expanded_tools: HashSet<String>,
+    pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
     last_lag_note_idx: Option<usize>,
@@ -98,6 +99,11 @@ impl AppState {
 
     pub fn with_flow_names(mut self, flows: Vec<(String, String)>) -> Self {
         self.flow_names = flows;
+        self
+    }
+
+    pub fn with_session(mut self, session: Option<std::sync::Arc<atman_runtime::Session>>) -> Self {
+        self.session = session;
         self
     }
 

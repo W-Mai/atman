@@ -934,6 +934,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
             flow_names: flow_names.clone(),
+            session: Some(std::sync::Arc::clone(&session)),
         };
         (
             Some(tokio::spawn(atman_tui::run_tui(handle))),
@@ -2519,7 +2520,7 @@ async fn cmd_tui_preview() -> Result<()> {
         }
         let _ = tx.send(StreamFrame::LlmDone { total_tokens: 48 });
     });
-    let result = atman_tui::run_tui(atman_tui::TuiHandle::from_session(session.as_ref())).await;
+    let result = atman_tui::run_tui(atman_tui::TuiHandle::from_session(session.clone())).await;
     feeder.abort();
     result
 }

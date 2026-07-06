@@ -69,10 +69,11 @@ pub struct TuiHandle {
     pub context_rx: Option<tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
     pub attach_rx: Option<tokio::sync::watch::Receiver<usize>>,
     pub flow_names: Vec<(String, String)>,
+    pub session: Option<std::sync::Arc<atman_runtime::Session>>,
 }
 
 impl TuiHandle {
-    pub fn from_session(session: &atman_runtime::Session) -> Self {
+    pub fn from_session(session: std::sync::Arc<atman_runtime::Session>) -> Self {
         Self {
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
@@ -88,6 +89,7 @@ impl TuiHandle {
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
             flow_names: Vec::new(),
+            session: Some(session),
         }
     }
 }
@@ -106,7 +108,8 @@ async fn run_frames(
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
         .with_initial_items(std::mem::take(&mut handle.initial_items))
         .with_session_dir(handle.session_dir.clone())
-        .with_flow_names(std::mem::take(&mut handle.flow_names));
+        .with_flow_names(std::mem::take(&mut handle.flow_names))
+        .with_session(handle.session.clone());
     let mut editor = InputEditor::default();
     let mut key_events = EventStream::new();
     let mut interrupt_prompt = false;
@@ -503,7 +506,16 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.resolve_scroll(0, transcript_area.height);
         f.render_widget(output::empty_hint(), transcript_area);
     } else {
-        let lines = output::build_lines(&app.items);
+        let messages = app
+            .session
+            .as_ref()
+            .map(|s| s.messages())
+            .unwrap_or_default();
+        let ctx = output::RenderCtx {
+            expanded_tools: &app.expanded_tools,
+            messages: &messages,
+        };
+        let lines = output::build_lines(&app.items, &ctx);
         let paragraph =
             ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
         let total_rows = paragraph.line_count(transcript_area.width) as u16;
