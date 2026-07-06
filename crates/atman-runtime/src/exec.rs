@@ -326,6 +326,8 @@ async fn run_streaming_once<'a>(
     ctx: &EvalCtx<'a>,
 ) -> StreamOutcome {
     let mut inj_rx = ctx.session.map(|s| s.subscribe_injections());
+    let stream_tx = ctx.session.map(|s| s.stream_tx());
+    let model_name = req.model.clone();
     let obs = provider.call_streaming(req);
     let cancel = obs.cancel.clone();
     let mut events = obs.events;
@@ -348,9 +350,18 @@ async fn run_streaming_once<'a>(
             ev = events.recv() => {
                 match ev {
                     Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
+                        if let Some(tx) = &stream_tx {
+                            let _ = tx.send(crate::stream::StreamFrame::LlmChunk {
+                                text: text.clone(),
+                                model: model_name.clone(),
+                            });
+                        }
                         state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
                     }
                     Ok(NodeEvent::LlmDone { total_tokens }) => {
+                        if let Some(tx) = &stream_tx {
+                            let _ = tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
+                        }
                         state.on_done(total_tokens, started, rules, &cancel);
                     }
                     Ok(_) => {}
@@ -389,9 +400,18 @@ async fn run_streaming_once<'a>(
                 text,
                 cumulative_tokens,
             } => {
+                if let Some(tx) = &stream_tx {
+                    let _ = tx.send(crate::stream::StreamFrame::LlmChunk {
+                        text: text.clone(),
+                        model: model_name.clone(),
+                    });
+                }
                 state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
             }
             NodeEvent::LlmDone { total_tokens } => {
+                if let Some(tx) = &stream_tx {
+                    let _ = tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
+                }
                 state.on_done(total_tokens, started, rules, &cancel);
             }
             _ => {}

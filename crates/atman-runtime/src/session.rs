@@ -9,6 +9,7 @@ use crate::event::{Event, EventSink, FlowRunId, TurnId};
 use crate::event_writer::EventWriter;
 use crate::injection::{Injection, InjectionId, InjectionState};
 use crate::message::{Message, MessageRole};
+use crate::stream::StreamFrame;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(pub Uuid);
@@ -34,6 +35,7 @@ pub struct Session {
     current_turn: Mutex<Option<TurnId>>,
     injection_queue: Mutex<Vec<Injection>>,
     injection_tx: broadcast::Sender<Injection>,
+    stream_tx: broadcast::Sender<StreamFrame>,
     flow_cancel: Mutex<CancellationToken>,
 }
 
@@ -54,6 +56,7 @@ impl Session {
             sink = sink.with_redactor(r);
         }
         let (injection_tx, _) = broadcast::channel(32);
+        let (stream_tx, _) = broadcast::channel(256);
         Ok(Self {
             id,
             dir,
@@ -63,12 +66,14 @@ impl Session {
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
+            stream_tx,
             flow_cancel: Mutex::new(CancellationToken::new()),
         })
     }
 
     pub fn open_ephemeral() -> Self {
         let (injection_tx, _) = broadcast::channel(32);
+        let (stream_tx, _) = broadcast::channel(256);
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -78,8 +83,17 @@ impl Session {
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
+            stream_tx,
             flow_cancel: Mutex::new(CancellationToken::new()),
         }
+    }
+
+    pub fn stream_tx(&self) -> broadcast::Sender<StreamFrame> {
+        self.stream_tx.clone()
+    }
+
+    pub fn stream_subscribe(&self) -> broadcast::Receiver<StreamFrame> {
+        self.stream_tx.subscribe()
     }
 
     pub fn id(&self) -> &SessionId {

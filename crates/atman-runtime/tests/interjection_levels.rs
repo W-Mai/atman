@@ -52,18 +52,21 @@ impl Provider for RecordingProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
-        let msg = Message {
-            role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text { text: "ok".into() }],
-            turn_id: req
-                .messages
-                .first()
-                .map(|m| m.turn_id.clone())
-                .unwrap_or_else(TurnId::now),
-        };
-        wrap_call_as_streaming(Box::pin(
-            async move { Ok(AssistantMessage::text_only(msg)) },
-        ))
+        let calls = self.calls.clone();
+        let turn_id = req
+            .messages
+            .first()
+            .map(|m| m.turn_id.clone())
+            .unwrap_or_else(TurnId::now);
+        let messages = req.messages.clone();
+        wrap_call_as_streaming(Box::pin(async move {
+            calls.lock().unwrap().push(messages);
+            Ok(AssistantMessage::text_only(Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Text { text: "ok".into() }],
+                turn_id,
+            }))
+        }))
     }
 }
 

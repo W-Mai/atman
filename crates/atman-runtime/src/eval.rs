@@ -195,13 +195,117 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
-    match tool
+    let stream_tx = ctx.session.map(|s| s.stream_tx());
+    if let Some(tx) = &stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::ToolUseStart {
+            tool: name.clone(),
+            args_preview: preview_tool_args(&positional, &named),
+        });
+    }
+    let outcome = tool
         .call(ToolArgs { positional, named }, &ctx_with_anchors)
-        .await
-    {
+        .await;
+    if let Some(tx) = &stream_tx {
+        let (ok, preview) = match &outcome {
+            Ok(v) => (true, preview_tool_value(v)),
+            Err(e) => (false, format!("{e}")),
+        };
+        let _ = tx.send(crate::stream::StreamFrame::ToolUseDone {
+            tool: name.clone(),
+            ok,
+            preview,
+        });
+    }
+    match outcome {
         Ok(v) => v,
         Err(e) => Value::Err(e),
     }
+}
+
+async fn call_and_maybe_stream(
+    provider: &dyn crate::provider::Provider,
+    req: crate::provider::LlmRequest,
+    session: Option<&crate::session::Session>,
+) -> Result<crate::provider::AssistantMessage, RuntimeError> {
+    let Some(session) = session else {
+        return provider.call(req).await;
+    };
+    let stream_tx = session.stream_tx();
+    let model_name = req.model.clone();
+    let obs = provider.call_streaming(req);
+    let mut events = obs.events;
+    let output = obs.output;
+    tokio::pin!(output);
+    loop {
+        tokio::select! {
+            biased;
+            ev = events.recv() => {
+                match ev {
+                    Ok(crate::event::NodeEvent::LlmChunk { text, .. }) => {
+                        let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
+                            text,
+                            model: model_name.clone(),
+                        });
+                    }
+                    Ok(crate::event::NodeEvent::LlmDone { total_tokens }) => {
+                        let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+            result = &mut output => {
+                while let Ok(ev) = events.try_recv() {
+                    match ev {
+                        crate::event::NodeEvent::LlmChunk { text, .. } => {
+                            let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
+                                text,
+                                model: model_name.clone(),
+                            });
+                        }
+                        crate::event::NodeEvent::LlmDone { total_tokens } => {
+                            let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
+                        }
+                        _ => {}
+                    }
+                }
+                return result;
+            }
+        }
+    }
+}
+
+fn preview_tool_args(positional: &[Value], named: &[(String, Value)]) -> String {
+    let mut parts: Vec<String> = positional.iter().map(preview_tool_value).collect();
+    for (k, v) in named {
+        parts.push(format!("{k}={}", preview_tool_value(v)));
+    }
+    truncate(&parts.join(", "), 120)
+}
+
+fn preview_tool_value(v: &Value) -> String {
+    let raw = match v {
+        Value::Str(s) => format!("{s:?}"),
+        Value::Int(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Unit => "()".into(),
+        Value::List(items) => format!("list[{}]", items.len()),
+        Value::Struct(f) => format!("struct[{}]", f.len()),
+        Value::Message(_) => "<message>".into(),
+        Value::Err(e) => format!("err({e})"),
+        Value::Path(p) => format!("{p:?}"),
+        Value::EditProposal(_) => "<edit_proposal>".into(),
+    };
+    truncate(&raw, 60)
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
@@ -488,7 +592,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     tools: tool_specs.clone(),
                 };
                 let start = std::time::Instant::now();
-                let outcome = provider.call(req).await;
+                let outcome = call_and_maybe_stream(provider.as_ref(), req, ctx.session).await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 let usage = match &outcome {
                     Ok(am) => crate::provider::TokenUsage {

@@ -87,18 +87,30 @@ impl Provider for CancelAfterFirstProvider {
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
-        let msg = Message {
-            role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text { text: "x".into() }],
-            turn_id: req
-                .messages
-                .first()
-                .map(|m| m.turn_id.clone())
-                .unwrap_or_else(TurnId::now),
-        };
-        wrap_call_as_streaming(Box::pin(
-            async move { Ok(AssistantMessage::text_only(msg)) },
-        ))
+        let session = self.session.clone();
+        let calls = self.calls.clone();
+        let turn_id = req
+            .messages
+            .first()
+            .map(|m| m.turn_id.clone())
+            .unwrap_or_else(TurnId::now);
+        wrap_call_as_streaming(Box::pin(async move {
+            let idx = {
+                let mut c = calls.lock().unwrap();
+                *c += 1;
+                *c
+            };
+            if idx == 1 {
+                session.cancel_flow();
+            }
+            Ok(AssistantMessage::text_only(Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::Text {
+                    text: format!("call-{idx}"),
+                }],
+                turn_id,
+            }))
+        }))
     }
 }
 
