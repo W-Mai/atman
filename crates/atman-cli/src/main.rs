@@ -889,6 +889,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         }
     }
     attach_memory_stores(&mut executor, session.dir(), false)?;
+    session.refresh_todos_from_store_async().await;
 
     let lifecycles = match config_dir() {
         Ok(cfg) => atman_runtime::lifecycle::LifecycleRunner::from_dir(&cfg),
@@ -933,6 +934,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
+            todos_rx: Some(session.subscribe_todos()),
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
         };

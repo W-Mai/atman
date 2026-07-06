@@ -68,6 +68,7 @@ pub struct TuiHandle {
     pub goal_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,
     pub context_rx: Option<tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
     pub attach_rx: Option<tokio::sync::watch::Receiver<usize>>,
+    pub todos_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>>,
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
 }
@@ -88,6 +89,7 @@ impl TuiHandle {
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
+            todos_rx: Some(session.subscribe_todos()),
             flow_names: Vec::new(),
             session: Some(session),
         }
@@ -221,6 +223,11 @@ async fn run_frames(
                     app.attach_count = *rx.borrow();
                 }
             }
+            _ = wait_todos_change(handle.todos_rx.as_mut()) => {
+                if let Some(rx) = handle.todos_rx.as_mut() {
+                    app.todos = rx.borrow().clone();
+                }
+            }
             cmd = recv_cmd(handle.cmd_rx.as_mut()) => {
                 if let Some(cmd) = cmd {
                     match cmd {
@@ -263,6 +270,17 @@ async fn wait_context_change(
 }
 
 async fn wait_attach_change(rx: Option<&mut tokio::sync::watch::Receiver<usize>>) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_todos_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>>,
+) {
     match rx {
         Some(r) => {
             let _ = r.changed().await;
@@ -566,6 +584,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 session_id: &app.session_id,
                 session_dir: &app.session_dir,
                 streaming: app.streaming,
+                todos: &app.todos,
             },
         );
     }

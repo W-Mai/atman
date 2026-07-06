@@ -13,6 +13,7 @@ pub struct SidebarInputs<'a> {
     pub session_id: &'a str,
     pub session_dir: &'a str,
     pub streaming: bool,
+    pub todos: &'a [atman_runtime::memory::todo::Todo],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,7 +72,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         );
     }
     if todos_h > 0 {
-        f.render_widget(todos_section(), sections[2]);
+        f.render_widget(todos_section(inputs.todos, todos_h), sections[2]);
     }
     if session_h > 0 {
         f.render_widget(
@@ -154,14 +155,70 @@ fn context_section<'a>(
     Paragraph::new(lines)
 }
 
-fn todos_section<'a>() -> Paragraph<'a> {
-    Paragraph::new(vec![
-        Line::from(section_title("▸ Todos")),
-        Line::from(Span::styled(
+fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], max_h: u16) -> Paragraph<'a> {
+    use atman_runtime::memory::todo::TodoStatus;
+    let done = todos
+        .iter()
+        .filter(|t| matches!(t.status, TodoStatus::Done))
+        .count();
+    let total = todos.len();
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(max_h as usize);
+    lines.push(Line::from(Span::styled(
+        format!("▸ Todos ({done}/{total})"),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if todos.is_empty() {
+        lines.push(Line::from(Span::styled(
             "  (no todos yet)",
             Style::default().fg(Color::DarkGray),
-        )),
-    ])
+        )));
+        return Paragraph::new(lines);
+    }
+    let show_cap = (max_h as usize).saturating_sub(1);
+    for todo in todos.iter().take(show_cap) {
+        let (glyph, style) = match todo.status {
+            TodoStatus::Pending => ("○", Style::default().fg(Color::DarkGray)),
+            TodoStatus::InProgress => (
+                "⚡",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            TodoStatus::Done => ("✓", Style::default().fg(Color::Green)),
+            TodoStatus::Cancelled => (
+                "✗",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::CROSSED_OUT),
+            ),
+        };
+        let content = &todo.where_;
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {glyph} "), Style::default().fg(Color::DarkGray)),
+            Span::styled(truncate_line(content, 24), style),
+        ]));
+    }
+    if todos.len() > show_cap {
+        lines.push(Line::from(Span::styled(
+            format!("  … +{} more", todos.len() - show_cap),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    Paragraph::new(lines)
+}
+
+fn truncate_line(s: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i >= max_chars {
+            out.push('…');
+            return out;
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn session_section<'a>(session_id: &'a str, session_dir: &'a str) -> Paragraph<'a> {

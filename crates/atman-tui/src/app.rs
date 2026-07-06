@@ -82,6 +82,7 @@ pub struct AppState {
     pub session_dir: String,
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,
+    pub todos: Vec<atman_runtime::memory::todo::Todo>,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,

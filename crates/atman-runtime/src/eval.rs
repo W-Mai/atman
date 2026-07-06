@@ -219,6 +219,11 @@ async fn dispatch_tool_call<'a>(
             id: tool_call_id,
         });
     }
+    if let Some(session) = ctx.session
+        && (name == "memory.todo.set" || name == "memory.todo.done")
+    {
+        session.refresh_todos_from_store_async().await;
+    }
     match outcome {
         Ok(v) => v,
         Err(e) => Value::Err(e),

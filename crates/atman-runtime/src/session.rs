@@ -44,6 +44,7 @@ pub struct Session {
     context_watch: watch::Sender<ContextSnapshot>,
     goal_watch: watch::Sender<Option<String>>,
     attach_watch: watch::Sender<usize>,
+    todos_watch: watch::Sender<Vec<crate::memory::todo::Todo>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -142,6 +143,7 @@ impl Session {
         let (context_watch, _) = watch::channel(ContextSnapshot::default());
         let (goal_watch, _) = watch::channel(None);
         let (attach_watch, _) = watch::channel(0);
+        let (todos_watch, _) = watch::channel(Vec::new());
         Ok(Self {
             id,
             dir,
@@ -156,6 +158,7 @@ impl Session {
             context_watch,
             goal_watch,
             attach_watch,
+            todos_watch,
         })
     }
 
@@ -191,6 +194,7 @@ impl Session {
         let (context_watch, _) = watch::channel(ContextSnapshot::default());
         let (goal_watch, _) = watch::channel(initial_goal);
         let (attach_watch, _) = watch::channel(0);
+        let (todos_watch, _) = watch::channel(Vec::new());
         Ok(Self {
             id,
             dir,
@@ -205,6 +209,7 @@ impl Session {
             context_watch,
             goal_watch,
             attach_watch,
+            todos_watch,
         })
     }
 
@@ -214,6 +219,7 @@ impl Session {
         let (context_watch, _) = watch::channel(ContextSnapshot::default());
         let (goal_watch, _) = watch::channel(None);
         let (attach_watch, _) = watch::channel(0);
+        let (todos_watch, _) = watch::channel(Vec::new());
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -228,6 +234,7 @@ impl Session {
             context_watch,
             goal_watch,
             attach_watch,
+            todos_watch,
         }
     }
 
@@ -297,6 +304,45 @@ impl Session {
         self.context_watch.send_modify(|snap| {
             snap.memory_recent_count = count;
         });
+    }
+
+    pub fn subscribe_todos(&self) -> watch::Receiver<Vec<crate::memory::todo::Todo>> {
+        self.todos_watch.subscribe()
+    }
+
+    pub fn refresh_todos_from_store(&self) {
+        if self.dir.as_os_str().is_empty() {
+            return;
+        }
+        let store = crate::memory::todo::TodoStore::at(&self.dir);
+        match tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::try_current()
+                .ok()
+                .map(|h| h.block_on(store.list()))
+        }) {
+            Some(Ok(list)) => {
+                let _ = self.todos_watch.send(list);
+            }
+            Some(Err(e)) => {
+                eprintln!("[atman] refresh_todos_from_store: {e}");
+            }
+            None => {}
+        }
+    }
+
+    pub async fn refresh_todos_from_store_async(&self) {
+        if self.dir.as_os_str().is_empty() {
+            return;
+        }
+        let store = crate::memory::todo::TodoStore::at(&self.dir);
+        match store.list().await {
+            Ok(list) => {
+                let _ = self.todos_watch.send(list);
+            }
+            Err(e) => {
+                eprintln!("[atman] refresh_todos_from_store_async: {e}");
+            }
+        }
     }
 
     pub fn sink(&self) -> &EventSink {
