@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use atman_runtime::stream::StreamFrame;
@@ -18,13 +19,22 @@ pub enum OutputItem {
         args: String,
         status: ToolStatus,
         result: Option<String>,
-        history_id: Option<String>,
+        tool_use_id: Option<String>,
     },
     SystemNote {
         text: String,
         level: NoteLevel,
     },
     Divider,
+}
+
+impl OutputItem {
+    pub fn tool_use_id(&self) -> Option<&str> {
+        match self {
+            OutputItem::ToolCall { tool_use_id, .. } => tool_use_id.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +68,7 @@ pub struct AppState {
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,
     pub flow_names: Vec<(String, String)>,
+    pub expanded_tools: HashSet<String>,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
     last_lag_note_idx: Option<usize>,
@@ -88,6 +99,27 @@ impl AppState {
     pub fn with_flow_names(mut self, flows: Vec<(String, String)>) -> Self {
         self.flow_names = flows;
         self
+    }
+
+    pub fn is_tool_expanded(&self, id: &str) -> bool {
+        self.expanded_tools.contains(id)
+    }
+
+    pub fn toggle_tool_expansion(&mut self, id: &str) {
+        if !self.expanded_tools.remove(id) {
+            self.expanded_tools.insert(id.to_string());
+        }
+    }
+
+    pub fn toggle_last_tool_expansion(&mut self) -> bool {
+        for item in self.items.iter().rev() {
+            if let Some(id) = item.tool_use_id() {
+                let id = id.to_string();
+                self.toggle_tool_expansion(&id);
+                return true;
+            }
+        }
+        false
     }
 
     pub fn refresh_popup(&mut self, editor_buf: &str) {
@@ -193,7 +225,7 @@ impl AppState {
                     args: args_preview,
                     status: ToolStatus::Running,
                     result: None,
-                    history_id: Some(id),
+                    tool_use_id: Some(id),
                 });
             }
             StreamFrame::ToolUseDone {
@@ -367,6 +399,58 @@ mod tests {
         assert_eq!(app.items.len(), 2);
         assert!(matches!(app.items[0], OutputItem::UserTurn { .. }));
         assert!(matches!(app.items[1], OutputItem::Divider));
+    }
+
+    #[test]
+    fn tool_use_start_stores_id_on_output_item() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::ToolUseStart {
+            tool: "fs.read".into(),
+            args_preview: "foo".into(),
+            id: "tc_42".into(),
+        });
+        match &app.items[0] {
+            OutputItem::ToolCall { tool_use_id, .. } => {
+                assert_eq!(tool_use_id.as_deref(), Some("tc_42"));
+            }
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    #[test]
+    fn toggle_tool_expansion_flips_membership() {
+        let mut app = AppState::new("s".into(), None);
+        assert!(!app.is_tool_expanded("x"));
+        app.toggle_tool_expansion("x");
+        assert!(app.is_tool_expanded("x"));
+        app.toggle_tool_expansion("x");
+        assert!(!app.is_tool_expanded("x"));
+    }
+
+    #[test]
+    fn toggle_last_tool_expansion_finds_latest_tool_call() {
+        let mut app = AppState::new("s".into(), None);
+        app.push_user_turn("x".into());
+        app.apply_stream_frame(StreamFrame::ToolUseStart {
+            tool: "a".into(),
+            args_preview: "".into(),
+            id: "tc_a".into(),
+        });
+        app.apply_stream_frame(StreamFrame::ToolUseStart {
+            tool: "b".into(),
+            args_preview: "".into(),
+            id: "tc_b".into(),
+        });
+        assert!(app.toggle_last_tool_expansion());
+        assert!(app.is_tool_expanded("tc_b"));
+        assert!(!app.is_tool_expanded("tc_a"));
+    }
+
+    #[test]
+    fn toggle_last_tool_expansion_returns_false_when_no_tool_call() {
+        let mut app = AppState::new("s".into(), None);
+        app.push_user_turn("hi".into());
+        assert!(!app.toggle_last_tool_expansion());
     }
 
     #[test]

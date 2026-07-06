@@ -114,7 +114,7 @@ mod tests {
                 args: "a".into(),
                 status: ToolStatus::Ok,
                 result: Some("r".into()),
-                history_id: None,
+                tool_use_id: None,
             },
             OutputItem::SystemNote {
                 text: "note".into(),

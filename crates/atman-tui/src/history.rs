@@ -30,7 +30,7 @@ pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {
                                 args: format_input_preview(input),
                                 status: ToolStatus::Ok,
                                 result: None,
-                                history_id: Some(id.clone()),
+                                tool_use_id: Some(id.clone()),
                             });
                         }
                         MessagePart::ToolResult { .. } | MessagePart::Image { .. } => {}
@@ -59,7 +59,7 @@ fn attach_tool_result(items: &mut [OutputItem], tool_use_id: &str, content: &str
     let truncated = truncate(content, TOOL_RESULT_MAX_CHARS);
     for item in items.iter_mut().rev() {
         if let OutputItem::ToolCall {
-            history_id: Some(id),
+            tool_use_id: Some(id),
             status,
             result,
             ..
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_attaches_to_matching_history_id() {
+    fn tool_result_attaches_to_matching_tool_use_id() {
         let msgs = vec![
             assistant(vec![MessagePart::ToolUse {
                 id: "toolu_1".into(),
