@@ -24,6 +24,10 @@ impl MemoryId {
     pub fn now() -> Self {
         Self(Uuid::now_v7())
     }
+
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
 }
 
 impl std::fmt::Display for MemoryId {

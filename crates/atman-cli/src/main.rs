@@ -993,6 +993,11 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                 handle_sidebar_builtin(arg, cmd_tx_for_repl.as_ref(), &reporter);
                 continue;
             }
+            if trimmed == "todo" || trimmed.starts_with("todo ") {
+                let arg = trimmed.strip_prefix("todo").unwrap_or("").trim();
+                handle_todo_builtin(arg, &session, &reporter).await;
+                continue;
+            }
             if !handle_builtin(trimmed, sid.as_str(), &mut pending, &session, &reporter) {
                 break;
             }
@@ -1645,6 +1650,88 @@ fn handle_sidebar_builtin(
     reporter.info(format!("[atman] sidebar mode: {arg}"));
 }
 
+async fn handle_todo_builtin(arg: &str, session: &Session, reporter: &Reporter) {
+    use atman_runtime::memory::todo::{TodoStatus, TodoStore};
+    let store = TodoStore::at(session.dir());
+    let trimmed = arg.trim();
+    match trimmed {
+        "" | "list" => match store.list().await {
+            Ok(list) if list.is_empty() => reporter.info("[atman] no todos yet"),
+            Ok(list) => {
+                for (i, t) in list.iter().enumerate() {
+                    let glyph = match t.status {
+                        TodoStatus::Pending => "○",
+                        TodoStatus::InProgress => "⚡",
+                        TodoStatus::Done => "✓",
+                        TodoStatus::Cancelled => "✗",
+                    };
+                    reporter.info(format!(
+                        "  {i:>2}  {glyph} {}  ({})",
+                        t.where_, t.id
+                    ));
+                }
+            }
+            Err(e) => reporter.error(format!("[atman] :todo list: {e}")),
+        },
+        "clear" => {
+            match tokio::fs::remove_file(store.path()).await {
+                Ok(()) | Err(_) => {}
+            }
+            session.refresh_todos_from_store_async().await;
+            reporter.info("[atman] todos cleared");
+        }
+        s if s.starts_with("done ") => {
+            let id_str = s[5..].trim();
+            match parse_todo_id(id_str, &store).await {
+                Ok(id) => match store.set_status(&id, TodoStatus::Done).await {
+                    Ok(()) => {
+                        session.refresh_todos_from_store_async().await;
+                        reporter.info(format!("[atman] todo {id} → done"));
+                    }
+                    Err(e) => reporter.error(format!("[atman] :todo done: {e}")),
+                },
+                Err(e) => reporter.error(format!("[atman] :todo done: {e}")),
+            }
+        }
+        s if s.starts_with("cancel ") => {
+            let id_str = s[7..].trim();
+            match parse_todo_id(id_str, &store).await {
+                Ok(id) => match store.set_status(&id, TodoStatus::Cancelled).await {
+                    Ok(()) => {
+                        session.refresh_todos_from_store_async().await;
+                        reporter.info(format!("[atman] todo {id} → cancelled"));
+                    }
+                    Err(e) => reporter.error(format!("[atman] :todo cancel: {e}")),
+                },
+                Err(e) => reporter.error(format!("[atman] :todo cancel: {e}")),
+            }
+        }
+        other => reporter.error(format!(
+            "[atman] :todo: unknown `{other}` (try: list / done <id> / cancel <id> / clear). To add todos, ask the agent — it uses memory.todo.set."
+        )),
+    }
+}
+
+async fn parse_todo_id(
+    s: &str,
+    store: &atman_runtime::memory::todo::TodoStore,
+) -> Result<atman_runtime::memory::MemoryId, String> {
+    if let Ok(id) = atman_runtime::memory::MemoryId::parse(s) {
+        return Ok(id);
+    }
+    if let Ok(idx) = s.parse::<usize>() {
+        let list = store
+            .list()
+            .await
+            .map_err(|e| format!("list failed: {e}"))?;
+        if let Some(t) = list.get(idx) {
+            return Ok(t.id.clone());
+        }
+        return Err(format!("index {idx} out of range"));
+    }
+    Err(format!("bad todo id `{s}` (use uuid or list index)"))
+}
+
 fn handle_goal_builtin(cmd: &str, session: &Session, reporter: &Reporter) {
     let store = atman_runtime::memory::goal::GoalStore::at(session.dir());
     let rest = cmd.strip_prefix("goal").unwrap_or(cmd).trim();
@@ -1736,6 +1823,11 @@ fn handle_builtin(
                 ":goal <text>         — set session goal (auto-injected into every llm system prompt)",
                 ":goal clear          — erase session goal",
                 ":sessions            — list recent sessions on disk (newest first)",
+                ":sidebar on|off|auto — toggle right sidebar",
+                ":todo list           — show current todos",
+                ":todo done <id>      — mark todo done (uuid or list index)",
+                ":todo cancel <id>    — mark todo cancelled",
+                ":todo clear          — remove all todos",
                 "",
                 "resume a prior session: exit, then run `atman --continue <session_id>`",
                 "@./path or @/abs     — inline attach in bare input",

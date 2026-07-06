@@ -16,6 +16,7 @@ pub const BUILTINS: &[(&str, &str)] = &[
     (":goal", "get / set / clear session goal"),
     (":sessions", "list recent sessions"),
     (":sidebar", "sidebar on / off / auto"),
+    (":todo", "list / done <id> / cancel <id> / clear"),
 ];
 
 pub const INTERJECTIONS: &[(&str, &str)] = &[
