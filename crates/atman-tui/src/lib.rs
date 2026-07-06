@@ -564,11 +564,24 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             messages: &messages,
             animation_frame: app.animation_frame,
         };
-        let (lines, ranges, total_rows) =
-            output::build_lines_with_ranges(&app.items, transcript_area.width, &ctx);
-        app.last_item_ranges = ranges;
+        let animation_key = if app.has_running_flow() {
+            Some(app.animation_frame)
+        } else {
+            None
+        };
+        let cache_key = output::LayoutKey {
+            items_version: app.items_version,
+            expanded_version: app.expanded_version,
+            width: transcript_area.width,
+            animation_frame: animation_key,
+        };
+        let mut cache = std::mem::take(&mut app.layout_cache);
+        let (lines, ranges, total_rows) = cache.get_or_build(cache_key, &app.items, &ctx);
+        app.last_item_ranges = ranges.to_vec();
+        let lines_owned = lines.to_vec();
+        app.layout_cache = cache;
         app.resolve_scroll(total_rows, transcript_area.height);
-        let paragraph = ratatui::widgets::Paragraph::new(lines)
+        let paragraph = ratatui::widgets::Paragraph::new(lines_owned)
             .wrap(ratatui::widgets::Wrap { trim: false })
             .scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, transcript_area);

@@ -92,6 +92,9 @@ pub struct AppState {
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub animation_frame: u32,
+    pub items_version: u64,
+    pub expanded_version: u64,
+    pub layout_cache: crate::output::LayoutCache,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
     last_lag_note_idx: Option<usize>,
@@ -111,6 +114,7 @@ impl AppState {
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
         self.items = items;
+        self.items_version = self.items_version.wrapping_add(1);
         self
     }
 
@@ -137,6 +141,7 @@ impl AppState {
         if !self.expanded_tools.remove(id) {
             self.expanded_tools.insert(id.to_string());
         }
+        self.expanded_version = self.expanded_version.wrapping_add(1);
     }
 
     pub fn toggle_last_tool_expansion(&mut self) -> bool {
@@ -160,6 +165,7 @@ impl AppState {
                 && rid == run_id
             {
                 *expanded = !*expanded;
+                self.expanded_version = self.expanded_version.wrapping_add(1);
                 return;
             }
         }
@@ -249,7 +255,16 @@ impl AppState {
 
     pub fn push_item(&mut self, item: OutputItem) {
         self.items.push(item);
+        self.items_version = self.items_version.wrapping_add(1);
         self.reset_lag_state();
+    }
+
+    pub fn mark_items_dirty(&mut self) {
+        self.items_version = self.items_version.wrapping_add(1);
+    }
+
+    pub fn mark_expanded_dirty(&mut self) {
+        self.expanded_version = self.expanded_version.wrapping_add(1);
     }
 
     pub fn push_note(&mut self, text: impl Into<String>, level: NoteLevel) {

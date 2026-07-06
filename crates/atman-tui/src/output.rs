@@ -74,6 +74,53 @@ pub fn build_lines_with_ranges(
     (all_lines, ranges, cursor)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutKey {
+    pub items_version: u64,
+    pub expanded_version: u64,
+    pub width: u16,
+    pub animation_frame: Option<u32>,
+}
+
+#[derive(Default)]
+pub struct LayoutCache {
+    key: Option<LayoutKey>,
+    lines: Vec<Line<'static>>,
+    ranges: Vec<ItemRange>,
+    total_rows: u16,
+}
+
+impl LayoutCache {
+    pub fn get_or_build(
+        &mut self,
+        key: LayoutKey,
+        items: &[OutputItem],
+        ctx: &RenderCtx<'_>,
+    ) -> (&[Line<'static>], &[ItemRange], u16) {
+        if self.key != Some(key) {
+            let (lines, ranges, total) = build_lines_with_ranges(items, key.width, ctx);
+            self.lines = lines;
+            self.ranges = ranges;
+            self.total_rows = total;
+            self.key = Some(key);
+        }
+        (&self.lines, &self.ranges, self.total_rows)
+    }
+
+    pub fn invalidate(&mut self) {
+        self.key = None;
+    }
+}
+
+impl std::fmt::Debug for LayoutCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayoutCache")
+            .field("key", &self.key)
+            .field("total_rows", &self.total_rows)
+            .finish()
+    }
+}
+
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
     let mut lines = match item {
         OutputItem::UserTurn { text } => vec![Line::from(vec![
