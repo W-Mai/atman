@@ -47,6 +47,7 @@ pub struct TuiHandle {
     pub stream_rx: broadcast::Receiver<StreamFrame>,
     pub submit_tx: Option<mpsc::UnboundedSender<String>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
+    pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl TuiHandle {
@@ -57,6 +58,7 @@ impl TuiHandle {
             stream_rx: session.stream_subscribe(),
             submit_tx: None,
             note_rx: None,
+            shutdown_rx: None,
         }
     }
 }
@@ -84,6 +86,7 @@ async fn run_frames(
     let mut editor = InputEditor::default();
     let mut key_events = EventStream::new();
     let mut interrupt_prompt = false;
+    let mut shutdown = handle.shutdown_rx.take();
 
     loop {
         terminal.draw(|f| render_frame(f, &app, &editor))?;
@@ -94,6 +97,9 @@ async fn run_frames(
 
         tokio::select! {
             biased;
+            _ = wait_shutdown(shutdown.as_mut()) => {
+                break;
+            }
             key = key_events.next() => {
                 if let Some(Ok(CtEvent::Key(ke))) = key {
                     handle_key(
@@ -125,6 +131,15 @@ async fn run_frames(
 async fn recv_note(rx: Option<&mut mpsc::UnboundedReceiver<TuiNote>>) -> Option<TuiNote> {
     match rx {
         Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_shutdown(rx: Option<&mut tokio::sync::oneshot::Receiver<()>>) {
+    match rx {
+        Some(r) => {
+            let _ = r.await;
+        }
         None => std::future::pending().await,
     }
 }

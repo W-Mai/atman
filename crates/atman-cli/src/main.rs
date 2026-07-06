@@ -839,10 +839,14 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     use std::collections::VecDeque;
     use tokio::sync::mpsc;
 
-    println!(
+    let use_tui = tui_mode_requested();
+    let (note_tx, note_rx) = mpsc::unbounded_channel::<atman_tui::TuiNote>();
+    let reporter = Reporter::new(use_tui, note_tx);
+
+    reporter.info(format!(
         "atman v{} — type `:help` for commands, `:exit` to leave, `!nudge <text>` or `!stop` while a flow is running",
         env!("CARGO_PKG_VERSION")
-    );
+    ));
 
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
@@ -855,14 +859,18 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     if let Some(path) = session.events_path() {
         let count = session.message_count();
         if count > 0 {
-            println!(
+            reporter.info(format!(
                 "[atman] resumed session={} events={} ({} prior message(s))",
                 session.id(),
                 path.display(),
                 count
-            );
+            ));
         } else {
-            println!("[atman] session={} events={}", session.id(), path.display());
+            reporter.info(format!(
+                "[atman] session={} events={}",
+                session.id(),
+                path.display()
+            ));
         }
     }
 
@@ -873,11 +881,11 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         .await?;
     for outcome in &mcp_status {
         match outcome {
-            Ok(s) => println!(
+            Ok(s) => reporter.info(format!(
                 "[atman] mcp `{}` connected via {} ({} tools)",
                 s.name, s.transport, s.tool_count
-            ),
-            Err(e) => eprintln!("[atman] mcp boot: {e}"),
+            )),
+            Err(e) => reporter.error(format!("[atman] mcp boot: {e}")),
         }
     }
     attach_memory_stores(&mut executor, session.dir(), false)?;
@@ -893,14 +901,29 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     let classifier = build_interjection_classifier();
 
     if let Err(e) = run_boot_flow(&executor).await {
-        eprintln!("[atman] boot flow error: {e}");
+        reporter.error(format!("[atman] boot flow error: {e}"));
     }
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
-    let (printer_tx, printer_rx) = tokio::sync::oneshot::channel::<Option<ExternalPrinter>>();
-    spawn_stdin_reader(input_tx, printer_tx);
-    let printer = printer_rx.await.unwrap_or(None);
-    spawn_stream_consumer(&session, printer).await;
+    let (tui_task, tui_shutdown) = if use_tui {
+        let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = atman_tui::TuiHandle {
+            session_id: session.id().to_string(),
+            goal: session.goal(),
+            stream_rx: session.stream_subscribe(),
+            submit_tx: Some(input_tx),
+            note_rx: Some(note_rx),
+            shutdown_rx: Some(sh_rx),
+        };
+        (Some(tokio::spawn(atman_tui::run_tui(handle))), Some(sh_tx))
+    } else {
+        drop(note_rx);
+        let (printer_tx, printer_rx) = tokio::sync::oneshot::channel::<Option<ExternalPrinter>>();
+        spawn_stdin_reader(input_tx, printer_tx);
+        let printer = printer_rx.await.unwrap_or(None);
+        spawn_stream_consumer(&session, printer).await;
+        (None, None)
+    };
     let mut pending = PendingUserMessage::default();
     let mut pushback: VecDeque<String> = VecDeque::new();
     let sid = session.id().to_string();
@@ -973,7 +996,52 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
 
     session.shutdown().await;
     drop(executor);
+    if let Some(sh) = tui_shutdown {
+        let _ = sh.send(());
+    }
+    if let Some(handle) = tui_task {
+        match handle.await {
+            Ok(Ok(())) | Err(_) => {}
+            Ok(Err(e)) => eprintln!("[atman] tui exited with error: {e}"),
+        }
+    }
     Ok(())
+}
+
+fn tui_mode_requested() -> bool {
+    match std::env::var("ATMAN_TUI") {
+        Ok(v) => matches!(v.as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
+    }
+}
+
+enum Reporter {
+    Stdout,
+    Tui(tokio::sync::mpsc::UnboundedSender<atman_tui::TuiNote>),
+}
+
+impl Reporter {
+    fn new(tui: bool, tx: tokio::sync::mpsc::UnboundedSender<atman_tui::TuiNote>) -> Self {
+        if tui { Self::Tui(tx) } else { Self::Stdout }
+    }
+
+    fn info(&self, text: impl Into<String>) {
+        match self {
+            Self::Stdout => println!("{}", text.into()),
+            Self::Tui(tx) => {
+                let _ = tx.send(atman_tui::TuiNote::Info(text.into()));
+            }
+        }
+    }
+
+    fn error(&self, text: impl Into<String>) {
+        match self {
+            Self::Stdout => eprintln!("{}", text.into()),
+            Self::Tui(tx) => {
+                let _ = tx.send(atman_tui::TuiNote::Error(text.into()));
+            }
+        }
+    }
 }
 
 type ExternalPrinter = Box<dyn rustyline::ExternalPrinter + Send>;
