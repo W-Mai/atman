@@ -53,6 +53,7 @@ enum Cmd {
     Doctor,
     Init,
     RebuildIndex,
+    TuiPreview,
     Version,
     Monitor {
         #[arg(long, default_value_t = 65098)]
@@ -230,6 +231,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Doctor) => cmd_doctor().await,
         Some(Cmd::Init) => cmd_init().await,
         Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
+        Some(Cmd::TuiPreview) => cmd_tui_preview().await,
         Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Start,
@@ -2231,6 +2233,64 @@ async fn cmd_init() -> Result<()> {
     println!("  4. see docs/quickstart.md for a walkthrough,");
     println!("     docs/context-strategy.md for how goal / todos / recent_turns compose.");
     Ok(())
+}
+
+async fn cmd_tui_preview() -> Result<()> {
+    use atman_runtime::stream::StreamFrame;
+
+    let session = std::sync::Arc::new(Session::open_ephemeral());
+    let tx = session.stream_tx();
+    let feeder = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let _ = tx.send(StreamFrame::LlmChunk {
+            text: "# Hello from atman\n\n".into(),
+            model: "demo".into(),
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        for word in [
+            "atman ",
+            "is ",
+            "a ",
+            "Rust ",
+            "code-agent ",
+            "runtime.\n\n",
+        ] {
+            let _ = tx.send(StreamFrame::LlmChunk {
+                text: word.into(),
+                model: "demo".into(),
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        let _ = tx.send(StreamFrame::ToolUseStart {
+            tool: "fs.list".into(),
+            args_preview: "path=\"examples\"".into(),
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let _ = tx.send(StreamFrame::ToolUseDone {
+            tool: "fs.list".into(),
+            ok: true,
+            preview: "9 entries".into(),
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        for word in [
+            "Found ",
+            "`agent.at`, ",
+            "`hello.at`, ",
+            "and ",
+            "seven ",
+            "more.\n",
+        ] {
+            let _ = tx.send(StreamFrame::LlmChunk {
+                text: word.into(),
+                model: "demo".into(),
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+        let _ = tx.send(StreamFrame::LlmDone { total_tokens: 48 });
+    });
+    let result = atman_tui::run_tui(session.as_ref()).await;
+    feeder.abort();
+    result
 }
 
 async fn cmd_doctor() -> Result<()> {
