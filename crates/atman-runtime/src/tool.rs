@@ -60,6 +60,7 @@ pub struct ToolCtx {
     pub events: Option<crate::event::EventSink>,
     pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
     pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
+    pub current_node_id: Option<String>,
 }
 
 impl ToolCtx {
@@ -104,6 +105,11 @@ impl ToolCtx {
         msgs: std::sync::Arc<Vec<crate::message::Message>>,
     ) -> Self {
         self.session_messages = Some(msgs);
+        self
+    }
+
+    pub fn with_current_node(mut self, node_id: Option<String>) -> Self {
+        self.current_node_id = node_id;
         self
     }
 }

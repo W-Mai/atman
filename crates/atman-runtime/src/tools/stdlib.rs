@@ -785,6 +785,22 @@ impl Tool for DispatchAll {
                     positional: Vec::new(),
                     named,
                 };
+                if let (Some(sink), Some(run_id), Some(parent_node)) = (
+                    ctx.events.as_ref(),
+                    ctx.flow_run_id.clone(),
+                    &ctx.current_node_id,
+                ) {
+                    let args_preview = format!("{:?}", input).chars().take(200).collect::<String>();
+                    sink.emit(crate::event::Event::ToolNode {
+                        seq: 0,
+                        run_id,
+                        parent_node_id: parent_node.clone(),
+                        tool_use_id: id.clone(),
+                        tool_name: name.clone(),
+                        args_preview,
+                        ts: chrono::Utc::now(),
+                    });
+                }
                 let (content, is_error) = match tool.call(call_args, ctx).await {
                     Ok(v) => (render_tool_result_text(&v), false),
                     Err(e) => (format!("{e}"), true),

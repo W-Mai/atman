@@ -5,6 +5,7 @@ use crate::error::RuntimeError;
 use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
+#[derive(Clone)]
 pub struct EvalCtx<'a> {
     pub tools: &'a ToolRegistry,
     pub tool_ctx: &'a ToolCtx,
@@ -17,6 +18,15 @@ pub struct EvalCtx<'a> {
     pub session: Option<&'a crate::session::Session>,
     pub flow_cancel: tokio_util::sync::CancellationToken,
     pub safety: Option<&'a crate::safety::SafetyConfig>,
+    pub current_node_id: Option<String>,
+}
+
+impl<'a> EvalCtx<'a> {
+    pub fn with_node(&self, node_id: impl Into<String>) -> Self {
+        let mut c = self.clone();
+        c.current_node_id = Some(node_id.into());
+        c
+    }
 }
 
 pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxFut<'a, Value> {
@@ -195,12 +205,27 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
+    let ctx_with_anchors = ctx_with_anchors.with_current_node(ctx.current_node_id.clone());
     let stream_tx = ctx.session.map(|s| s.stream_tx());
     let tool_call_id = uuid::Uuid::now_v7().to_string();
+    let args_preview = preview_tool_args(&positional, &named);
+    if let (Some(sink), Some(run_id), Some(parent_node)) =
+        (ctx.events, ctx.flow_run_id.clone(), &ctx.current_node_id)
+    {
+        sink.emit(crate::event::Event::ToolNode {
+            seq: 0,
+            run_id,
+            parent_node_id: parent_node.clone(),
+            tool_use_id: tool_call_id.clone(),
+            tool_name: name.clone(),
+            args_preview: args_preview.clone(),
+            ts: chrono::Utc::now(),
+        });
+    }
     if let Some(tx) = &stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::ToolUseStart {
             tool: name.clone(),
-            args_preview: preview_tool_args(&positional, &named),
+            args_preview: args_preview.clone(),
             id: tool_call_id.clone(),
         });
     }
@@ -324,8 +349,51 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
         Node::ToolCall { path, args } => dispatch_tool_call(path, args, Vec::new(), env, ctx).await,
         Node::Fanout { items, collect } => match collect {
             atman_dsl::ast::FanoutCollect::All => {
-                let futs = items.iter().map(|item| eval_expr(item, env, ctx));
+                let parent_id = ctx.current_node_id.clone();
+                let branch_ctxs: Vec<EvalCtx<'a>> = (0..items.len())
+                    .map(|i| {
+                        let branch_id = match &parent_id {
+                            Some(p) => format!("{p}.branch[{i}]"),
+                            None => format!("branch[{i}]"),
+                        };
+                        if let (Some(sink), Some(run_id)) = (ctx.events, ctx.flow_run_id.clone()) {
+                            sink.emit(crate::event::Event::FlowNodeStart {
+                                seq: 0,
+                                run_id,
+                                node_id: branch_id.clone(),
+                                kind: crate::nodegraph::NodeKind::UserConfirm,
+                                label: format!("branch[{i}]"),
+                                parent_node_id: parent_id.clone(),
+                                ts: chrono::Utc::now(),
+                            });
+                        }
+                        ctx.with_node(branch_id)
+                    })
+                    .collect();
+                let futs = items
+                    .iter()
+                    .zip(branch_ctxs.iter())
+                    .map(|(item, bctx)| eval_expr(item, env, bctx));
                 let results: Vec<Value> = futures::future::join_all(futs).await;
+                for (bctx, v) in branch_ctxs.iter().zip(results.iter()) {
+                    if let (Some(sink), Some(run_id), Some(bid)) =
+                        (ctx.events, ctx.flow_run_id.clone(), &bctx.current_node_id)
+                    {
+                        let status = if v.is_err() {
+                            crate::event::FlowNodeStatus::Err
+                        } else {
+                            crate::event::FlowNodeStatus::Ok
+                        };
+                        sink.emit(crate::event::Event::FlowNodeEnd {
+                            seq: 0,
+                            run_id,
+                            node_id: bid.clone(),
+                            status,
+                            output_preview: None,
+                            ts: chrono::Utc::now(),
+                        });
+                    }
+                }
                 for v in &results {
                     if let Value::Err(e) = v {
                         return Value::Err(e.clone());
@@ -739,11 +807,43 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             for (n, v) in bindings {
                 sub_env.bind(n, v);
             }
-            match crate::exec::exec_stmts(&target.body, &mut sub_env, ctx).await {
-                crate::exec::StmtOutcome::Return(v) => v,
-                crate::exec::StmtOutcome::Err(e) => Value::Err(e),
-                crate::exec::StmtOutcome::Continue => Value::Unit,
+            let sub_run_id = crate::event::FlowRunId::now();
+            if let Some(sink) = ctx.events {
+                sink.emit(crate::event::Event::FlowStart {
+                    seq: 0,
+                    run_id: sub_run_id.clone(),
+                    flow_name: name.name.clone(),
+                    parent_run_id: ctx.flow_run_id.clone(),
+                    parent_node_id: ctx.current_node_id.clone(),
+                    ts: chrono::Utc::now(),
+                });
             }
+            let sub_ctx = EvalCtx {
+                flow_run_id: Some(sub_run_id.clone()),
+                current_node_id: None,
+                ..ctx.clone()
+            };
+            let outcome = crate::exec::exec_stmts(&target.body, &mut sub_env, &sub_ctx).await;
+            let (result, status) = match outcome {
+                crate::exec::StmtOutcome::Return(v) => (v, crate::event::FlowStatus::Ok),
+                crate::exec::StmtOutcome::Err(e) => (
+                    Value::Err(e.clone()),
+                    crate::event::FlowStatus::Errored {
+                        message: format!("{e}"),
+                    },
+                ),
+                crate::exec::StmtOutcome::Continue => (Value::Unit, crate::event::FlowStatus::Ok),
+            };
+            if let Some(sink) = ctx.events {
+                sink.emit(crate::event::Event::FlowEnd {
+                    seq: 0,
+                    run_id: sub_run_id,
+                    flow_name: name.name.clone(),
+                    status,
+                    ts: chrono::Utc::now(),
+                });
+            }
+            result
         }
     }
 }
@@ -1401,6 +1501,7 @@ mod tests {
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
+            current_node_id: None,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -1496,6 +1597,7 @@ mod tests {
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
+            current_node_id: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -1535,6 +1637,7 @@ mod tests {
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
+            current_node_id: None,
         };
 
         let mut env = Env::new();
@@ -1575,6 +1678,7 @@ mod tests {
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
+            current_node_id: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -1610,6 +1714,7 @@ mod tests {
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
+            current_node_id: None,
         };
 
         let src = r#"flow t() {
@@ -1650,6 +1755,7 @@ mod tests {
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
+            current_node_id: None,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -1680,6 +1786,7 @@ mod tests {
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
+            current_node_id: None,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -1792,6 +1899,7 @@ flow parent(x: Int) -> Int {
             session: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
+            current_node_id: None,
         };
 
         let mut env = Env::new();
@@ -1803,5 +1911,55 @@ flow parent(x: Int) -> Int {
             let v = eval_expr(value, &env, &ctx).await;
             assert!(matches!(v, Value::Str(s) if s == "hello runtime"));
         }
+    }
+
+    #[tokio::test]
+    async fn fanout_emits_branch_start_end_events_with_parent_linkage() {
+        let src = r#"flow t() { return fanout [1, 2, 3] collect: all }"#;
+        let file = parse_file(src).unwrap();
+        let tools = ToolRegistry::new();
+        let tool_ctx = ToolCtx::new();
+        let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
+        let events = crate::event::EventSink::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+            providers: &providers,
+            flows: &flows,
+            contract: None,
+            events: Some(&events),
+            turn_id: None,
+            flow_run_id: Some(crate::event::FlowRunId::now()),
+            session: None,
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
+            current_node_id: Some("stmt_1".into()),
+        };
+        if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
+            let _ = eval_expr(value, &Env::new(), &ctx).await;
+        }
+        let snap = events.snapshot();
+        let starts: Vec<_> = snap
+            .iter()
+            .filter_map(|e| match e {
+                crate::event::Event::FlowNodeStart {
+                    node_id,
+                    parent_node_id,
+                    ..
+                } => Some((node_id.clone(), parent_node_id.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 3);
+        assert_eq!(starts[0].0, "stmt_1.branch[0]");
+        assert_eq!(starts[1].0, "stmt_1.branch[1]");
+        assert_eq!(starts[2].0, "stmt_1.branch[2]");
+        assert!(starts.iter().all(|(_, p)| p.as_deref() == Some("stmt_1")));
+        let ends = snap
+            .iter()
+            .filter(|e| matches!(e, crate::event::Event::FlowNodeEnd { .. }))
+            .count();
+        assert_eq!(ends, 3);
     }
 }

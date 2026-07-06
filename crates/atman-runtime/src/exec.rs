@@ -77,14 +77,16 @@ pub fn exec_stmts_prefixed<'a>(
 ) -> BoxFut<'a, StmtOutcome> {
     Box::pin(async move {
         let watches = collect_watches(stmts);
+        let parent_node_id = ctx.current_node_id.clone();
         for (i, stmt) in stmts.iter().enumerate() {
             let node_id = if prefix.is_empty() {
                 format!("{i}")
             } else {
                 format!("{prefix}.{i}")
             };
-            emit_flow_node_start(ctx, &node_id, stmt);
-            let outcome = exec_stmt(stmt, env, ctx, &watches).await;
+            emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
+            let stmt_ctx = ctx.with_node(&node_id);
+            let outcome = exec_stmt(stmt, env, &stmt_ctx, &watches).await;
             emit_flow_node_end(ctx, &node_id, &outcome);
             match outcome {
                 StmtOutcome::Continue => continue,
@@ -95,7 +97,12 @@ pub fn exec_stmts_prefixed<'a>(
     })
 }
 
-fn emit_flow_node_start(ctx: &EvalCtx<'_>, node_id: &str, stmt: &Stmt) {
+fn emit_flow_node_start(
+    ctx: &EvalCtx<'_>,
+    node_id: &str,
+    stmt: &Stmt,
+    parent_node_id: Option<&str>,
+) {
     let Some(session) = ctx.session else {
         return;
     };
@@ -110,7 +117,7 @@ fn emit_flow_node_start(ctx: &EvalCtx<'_>, node_id: &str, stmt: &Stmt) {
             node_id: node_id.to_string(),
             kind: kind.clone(),
             label: label.clone(),
-            parent_node_id: None,
+            parent_node_id: parent_node_id.map(String::from),
             ts: chrono::Utc::now(),
         });
     }
@@ -610,6 +617,7 @@ async fn eval_bash_with_watches(
         session: ctx.session,
         flow_cancel: ctx.flow_cancel.clone(),
         safety: ctx.safety,
+        current_node_id: ctx.current_node_id.clone(),
     };
     let value = eval_expr(expr, env, &new_ctx).await;
     drop(tx);
@@ -949,6 +957,7 @@ pub async fn exec_flow_with_siblings(
         session,
         flow_cancel,
         safety,
+        current_node_id: None,
     };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),
