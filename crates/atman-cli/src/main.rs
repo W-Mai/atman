@@ -753,8 +753,14 @@ async fn run_slash_command_in_turn(
 type SlashCommandParsed = (atman_dsl::ast::File, String, Vec<(String, Value)>);
 
 fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
-    let mut parts = line.split_whitespace();
-    let name_full = parts.next().context("empty slash command")?;
+    let trimmed_line = line.trim();
+    let (name_full, rest_raw) = match trimmed_line.split_once(char::is_whitespace) {
+        Some((n, r)) => (n, r.trim_start()),
+        None => (trimmed_line, ""),
+    };
+    if name_full.is_empty() {
+        bail!("empty slash command");
+    }
     let name = name_full.strip_prefix('/').unwrap_or(name_full);
     let cfg = config_dir()?;
     let path = cfg.join("commands").join(format!("{name}.at"));
@@ -791,8 +797,19 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     let params: Vec<String> = flow.params.iter().map(|(id, _)| id.name.clone()).collect();
 
     let mut kv: Vec<(String, Value)> = Vec::new();
+
+    let single_string_param = params.len() == 1
+        && !rest_raw.is_empty()
+        && !rest_raw
+            .split_whitespace()
+            .any(|t| t.contains('=') && !t.starts_with('='));
+    if single_string_param {
+        kv.push((params[0].clone(), Value::Str(rest_raw.to_string())));
+        return Ok((parsed, flow_name, kv));
+    }
+
     let mut positional_index = 0usize;
-    for tok in parts {
+    for tok in rest_raw.split_whitespace() {
         if let Some((k, v)) = tok.split_once('=') {
             kv.push((k.to_string(), Value::Str(v.to_string())));
         } else if positional_index < params.len() {

@@ -136,6 +136,49 @@ fn slash_command_resolver_accepts_multi_flow_agent_at() {
 }
 
 #[test]
+fn slash_command_passes_multi_word_bare_text_intact_to_single_string_param() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("atman");
+    let data = tmp.path().join("data");
+    std::fs::create_dir_all(cfg.join("commands")).unwrap();
+    std::fs::write(
+        cfg.join("commands").join("echo.at"),
+        "flow echo(msg: string) -> string { return msg }\n",
+    )
+    .unwrap();
+
+    let out = Command::new(atman_bin())
+        .env("ATMAN_CONFIG_DIR", cfg.to_str().unwrap())
+        .env("ATMAN_DATA_DIR", data.to_str().unwrap())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .env("ATMAN_DISABLE_MIGRATION", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"/echo OK short story about atman\n:exit\n")?;
+            child.wait_with_output()
+        })
+        .expect("spawn repl");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("extra positional argument"),
+        "spaces in bare text got wrongly split into positional args: stderr=\n{stderr}"
+    );
+    assert!(
+        stdout.contains("OK short story about atman"),
+        "want full multi-word string echoed back, got stdout=\n{stdout}"
+    );
+}
+
+#[test]
 fn init_produces_flows_that_actually_run() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = tmp.path().join("atman");
