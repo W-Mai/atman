@@ -382,6 +382,8 @@ impl AppState {
                     }
                 }
             }
+            StreamFrame::ToolNode { .. } => {}
+            StreamFrame::Unknown => {}
         }
     }
 

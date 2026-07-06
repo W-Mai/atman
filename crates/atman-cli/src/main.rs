@@ -1222,7 +1222,9 @@ fn render_stream_frame(
         StreamFrame::FlowGraph { .. }
         | StreamFrame::FlowNodeStart { .. }
         | StreamFrame::FlowNodeEnd { .. }
-        | StreamFrame::FlowDone { .. } => {}
+        | StreamFrame::FlowDone { .. }
+        | StreamFrame::ToolNode { .. }
+        | StreamFrame::Unknown => {}
     }
 }
 

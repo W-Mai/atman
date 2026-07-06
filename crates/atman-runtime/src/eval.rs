@@ -214,13 +214,22 @@ async fn dispatch_tool_call<'a>(
     {
         sink.emit(crate::event::Event::ToolNode {
             seq: 0,
-            run_id,
+            run_id: run_id.clone(),
             parent_node_id: parent_node.clone(),
             tool_use_id: tool_call_id.clone(),
             tool_name: name.clone(),
             args_preview: args_preview.clone(),
             ts: chrono::Utc::now(),
         });
+        if let Some(tx) = &stream_tx {
+            let _ = tx.send(crate::stream::StreamFrame::ToolNode {
+                run_id: run_id.0.to_string(),
+                parent_node_id: parent_node.clone(),
+                tool_use_id: tool_call_id.clone(),
+                tool: name.clone(),
+                args_preview: args_preview.clone(),
+            });
+        }
     }
     if let Some(tx) = &stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::ToolUseStart {

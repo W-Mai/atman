@@ -87,7 +87,7 @@ pub fn exec_stmts_prefixed<'a>(
             emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
             let stmt_ctx = ctx.with_node(&node_id);
             let outcome = exec_stmt(stmt, env, &stmt_ctx, &watches).await;
-            emit_flow_node_end(ctx, &node_id, &outcome);
+            emit_flow_node_end(ctx, &node_id, &outcome, parent_node_id.as_deref());
             match outcome {
                 StmtOutcome::Continue => continue,
                 other => return other,
@@ -128,10 +128,16 @@ fn emit_flow_node_start(
             node_id: node_id.to_string(),
             kind,
             label,
+            parent_node_id: parent_node_id.map(String::from),
         });
 }
 
-fn emit_flow_node_end(ctx: &EvalCtx<'_>, node_id: &str, outcome: &StmtOutcome) {
+fn emit_flow_node_end(
+    ctx: &EvalCtx<'_>,
+    node_id: &str,
+    outcome: &StmtOutcome,
+    parent_node_id: Option<&str>,
+) {
     let Some(session) = ctx.session else {
         return;
     };
@@ -159,6 +165,7 @@ fn emit_flow_node_end(ctx: &EvalCtx<'_>, node_id: &str, outcome: &StmtOutcome) {
             node_id: node_id.to_string(),
             status,
             output_preview: None,
+            parent_node_id: parent_node_id.map(String::from),
         });
 }
 
