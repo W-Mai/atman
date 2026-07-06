@@ -384,13 +384,38 @@ fn append_flow_node_lines(
             }
         }
     };
+    let box_color = match status {
+        Some(atman_runtime::event::FlowNodeStatus::Ok) => Color::Green,
+        Some(atman_runtime::event::FlowNodeStatus::Err) => Color::Red,
+        Some(atman_runtime::event::FlowNodeStatus::Cancelled) => Color::DarkGray,
+        None if flow_running => Color::Yellow,
+        None => Color::DarkGray,
+    };
+    let box_style = Style::default().fg(box_color);
+    let label_width = node.label.chars().count().max(12);
+    let inner_width = label_width + 4;
+
+    out.push(Line::from(Span::styled(
+        format!("{indent}┌{}┐", "─".repeat(inner_width)),
+        box_style,
+    )));
     out.push(Line::from(vec![
-        Span::raw(indent),
+        Span::styled(format!("{indent}│ "), box_style),
         Span::styled(glyph_str, style),
         Span::raw(" "),
-        Span::raw(node.label.clone()),
+        Span::raw(format!("{:<w$}", node.label, w = label_width)),
+        Span::styled(" │".to_string(), box_style),
     ]));
+    out.push(Line::from(Span::styled(
+        format!("{indent}└{}┘", "─".repeat(inner_width)),
+        box_style,
+    )));
+
     for child in &node.children {
+        out.push(Line::from(Span::styled(
+            format!("{indent}      ↓"),
+            Style::default().fg(Color::DarkGray),
+        )));
         append_flow_node_lines(
             out,
             child,
