@@ -55,6 +55,9 @@ pub struct AppState {
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,
     pub sidebar_mode: crate::sidebar::SidebarMode,
+    pub popup: crate::completion::PopupState,
+    pub cheatsheet_open: bool,
+    pub flow_names: Vec<(String, String)>,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
     last_lag_note_idx: Option<usize>,
@@ -80,6 +83,22 @@ impl AppState {
     pub fn with_session_dir(mut self, dir: String) -> Self {
         self.session_dir = dir;
         self
+    }
+
+    pub fn with_flow_names(mut self, flows: Vec<(String, String)>) -> Self {
+        self.flow_names = flows;
+        self
+    }
+
+    pub fn refresh_popup(&mut self, editor_buf: &str) {
+        let candidates = crate::completion::compute_candidates(
+            editor_buf,
+            &self.flow_names,
+            crate::completion::BUILTINS,
+            crate::completion::INTERJECTIONS,
+            self.streaming,
+        );
+        self.popup.set(candidates);
     }
 
     pub fn max_scroll_offset(&self) -> u16 {

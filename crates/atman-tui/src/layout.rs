@@ -9,6 +9,7 @@ pub struct AppLayout {
     pub transcript: Rect,
     pub sidebar: Option<Rect>,
     pub input: Rect,
+    pub hint: Option<Rect>,
 }
 
 pub fn compute(area: Rect, input_height: u16, show_sidebar: bool) -> AppLayout {
@@ -21,17 +22,20 @@ pub fn compute_ex(
     show_sidebar: bool,
     status_height: u16,
 ) -> AppLayout {
+    let hint_h: u16 = if area.height >= 12 { 1 } else { 0 };
     let vertical = RatatuiLayout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(status_height.max(1)),
             Constraint::Min(3),
             Constraint::Length(input_height.max(3)),
+            Constraint::Length(hint_h),
         ])
         .split(area);
     let status = vertical[0];
     let mid = vertical[1];
     let input = vertical[2];
+    let hint = if hint_h > 0 { Some(vertical[3]) } else { None };
 
     let (transcript, sidebar) = if show_sidebar && area.width >= SIDEBAR_MIN_TOTAL_WIDTH {
         let cols = RatatuiLayout::default()
@@ -47,6 +51,7 @@ pub fn compute_ex(
         transcript,
         sidebar,
         input,
+        hint,
     }
 }
 

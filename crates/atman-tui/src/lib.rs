@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
+pub mod completion;
 pub mod highlight;
 pub mod history;
 pub mod input;
@@ -67,6 +68,7 @@ pub struct TuiHandle {
     pub goal_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,
     pub context_rx: Option<tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
     pub attach_rx: Option<tokio::sync::watch::Receiver<usize>>,
+    pub flow_names: Vec<(String, String)>,
 }
 
 impl TuiHandle {
@@ -85,6 +87,7 @@ impl TuiHandle {
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
+            flow_names: Vec::new(),
         }
     }
 }
@@ -102,7 +105,8 @@ async fn run_frames(
 ) -> Result<()> {
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
         .with_initial_items(std::mem::take(&mut handle.initial_items))
-        .with_session_dir(handle.session_dir.clone());
+        .with_session_dir(handle.session_dir.clone())
+        .with_flow_names(std::mem::take(&mut handle.flow_names));
     let mut editor = InputEditor::default();
     let mut key_events = EventStream::new();
     let mut interrupt_prompt = false;
@@ -280,22 +284,59 @@ fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if app.cheatsheet_open {
+        match action {
+            KeyAction::Escape | KeyAction::HelpModal => app.cheatsheet_open = false,
+            KeyAction::Quit => app.should_quit = true,
+            _ => {}
+        }
+        return;
+    }
+    if app.popup.is_open() {
+        match action {
+            KeyAction::Escape => {
+                app.popup.close();
+                return;
+            }
+            KeyAction::HistoryUp => {
+                app.popup.prev();
+                return;
+            }
+            KeyAction::HistoryDown => {
+                app.popup.next();
+                return;
+            }
+            KeyAction::Tab | KeyAction::Submit => {
+                if let Some(item) = app.popup.accept() {
+                    editor.replace_with(&item.insert);
+                }
+                app.refresh_popup(editor.buf());
+                return;
+            }
+            _ => {}
+        }
+    }
+    let mut edited = false;
     match action {
         KeyAction::Char(c) => {
             editor.insert_char(c);
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::Backspace => {
             editor.backspace();
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::DeleteWordBackward => {
             editor.delete_word_backward();
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::Newline => {
             editor.insert_newline();
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::Submit => {
             if let Some(line) = editor.submit() {
@@ -305,14 +346,17 @@ fn handle_key(
                 }
             }
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::HistoryUp => {
             editor.history_up();
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::HistoryDown => {
             editor.history_down();
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::CursorLeft => {
             editor.move_left();
@@ -330,21 +374,28 @@ fn handle_key(
             editor.move_end();
             *interrupt_prompt = false;
         }
+        KeyAction::Tab => {
+            *interrupt_prompt = false;
+        }
         KeyAction::NudgePrefill => {
             editor.prefill("/nudge ");
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::CoursePrefill => {
             editor.prefill("/course ");
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::RedirectPrefill => {
             editor.prefill("/redirect ");
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::HardStop => {
             editor.prefill("/hard-stop ");
             *interrupt_prompt = false;
+            edited = true;
         }
         KeyAction::ScrollUp | KeyAction::PageUp => {
             app.scroll_up(if matches!(action, KeyAction::PageUp) {
@@ -378,11 +429,16 @@ fn handle_key(
                 app.push_note("cancel requested", app::NoteLevel::Warn);
             } else if !editor.buf().is_empty() {
                 editor.clear();
+                edited = true;
             }
             *interrupt_prompt = false;
         }
         KeyAction::ToggleSidebar => {
             app.sidebar_mode = app.sidebar_mode.toggle();
+            *interrupt_prompt = false;
+        }
+        KeyAction::HelpModal => {
+            app.cheatsheet_open = true;
             *interrupt_prompt = false;
         }
         KeyAction::Interrupt => {
@@ -399,6 +455,9 @@ fn handle_key(
         KeyAction::Ignore => {
             *interrupt_prompt = false;
         }
+    }
+    if edited {
+        app.refresh_popup(editor.buf());
     }
 }
 
@@ -463,6 +522,15 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         ),
         l.input,
     );
+    if let Some(hint_area) = l.hint {
+        completion::render_hint_strip(f, hint_area, hint_area.width < 60);
+    }
+    if app.popup.is_open() {
+        completion::render_popup(f, l.input, &app.popup);
+    }
+    if app.cheatsheet_open {
+        completion::render_cheatsheet(f, area);
+    }
 }
 
 fn compute_input_height(buf: &str, width: u16) -> u16 {

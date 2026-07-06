@@ -904,6 +904,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         reporter.error(format!("[atman] boot flow error: {e}"));
     }
 
+    let flow_names = discover_flow_names();
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
     let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
@@ -932,6 +933,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
+            flow_names: flow_names.clone(),
         };
         (
             Some(tokio::spawn(atman_tui::run_tui(handle))),
@@ -1579,6 +1581,29 @@ fn format_age(secs: u64) -> String {
     } else {
         format!("{}d", secs / 86400)
     }
+}
+
+fn discover_flow_names() -> Vec<(String, String)> {
+    let Ok(cfg) = config_dir() else {
+        return Vec::new();
+    };
+    let dir = cfg.join("commands");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for e in entries.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("at") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        out.push((name.to_string(), format!("commands/{name}.at")));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 fn handle_sidebar_builtin(

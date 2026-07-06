@@ -188,6 +188,13 @@ impl InputEditor {
         std::mem::take(&mut self.buf)
     }
 
+    pub fn replace_with(&mut self, text: &str) {
+        self.consume_history_view();
+        self.buf.clear();
+        self.buf.push_str(text);
+        self.cursor = self.buf.len();
+    }
+
     pub fn prefill(&mut self, prefix: &str) {
         self.consume_history_view();
         if !self.buf.starts_with(prefix) {
