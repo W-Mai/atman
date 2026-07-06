@@ -70,6 +70,8 @@ pub struct AppState {
     pub flow_names: Vec<(String, String)>,
     pub expanded_tools: HashSet<String>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
+    pub last_item_ranges: Vec<crate::output::ItemRange>,
+    pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
     last_lag_note_idx: Option<usize>,
@@ -126,6 +128,24 @@ impl AppState {
             }
         }
         false
+    }
+
+    pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
+        let rect = self.last_transcript_rect?;
+        if col < rect.x
+            || col >= rect.x.saturating_add(rect.width)
+            || row < rect.y
+            || row >= rect.y.saturating_add(rect.height)
+        {
+            return None;
+        }
+        let rel = row
+            .saturating_sub(rect.y)
+            .saturating_add(self.scroll_offset);
+        self.last_item_ranges
+            .iter()
+            .find(|r| rel >= r.start_row && rel < r.end_row)
+            .map(|r| r.item_index)
     }
 
     pub fn refresh_popup(&mut self, editor_buf: &str) {
@@ -457,6 +477,48 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.push_user_turn("hi".into());
         assert!(!app.toggle_last_tool_expansion());
+    }
+
+    #[test]
+    fn hit_test_maps_absolute_row_to_item_index() {
+        use crate::output::ItemRange;
+        use ratatui::layout::Rect;
+        let mut app = AppState::new("s".into(), None);
+        app.last_transcript_rect = Some(Rect::new(0, 2, 80, 20));
+        app.last_item_ranges = vec![
+            ItemRange {
+                item_index: 0,
+                start_row: 0,
+                end_row: 2,
+            },
+            ItemRange {
+                item_index: 1,
+                start_row: 2,
+                end_row: 5,
+            },
+        ];
+        app.scroll_offset = 0;
+        assert_eq!(app.hit_test(10, 2), Some(0));
+        assert_eq!(app.hit_test(10, 3), Some(0));
+        assert_eq!(app.hit_test(10, 4), Some(1));
+        assert_eq!(app.hit_test(10, 6), Some(1));
+    }
+
+    #[test]
+    fn hit_test_returns_none_outside_transcript() {
+        use crate::output::ItemRange;
+        use ratatui::layout::Rect;
+        let mut app = AppState::new("s".into(), None);
+        app.last_transcript_rect = Some(Rect::new(5, 2, 80, 20));
+        app.last_item_ranges = vec![ItemRange {
+            item_index: 0,
+            start_row: 0,
+            end_row: 2,
+        }];
+        assert_eq!(app.hit_test(10, 1), None, "row above rect");
+        assert_eq!(app.hit_test(10, 30), None, "row below rect");
+        assert_eq!(app.hit_test(2, 3), None, "col left of rect");
+        assert_eq!(app.hit_test(200, 3), None, "col right of rect");
     }
 
     #[test]

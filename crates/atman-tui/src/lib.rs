@@ -502,8 +502,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         l.status,
     );
     let transcript_area = l.transcript;
+    app.last_transcript_rect = Some(transcript_area);
     if app.items.is_empty() {
         app.resolve_scroll(0, transcript_area.height);
+        app.last_item_ranges.clear();
         f.render_widget(output::empty_hint(), transcript_area);
     } else {
         let messages = app
@@ -515,7 +517,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             expanded_tools: &app.expanded_tools,
             messages: &messages,
         };
-        let lines = output::build_lines(&app.items, &ctx);
+        let (lines, ranges) =
+            output::build_lines_with_ranges(&app.items, transcript_area.width, &ctx);
+        app.last_item_ranges = ranges;
         let paragraph =
             ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
         let total_rows = paragraph.line_count(transcript_area.width) as u16;

@@ -32,6 +32,40 @@ pub fn build_lines(items: &[OutputItem], ctx: &RenderCtx<'_>) -> Vec<Line<'stati
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemRange {
+    pub item_index: usize,
+    pub start_row: u16,
+    pub end_row: u16,
+}
+
+pub fn build_lines_with_ranges(
+    items: &[OutputItem],
+    width: u16,
+    ctx: &RenderCtx<'_>,
+) -> (Vec<Line<'static>>, Vec<ItemRange>) {
+    let mut all_lines: Vec<Line<'static>> = Vec::with_capacity(items.len() * 3);
+    let mut ranges: Vec<ItemRange> = Vec::with_capacity(items.len());
+    let mut cursor: u16 = 0;
+    for (idx, item) in items.iter().enumerate() {
+        let item_lines = render_item(item, ctx);
+        let rows = if width == 0 {
+            item_lines.len() as u16
+        } else {
+            let paragraph = Paragraph::new(item_lines.clone()).wrap(Wrap { trim: false });
+            paragraph.line_count(width) as u16
+        };
+        ranges.push(ItemRange {
+            item_index: idx,
+            start_row: cursor,
+            end_row: cursor.saturating_add(rows),
+        });
+        cursor = cursor.saturating_add(rows);
+        all_lines.extend(item_lines);
+    }
+    (all_lines, ranges)
+}
+
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
     let mut lines = match item {
         OutputItem::UserTurn { text } => vec![Line::from(vec![
@@ -338,6 +372,26 @@ mod tests {
         assert!(flat.contains("args:"));
         assert!(flat.contains("result:"));
         assert!(flat.contains("hello world"));
+    }
+
+    #[test]
+    fn build_lines_with_ranges_gives_one_range_per_item() {
+        let items = vec![
+            OutputItem::UserTurn { text: "hi".into() },
+            OutputItem::Divider,
+        ];
+        let (_lines, ranges) = build_lines_with_ranges(&items, 80, &RenderCtx::empty());
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].item_index, 0);
+        assert_eq!(ranges[1].item_index, 1);
+        assert!(ranges[0].end_row <= ranges[1].start_row);
+    }
+
+    #[test]
+    fn build_lines_with_ranges_empty_items_returns_empty_vecs() {
+        let (lines, ranges) = build_lines_with_ranges(&[], 80, &RenderCtx::empty());
+        assert!(lines.is_empty());
+        assert!(ranges.is_empty());
     }
 
     #[test]
