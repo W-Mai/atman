@@ -905,10 +905,11 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     }
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
-    let (tui_task, tui_shutdown, ctrl_task) = if use_tui {
+    let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
         let initial_items = atman_tui::history::flatten_messages(&session.messages());
         let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<atman_tui::TuiControl>();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let session_for_ctrl = std::sync::Arc::clone(&session);
         let ctrl_task = tokio::spawn(async move {
             while let Some(msg) = ctrl_rx.recv().await {
@@ -919,12 +920,14 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         });
         let handle = atman_tui::TuiHandle {
             session_id: session.id().to_string(),
+            session_dir: session.dir().to_string_lossy().to_string(),
             goal: session.goal(),
             stream_rx: session.stream_subscribe(),
             submit_tx: Some(input_tx),
             note_rx: Some(note_rx),
             shutdown_rx: Some(sh_rx),
             control_tx: Some(ctrl_tx),
+            cmd_rx: Some(cmd_rx),
             initial_items,
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),
@@ -934,6 +937,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             Some(tokio::spawn(atman_tui::run_tui(handle))),
             Some(sh_tx),
             Some(ctrl_task),
+            Some(cmd_tx),
         )
     } else {
         drop(note_rx);
@@ -941,7 +945,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         spawn_stdin_reader(input_tx, printer_tx);
         let printer = printer_rx.await.unwrap_or(None);
         spawn_stream_consumer(&session, printer).await;
-        (None, None, None)
+        (None, None, None, None)
     };
     let mut pending = PendingUserMessage::default();
     let mut pushback: VecDeque<String> = VecDeque::new();
@@ -977,6 +981,11 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                     Ok(rows) => print_sessions_table(&rows, &reporter),
                     Err(e) => reporter.error(format!("[atman] :sessions: {e}")),
                 }
+                continue;
+            }
+            if trimmed == "sidebar" || trimmed.starts_with("sidebar ") {
+                let arg = trimmed.strip_prefix("sidebar").unwrap_or("").trim();
+                handle_sidebar_builtin(arg, cmd_tx_for_repl.as_ref(), &reporter);
                 continue;
             }
             if !handle_builtin(trimmed, sid.as_str(), &mut pending, &session, &reporter) {
@@ -1570,6 +1579,34 @@ fn format_age(secs: u64) -> String {
     } else {
         format!("{}d", secs / 86400)
     }
+}
+
+fn handle_sidebar_builtin(
+    arg: &str,
+    cmd_tx: Option<&tokio::sync::mpsc::UnboundedSender<atman_tui::TuiCommand>>,
+    reporter: &Reporter,
+) {
+    let Some(tx) = cmd_tx else {
+        reporter.info("[atman] :sidebar only works in TUI mode");
+        return;
+    };
+    let mode = match arg {
+        "" | "toggle" => {
+            reporter.info("[atman] :sidebar toggle | on | off | auto");
+            return;
+        }
+        "on" => atman_tui::sidebar::SidebarMode::Force(true),
+        "off" => atman_tui::sidebar::SidebarMode::Force(false),
+        "auto" => atman_tui::sidebar::SidebarMode::Auto,
+        other => {
+            reporter.error(format!(
+                "[atman] :sidebar: unknown arg `{other}` (try on/off/auto)"
+            ));
+            return;
+        }
+    };
+    let _ = tx.send(atman_tui::TuiCommand::SetSidebar(mode));
+    reporter.info(format!("[atman] sidebar mode: {arg}"));
 }
 
 fn handle_goal_builtin(cmd: &str, session: &Session, reporter: &Reporter) {

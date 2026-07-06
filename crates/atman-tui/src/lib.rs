@@ -19,6 +19,7 @@ pub mod keys;
 pub mod layout;
 pub mod markdown;
 pub mod output;
+pub mod sidebar;
 pub mod status;
 pub mod terminal_guard;
 
@@ -48,14 +49,20 @@ pub enum TuiControl {
     CancelFlow,
 }
 
+pub enum TuiCommand {
+    SetSidebar(sidebar::SidebarMode),
+}
+
 pub struct TuiHandle {
     pub session_id: String,
+    pub session_dir: String,
     pub goal: Option<String>,
     pub stream_rx: broadcast::Receiver<StreamFrame>,
     pub submit_tx: Option<mpsc::UnboundedSender<String>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     pub control_tx: Option<mpsc::UnboundedSender<TuiControl>>,
+    pub cmd_rx: Option<mpsc::UnboundedReceiver<TuiCommand>>,
     pub initial_items: Vec<app::OutputItem>,
     pub goal_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,
     pub context_rx: Option<tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
@@ -66,12 +73,14 @@ impl TuiHandle {
     pub fn from_session(session: &atman_runtime::Session) -> Self {
         Self {
             session_id: session.id().to_string(),
+            session_dir: session.dir().to_string_lossy().to_string(),
             goal: session.goal(),
             stream_rx: session.stream_subscribe(),
             submit_tx: None,
             note_rx: None,
             shutdown_rx: None,
             control_tx: None,
+            cmd_rx: None,
             initial_items: Vec::new(),
             goal_rx: Some(session.subscribe_goal()),
             context_rx: Some(session.subscribe_context()),
@@ -92,7 +101,8 @@ async fn run_frames(
     mut handle: TuiHandle,
 ) -> Result<()> {
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
-        .with_initial_items(std::mem::take(&mut handle.initial_items));
+        .with_initial_items(std::mem::take(&mut handle.initial_items))
+        .with_session_dir(handle.session_dir.clone());
     let mut editor = InputEditor::default();
     let mut key_events = EventStream::new();
     let mut interrupt_prompt = false;
@@ -171,9 +181,25 @@ async fn run_frames(
                     app.attach_count = *rx.borrow();
                 }
             }
+            cmd = recv_cmd(handle.cmd_rx.as_mut()) => {
+                if let Some(cmd) = cmd {
+                    match cmd {
+                        TuiCommand::SetSidebar(mode) => {
+                            app.sidebar_mode = mode;
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(())
+}
+
+async fn recv_cmd(rx: Option<&mut mpsc::UnboundedReceiver<TuiCommand>>) -> Option<TuiCommand> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn wait_goal_change(rx: Option<&mut tokio::sync::watch::Receiver<Option<String>>>) {
@@ -355,6 +381,10 @@ fn handle_key(
             }
             *interrupt_prompt = false;
         }
+        KeyAction::ToggleSidebar => {
+            app.sidebar_mode = app.sidebar_mode.toggle();
+            *interrupt_prompt = false;
+        }
         KeyAction::Interrupt => {
             if *interrupt_prompt {
                 app.should_quit = true;
@@ -382,9 +412,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         return;
     }
     let input_height = compute_input_height(editor.buf(), area.width);
-    let compact_status = area.width < layout::SIDEBAR_MIN_TOTAL_WIDTH;
+    let wide_enough = area.width >= layout::SIDEBAR_MIN_TOTAL_WIDTH;
+    let show_sidebar = app.sidebar_mode.resolve(wide_enough);
+    let compact_status = !show_sidebar;
     let status_height = if compact_status { 2 } else { 1 };
-    let l = layout::compute_ex(area, input_height, true, status_height);
+    let l = layout::compute_ex(area, input_height, show_sidebar, status_height);
     f.render_widget(
         status::render_bar(status::StatusInputs {
             session_id: &app.session_id,
@@ -408,12 +440,18 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.resolve_scroll(total_rows, transcript_area.height);
         f.render_widget(paragraph.scroll((app.scroll_offset, 0)), transcript_area);
     }
-    if let Some(sidebar) = l.sidebar {
-        f.render_widget(
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::LEFT)
-                .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray)),
-            sidebar,
+    if let Some(area) = l.sidebar {
+        sidebar::render(
+            f,
+            area,
+            sidebar::SidebarInputs {
+                goal: app.goal.as_deref(),
+                context: &app.context,
+                attach_count: app.attach_count,
+                session_id: &app.session_id,
+                session_dir: &app.session_dir,
+                streaming: app.streaming,
+            },
         );
     }
     f.render_widget(
