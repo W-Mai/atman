@@ -27,6 +27,7 @@ struct Renderer {
     blockquote_depth: u16,
     fresh_line: bool,
     in_table: bool,
+    in_table_head: bool,
     table_row: Vec<String>,
 }
 
@@ -201,6 +202,10 @@ impl Renderer {
                 self.in_table = true;
                 self.blank_line();
             }
+            Tag::TableHead => {
+                self.table_row.clear();
+                self.in_table_head = true;
+            }
             Tag::TableRow => {
                 self.table_row.clear();
             }
@@ -242,23 +247,45 @@ impl Renderer {
                 self.in_table = false;
                 self.blank_line();
             }
-            TagEnd::TableRow => {
-                if self.table_row.is_empty() {
-                    return;
+            TagEnd::TableHead | TagEnd::TableRow => {
+                let is_head = matches!(end, TagEnd::TableHead);
+                if !self.table_row.is_empty() {
+                    let cell_style = if is_head {
+                        Style::default()
+                            .fg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    let border_style = Style::default().fg(Color::DarkGray);
+                    let mut spans: Vec<Span<'static>> =
+                        Vec::with_capacity(self.table_row.len() * 2 + 1);
+                    spans.push(Span::styled("│", border_style));
+                    for (i, cell) in self.table_row.iter().enumerate() {
+                        if i > 0 {
+                            spans.push(Span::styled("│", border_style));
+                        }
+                        spans.push(Span::styled(format!(" {cell} "), cell_style));
+                    }
+                    spans.push(Span::styled("│", border_style));
+                    self.lines.push(Line::from(spans));
+                    self.fresh_line = true;
+                    if is_head {
+                        let width: usize = self
+                            .table_row
+                            .iter()
+                            .map(|c| c.chars().count() + 2)
+                            .sum::<usize>()
+                            + self.table_row.len().saturating_sub(1)
+                            + 2;
+                        self.lines
+                            .push(Line::from(Span::styled("─".repeat(width), border_style)));
+                    }
+                    self.table_row.clear();
                 }
-                let row = self
-                    .table_row
-                    .iter()
-                    .map(|c| format!(" {c} "))
-                    .collect::<Vec<_>>()
-                    .join("│");
-                self.lines.push(Line::from(vec![
-                    Span::styled("│", Style::default().fg(Color::DarkGray)),
-                    Span::raw(row),
-                    Span::styled("│", Style::default().fg(Color::DarkGray)),
-                ]));
-                self.fresh_line = true;
-                self.table_row.clear();
+                if is_head {
+                    self.in_table_head = false;
+                }
             }
             _ => {}
         }
@@ -421,7 +448,12 @@ mod tests {
         assert!(
             flat.iter()
                 .any(|l| l.contains("│") && l.contains("1") && l.contains("2")),
-            "{flat:?}"
+            "want data row: {flat:?}"
+        );
+        assert!(
+            flat.iter()
+                .any(|l| l.contains("│") && l.contains(" a ") && l.contains(" b ")),
+            "want header row: {flat:?}"
         );
     }
 
