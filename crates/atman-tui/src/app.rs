@@ -83,6 +83,7 @@ pub struct AppState {
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
+    pub animation_frame: u32,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
     last_lag_note_idx: Option<usize>,
@@ -139,6 +140,12 @@ impl AppState {
             }
         }
         false
+    }
+
+    pub fn has_running_flow(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item, OutputItem::FlowPanel { ended_at: None, .. }))
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {

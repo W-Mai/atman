@@ -11,6 +11,7 @@ const EXPANDED_CONTENT_MAX_CHARS: usize = 4096;
 pub struct RenderCtx<'a> {
     pub expanded_tools: &'a std::collections::HashSet<String>,
     pub messages: &'a [Message],
+    pub animation_frame: u32,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -20,8 +21,15 @@ impl<'a> RenderCtx<'a> {
         RenderCtx {
             expanded_tools: EMPTY_SET.get_or_init(std::collections::HashSet::new),
             messages: &[],
+            animation_frame: 0,
         }
     }
+}
+
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn spinner_char(frame: u32) -> &'static str {
+    SPINNER[(frame as usize) % SPINNER.len()]
 }
 
 pub fn build_lines(items: &[OutputItem], ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
@@ -130,7 +138,14 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             expanded,
             graph,
             ..
-        } => render_flow_panel(flow_name, graph, node_states, *ended_at, *expanded),
+        } => render_flow_panel(
+            flow_name,
+            graph,
+            node_states,
+            *ended_at,
+            *expanded,
+            ctx.animation_frame,
+        ),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
     lines
@@ -280,6 +295,7 @@ fn render_flow_panel(
     node_states: &std::collections::HashMap<String, atman_runtime::event::FlowNodeStatus>,
     ended_at: Option<std::time::Instant>,
     expanded: bool,
+    animation_frame: u32,
 ) -> Vec<Line<'static>> {
     let running = ended_at.is_none();
     let fold_glyph = if expanded { "▼" } else { "▶" };
@@ -294,13 +310,18 @@ fn render_flow_panel(
         "ok"
     };
     let total = count_nodes(&graph.root);
+    let flow_glyph = if running {
+        spinner_char(animation_frame)
+    } else {
+        "⚡"
+    };
     let header = Line::from(vec![
         Span::styled(
             format!(" {fold_glyph} "),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
-            format!("⚡ {flow_name}"),
+            format!("{flow_glyph} {flow_name}"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(" · {total} nodes · ")),
@@ -317,7 +338,7 @@ fn render_flow_panel(
     let mut lines = vec![header];
     if expanded {
         for node in &graph.root {
-            append_flow_node_lines(&mut lines, node, node_states, 1);
+            append_flow_node_lines(&mut lines, node, node_states, 1, animation_frame, running);
         }
     }
     lines
@@ -337,25 +358,47 @@ fn append_flow_node_lines(
     node: &atman_runtime::nodegraph::StaticNode,
     node_states: &std::collections::HashMap<String, atman_runtime::event::FlowNodeStatus>,
     depth: usize,
+    animation_frame: u32,
+    flow_running: bool,
 ) {
     let indent = "  ".repeat(depth);
     let status = node_states.get(&node.node_id);
-    let (glyph, style) = match status {
-        Some(atman_runtime::event::FlowNodeStatus::Ok) => ("✓", Style::default().fg(Color::Green)),
-        Some(atman_runtime::event::FlowNodeStatus::Err) => ("✗", Style::default().fg(Color::Red)),
-        Some(atman_runtime::event::FlowNodeStatus::Cancelled) => {
-            ("─", Style::default().fg(Color::DarkGray))
+    let (glyph_str, style) = match status {
+        Some(atman_runtime::event::FlowNodeStatus::Ok) => {
+            ("✓".to_string(), Style::default().fg(Color::Green))
         }
-        None => ("○", Style::default().fg(Color::DarkGray)),
+        Some(atman_runtime::event::FlowNodeStatus::Err) => {
+            ("✗".to_string(), Style::default().fg(Color::Red))
+        }
+        Some(atman_runtime::event::FlowNodeStatus::Cancelled) => {
+            ("─".to_string(), Style::default().fg(Color::DarkGray))
+        }
+        None => {
+            if flow_running {
+                (
+                    spinner_char(animation_frame).to_string(),
+                    Style::default().fg(Color::Yellow),
+                )
+            } else {
+                ("○".to_string(), Style::default().fg(Color::DarkGray))
+            }
+        }
     };
     out.push(Line::from(vec![
         Span::raw(indent),
-        Span::styled(glyph.to_string(), style),
+        Span::styled(glyph_str, style),
         Span::raw(" "),
         Span::raw(node.label.clone()),
     ]));
     for child in &node.children {
-        append_flow_node_lines(out, child, node_states, depth + 1);
+        append_flow_node_lines(
+            out,
+            child,
+            node_states,
+            depth + 1,
+            animation_frame,
+            flow_running,
+        );
     }
 }
 
@@ -446,6 +489,7 @@ mod tests {
         let ctx = RenderCtx {
             expanded_tools: &expanded,
             messages: &[],
+            animation_frame: 0,
         };
         let item = OutputItem::ToolCall {
             tool: "fs.read".into(),
@@ -494,6 +538,7 @@ mod tests {
         let ctx = RenderCtx {
             expanded_tools: &expanded,
             messages: &[],
+            animation_frame: 0,
         };
         let long = "x".repeat(5000);
         let item = OutputItem::ToolCall {

@@ -115,6 +115,8 @@ async fn run_frames(
     let mut interrupt_prompt = false;
     let mut shutdown = handle.shutdown_rx.take();
     let mut sigterm = build_sigterm_stream();
+    let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
@@ -133,6 +135,9 @@ async fn run_frames(
             }
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
+            }
+            _ = animation_tick.tick(), if app.has_running_flow() => {
+                app.animation_frame = app.animation_frame.wrapping_add(1);
             }
             key = key_events.next() => {
                 match key {
@@ -531,6 +536,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         let ctx = output::RenderCtx {
             expanded_tools: &app.expanded_tools,
             messages: &messages,
+            animation_frame: app.animation_frame,
         };
         let (lines, ranges) =
             output::build_lines_with_ranges(&app.items, transcript_area.width, &ctx);
