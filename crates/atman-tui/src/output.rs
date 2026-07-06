@@ -44,6 +44,7 @@ pub fn render_item(item: &OutputItem) -> Vec<Line<'static>> {
             args,
             status,
             result,
+            ..
         } => {
             let (mark, style) = match status {
                 ToolStatus::Running => ("  ⟶", Style::default().fg(Color::Yellow)),
@@ -113,6 +114,7 @@ mod tests {
                 args: "a".into(),
                 status: ToolStatus::Ok,
                 result: Some("r".into()),
+                history_id: None,
             },
             OutputItem::SystemNote {
                 text: "note".into(),

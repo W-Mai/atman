@@ -9,6 +9,7 @@ use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
 pub mod highlight;
+pub mod history;
 pub mod input;
 pub mod keys;
 pub mod layout;
@@ -46,6 +47,7 @@ pub struct TuiHandle {
     pub submit_tx: Option<mpsc::UnboundedSender<String>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    pub initial_items: Vec<app::OutputItem>,
 }
 
 impl TuiHandle {
@@ -57,6 +59,7 @@ impl TuiHandle {
             submit_tx: None,
             note_rx: None,
             shutdown_rx: None,
+            initial_items: Vec::new(),
         }
     }
 }
@@ -72,7 +75,8 @@ async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
 ) -> Result<()> {
-    let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone());
+    let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
+        .with_initial_items(std::mem::take(&mut handle.initial_items));
     let mut editor = InputEditor::default();
     let mut key_events = EventStream::new();
     let mut interrupt_prompt = false;

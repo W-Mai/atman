@@ -907,6 +907,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
     let (tui_task, tui_shutdown) = if use_tui {
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
+        let initial_items = atman_tui::history::flatten_messages(&session.messages());
         let handle = atman_tui::TuiHandle {
             session_id: session.id().to_string(),
             goal: session.goal(),
@@ -914,6 +915,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             submit_tx: Some(input_tx),
             note_rx: Some(note_rx),
             shutdown_rx: Some(sh_rx),
+            initial_items,
         };
         (Some(tokio::spawn(atman_tui::run_tui(handle))), Some(sh_tx))
     } else {

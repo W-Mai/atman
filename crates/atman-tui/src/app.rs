@@ -18,6 +18,7 @@ pub enum OutputItem {
         args: String,
         status: ToolStatus,
         result: Option<String>,
+        history_id: Option<String>,
     },
     SystemNote {
         text: String,
@@ -65,6 +66,11 @@ impl AppState {
             follow_tail: true,
             ..Default::default()
         }
+    }
+
+    pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
+        self.items = items;
+        self
     }
 
     pub fn max_scroll_offset(&self) -> u16 {
@@ -155,6 +161,7 @@ impl AppState {
                     args: args_preview,
                     status: ToolStatus::Running,
                     result: None,
+                    history_id: None,
                 });
             }
             StreamFrame::ToolUseDone { tool, ok, preview } => {
