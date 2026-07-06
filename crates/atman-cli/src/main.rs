@@ -862,7 +862,10 @@ async fn cmd_repl() -> Result<()> {
     }
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
-    spawn_stdin_reader(input_tx);
+    let (printer_tx, printer_rx) = tokio::sync::oneshot::channel::<Option<ExternalPrinter>>();
+    spawn_stdin_reader(input_tx, printer_tx);
+    let printer = printer_rx.await.unwrap_or(None);
+    spawn_stream_consumer(&session, printer).await;
     let mut pending = PendingUserMessage::default();
     let mut pushback: VecDeque<String> = VecDeque::new();
     let sid = session.id().to_string();
@@ -931,10 +934,16 @@ async fn cmd_repl() -> Result<()> {
     Ok(())
 }
 
-fn spawn_stdin_reader(tx: tokio::sync::mpsc::UnboundedSender<String>) {
+type ExternalPrinter = Box<dyn rustyline::ExternalPrinter + Send>;
+
+fn spawn_stdin_reader(
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    printer_tx: tokio::sync::oneshot::Sender<Option<ExternalPrinter>>,
+) {
     let non_interactive = std::env::var("ATMAN_REPL_NON_INTERACTIVE").is_ok();
     tokio::task::spawn_blocking(move || {
         if non_interactive {
+            let _ = printer_tx.send(None);
             use std::io::BufRead;
             let stdin = std::io::stdin();
             let locked = stdin.lock();
@@ -955,10 +964,19 @@ fn spawn_stdin_reader(tx: tokio::sync::mpsc::UnboundedSender<String>) {
                     Ok(e) => e,
                     Err(e) => {
                         eprintln!("[atman] rustyline init failed: {e}");
+                        let _ = printer_tx.send(None);
                         return;
                     }
                 };
             editor.set_helper(Some(completer));
+            let printer: Option<ExternalPrinter> = match editor.create_external_printer() {
+                Ok(p) => Some(Box::new(p)),
+                Err(e) => {
+                    eprintln!("[atman] external printer unavailable: {e}");
+                    None
+                }
+            };
+            let _ = printer_tx.send(printer);
             loop {
                 match editor.readline("atman> ") {
                     Ok(l) => {
@@ -975,6 +993,70 @@ fn spawn_stdin_reader(tx: tokio::sync::mpsc::UnboundedSender<String>) {
             }
         }
     });
+}
+
+async fn spawn_stream_consumer(session: &atman_runtime::Session, printer: Option<ExternalPrinter>) {
+    let mut rx = session.stream_subscribe();
+    tokio::spawn(async move {
+        let mut printer = printer;
+        let mut pending_line = String::new();
+        loop {
+            match rx.recv().await {
+                Ok(frame) => {
+                    render_stream_frame(&mut printer, &mut pending_line, frame);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    render_note(&mut printer, format!("(dropped {n} stream frames)"));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn render_stream_frame(
+    printer: &mut Option<ExternalPrinter>,
+    pending: &mut String,
+    frame: atman_runtime::stream::StreamFrame,
+) {
+    use atman_runtime::stream::StreamFrame;
+    match frame {
+        StreamFrame::LlmChunk { text, .. } => {
+            pending.push_str(&text);
+            emit(printer, text);
+        }
+        StreamFrame::LlmDone { .. } => {
+            if !pending.ends_with('\n') {
+                emit(printer, "\n".into());
+            }
+            pending.clear();
+        }
+        StreamFrame::ToolUseStart { tool, args_preview } => {
+            emit(printer, format!("  ⟶ {tool}({args_preview})\n"));
+        }
+        StreamFrame::ToolUseDone { tool, ok, preview } => {
+            let mark = if ok { '✓' } else { '✗' };
+            emit(printer, format!("  {mark} {tool} → {preview}\n"));
+        }
+        StreamFrame::Note(s) => render_note(printer, s),
+    }
+}
+
+fn render_note(printer: &mut Option<ExternalPrinter>, s: String) {
+    emit(printer, format!("[atman] {s}\n"));
+}
+
+fn emit(printer: &mut Option<ExternalPrinter>, s: String) {
+    match printer.as_mut() {
+        Some(p) => {
+            let _ = p.print(s);
+        }
+        None => {
+            print!("{s}");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    }
 }
 
 enum TurnKind {
