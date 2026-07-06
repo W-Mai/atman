@@ -564,14 +564,14 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             messages: &messages,
             animation_frame: app.animation_frame,
         };
-        let (lines, ranges) =
+        let (lines, ranges, total_rows) =
             output::build_lines_with_ranges(&app.items, transcript_area.width, &ctx);
         app.last_item_ranges = ranges;
-        let paragraph =
-            ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
-        let total_rows = paragraph.line_count(transcript_area.width) as u16;
         app.resolve_scroll(total_rows, transcript_area.height);
-        f.render_widget(paragraph.scroll((app.scroll_offset, 0)), transcript_area);
+        let paragraph = ratatui::widgets::Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((app.scroll_offset, 0));
+        f.render_widget(paragraph, transcript_area);
     }
     if let Some(area) = l.sidebar {
         sidebar::render(
