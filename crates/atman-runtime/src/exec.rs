@@ -66,10 +66,26 @@ pub fn exec_stmts<'a>(
     env: &'a mut Env,
     ctx: &'a EvalCtx<'a>,
 ) -> BoxFut<'a, StmtOutcome> {
+    exec_stmts_prefixed(stmts, env, ctx, String::new())
+}
+
+pub fn exec_stmts_prefixed<'a>(
+    stmts: &'a [Stmt],
+    env: &'a mut Env,
+    ctx: &'a EvalCtx<'a>,
+    prefix: String,
+) -> BoxFut<'a, StmtOutcome> {
     Box::pin(async move {
         let watches = collect_watches(stmts);
-        for stmt in stmts {
+        for (i, stmt) in stmts.iter().enumerate() {
+            let node_id = if prefix.is_empty() {
+                format!("{i}")
+            } else {
+                format!("{prefix}.{i}")
+            };
+            emit_flow_node_start(ctx, &node_id, stmt);
             let outcome = exec_stmt(stmt, env, ctx, &watches).await;
+            emit_flow_node_end(ctx, &node_id, &outcome);
             match outcome {
                 StmtOutcome::Continue => continue,
                 other => return other,
@@ -77,6 +93,108 @@ pub fn exec_stmts<'a>(
         }
         StmtOutcome::Continue
     })
+}
+
+fn emit_flow_node_start(ctx: &EvalCtx<'_>, node_id: &str, stmt: &Stmt) {
+    let Some(session) = ctx.session else {
+        return;
+    };
+    let Some(run_id) = ctx.flow_run_id.clone() else {
+        return;
+    };
+    let (kind, label) = stmt_to_node_kind_label(stmt);
+    if let Some(sink) = ctx.events {
+        sink.emit(crate::event::Event::FlowNodeStart {
+            seq: 0,
+            run_id: run_id.clone(),
+            node_id: node_id.to_string(),
+            kind: kind.clone(),
+            label: label.clone(),
+            ts: chrono::Utc::now(),
+        });
+    }
+    let _ = session
+        .stream_tx()
+        .send(crate::stream::StreamFrame::FlowNodeStart {
+            run_id: run_id.0.to_string(),
+            node_id: node_id.to_string(),
+            kind,
+            label,
+        });
+}
+
+fn emit_flow_node_end(ctx: &EvalCtx<'_>, node_id: &str, outcome: &StmtOutcome) {
+    let Some(session) = ctx.session else {
+        return;
+    };
+    let Some(run_id) = ctx.flow_run_id.clone() else {
+        return;
+    };
+    let status = match outcome {
+        StmtOutcome::Err(_) => crate::event::FlowNodeStatus::Err,
+        _ => crate::event::FlowNodeStatus::Ok,
+    };
+    if let Some(sink) = ctx.events {
+        sink.emit(crate::event::Event::FlowNodeEnd {
+            seq: 0,
+            run_id: run_id.clone(),
+            node_id: node_id.to_string(),
+            status: status.clone(),
+            output_preview: None,
+            ts: chrono::Utc::now(),
+        });
+    }
+    let _ = session
+        .stream_tx()
+        .send(crate::stream::StreamFrame::FlowNodeEnd {
+            run_id: run_id.0.to_string(),
+            node_id: node_id.to_string(),
+            status,
+            output_preview: None,
+        });
+}
+
+fn stmt_to_node_kind_label(stmt: &Stmt) -> (crate::nodegraph::NodeKind, String) {
+    use crate::nodegraph::NodeKind;
+    match stmt {
+        Stmt::Bind { value, .. } | Stmt::Expr(value) => expr_to_node_kind_label(value),
+        Stmt::Return { .. } => (NodeKind::Return, "return".into()),
+        Stmt::When { .. } => (
+            NodeKind::When {
+                condition_preview: "when".into(),
+            },
+            "when …".into(),
+        ),
+        Stmt::Watch(_) => (NodeKind::Return, "watch".into()),
+    }
+}
+
+fn expr_to_node_kind_label(expr: &Expr) -> (crate::nodegraph::NodeKind, String) {
+    use crate::nodegraph::NodeKind;
+    match expr {
+        Expr::Node(Node::Llm { .. }) => (NodeKind::Llm { model: None }, "llm".into()),
+        Expr::Node(Node::ToolCall { path, .. }) => {
+            let p = path
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .join(".");
+            (NodeKind::ToolCall { path: p.clone() }, format!("⟶ {p}"))
+        }
+        Expr::Node(Node::Fanout { items, collect }) => (
+            NodeKind::Fanout {
+                collect: (*collect).into(),
+            },
+            format!("fanout ×{}", items.len()),
+        ),
+        Expr::Node(Node::Subflow { name, .. }) => (
+            NodeKind::Subflow {
+                name: name.name.clone(),
+            },
+            format!("subflow({})", name.name),
+        ),
+        _ => (NodeKind::Return, "expr".into()),
+    }
 }
 
 fn collect_watches(stmts: &[Stmt]) -> HashMap<String, Vec<&WatchDecl>> {
