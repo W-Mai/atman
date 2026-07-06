@@ -220,7 +220,8 @@ fn extract_ts(event: &Event) -> String {
         | Event::LlmPartialCall { ts, .. }
         | Event::FlowGraph { ts, .. }
         | Event::FlowNodeStart { ts, .. }
-        | Event::FlowNodeEnd { ts, .. } => ts.to_rfc3339(),
+        | Event::FlowNodeEnd { ts, .. }
+        | Event::ToolNode { ts, .. } => ts.to_rfc3339(),
     }
 }
 
@@ -246,6 +247,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::FlowGraph { .. } => "flow_graph",
         Event::FlowNodeStart { .. } => "flow_node_start",
         Event::FlowNodeEnd { .. } => "flow_node_end",
+        Event::ToolNode { .. } => "tool_node",
     }
 }
 
@@ -301,7 +303,8 @@ fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
         ),
         Event::FlowGraph { run_id, .. }
         | Event::FlowNodeStart { run_id, .. }
-        | Event::FlowNodeEnd { run_id, .. } => (None, Some(run_id.0.to_string())),
+        | Event::FlowNodeEnd { run_id, .. }
+        | Event::ToolNode { run_id, .. } => (None, Some(run_id.0.to_string())),
         Event::LlmCall { .. }
         | Event::ContextCompact { .. }
         | Event::PendingPrompt { .. }
@@ -336,6 +339,8 @@ mod tests {
                 seq: 0,
                 run_id: FlowRunId::now(),
                 flow_name: format!("flow_{i}"),
+                parent_run_id: None,
+                parent_node_id: None,
                 ts: chrono::Utc::now(),
             })
             .unwrap();
@@ -364,6 +369,8 @@ mod tests {
                 seq: (i + 1) as u64,
                 run_id: FlowRunId::now(),
                 flow_name: format!("flow_{i}"),
+                parent_run_id: None,
+                parent_node_id: None,
                 ts: chrono::Utc::now(),
             })
             .unwrap();

@@ -5,6 +5,8 @@ fn make_flow_start() -> Event {
         seq: 0,
         run_id: FlowRunId::now(),
         flow_name: "t".into(),
+        parent_run_id: None,
+        parent_node_id: None,
         ts: chrono::Utc::now(),
     }
 }

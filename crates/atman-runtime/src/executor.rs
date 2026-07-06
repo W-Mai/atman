@@ -124,6 +124,8 @@ impl Executor {
             seq: 0,
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
+            parent_run_id: None,
+            parent_node_id: None,
             ts: chrono::Utc::now(),
         });
         let graph = crate::nodegraph::extract_graph(flow);

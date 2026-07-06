@@ -110,6 +110,7 @@ fn emit_flow_node_start(ctx: &EvalCtx<'_>, node_id: &str, stmt: &Stmt) {
             node_id: node_id.to_string(),
             kind: kind.clone(),
             label: label.clone(),
+            parent_node_id: None,
             ts: chrono::Utc::now(),
         });
     }

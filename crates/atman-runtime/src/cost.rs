@@ -165,6 +165,8 @@ mod tests {
                 seq: 0,
                 run_id: run_id.clone(),
                 flow_name: "t".into(),
+                parent_run_id: None,
+                parent_node_id: None,
                 ts: chrono::Utc::now(),
             },
             ok_call("m", "p", 5, 5),

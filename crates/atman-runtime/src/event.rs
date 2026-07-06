@@ -46,6 +46,8 @@ pub enum Event {
         seq: u64,
         run_id: FlowRunId,
         flow_name: String,
+        parent_run_id: Option<FlowRunId>,
+        parent_node_id: Option<String>,
         ts: chrono::DateTime<chrono::Utc>,
     },
     FlowEnd {
@@ -197,6 +199,7 @@ pub enum Event {
         node_id: String,
         kind: crate::nodegraph::NodeKind,
         label: String,
+        parent_node_id: Option<String>,
         ts: chrono::DateTime<chrono::Utc>,
     },
     FlowNodeEnd {
@@ -206,6 +209,16 @@ pub enum Event {
         node_id: String,
         status: FlowNodeStatus,
         output_preview: Option<String>,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    ToolNode {
+        #[serde(default)]
+        seq: u64,
+        run_id: FlowRunId,
+        parent_node_id: String,
+        tool_use_id: String,
+        tool_name: String,
+        args_preview: String,
         ts: chrono::DateTime<chrono::Utc>,
     },
 }
@@ -240,7 +253,8 @@ impl Event {
             | Event::LlmPartialCall { seq, .. }
             | Event::FlowGraph { seq, .. }
             | Event::FlowNodeStart { seq, .. }
-            | Event::FlowNodeEnd { seq, .. } => *seq = new_seq,
+            | Event::FlowNodeEnd { seq, .. }
+            | Event::ToolNode { seq, .. } => *seq = new_seq,
         }
     }
 
@@ -265,7 +279,8 @@ impl Event {
             | Event::LlmPartialCall { seq, .. }
             | Event::FlowGraph { seq, .. }
             | Event::FlowNodeStart { seq, .. }
-            | Event::FlowNodeEnd { seq, .. } => *seq,
+            | Event::FlowNodeEnd { seq, .. }
+            | Event::ToolNode { seq, .. } => *seq,
         }
     }
 }
@@ -401,5 +416,79 @@ impl EventSink {
 
     pub fn snapshot(&self) -> Vec<Event> {
         self.events.lock().expect("event sink poisoned").clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_start_serializes_parent_linkage() {
+        let parent = FlowRunId::now();
+        let ev = Event::FlowStart {
+            seq: 42,
+            run_id: FlowRunId::now(),
+            flow_name: "child".into(),
+            parent_run_id: Some(parent.clone()),
+            parent_node_id: Some("stmt_3".into()),
+            ts: chrono::Utc::now(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["type"], "flow_start");
+        assert_eq!(v["parent_run_id"], serde_json::json!(parent.0.to_string()));
+        assert_eq!(v["parent_node_id"], "stmt_3");
+    }
+
+    #[test]
+    fn flow_node_start_carries_parent_node_id() {
+        let ev = Event::FlowNodeStart {
+            seq: 7,
+            run_id: FlowRunId::now(),
+            node_id: "stmt_1.branch[0]".into(),
+            kind: crate::nodegraph::NodeKind::UserConfirm,
+            label: "fanout".into(),
+            parent_node_id: Some("stmt_1".into()),
+            ts: chrono::Utc::now(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["type"], "flow_node_start");
+        assert_eq!(v["parent_node_id"], "stmt_1");
+    }
+
+    #[test]
+    fn tool_node_serializes_all_fields() {
+        let run_id = FlowRunId::now();
+        let ev = Event::ToolNode {
+            seq: 12,
+            run_id: run_id.clone(),
+            parent_node_id: "stmt_2".into(),
+            tool_use_id: "tu_abc".into(),
+            tool_name: "fs.read".into(),
+            args_preview: "{\"path\":\"a.rs\"}".into(),
+            ts: chrono::Utc::now(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["type"], "tool_node");
+        assert_eq!(v["run_id"], run_id.0.to_string());
+        assert_eq!(v["parent_node_id"], "stmt_2");
+        assert_eq!(v["tool_use_id"], "tu_abc");
+        assert_eq!(v["tool_name"], "fs.read");
+        assert_eq!(v["args_preview"], "{\"path\":\"a.rs\"}");
+    }
+
+    #[test]
+    fn seq_and_set_seq_cover_tool_node() {
+        let mut ev = Event::ToolNode {
+            seq: 0,
+            run_id: FlowRunId::now(),
+            parent_node_id: "s".into(),
+            tool_use_id: "t".into(),
+            tool_name: "n".into(),
+            args_preview: "{}".into(),
+            ts: chrono::Utc::now(),
+        };
+        ev.set_seq(99);
+        assert_eq!(ev.seq(), 99);
     }
 }
