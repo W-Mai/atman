@@ -1,6 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use atman_runtime::event::FlowNodeStatus;
+use atman_runtime::nodegraph::FlowGraph;
 use atman_runtime::stream::StreamFrame;
 
 const LAG_COOLDOWN: Duration = Duration::from_millis(300);
@@ -26,6 +28,15 @@ pub enum OutputItem {
         level: NoteLevel,
     },
     Divider,
+    FlowPanel {
+        run_id: String,
+        flow_name: String,
+        graph: FlowGraph,
+        node_states: HashMap<String, FlowNodeStatus>,
+        started_at: Instant,
+        ended_at: Option<Instant>,
+        expanded: bool,
+    },
 }
 
 impl OutputItem {
@@ -280,11 +291,82 @@ impl AppState {
                     level: NoteLevel::Info,
                 });
             }
-            StreamFrame::FlowGraph { .. }
-            | StreamFrame::FlowNodeStart { .. }
-            | StreamFrame::FlowNodeEnd { .. }
-            | StreamFrame::FlowDone { .. } => {}
+            StreamFrame::FlowGraph { run_id, graph } => {
+                self.push_item(OutputItem::FlowPanel {
+                    run_id,
+                    flow_name: graph.flow_name.clone(),
+                    graph,
+                    node_states: HashMap::new(),
+                    started_at: Instant::now(),
+                    ended_at: None,
+                    expanded: true,
+                });
+            }
+            StreamFrame::FlowNodeStart {
+                run_id, node_id, ..
+            } => {
+                if let Some(panel) = self.find_flow_panel_mut(&run_id) {
+                    panel.insert(node_id, FlowNodeStatus::Ok);
+                }
+            }
+            StreamFrame::FlowNodeEnd {
+                run_id,
+                node_id,
+                status,
+                ..
+            } => {
+                if let Some(panel) = self.find_flow_panel_mut(&run_id) {
+                    panel.insert(node_id, status);
+                }
+            }
+            StreamFrame::FlowDone { run_id, ok, .. } => {
+                if let Some(item) = self.find_flow_panel_item_mut(&run_id)
+                    && let OutputItem::FlowPanel {
+                        ended_at,
+                        expanded,
+                        node_states,
+                        ..
+                    } = item
+                {
+                    *ended_at = Some(Instant::now());
+                    *expanded = !ok;
+                    if !ok {
+                        node_states
+                            .entry("__flow__".into())
+                            .or_insert(FlowNodeStatus::Err);
+                    }
+                }
+            }
         }
+    }
+
+    fn find_flow_panel_mut(
+        &mut self,
+        run_id: &str,
+    ) -> Option<&mut HashMap<String, FlowNodeStatus>> {
+        for item in self.items.iter_mut().rev() {
+            if let OutputItem::FlowPanel {
+                run_id: rid,
+                node_states,
+                ..
+            } = item
+                && rid == run_id
+            {
+                return Some(node_states);
+            }
+        }
+        None
+    }
+
+    fn find_flow_panel_item_mut(&mut self, run_id: &str) -> Option<&mut OutputItem> {
+        for item in self.items.iter_mut().rev() {
+            if let OutputItem::FlowPanel { run_id: rid, .. } = item
+                && rid == run_id
+            {
+                return Some(item);
+            }
+        }
+        None
     }
 
     pub fn record_lag(&mut self, dropped: u64, now: Instant) {

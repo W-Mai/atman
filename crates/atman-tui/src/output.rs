@@ -123,6 +123,14 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
                 Style::default().fg(Color::DarkGray),
             )),
         ],
+        OutputItem::FlowPanel {
+            flow_name,
+            node_states,
+            ended_at,
+            expanded,
+            graph,
+            ..
+        } => render_flow_panel(flow_name, graph, node_states, *ended_at, *expanded),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
     lines
@@ -264,6 +272,91 @@ fn cap_content(s: &str, max: usize) -> (String, usize) {
     }
     let total = s.chars().count();
     (kept, total - max)
+}
+
+fn render_flow_panel(
+    flow_name: &str,
+    graph: &atman_runtime::nodegraph::FlowGraph,
+    node_states: &std::collections::HashMap<String, atman_runtime::event::FlowNodeStatus>,
+    ended_at: Option<std::time::Instant>,
+    expanded: bool,
+) -> Vec<Line<'static>> {
+    let running = ended_at.is_none();
+    let fold_glyph = if expanded { "▼" } else { "▶" };
+    let status_short = if running {
+        "running…"
+    } else if node_states
+        .values()
+        .any(|s| matches!(s, atman_runtime::event::FlowNodeStatus::Err))
+    {
+        "err"
+    } else {
+        "ok"
+    };
+    let total = count_nodes(&graph.root);
+    let header = Line::from(vec![
+        Span::styled(
+            format!(" {fold_glyph} "),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!("⚡ {flow_name}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" · {total} nodes · ")),
+        Span::styled(
+            status_short.to_string(),
+            match status_short {
+                "running…" => Style::default().fg(Color::Yellow),
+                "ok" => Style::default().fg(Color::Green),
+                "err" => Style::default().fg(Color::Red),
+                _ => Style::default(),
+            },
+        ),
+    ]);
+    let mut lines = vec![header];
+    if expanded {
+        for node in &graph.root {
+            append_flow_node_lines(&mut lines, node, node_states, 1);
+        }
+    }
+    lines
+}
+
+fn count_nodes(nodes: &[atman_runtime::nodegraph::StaticNode]) -> usize {
+    let mut n = 0;
+    for node in nodes {
+        n += 1;
+        n += count_nodes(&node.children);
+    }
+    n
+}
+
+fn append_flow_node_lines(
+    out: &mut Vec<Line<'static>>,
+    node: &atman_runtime::nodegraph::StaticNode,
+    node_states: &std::collections::HashMap<String, atman_runtime::event::FlowNodeStatus>,
+    depth: usize,
+) {
+    let indent = "  ".repeat(depth);
+    let status = node_states.get(&node.node_id);
+    let (glyph, style) = match status {
+        Some(atman_runtime::event::FlowNodeStatus::Ok) => ("✓", Style::default().fg(Color::Green)),
+        Some(atman_runtime::event::FlowNodeStatus::Err) => ("✗", Style::default().fg(Color::Red)),
+        Some(atman_runtime::event::FlowNodeStatus::Cancelled) => {
+            ("─", Style::default().fg(Color::DarkGray))
+        }
+        None => ("○", Style::default().fg(Color::DarkGray)),
+    };
+    out.push(Line::from(vec![
+        Span::raw(indent),
+        Span::styled(glyph.to_string(), style),
+        Span::raw(" "),
+        Span::raw(node.label.clone()),
+    ]));
+    for child in &node.children {
+        append_flow_node_lines(out, child, node_states, depth + 1);
+    }
 }
 
 fn pretty_wrap(s: &str) -> String {
