@@ -7,7 +7,7 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 
 const BUILTINS: &[&str] = &[
-    "help", "exit", "quit", "session", "cost", "attach", "suggest", "goal",
+    "help", "exit", "quit", "session", "sessions", "cost", "attach", "suggest", "goal",
 ];
 
 const INTERJECTIONS: &[&str] = &["nudge", "course-correct", "redirect", "stop"];

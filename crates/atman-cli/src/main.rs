@@ -21,6 +21,8 @@ mod sync;
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
+    #[arg(long, value_name = "SID", global = true)]
+    r#continue: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -187,7 +189,7 @@ enum SessionAction {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        None => cmd_repl().await,
+        None => cmd_repl(cli.r#continue).await,
         Some(Cmd::Version) => {
             println!("atman v{}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -814,7 +816,7 @@ struct PendingUserMessage {
     attachments: Vec<std::path::PathBuf>,
 }
 
-async fn cmd_repl() -> Result<()> {
+async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     use std::collections::VecDeque;
     use tokio::sync::mpsc;
 
@@ -825,10 +827,24 @@ async fn cmd_repl() -> Result<()> {
 
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
-    let session = Session::open_with_redactor(&root, redactor.clone())
-        .with_context(|| format!("opening session under {}", root.display()))?;
+    let session = match resume_sid {
+        Some(sid) => Session::open_existing_with_redactor(&root, &sid, redactor.clone())
+            .with_context(|| format!("resuming session {sid} under {}", root.display()))?,
+        None => Session::open_with_redactor(&root, redactor.clone())
+            .with_context(|| format!("opening session under {}", root.display()))?,
+    };
     if let Some(path) = session.events_path() {
-        println!("[atman] session={} events={}", session.id(), path.display());
+        let count = session.message_count();
+        if count > 0 {
+            println!(
+                "[atman] resumed session={} events={} ({} prior message(s))",
+                session.id(),
+                path.display(),
+                count
+            );
+        } else {
+            println!("[atman] session={} events={}", session.id(), path.display());
+        }
     }
 
     let atman_daemon::bootstrap::BootstrapOutcome {
@@ -892,6 +908,13 @@ async fn cmd_repl() -> Result<()> {
             }
             if trimmed == "goal" || trimmed.starts_with("goal ") || trimmed == "goal clear" {
                 handle_goal_builtin(trimmed, session.dir());
+                continue;
+            }
+            if trimmed == "sessions" {
+                match list_recent_sessions(&data_dir()?, 20) {
+                    Ok(rows) => print_sessions_table(&rows),
+                    Err(e) => eprintln!("[atman] :sessions: {e}"),
+                }
                 continue;
             }
             if !handle_builtin(trimmed, sid.as_str(), &mut pending) {
@@ -1324,6 +1347,84 @@ fn guess_image_mime(path: &std::path::Path) -> Option<String> {
     )
 }
 
+struct SessionRow {
+    sid: String,
+    mtime: std::time::SystemTime,
+    events_bytes: u64,
+    goal: Option<String>,
+}
+
+fn list_recent_sessions(root: &Path, cap: usize) -> Result<Vec<SessionRow>> {
+    let sessions_dir = root.join("sessions");
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut rows: Vec<SessionRow> = Vec::new();
+    for entry in std::fs::read_dir(&sessions_dir)? {
+        let e = entry?;
+        let path = e.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let sid = e.file_name().to_string_lossy().to_string();
+        let events = path.join("events.jsonl");
+        let (mtime, events_bytes) = match events.metadata() {
+            Ok(m) => (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()),
+            Err(_) => continue,
+        };
+        let goal_path = path.join("goal.txt");
+        let goal = std::fs::read_to_string(&goal_path)
+            .ok()
+            .map(|s| s.trim_end().to_string())
+            .filter(|s| !s.is_empty());
+        rows.push(SessionRow {
+            sid,
+            mtime,
+            events_bytes,
+            goal,
+        });
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.mtime));
+    rows.truncate(cap);
+    Ok(rows)
+}
+
+fn print_sessions_table(rows: &[SessionRow]) {
+    if rows.is_empty() {
+        println!("[atman] no sessions on disk yet");
+        return;
+    }
+    println!(
+        "{:<40} {:>10} {:>8}  goal",
+        "session_id", "events(B)", "age"
+    );
+    let now = std::time::SystemTime::now();
+    for r in rows {
+        let age = now
+            .duration_since(r.mtime)
+            .map(|d| format_age(d.as_secs()))
+            .unwrap_or_else(|_| "?".into());
+        let goal_col = r.goal.as_deref().unwrap_or("");
+        println!(
+            "{:<40} {:>10} {:>8}  {}",
+            r.sid, r.events_bytes, age, goal_col
+        );
+    }
+    println!("[atman] resume with: atman --continue <session_id>");
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
 fn handle_goal_builtin(cmd: &str, session_dir: &Path) {
     let store = atman_runtime::memory::goal::GoalStore::at(session_dir);
     let rest = cmd.strip_prefix("goal").unwrap_or(cmd).trim();
@@ -1401,6 +1502,9 @@ fn handle_builtin(cmd: &str, sid: &str, pending: &mut PendingUserMessage) -> boo
                 ":goal <text>         — set session goal (auto-injected into every llm system prompt)"
             );
             println!(":goal clear          — erase session goal");
+            println!(":sessions            — list recent sessions on disk (newest first)");
+            println!();
+            println!("resume a prior session: exit, then run `atman --continue <session_id>`");
             println!("@./path or @/abs     — inline attach in bare input");
             true
         }

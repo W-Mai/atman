@@ -18,6 +18,10 @@ impl SessionId {
     pub fn now() -> Self {
         Self(Uuid::now_v7())
     }
+
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
 }
 
 impl std::fmt::Display for SessionId {
@@ -37,6 +41,59 @@ pub struct Session {
     injection_tx: broadcast::Sender<Injection>,
     stream_tx: broadcast::Sender<StreamFrame>,
     flow_cancel: Mutex<CancellationToken>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionOpenError {
+    #[error("invalid session id `{sid}` (want a UUID)")]
+    InvalidId { sid: String },
+    #[error("session `{sid}` not found at {}", dir.display())]
+    NotFound { sid: String, dir: PathBuf },
+    #[error("session writer init: {0}")]
+    WriterInit(#[source] std::io::Error),
+    #[error("replay {}: {source}", path.display())]
+    Replay {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(SessionOpenError::Replay {
+                path: path.to_path_buf(),
+                source: e,
+            });
+        }
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let ty = v["type"].as_str().unwrap_or("");
+        if !matches!(
+            ty,
+            "user_msg" | "assistant_msg" | "tool_result_msg" | "system_msg"
+        ) {
+            continue;
+        }
+        let Some(m) = v.get("message") else {
+            continue;
+        };
+        if let Ok(msg) = serde_json::from_value::<Message>(m.clone()) {
+            out.push(msg);
+        }
+    }
+    Ok(out)
 }
 
 impl Session {
@@ -63,6 +120,48 @@ impl Session {
             writer: Some(writer),
             sink,
             messages: Mutex::new(Vec::new()),
+            current_turn: Mutex::new(None),
+            injection_queue: Mutex::new(Vec::new()),
+            injection_tx,
+            stream_tx,
+            flow_cancel: Mutex::new(CancellationToken::new()),
+        })
+    }
+
+    pub fn open_existing(root: impl AsRef<Path>, sid: &str) -> Result<Self, SessionOpenError> {
+        Self::open_existing_with_redactor(root, sid, None)
+    }
+
+    pub fn open_existing_with_redactor(
+        root: impl AsRef<Path>,
+        sid: &str,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+    ) -> Result<Self, SessionOpenError> {
+        let id = SessionId::parse(sid).map_err(|_| SessionOpenError::InvalidId {
+            sid: sid.to_string(),
+        })?;
+        let dir = root.as_ref().join("sessions").join(id.to_string());
+        if !dir.exists() {
+            return Err(SessionOpenError::NotFound {
+                sid: sid.to_string(),
+                dir: dir.clone(),
+            });
+        }
+        let writer = EventWriter::spawn_with(&dir, redactor.clone())
+            .map_err(SessionOpenError::WriterInit)?;
+        let mut sink = EventSink::new().with_forwarder(writer.sender());
+        if let Some(r) = redactor {
+            sink = sink.with_redactor(r);
+        }
+        let messages = replay_messages_from(&dir.join("events.jsonl"))?;
+        let (injection_tx, _) = broadcast::channel(32);
+        let (stream_tx, _) = broadcast::channel(256);
+        Ok(Self {
+            id,
+            dir,
+            writer: Some(writer),
+            sink,
+            messages: Mutex::new(messages),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
