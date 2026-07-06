@@ -949,17 +949,17 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                 continue;
             }
             if trimmed == "goal" || trimmed.starts_with("goal ") || trimmed == "goal clear" {
-                handle_goal_builtin(trimmed, session.dir());
+                handle_goal_builtin(trimmed, session.dir(), &reporter);
                 continue;
             }
             if trimmed == "sessions" {
                 match list_recent_sessions(&data_dir()?, 20) {
-                    Ok(rows) => print_sessions_table(&rows),
-                    Err(e) => eprintln!("[atman] :sessions: {e}"),
+                    Ok(rows) => print_sessions_table(&rows, &reporter),
+                    Err(e) => reporter.error(format!("[atman] :sessions: {e}")),
                 }
                 continue;
             }
-            if !handle_builtin(trimmed, sid.as_str(), &mut pending) {
+            if !handle_builtin(trimmed, sid.as_str(), &mut pending, &reporter) {
                 break;
             }
             continue;
@@ -969,8 +969,8 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         } else {
             let trimmed = line.trim();
             if resolve_route_call(trimmed).is_none() {
-                println!(
-                    "[atman] no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
+                reporter.info(
+                    "[atman] no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`.",
                 );
                 continue;
             }
@@ -1015,6 +1015,7 @@ fn tui_mode_requested() -> bool {
     }
 }
 
+#[derive(Clone)]
 enum Reporter {
     Stdout,
     Tui(tokio::sync::mpsc::UnboundedSender<atman_tui::TuiNote>),
@@ -1484,15 +1485,15 @@ fn list_recent_sessions(root: &Path, cap: usize) -> Result<Vec<SessionRow>> {
     Ok(rows)
 }
 
-fn print_sessions_table(rows: &[SessionRow]) {
+fn print_sessions_table(rows: &[SessionRow], reporter: &Reporter) {
     if rows.is_empty() {
-        println!("[atman] no sessions on disk yet");
+        reporter.info("[atman] no sessions on disk yet");
         return;
     }
-    println!(
+    reporter.info(format!(
         "{:<40} {:>10} {:>8}  goal",
         "session_id", "events(B)", "age"
-    );
+    ));
     let now = std::time::SystemTime::now();
     for r in rows {
         let age = now
@@ -1500,12 +1501,12 @@ fn print_sessions_table(rows: &[SessionRow]) {
             .map(|d| format_age(d.as_secs()))
             .unwrap_or_else(|_| "?".into());
         let goal_col = r.goal.as_deref().unwrap_or("");
-        println!(
+        reporter.info(format!(
             "{:<40} {:>10} {:>8}  {}",
             r.sid, r.events_bytes, age, goal_col
-        );
+        ));
     }
-    println!("[atman] resume with: atman --continue <session_id>");
+    reporter.info("[atman] resume with: atman --continue <session_id>");
 }
 
 fn format_age(secs: u64) -> String {
@@ -1520,49 +1521,54 @@ fn format_age(secs: u64) -> String {
     }
 }
 
-fn handle_goal_builtin(cmd: &str, session_dir: &Path) {
+fn handle_goal_builtin(cmd: &str, session_dir: &Path, reporter: &Reporter) {
     let store = atman_runtime::memory::goal::GoalStore::at(session_dir);
     let rest = cmd.strip_prefix("goal").unwrap_or(cmd).trim();
     if rest.is_empty() {
         match store.get() {
-            Ok(s) if s.is_empty() => println!("[atman] no session goal set"),
-            Ok(s) => println!("[atman] goal: {s}"),
-            Err(e) => eprintln!("[atman] :goal: read failed: {e}"),
+            Ok(s) if s.is_empty() => reporter.info("[atman] no session goal set"),
+            Ok(s) => reporter.info(format!("[atman] goal: {s}")),
+            Err(e) => reporter.error(format!("[atman] :goal: read failed: {e}")),
         }
         return;
     }
     if rest == "clear" {
         match store.clear() {
-            Ok(()) => println!("[atman] goal cleared"),
-            Err(e) => eprintln!("[atman] :goal clear: {e}"),
+            Ok(()) => reporter.info("[atman] goal cleared"),
+            Err(e) => reporter.error(format!("[atman] :goal clear: {e}")),
         }
         return;
     }
     match store.set(rest) {
-        Ok(()) => println!("[atman] goal set: {rest}"),
-        Err(e) => eprintln!("[atman] :goal set: {e}"),
+        Ok(()) => reporter.info(format!("[atman] goal set: {rest}")),
+        Err(e) => reporter.error(format!("[atman] :goal set: {e}")),
     }
 }
 
-fn handle_builtin(cmd: &str, sid: &str, pending: &mut PendingUserMessage) -> bool {
+fn handle_builtin(
+    cmd: &str,
+    sid: &str,
+    pending: &mut PendingUserMessage,
+    reporter: &Reporter,
+) -> bool {
     if let Some(rest) = cmd.strip_prefix("attach") {
         let arg = rest.trim();
         match arg {
             "" => {
-                eprintln!(":attach <path>  |  :attach clear  |  :attach list");
+                reporter.error(":attach <path>  |  :attach clear  |  :attach list");
                 return true;
             }
             "clear" => {
                 pending.attachments.clear();
-                println!("[atman] pending attachments cleared");
+                reporter.info("[atman] pending attachments cleared");
                 return true;
             }
             "list" => {
                 if pending.attachments.is_empty() {
-                    println!("[atman] no pending attachments");
+                    reporter.info("[atman] no pending attachments");
                 } else {
                     for (i, p) in pending.attachments.iter().enumerate() {
-                        println!("  {i}: {}", p.display());
+                        reporter.info(format!("  {i}: {}", p.display()));
                     }
                 }
                 return true;
@@ -1570,50 +1576,54 @@ fn handle_builtin(cmd: &str, sid: &str, pending: &mut PendingUserMessage) -> boo
             path => {
                 let expanded = std::path::PathBuf::from(path);
                 if !expanded.exists() {
-                    eprintln!(":attach: file not found: {}", expanded.display());
+                    reporter.error(format!(":attach: file not found: {}", expanded.display()));
                     return true;
                 }
                 pending.attachments.push(expanded.clone());
-                println!(
+                reporter.info(format!(
                     "[atman] attached {} (pending count: {})",
                     expanded.display(),
                     pending.attachments.len()
-                );
+                ));
                 return true;
             }
         }
     }
     match cmd {
         "help" => {
-            println!(":help                — show this");
-            println!(":exit | :quit        — leave REPL");
-            println!(":session             — print current session id");
-            println!(":cost                — cost summary for current session");
-            println!(":attach <path>       — attach file to next turn");
-            println!(":attach clear|list   — manage pending attachments");
-            println!(":suggest             — ask meta-LLM for a reusable flow from recent turns");
-            println!(":goal                — show current session goal");
-            println!(
-                ":goal <text>         — set session goal (auto-injected into every llm system prompt)"
-            );
-            println!(":goal clear          — erase session goal");
-            println!(":sessions            — list recent sessions on disk (newest first)");
-            println!();
-            println!("resume a prior session: exit, then run `atman --continue <session_id>`");
-            println!("@./path or @/abs     — inline attach in bare input");
+            for line in [
+                ":help                — show this",
+                ":exit | :quit        — leave REPL",
+                ":session             — print current session id",
+                ":cost                — cost summary for current session",
+                ":attach <path>       — attach file to next turn",
+                ":attach clear|list   — manage pending attachments",
+                ":suggest             — ask meta-LLM for a reusable flow from recent turns",
+                ":goal                — show current session goal",
+                ":goal <text>         — set session goal (auto-injected into every llm system prompt)",
+                ":goal clear          — erase session goal",
+                ":sessions            — list recent sessions on disk (newest first)",
+                "",
+                "resume a prior session: exit, then run `atman --continue <session_id>`",
+                "@./path or @/abs     — inline attach in bare input",
+            ] {
+                reporter.info(line);
+            }
             true
         }
         "exit" | "quit" => false,
         "session" => {
-            println!("session_id: {sid}");
+            reporter.info(format!("session_id: {sid}"));
             true
         }
         "cost" => {
-            eprintln!("(hint) run `atman cost {sid}` in another shell for now");
+            reporter.error(format!(
+                "(hint) run `atman cost {sid}` in another shell for now"
+            ));
             true
         }
         other => {
-            eprintln!("unknown builtin `:{other}` — try `:help`");
+            reporter.error(format!("unknown builtin `:{other}` — try `:help`"));
             true
         }
     }
