@@ -40,12 +40,14 @@ pub enum NoteLevel {
 pub struct AppState {
     pub items: Vec<OutputItem>,
     pub input: String,
-    pub scroll_offset: usize,
+    pub scroll_offset: u16,
     pub follow_tail: bool,
     pub should_quit: bool,
     pub streaming: bool,
     pub goal: Option<String>,
     pub session_id: String,
+    pub last_total_rows: u16,
+    pub last_viewport_rows: u16,
 }
 
 impl AppState {
@@ -58,22 +60,51 @@ impl AppState {
         }
     }
 
-    pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    pub fn max_scroll_offset(&self) -> u16 {
+        self.last_total_rows.saturating_sub(self.last_viewport_rows)
+    }
+
+    pub fn scroll_up(&mut self, rows: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(rows);
         self.follow_tail = false;
     }
 
-    pub fn scroll_down(&mut self, lines: usize) {
-        let max = self.items.len().saturating_sub(1);
-        self.scroll_offset = (self.scroll_offset + lines).min(max);
-        if self.scroll_offset >= max {
+    pub fn scroll_down(&mut self, rows: u16) {
+        let max = self.max_scroll_offset();
+        let next = self.scroll_offset.saturating_add(rows);
+        if next >= max {
             self.follow_tail = true;
+        } else {
+            self.scroll_offset = next;
         }
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = 0;
+        self.follow_tail = false;
     }
 
     pub fn scroll_to_tail(&mut self) {
         self.follow_tail = true;
-        self.scroll_offset = self.items.len().saturating_sub(1);
+    }
+
+    pub fn resolve_scroll(&mut self, total_rows: u16, viewport_rows: u16) {
+        self.last_total_rows = total_rows;
+        self.last_viewport_rows = viewport_rows;
+        let max = total_rows.saturating_sub(viewport_rows);
+        if self.follow_tail {
+            self.scroll_offset = max;
+        } else {
+            self.scroll_offset = self.scroll_offset.min(max);
+        }
+    }
+
+    pub fn pending_below_rows(&self) -> u16 {
+        if self.follow_tail {
+            0
+        } else {
+            self.max_scroll_offset().saturating_sub(self.scroll_offset)
+        }
     }
 
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
@@ -129,21 +160,11 @@ impl AppState {
                 });
             }
         }
-        self.tail_if_following();
     }
 
     pub fn push_user_turn(&mut self, text: String) {
         self.items.push(OutputItem::UserTurn { text });
         self.items.push(OutputItem::Divider);
-        if self.follow_tail {
-            self.scroll_offset = self.items.len().saturating_sub(1);
-        }
-    }
-
-    fn tail_if_following(&mut self) {
-        if self.follow_tail {
-            self.scroll_offset = self.items.len().saturating_sub(1);
-        }
     }
 }
 
@@ -253,29 +274,59 @@ mod tests {
     }
 
     #[test]
-    fn scroll_up_leaves_follow_tail_and_stops_tailing_new_frames() {
+    fn resolve_scroll_follows_tail_by_default() {
         let mut app = AppState::new("s".into(), None);
-        for _ in 0..5 {
-            app.push_user_turn("x".into());
-        }
-        let last = app.scroll_offset;
-        app.scroll_up(2);
-        assert_eq!(app.scroll_offset, last - 2);
-        assert!(!app.follow_tail);
-        app.apply_stream_frame(StreamFrame::Note("new".into()));
-        assert_eq!(app.scroll_offset, last - 2);
+        app.resolve_scroll(100, 20);
+        assert_eq!(app.scroll_offset, 80);
+        assert!(app.follow_tail);
     }
 
     #[test]
-    fn scroll_to_tail_resumes_following_new_frames() {
+    fn scroll_up_disables_follow_tail() {
         let mut app = AppState::new("s".into(), None);
-        app.push_user_turn("x".into());
-        app.push_user_turn("y".into());
-        app.scroll_up(10);
+        app.resolve_scroll(100, 20);
+        app.scroll_up(5);
+        assert_eq!(app.scroll_offset, 75);
         assert!(!app.follow_tail);
-        app.scroll_to_tail();
+    }
+
+    #[test]
+    fn scroll_down_reaching_bottom_reenables_follow_tail() {
+        let mut app = AppState::new("s".into(), None);
+        app.resolve_scroll(100, 20);
+        app.scroll_up(30);
+        assert_eq!(app.scroll_offset, 50);
+        app.scroll_down(30);
         assert!(app.follow_tail);
-        app.apply_stream_frame(StreamFrame::Note("new".into()));
-        assert_eq!(app.scroll_offset, app.items.len() - 1);
+    }
+
+    #[test]
+    fn scroll_down_partial_leaves_follow_tail_off() {
+        let mut app = AppState::new("s".into(), None);
+        app.resolve_scroll(200, 20);
+        app.scroll_up(100);
+        app.scroll_down(20);
+        assert_eq!(app.scroll_offset, 100);
+        assert!(!app.follow_tail);
+    }
+
+    #[test]
+    fn resolve_scroll_preserves_offset_when_not_following() {
+        let mut app = AppState::new("s".into(), None);
+        app.resolve_scroll(100, 20);
+        app.scroll_up(30);
+        app.resolve_scroll(200, 20);
+        assert_eq!(app.scroll_offset, 50);
+    }
+
+    #[test]
+    fn pending_below_rows_reports_diff_when_not_following() {
+        let mut app = AppState::new("s".into(), None);
+        app.resolve_scroll(100, 20);
+        app.scroll_up(15);
+        assert_eq!(app.pending_below_rows(), 15);
+        app.scroll_to_tail();
+        app.resolve_scroll(100, 20);
+        assert_eq!(app.pending_below_rows(), 0);
     }
 }

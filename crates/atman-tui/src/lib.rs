@@ -80,7 +80,7 @@ async fn run_frames(
     let mut sigterm = build_sigterm_stream();
 
     loop {
-        terminal.draw(|f| render_frame(f, &app, &editor))?;
+        terminal.draw(|f| render_frame(f, &mut app, &editor))?;
 
         if app.should_quit {
             break;
@@ -232,8 +232,7 @@ fn handle_key(
             *interrupt_prompt = false;
         }
         KeyAction::Home => {
-            app.scroll_offset = 0;
-            app.follow_tail = false;
+            app.scroll_to_top();
             *interrupt_prompt = false;
         }
         KeyAction::End => {
@@ -260,7 +259,7 @@ fn handle_key(
     }
 }
 
-fn render_frame(f: &mut ratatui::Frame, app: &AppState, editor: &InputEditor) {
+fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {
     let area = f.area();
     let input_height = compute_input_height(editor.buf(), area.width);
     let l = layout::compute(area, input_height);
@@ -269,10 +268,15 @@ fn render_frame(f: &mut ratatui::Frame, app: &AppState, editor: &InputEditor) {
         l.status,
     );
     if app.items.is_empty() {
+        app.resolve_scroll(0, l.output.height);
         f.render_widget(output::empty_hint(), l.output);
     } else {
-        let mut state = ratatui::widgets::ListState::default().with_offset(app.scroll_offset);
-        f.render_stateful_widget(output::build_list(&app.items), l.output, &mut state);
+        let lines = output::build_lines(&app.items);
+        let paragraph =
+            ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
+        let total_rows = paragraph.line_count(l.output.width) as u16;
+        app.resolve_scroll(total_rows, l.output.height);
+        f.render_widget(paragraph.scroll((app.scroll_offset, 0)), l.output);
     }
     f.render_widget(input_paragraph(editor.buf(), app.streaming), l.input);
 }
