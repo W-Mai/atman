@@ -13,7 +13,6 @@ pub enum OutputItem {
     },
     AssistantMd {
         md: String,
-        streaming: bool,
     },
     SystemNote {
         text: String,
@@ -72,6 +71,7 @@ pub struct AppState {
     pub layout_cache: crate::output::LayoutCache,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
+    pub pending_llm_text: String,
     last_lag_note_idx: Option<usize>,
     last_lag_at: Option<Instant>,
     last_lag_count: u64,
@@ -276,22 +276,14 @@ impl AppState {
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         match frame {
             StreamFrame::LlmChunk { text, .. } => {
-                if let Some(OutputItem::AssistantMd { md, streaming, .. }) = self.items.last_mut()
-                    && *streaming
-                {
-                    md.push_str(&text);
-                    self.reset_lag_state();
-                    return;
-                }
-                self.push_item(OutputItem::AssistantMd {
-                    md: text,
-                    streaming: true,
-                });
+                self.pending_llm_text.push_str(&text);
                 self.streaming = true;
+                self.reset_lag_state();
             }
             StreamFrame::LlmDone { .. } => {
-                if let Some(OutputItem::AssistantMd { streaming, .. }) = self.items.last_mut() {
-                    *streaming = false;
+                if !self.pending_llm_text.is_empty() {
+                    let md = std::mem::take(&mut self.pending_llm_text);
+                    self.push_item(OutputItem::AssistantMd { md });
                 }
                 self.streaming = false;
                 self.reset_lag_state();
@@ -403,7 +395,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunks_accumulate_into_last_assistant_item() {
+    fn chunks_buffer_without_pushing_items_until_done() {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "hello ".into(),
@@ -413,29 +405,26 @@ mod tests {
             text: "world".into(),
             model: "m".into(),
         });
-        assert_eq!(app.items.len(), 1);
-        match &app.items[0] {
-            OutputItem::AssistantMd { md, streaming, .. } => {
-                assert_eq!(md, "hello world");
-                assert!(*streaming);
-            }
-            other => panic!("expected assistant md, got {other:?}"),
-        }
+        assert!(app.items.is_empty(), "no partial items during streaming");
+        assert_eq!(app.pending_llm_text, "hello world");
+        assert!(app.streaming);
     }
 
     #[test]
-    fn done_flips_streaming_flag() {
+    fn done_flushes_pending_buffer_into_one_markdown_item() {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "hi".into(),
             model: "m".into(),
         });
         app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 3 });
+        assert_eq!(app.items.len(), 1);
         match &app.items[0] {
-            OutputItem::AssistantMd { streaming, .. } => assert!(!streaming),
+            OutputItem::AssistantMd { md } => assert_eq!(md, "hi"),
             _ => panic!(),
         }
         assert!(!app.streaming);
+        assert!(app.pending_llm_text.is_empty());
     }
 
     #[test]
