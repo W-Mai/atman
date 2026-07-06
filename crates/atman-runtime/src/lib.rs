@@ -34,6 +34,7 @@ pub mod tool_naming;
 pub mod tools;
 pub mod validate;
 pub mod value;
+pub mod workflow;
 
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};
 pub use env::Env;
@@ -52,3 +53,4 @@ pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, Tool
 pub use tool_naming::ToolNaming;
 pub use validate::{ValidationError, validate};
 pub use value::Value;
+pub use workflow::{NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind};
