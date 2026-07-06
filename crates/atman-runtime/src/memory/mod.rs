@@ -7,10 +7,12 @@ use uuid::Uuid;
 use crate::error::RuntimeError;
 
 pub mod confession;
+pub mod goal;
 pub mod spec;
 pub mod todo;
 
 pub use confession::{Confession, ConfessionStore};
+pub use goal::GoalStore;
 pub use spec::{SpecDeviation, SpecEntry, SpecStatus, SpecStore};
 pub use todo::{Todo, TodoStatus, TodoStore};
 

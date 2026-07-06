@@ -60,6 +60,49 @@ fn init_is_idempotent_and_never_overwrites_user_edits() {
 }
 
 #[test]
+fn repl_goal_builtin_set_show_clear() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = tmp.path().join("atman");
+    let data = tmp.path().join("data");
+    run_init(&cfg);
+
+    use std::io::Write;
+    let mut cmd = Command::new(atman_bin());
+    cmd.env("ATMAN_CONFIG_DIR", cfg.to_str().unwrap())
+        .env("ATMAN_DATA_DIR", data.to_str().unwrap())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .env("ATMAN_DISABLE_MIGRATION", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn repl");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b":goal\n:goal ship an agent\n:goal\n:goal clear\n:goal\n:exit\n")
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no session goal set"),
+        "want empty-goal hint: {stdout}"
+    );
+    assert!(
+        stdout.contains("goal set: ship an agent"),
+        "want set confirmation: {stdout}"
+    );
+    assert!(
+        stdout.contains("goal: ship an agent"),
+        "want current goal readback: {stdout}"
+    );
+    assert!(
+        stdout.contains("goal cleared"),
+        "want clear confirmation: {stdout}"
+    );
+}
+
+#[test]
 fn slash_command_resolver_accepts_multi_flow_agent_at() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = tmp.path().join("atman");

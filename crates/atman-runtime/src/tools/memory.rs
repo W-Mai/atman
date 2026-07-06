@@ -3,10 +3,100 @@ use std::sync::Arc;
 use crate::error::RuntimeError;
 use crate::memory::MemoryId;
 use crate::memory::confession::{Confession, ConfessionStore};
+use crate::memory::goal::GoalStore;
 use crate::memory::spec::SpecStore;
 use crate::memory::todo::{Todo, TodoStatus, TodoStore};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
+
+pub struct MemoryGoalGet {
+    pub store: Arc<GoalStore>,
+}
+
+impl Tool for MemoryGoalGet {
+    fn name(&self) -> &str {
+        "memory.goal.get"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Return the current session goal (persistent, auto-injected as system prefix). Empty string when unset.",
+        )
+    }
+
+    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let text = self
+                .store
+                .get()
+                .map_err(|e| RuntimeError::ToolFailed(format!("goal.get: {e}")))?;
+            Ok(Value::Str(text))
+        })
+    }
+}
+
+pub struct MemoryGoalSet {
+    pub store: Arc<GoalStore>,
+}
+
+impl Tool for MemoryGoalSet {
+    fn name(&self) -> &str {
+        "memory.goal.set"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Overwrite the session goal. atman injects the goal as a system-prompt \
+             prefix on every llm call in this session; it does not enter message \
+             history and is never compacted or evicted.",
+        )
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let text = required_string(&args, "text")?;
+            self.store
+                .set(&text)
+                .map_err(|e| RuntimeError::ToolFailed(format!("goal.set: {e}")))?;
+            Ok(Value::Unit)
+        })
+    }
+}
+
+pub struct MemoryGoalClear {
+    pub store: Arc<GoalStore>,
+}
+
+impl Tool for MemoryGoalClear {
+    fn name(&self) -> &str {
+        "memory.goal.clear"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Erase the session goal so future llm calls stop receiving the goal prefix.")
+    }
+
+    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            self.store
+                .clear()
+                .map_err(|e| RuntimeError::ToolFailed(format!("goal.clear: {e}")))?;
+            Ok(Value::Unit)
+        })
+    }
+}
 
 pub struct MemoryTodoSet {
     pub store: Arc<TodoStore>,

@@ -135,7 +135,8 @@ mod tests {
         crate::tools::register_tier_zero(&mut ex.tools);
         let todo = std::sync::Arc::new(crate::memory::TodoStore::at(dir));
         let confession = std::sync::Arc::new(crate::memory::ConfessionStore::at(dir));
-        crate::tools::register_memory(&mut ex.tools, todo, confession);
+        let goal = std::sync::Arc::new(crate::memory::GoalStore::at(dir));
+        crate::tools::register_memory(&mut ex.tools, todo, confession, goal);
         ex
     }
 

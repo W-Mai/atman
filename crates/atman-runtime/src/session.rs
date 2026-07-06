@@ -94,6 +94,17 @@ impl Session {
         self.writer.as_ref().map(|w| w.events_path())
     }
 
+    pub fn goal(&self) -> Option<String> {
+        if self.dir.as_os_str().is_empty() {
+            return None;
+        }
+        let store = crate::memory::goal::GoalStore::at(&self.dir);
+        match store.get() {
+            Ok(s) if !s.is_empty() => Some(s),
+            _ => None,
+        }
+    }
+
     pub fn sink(&self) -> &EventSink {
         &self.sink
     }

@@ -12,8 +12,9 @@ fn build_executor_with_memory(dir: &TempDir) -> Executor {
     tools::register_tier_zero(&mut ex.tools);
     let todo = Arc::new(TodoStore::at(dir.path()));
     let confession = Arc::new(ConfessionStore::at(dir.path()));
+    let goal = Arc::new(atman_runtime::memory::GoalStore::at(dir.path()));
     let spec = Arc::new(SpecStore::new(dir.path().to_path_buf()));
-    tools::register_memory(&mut ex.tools, todo, confession);
+    tools::register_memory(&mut ex.tools, todo, confession, goal);
     tools::register_spec_memory(&mut ex.tools, spec);
     ex
 }

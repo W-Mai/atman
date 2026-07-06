@@ -461,6 +461,15 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     )));
                 }
             }
+            if let Some(session) = ctx.session
+                && let Some(goal) = session.goal()
+            {
+                let prefix = format!("[session goal]\n{goal}\n[/session goal]");
+                system = Some(match system.take() {
+                    Some(existing) if !existing.is_empty() => format!("{prefix}\n\n{existing}"),
+                    _ => prefix,
+                });
+            }
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
             for attempt in 0..=retry_count {

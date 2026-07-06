@@ -14,11 +14,12 @@ async fn confess_three_and_fetch_returns_three_via_flow() {
     let dir = TempDir::new().unwrap();
     let confession = Arc::new(ConfessionStore::at(dir.path()));
     let todo = Arc::new(TodoStore::at(dir.path()));
+    let goal = Arc::new(atman_runtime::memory::GoalStore::at(dir.path()));
     let spec = Arc::new(SpecStore::new(dir.path().to_path_buf()));
 
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_memory(&mut ex.tools, todo, confession.clone());
+    tools::register_memory(&mut ex.tools, todo, confession.clone(), goal);
     tools::register_spec_memory(&mut ex.tools, spec);
 
     let src = r#"flow t() -> Int {

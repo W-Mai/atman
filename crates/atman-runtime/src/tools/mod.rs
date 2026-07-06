@@ -73,6 +73,7 @@ pub fn register_memory(
     reg: &mut ToolRegistry,
     todo_store: Arc<crate::memory::todo::TodoStore>,
     confession_store: Arc<crate::memory::confession::ConfessionStore>,
+    goal_store: Arc<crate::memory::goal::GoalStore>,
 ) {
     reg.register(Arc::new(memory::MemoryTodoSet {
         store: todo_store.clone(),
@@ -84,6 +85,13 @@ pub fn register_memory(
     reg.register(Arc::new(memory::MemoryFetchConfessions {
         store: confession_store,
     }));
+    reg.register(Arc::new(memory::MemoryGoalGet {
+        store: goal_store.clone(),
+    }));
+    reg.register(Arc::new(memory::MemoryGoalSet {
+        store: goal_store.clone(),
+    }));
+    reg.register(Arc::new(memory::MemoryGoalClear { store: goal_store }));
 }
 
 pub fn register_spec_memory(

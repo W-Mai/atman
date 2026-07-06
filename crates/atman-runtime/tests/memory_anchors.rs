@@ -13,10 +13,16 @@ async fn memory_confess_auto_fills_flow_run_and_turn_anchors_when_called_from_fl
     let confession_store = Arc::new(ConfessionStore::at(tmp.path()));
     let todo_store = Arc::new(TodoStore::at(tmp.path()));
     let spec_store = Arc::new(SpecStore::new(tmp.path().to_path_buf()));
+    let goal_store = Arc::new(atman_runtime::memory::GoalStore::at(tmp.path()));
 
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_memory(&mut ex.tools, todo_store, confession_store.clone());
+    tools::register_memory(
+        &mut ex.tools,
+        todo_store,
+        confession_store.clone(),
+        goal_store,
+    );
     tools::register_spec_memory(&mut ex.tools, spec_store);
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_fallback(Value::Str("ok".into())),
@@ -57,10 +63,16 @@ async fn memory_confess_appends_user_anchors_after_auto_anchors() {
     let confession_store = Arc::new(ConfessionStore::at(tmp.path()));
     let todo_store = Arc::new(TodoStore::at(tmp.path()));
     let spec_store = Arc::new(SpecStore::new(tmp.path().to_path_buf()));
+    let goal_store = Arc::new(atman_runtime::memory::GoalStore::at(tmp.path()));
 
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_memory(&mut ex.tools, todo_store, confession_store.clone());
+    tools::register_memory(
+        &mut ex.tools,
+        todo_store,
+        confession_store.clone(),
+        goal_store,
+    );
     tools::register_spec_memory(&mut ex.tools, spec_store);
 
     let src = r#"flow t() -> string {

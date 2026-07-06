@@ -887,6 +887,10 @@ async fn cmd_repl() -> Result<()> {
                 }
                 continue;
             }
+            if trimmed == "goal" || trimmed.starts_with("goal ") || trimmed == "goal clear" {
+                handle_goal_builtin(trimmed, session.dir());
+                continue;
+            }
             if !handle_builtin(trimmed, sid.as_str(), &mut pending) {
                 break;
             }
@@ -1238,6 +1242,30 @@ fn guess_image_mime(path: &std::path::Path) -> Option<String> {
     )
 }
 
+fn handle_goal_builtin(cmd: &str, session_dir: &Path) {
+    let store = atman_runtime::memory::goal::GoalStore::at(session_dir);
+    let rest = cmd.strip_prefix("goal").unwrap_or(cmd).trim();
+    if rest.is_empty() {
+        match store.get() {
+            Ok(s) if s.is_empty() => println!("[atman] no session goal set"),
+            Ok(s) => println!("[atman] goal: {s}"),
+            Err(e) => eprintln!("[atman] :goal: read failed: {e}"),
+        }
+        return;
+    }
+    if rest == "clear" {
+        match store.clear() {
+            Ok(()) => println!("[atman] goal cleared"),
+            Err(e) => eprintln!("[atman] :goal clear: {e}"),
+        }
+        return;
+    }
+    match store.set(rest) {
+        Ok(()) => println!("[atman] goal set: {rest}"),
+        Err(e) => eprintln!("[atman] :goal set: {e}"),
+    }
+}
+
 fn handle_builtin(cmd: &str, sid: &str, pending: &mut PendingUserMessage) -> bool {
     if let Some(rest) = cmd.strip_prefix("attach") {
         let arg = rest.trim();
@@ -1286,6 +1314,11 @@ fn handle_builtin(cmd: &str, sid: &str, pending: &mut PendingUserMessage) -> boo
             println!(":attach <path>       — attach file to next turn");
             println!(":attach clear|list   — manage pending attachments");
             println!(":suggest             — ask meta-LLM for a reusable flow from recent turns");
+            println!(":goal                — show current session goal");
+            println!(
+                ":goal <text>         — set session goal (auto-injected into every llm system prompt)"
+            );
+            println!(":goal clear          — erase session goal");
             println!("@./path or @/abs     — inline attach in bare input");
             true
         }
