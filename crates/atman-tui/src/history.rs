@@ -10,11 +10,56 @@ use crate::app::{NoteLevel, OutputItem, ToolStatus};
 const TOOL_RESULT_MAX_CHARS: usize = 200;
 
 pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
+    use atman_runtime::stream::StreamFrame;
+    use atman_runtime::workflow::WorkflowGraph;
+    use std::collections::HashSet;
+
     let mut out: Vec<OutputItem> = Vec::new();
     let mut flow_panel_idx: HashMap<String, usize> = HashMap::new();
+    let mut current_workflow_idx: Option<usize> = None;
+    let ensure_panel = |out: &mut Vec<OutputItem>, current: &mut Option<usize>| -> usize {
+        if let Some(i) = *current {
+            return i;
+        }
+        let turn_index = out
+            .iter()
+            .filter(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
+            .count();
+        out.push(OutputItem::WorkflowPanel {
+            turn_index,
+            graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+            expanded_nodes: HashSet::new(),
+            panel_expanded: true,
+            started_at: Instant::now(),
+            ended_at: None,
+        });
+        let idx = out.len() - 1;
+        *current = Some(idx);
+        idx
+    };
+    let apply_workflow = |out: &mut Vec<OutputItem>, idx: usize, frame: &StreamFrame| {
+        if let Some(OutputItem::WorkflowPanel {
+            graph, ended_at, ..
+        }) = out.get_mut(idx)
+        {
+            graph.apply_stream_frame(frame);
+            if let StreamFrame::FlowDone { .. } = frame {
+                *ended_at = Some(Instant::now());
+            }
+        }
+    };
     for entry in entries {
         match entry {
-            TranscriptEntry::Message(msg) => flatten_message(msg, &mut out),
+            TranscriptEntry::Message(msg) => {
+                if matches!(msg.role, MessageRole::User)
+                    && let Some(i) = current_workflow_idx.take()
+                    && let Some(OutputItem::WorkflowPanel { ended_at, .. }) = out.get_mut(i)
+                    && ended_at.is_none()
+                {
+                    *ended_at = Some(Instant::now());
+                }
+                flatten_message(msg, &mut out);
+            }
             TranscriptEntry::FlowGraph {
                 run_id,
                 flow_name,
@@ -31,6 +76,15 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     expanded: false,
                 });
                 flow_panel_idx.insert(run_id.clone(), idx);
+                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
+                apply_workflow(
+                    &mut out,
+                    panel_idx,
+                    &StreamFrame::FlowGraph {
+                        run_id: run_id.clone(),
+                        graph: graph.clone(),
+                    },
+                );
             }
             TranscriptEntry::FlowNodeStatus {
                 run_id,
@@ -41,6 +95,24 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     && let Some(OutputItem::FlowPanel { node_states, .. }) = out.get_mut(idx)
                 {
                     node_states.insert(node_id.clone(), status.clone());
+                }
+                if let Some(panel_idx) = current_workflow_idx {
+                    let start_frame = StreamFrame::FlowNodeStart {
+                        run_id: run_id.clone(),
+                        node_id: node_id.clone(),
+                        kind: atman_runtime::nodegraph::NodeKind::UserConfirm,
+                        label: node_id.clone(),
+                        parent_node_id: None,
+                    };
+                    apply_workflow(&mut out, panel_idx, &start_frame);
+                    let end_frame = StreamFrame::FlowNodeEnd {
+                        run_id: run_id.clone(),
+                        node_id: node_id.clone(),
+                        status: status.clone(),
+                        output_preview: None,
+                        parent_node_id: None,
+                    };
+                    apply_workflow(&mut out, panel_idx, &end_frame);
                 }
             }
             TranscriptEntry::FlowDone { run_id, ok } => {
@@ -57,6 +129,17 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                             .entry("__flow__".to_string())
                             .or_insert(FlowNodeStatus::Err);
                     }
+                }
+                if let Some(panel_idx) = current_workflow_idx {
+                    apply_workflow(
+                        &mut out,
+                        panel_idx,
+                        &StreamFrame::FlowDone {
+                            run_id: run_id.clone(),
+                            flow_name: String::new(),
+                            ok: *ok,
+                        },
+                    );
                 }
             }
         }
@@ -316,8 +399,43 @@ mod tests {
 
     #[test]
     fn truncate_handles_utf8_boundary() {
-        let s = "你好世界"; // 4 chars, 12 bytes
+        let s = "你好世界";
         assert_eq!(truncate(s, 4), "你好世界");
         assert_eq!(truncate(s, 2), "你好…");
+    }
+
+    #[test]
+    fn flatten_transcript_builds_workflow_panel_from_events() {
+        use atman_runtime::nodegraph::FlowGraph as StaticFlowGraph;
+        let entries = vec![
+            TranscriptEntry::FlowGraph {
+                run_id: "r1".into(),
+                flow_name: "look_into".into(),
+                graph: StaticFlowGraph {
+                    flow_name: "look_into".into(),
+                    root: Vec::new(),
+                },
+            },
+            TranscriptEntry::FlowNodeStatus {
+                run_id: "r1".into(),
+                node_id: "stmt_0".into(),
+                status: FlowNodeStatus::Ok,
+            },
+            TranscriptEntry::FlowDone {
+                run_id: "r1".into(),
+                ok: true,
+            },
+        ];
+        let out = flatten_transcript(&entries);
+        let panel = out
+            .iter()
+            .find_map(|it| match it {
+                OutputItem::WorkflowPanel { graph, ended_at, .. } => Some((graph, *ended_at)),
+                _ => None,
+            })
+            .expect("workflow panel");
+        assert_eq!(panel.0.root.len(), 1);
+        assert_eq!(panel.0.root[0].label, "look_into");
+        assert!(panel.1.is_some(), "FlowDone should close panel");
     }
 }
