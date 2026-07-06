@@ -5,6 +5,10 @@ use crossterm::event::{Event as CtEvent, EventStream};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Alignment;
+use ratatui::style::{Color, Style};
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
@@ -53,6 +57,9 @@ pub struct TuiHandle {
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     pub control_tx: Option<mpsc::UnboundedSender<TuiControl>>,
     pub initial_items: Vec<app::OutputItem>,
+    pub goal_rx: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    pub context_rx: Option<tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
+    pub attach_rx: Option<tokio::sync::watch::Receiver<usize>>,
 }
 
 impl TuiHandle {
@@ -66,6 +73,9 @@ impl TuiHandle {
             shutdown_rx: None,
             control_tx: None,
             initial_items: Vec::new(),
+            goal_rx: Some(session.subscribe_goal()),
+            context_rx: Some(session.subscribe_context()),
+            attach_rx: Some(session.subscribe_attach()),
         }
     }
 }
@@ -146,9 +156,53 @@ async fn run_frames(
                     app.push_note(text, level);
                 }
             }
+            _ = wait_goal_change(handle.goal_rx.as_mut()) => {
+                if let Some(rx) = handle.goal_rx.as_mut() {
+                    app.goal = rx.borrow().clone();
+                }
+            }
+            _ = wait_context_change(handle.context_rx.as_mut()) => {
+                if let Some(rx) = handle.context_rx.as_mut() {
+                    app.context = rx.borrow().clone();
+                }
+            }
+            _ = wait_attach_change(handle.attach_rx.as_mut()) => {
+                if let Some(rx) = handle.attach_rx.as_mut() {
+                    app.attach_count = *rx.borrow();
+                }
+            }
         }
     }
     Ok(())
+}
+
+async fn wait_goal_change(rx: Option<&mut tokio::sync::watch::Receiver<Option<String>>>) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_context_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
+) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_attach_change(rx: Option<&mut tokio::sync::watch::Receiver<usize>>) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(unix)]
@@ -320,10 +374,26 @@ fn handle_key(
 
 fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {
     let area = f.area();
+    if area.width < 40 || area.height < 8 {
+        let msg = Paragraph::new(Line::from("terminal too small (need 40×8)"))
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(Alignment::Center);
+        f.render_widget(msg, area);
+        return;
+    }
     let input_height = compute_input_height(editor.buf(), area.width);
-    let l = layout::compute(area, input_height, true);
+    let compact_status = area.width < layout::SIDEBAR_MIN_TOTAL_WIDTH;
+    let status_height = if compact_status { 2 } else { 1 };
+    let l = layout::compute_ex(area, input_height, true, status_height);
     f.render_widget(
-        status::render_bar(&app.session_id, app.goal.as_deref(), app.streaming),
+        status::render_bar(status::StatusInputs {
+            session_id: &app.session_id,
+            goal: app.goal.as_deref(),
+            streaming: app.streaming,
+            context: &app.context,
+            attach_count: app.attach_count,
+            include_compact_line: compact_status,
+        }),
         l.status,
     );
     let transcript_area = l.transcript;

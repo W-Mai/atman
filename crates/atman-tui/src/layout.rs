@@ -12,10 +12,19 @@ pub struct AppLayout {
 }
 
 pub fn compute(area: Rect, input_height: u16, show_sidebar: bool) -> AppLayout {
+    compute_ex(area, input_height, show_sidebar, 1)
+}
+
+pub fn compute_ex(
+    area: Rect,
+    input_height: u16,
+    show_sidebar: bool,
+    status_height: u16,
+) -> AppLayout {
     let vertical = RatatuiLayout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(status_height.max(1)),
             Constraint::Min(3),
             Constraint::Length(input_height.max(3)),
         ])

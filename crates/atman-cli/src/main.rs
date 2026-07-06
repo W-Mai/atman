@@ -926,6 +926,9 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             shutdown_rx: Some(sh_rx),
             control_tx: Some(ctrl_tx),
             initial_items,
+            goal_rx: Some(session.subscribe_goal()),
+            context_rx: Some(session.subscribe_context()),
+            attach_rx: Some(session.subscribe_attach()),
         };
         (
             Some(tokio::spawn(atman_tui::run_tui(handle))),
@@ -966,7 +969,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                 continue;
             }
             if trimmed == "goal" || trimmed.starts_with("goal ") || trimmed == "goal clear" {
-                handle_goal_builtin(trimmed, session.dir(), &reporter);
+                handle_goal_builtin(trimmed, &session, &reporter);
                 continue;
             }
             if trimmed == "sessions" {
@@ -976,7 +979,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                 }
                 continue;
             }
-            if !handle_builtin(trimmed, sid.as_str(), &mut pending, &reporter) {
+            if !handle_builtin(trimmed, sid.as_str(), &mut pending, &session, &reporter) {
                 break;
             }
             continue;
@@ -1569,8 +1572,8 @@ fn format_age(secs: u64) -> String {
     }
 }
 
-fn handle_goal_builtin(cmd: &str, session_dir: &Path, reporter: &Reporter) {
-    let store = atman_runtime::memory::goal::GoalStore::at(session_dir);
+fn handle_goal_builtin(cmd: &str, session: &Session, reporter: &Reporter) {
+    let store = atman_runtime::memory::goal::GoalStore::at(session.dir());
     let rest = cmd.strip_prefix("goal").unwrap_or(cmd).trim();
     if rest.is_empty() {
         match store.get() {
@@ -1582,13 +1585,19 @@ fn handle_goal_builtin(cmd: &str, session_dir: &Path, reporter: &Reporter) {
     }
     if rest == "clear" {
         match store.clear() {
-            Ok(()) => reporter.info("[atman] goal cleared"),
+            Ok(()) => {
+                session.set_goal(None);
+                reporter.info("[atman] goal cleared");
+            }
             Err(e) => reporter.error(format!("[atman] :goal clear: {e}")),
         }
         return;
     }
     match store.set(rest) {
-        Ok(()) => reporter.info(format!("[atman] goal set: {rest}")),
+        Ok(()) => {
+            session.set_goal(Some(rest.to_string()));
+            reporter.info(format!("[atman] goal set: {rest}"));
+        }
         Err(e) => reporter.error(format!("[atman] :goal set: {e}")),
     }
 }
@@ -1597,6 +1606,7 @@ fn handle_builtin(
     cmd: &str,
     sid: &str,
     pending: &mut PendingUserMessage,
+    session: &Session,
     reporter: &Reporter,
 ) -> bool {
     if let Some(rest) = cmd.strip_prefix("attach") {
@@ -1608,6 +1618,7 @@ fn handle_builtin(
             }
             "clear" => {
                 pending.attachments.clear();
+                session.set_attach_count(0);
                 reporter.info("[atman] pending attachments cleared");
                 return true;
             }
@@ -1628,6 +1639,7 @@ fn handle_builtin(
                     return true;
                 }
                 pending.attachments.push(expanded.clone());
+                session.set_attach_count(pending.attachments.len());
                 reporter.info(format!(
                     "[atman] attached {} (pending count: {})",
                     expanded.display(),

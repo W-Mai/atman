@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -41,6 +41,20 @@ pub struct Session {
     injection_tx: broadcast::Sender<Injection>,
     stream_tx: broadcast::Sender<StreamFrame>,
     flow_cancel: Mutex<CancellationToken>,
+    context_watch: watch::Sender<ContextSnapshot>,
+    goal_watch: watch::Sender<Option<String>>,
+    attach_watch: watch::Sender<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ContextSnapshot {
+    pub model: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: f64,
+    pub mcp_ok: u16,
+    pub mcp_total: u16,
+    pub memory_recent_count: u16,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +71,17 @@ pub enum SessionOpenError {
         #[source]
         source: std::io::Error,
     },
+}
+
+fn load_goal(dir: &Path) -> Option<String> {
+    if dir.as_os_str().is_empty() {
+        return None;
+    }
+    let store = crate::memory::goal::GoalStore::at(dir);
+    match store.get() {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
 }
 
 fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
@@ -114,6 +139,9 @@ impl Session {
         }
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(256);
+        let (context_watch, _) = watch::channel(ContextSnapshot::default());
+        let (goal_watch, _) = watch::channel(None);
+        let (attach_watch, _) = watch::channel(0);
         Ok(Self {
             id,
             dir,
@@ -125,6 +153,9 @@ impl Session {
             injection_tx,
             stream_tx,
             flow_cancel: Mutex::new(CancellationToken::new()),
+            context_watch,
+            goal_watch,
+            attach_watch,
         })
     }
 
@@ -154,8 +185,12 @@ impl Session {
             sink = sink.with_redactor(r);
         }
         let messages = replay_messages_from(&dir.join("events.jsonl"))?;
+        let initial_goal = load_goal(&dir);
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(256);
+        let (context_watch, _) = watch::channel(ContextSnapshot::default());
+        let (goal_watch, _) = watch::channel(initial_goal);
+        let (attach_watch, _) = watch::channel(0);
         Ok(Self {
             id,
             dir,
@@ -167,12 +202,18 @@ impl Session {
             injection_tx,
             stream_tx,
             flow_cancel: Mutex::new(CancellationToken::new()),
+            context_watch,
+            goal_watch,
+            attach_watch,
         })
     }
 
     pub fn open_ephemeral() -> Self {
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(256);
+        let (context_watch, _) = watch::channel(ContextSnapshot::default());
+        let (goal_watch, _) = watch::channel(None);
+        let (attach_watch, _) = watch::channel(0);
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -184,6 +225,9 @@ impl Session {
             injection_tx,
             stream_tx,
             flow_cancel: Mutex::new(CancellationToken::new()),
+            context_watch,
+            goal_watch,
+            attach_watch,
         }
     }
 
@@ -208,14 +252,51 @@ impl Session {
     }
 
     pub fn goal(&self) -> Option<String> {
-        if self.dir.as_os_str().is_empty() {
-            return None;
+        if let Some(cached) = self.goal_watch.borrow().clone() {
+            return Some(cached);
         }
-        let store = crate::memory::goal::GoalStore::at(&self.dir);
-        match store.get() {
-            Ok(s) if !s.is_empty() => Some(s),
-            _ => None,
-        }
+        load_goal(&self.dir)
+    }
+
+    pub fn subscribe_goal(&self) -> watch::Receiver<Option<String>> {
+        self.goal_watch.subscribe()
+    }
+
+    pub fn subscribe_context(&self) -> watch::Receiver<ContextSnapshot> {
+        self.context_watch.subscribe()
+    }
+
+    pub fn subscribe_attach(&self) -> watch::Receiver<usize> {
+        self.attach_watch.subscribe()
+    }
+
+    pub fn set_goal(&self, goal: Option<String>) {
+        let _ = self.goal_watch.send(goal);
+    }
+
+    pub fn set_attach_count(&self, count: usize) {
+        let _ = self.attach_watch.send(count);
+    }
+
+    pub fn record_llm_call(&self, model: &str, tokens_in: u64, tokens_out: u64) {
+        self.context_watch.send_modify(|snap| {
+            snap.model = model.to_string();
+            snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
+            snap.tokens_out = snap.tokens_out.saturating_add(tokens_out);
+        });
+    }
+
+    pub fn set_mcp_totals(&self, ok: u16, total: u16) {
+        self.context_watch.send_modify(|snap| {
+            snap.mcp_ok = ok;
+            snap.mcp_total = total;
+        });
+    }
+
+    pub fn set_memory_recent_count(&self, count: u16) {
+        self.context_watch.send_modify(|snap| {
+            snap.memory_recent_count = count;
+        });
     }
 
     pub fn sink(&self) -> &EventSink {

@@ -623,11 +623,14 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         seq: 0,
                         model: model.clone(),
                         provider: provider.name().to_string(),
-                        usage,
+                        usage: usage.clone(),
                         wallclock_ms: elapsed_ms,
                         status,
                         ts: chrono::Utc::now(),
                     });
+                }
+                if let Some(session) = ctx.session {
+                    session.record_llm_call(&model, usage.input + usage.cached_input, usage.output);
                 }
                 match outcome {
                     Ok(am) => {
