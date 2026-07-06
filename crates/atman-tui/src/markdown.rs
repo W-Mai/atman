@@ -275,16 +275,15 @@ impl Renderer {
             format!("┌─ {lang_label} ─"),
             Style::default().fg(Color::DarkGray),
         )));
-        for line in body.lines() {
-            self.lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(line.to_string(), Style::default().fg(Color::LightGreen)),
-            ]));
+        let gutter = Style::default().fg(Color::DarkGray);
+        for hl in crate::highlight::highlight_code(lang, body) {
+            let mut spans = Vec::with_capacity(hl.spans.len() + 1);
+            spans.push(Span::styled("│ ", gutter));
+            spans.extend(hl.spans);
+            self.lines.push(Line::from(spans));
         }
-        self.lines.push(Line::from(Span::styled(
-            "└─".to_string(),
-            Style::default().fg(Color::DarkGray),
-        )));
+        self.lines
+            .push(Line::from(Span::styled("└─".to_string(), gutter)));
         self.fresh_line = true;
         self.blank_line();
     }

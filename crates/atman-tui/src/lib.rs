@@ -11,6 +11,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 pub mod app;
+pub mod highlight;
 pub mod input;
 pub mod keys;
 pub mod layout;
