@@ -315,14 +315,16 @@ fn handle_key(
                 app.popup.next();
                 return;
             }
-            KeyAction::Tab | KeyAction::Submit => {
+            KeyAction::Tab => {
                 if let Some(item) = app.popup.accept() {
                     editor.replace_with(&item.insert);
                 }
                 app.refresh_popup(editor.buf());
                 return;
             }
-            _ => {}
+            _ => {
+                app.popup.close();
+            }
         }
     }
     let mut edited = false;
