@@ -44,6 +44,15 @@ impl InputEditor {
         std::mem::take(&mut self.buf)
     }
 
+    pub fn prefill(&mut self, prefix: &str) {
+        self.reset_history_view();
+        if !self.buf.starts_with(prefix) {
+            let existing = std::mem::take(&mut self.buf);
+            self.buf.push_str(prefix);
+            self.buf.push_str(&existing);
+        }
+    }
+
     pub fn submit(&mut self) -> Option<String> {
         let line = std::mem::take(&mut self.buf);
         self.history_idx = None;
@@ -131,6 +140,22 @@ mod tests {
         assert_eq!(ed.buf(), "two");
         ed.history_down();
         assert_eq!(ed.buf(), "wip");
+    }
+
+    #[test]
+    fn prefill_prepends_prefix_when_absent() {
+        let mut ed = InputEditor::default();
+        "foo".chars().for_each(|c| ed.push_char(c));
+        ed.prefill("/nudge ");
+        assert_eq!(ed.buf(), "/nudge foo");
+    }
+
+    #[test]
+    fn prefill_is_idempotent_when_prefix_already_present() {
+        let mut ed = InputEditor::default();
+        "/nudge stop".chars().for_each(|c| ed.push_char(c));
+        ed.prefill("/nudge ");
+        assert_eq!(ed.buf(), "/nudge stop");
     }
 
     #[test]

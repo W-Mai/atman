@@ -103,6 +103,47 @@ fn handle_key(
             editor.history_down();
             *interrupt_prompt = false;
         }
+        KeyAction::NudgePrefill => {
+            editor.prefill("/nudge ");
+            *interrupt_prompt = false;
+        }
+        KeyAction::CoursePrefill => {
+            editor.prefill("/course ");
+            *interrupt_prompt = false;
+        }
+        KeyAction::RedirectPrefill => {
+            editor.prefill("/redirect ");
+            *interrupt_prompt = false;
+        }
+        KeyAction::HardStop => {
+            editor.prefill("/hard-stop ");
+            *interrupt_prompt = false;
+        }
+        KeyAction::ScrollUp | KeyAction::PageUp => {
+            app.scroll_up(if matches!(action, KeyAction::PageUp) {
+                10
+            } else {
+                1
+            });
+            *interrupt_prompt = false;
+        }
+        KeyAction::ScrollDown | KeyAction::PageDown => {
+            app.scroll_down(if matches!(action, KeyAction::PageDown) {
+                10
+            } else {
+                1
+            });
+            *interrupt_prompt = false;
+        }
+        KeyAction::Home => {
+            app.scroll_offset = 0;
+            app.follow_tail = false;
+            *interrupt_prompt = false;
+        }
+        KeyAction::End => {
+            app.scroll_to_tail();
+            *interrupt_prompt = false;
+        }
         KeyAction::Interrupt => {
             if *interrupt_prompt {
                 app.should_quit = true;
@@ -117,7 +158,7 @@ fn handle_key(
         KeyAction::Quit => {
             app.should_quit = true;
         }
-        _ => {
+        KeyAction::Ignore => {
             *interrupt_prompt = false;
         }
     }
@@ -134,7 +175,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &AppState, editor: &InputEditor) {
     if app.items.is_empty() {
         f.render_widget(output::empty_hint(), l.output);
     } else {
-        f.render_widget(output::build_list(&app.items), l.output);
+        let mut state = ratatui::widgets::ListState::default().with_offset(app.scroll_offset);
+        f.render_stateful_widget(output::build_list(&app.items), l.output, &mut state);
     }
     f.render_widget(input_paragraph(editor.buf(), app.streaming), l.input);
 }
