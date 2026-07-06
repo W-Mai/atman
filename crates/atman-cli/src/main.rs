@@ -986,6 +986,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             kind,
             &mut input_rx,
             &mut pushback,
+            &reporter,
         )
         .await;
     }
@@ -1009,10 +1010,17 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
 }
 
 fn tui_mode_requested() -> bool {
-    match std::env::var("ATMAN_TUI") {
-        Ok(v) => matches!(v.as_str(), "1" | "true" | "yes" | "on"),
-        Err(_) => false,
+    if let Ok(v) = std::env::var("ATMAN_NO_TUI") {
+        if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
+            return false;
+        }
     }
+    if let Ok(v) = std::env::var("ATMAN_TUI") {
+        if matches!(v.as_str(), "0" | "false" | "no" | "off") {
+            return false;
+        }
+    }
+    std::env::var("ATMAN_REPL_NON_INTERACTIVE").is_err()
 }
 
 #[derive(Clone)]
@@ -1196,6 +1204,7 @@ async fn run_turn_with_interjection(
     kind: TurnKind,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     pushback: &mut std::collections::VecDeque<String>,
+    reporter: &Reporter,
 ) {
     let (text, inline_attachments) = extract_at_paths(raw_line);
     let mut attachments = std::mem::take(&mut pending.attachments);
@@ -1226,7 +1235,7 @@ async fn run_turn_with_interjection(
             biased;
             r = &mut flow_fut => break r,
             Some(line) = input_rx.recv() => {
-                if !consume_interjection_input(&line, session, classifier).await {
+                if !consume_interjection_input(&line, session, classifier, reporter).await {
                     pushback.push_back(line);
                 }
             }
@@ -1234,8 +1243,13 @@ async fn run_turn_with_interjection(
     };
 
     match result {
-        Ok(v) => println!("{}", render_value(&v)),
-        Err(e) => eprintln!("error: {e}"),
+        Ok(v) => {
+            let rendered = render_value(&v);
+            if !rendered.is_empty() {
+                reporter.info(rendered);
+            }
+        }
+        Err(e) => reporter.error(format!("error: {e}")),
     }
     lifecycles
         .fire(executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
@@ -1252,6 +1266,7 @@ async fn consume_interjection_input(
     classifier: Option<
         &std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>,
     >,
+    reporter: &Reporter,
 ) -> bool {
     use atman_runtime::injection::InjectionLevel;
     use atman_runtime::injection_classifier::{ClassifierSource, source_tag};
@@ -1262,27 +1277,27 @@ async fn consume_interjection_input(
     if trimmed == "!stop" {
         session.cancel_flow();
         let _ = session.enqueue_injection_with_level("stop", InjectionLevel::L4HardStop, None);
-        println!("[atman] stop requested; flow will abort at next node boundary");
+        reporter.info("[atman] stop requested; flow will abort at next node boundary");
         return true;
     }
     if let Some(text) = trimmed.strip_prefix("!course-correct ") {
         let text = text.trim();
         if text.is_empty() {
-            eprintln!("[atman] usage: !course-correct <text>");
+            reporter.error("[atman] usage: !course-correct <text>");
             return true;
         }
         match session.enqueue_injection_with_level(text, InjectionLevel::L2CourseCorrect, None) {
-            Ok(id) => println!(
+            Ok(id) => reporter.info(format!(
                 "[atman] course-correct queued ({id}) — llm restarts at next chunk boundary"
-            ),
-            Err(e) => eprintln!("[atman] course-correct rejected: {e}"),
+            )),
+            Err(e) => reporter.error(format!("[atman] course-correct rejected: {e}")),
         }
         return true;
     }
     if let Some(target) = trimmed.strip_prefix("!redirect ") {
         let target = target.trim();
         if target.is_empty() {
-            eprintln!("[atman] usage: !redirect <flow_name>");
+            reporter.error("[atman] usage: !redirect <flow_name>");
             return true;
         }
         match session.enqueue_injection_with_level(
@@ -1290,34 +1305,38 @@ async fn consume_interjection_input(
             InjectionLevel::L3Redirect,
             Some(target.to_string()),
         ) {
-            Ok(id) => println!("[atman] redirect queued ({id}) → {target}"),
-            Err(e) => eprintln!("[atman] redirect rejected: {e}"),
+            Ok(id) => reporter.info(format!("[atman] redirect queued ({id}) → {target}")),
+            Err(e) => reporter.error(format!("[atman] redirect rejected: {e}")),
         }
         return true;
     }
     if let Some(text) = trimmed.strip_prefix("!nudge ") {
         let text = text.trim();
         if text.is_empty() {
-            eprintln!("[atman] usage: !nudge <text>");
+            reporter.error("[atman] usage: !nudge <text>");
             return true;
         }
         match session.enqueue_injection(text) {
-            Ok(id) => println!("[atman] nudge queued ({id}) — will inject at next llm node"),
-            Err(e) => eprintln!("[atman] nudge rejected: {e}"),
+            Ok(id) => reporter.info(format!(
+                "[atman] nudge queued ({id}) — will inject at next llm node"
+            )),
+            Err(e) => reporter.error(format!("[atman] nudge rejected: {e}")),
         }
         return true;
     }
     if let Some(text) = trimmed.strip_prefix('!') {
         let text = text.trim();
         if text.is_empty() {
-            eprintln!(
-                "[atman] usage while flow runs: !nudge <text> | !course-correct <text> | !redirect <flow> | !stop"
+            reporter.error(
+                "[atman] usage while flow runs: !nudge <text> | !course-correct <text> | !redirect <flow> | !stop",
             );
             return true;
         }
         match session.enqueue_injection(text) {
-            Ok(id) => println!("[atman] nudge queued ({id}) — will inject at next llm node"),
-            Err(e) => eprintln!("[atman] nudge rejected: {e}"),
+            Ok(id) => reporter.info(format!(
+                "[atman] nudge queued ({id}) — will inject at next llm node"
+            )),
+            Err(e) => reporter.error(format!("[atman] nudge rejected: {e}")),
         }
         return true;
     }
@@ -1334,7 +1353,7 @@ async fn consume_interjection_input(
                 InjectionLevel::L4HardStop,
                 cls.redirect_target,
             );
-            println!("[atman] L4 stop queued ({source}): {trimmed}");
+            reporter.info(format!("[atman] L4 stop queued ({source}): {trimmed}"));
         }
         InjectionLevel::L3Redirect => {
             let target = cls.redirect_target.clone();
@@ -1343,11 +1362,11 @@ async fn consume_interjection_input(
                 InjectionLevel::L3Redirect,
                 target.clone(),
             ) {
-                Ok(id) => println!(
+                Ok(id) => reporter.info(format!(
                     "[atman] L3 redirect queued ({id}, {source}) → {}",
                     target.as_deref().unwrap_or("<no target>")
-                ),
-                Err(e) => eprintln!("[atman] L3 redirect rejected: {e}"),
+                )),
+                Err(e) => reporter.error(format!("[atman] L3 redirect rejected: {e}")),
             }
         }
         InjectionLevel::L2CourseCorrect => {
@@ -1356,15 +1375,17 @@ async fn consume_interjection_input(
                 InjectionLevel::L2CourseCorrect,
                 None,
             ) {
-                Ok(id) => {
-                    println!("[atman] L2 course-correct queued ({id}, {source}): {trimmed}")
-                }
-                Err(e) => eprintln!("[atman] L2 course-correct rejected: {e}"),
+                Ok(id) => reporter.info(format!(
+                    "[atman] L2 course-correct queued ({id}, {source}): {trimmed}"
+                )),
+                Err(e) => reporter.error(format!("[atman] L2 course-correct rejected: {e}")),
             }
         }
         InjectionLevel::L1Nudge => match session.enqueue_injection(trimmed) {
-            Ok(id) => println!("[atman] L1 nudge queued ({id}, {source}): {trimmed}"),
-            Err(e) => eprintln!("[atman] L1 nudge rejected: {e}"),
+            Ok(id) => reporter.info(format!(
+                "[atman] L1 nudge queued ({id}, {source}): {trimmed}"
+            )),
+            Err(e) => reporter.error(format!("[atman] L1 nudge rejected: {e}")),
         },
     }
     let _ = ClassifierSource::Default;
