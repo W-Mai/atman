@@ -119,6 +119,10 @@ async fn run_frames(
                             handle.control_tx.as_ref(),
                         );
                     }
+                    Some(Ok(CtEvent::Paste(s))) => {
+                        editor.insert_str(&s);
+                        interrupt_prompt = false;
+                    }
                     Some(Ok(CtEvent::Resize(_, _))) => {}
                     _ => {}
                 }
@@ -198,11 +202,19 @@ fn handle_key(
 ) {
     match action {
         KeyAction::Char(c) => {
-            editor.push_char(c);
+            editor.insert_char(c);
             *interrupt_prompt = false;
         }
         KeyAction::Backspace => {
             editor.backspace();
+            *interrupt_prompt = false;
+        }
+        KeyAction::DeleteWordBackward => {
+            editor.delete_word_backward();
+            *interrupt_prompt = false;
+        }
+        KeyAction::Newline => {
+            editor.insert_newline();
             *interrupt_prompt = false;
         }
         KeyAction::Submit => {
@@ -220,6 +232,22 @@ fn handle_key(
         }
         KeyAction::HistoryDown => {
             editor.history_down();
+            *interrupt_prompt = false;
+        }
+        KeyAction::CursorLeft => {
+            editor.move_left();
+            *interrupt_prompt = false;
+        }
+        KeyAction::CursorRight => {
+            editor.move_right();
+            *interrupt_prompt = false;
+        }
+        KeyAction::CursorHome => {
+            editor.move_home();
+            *interrupt_prompt = false;
+        }
+        KeyAction::CursorEnd => {
+            editor.move_end();
             *interrupt_prompt = false;
         }
         KeyAction::NudgePrefill => {
@@ -319,16 +347,26 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         );
     }
     f.render_widget(
-        input_paragraph(editor.buf(), app.streaming, app.pending_below_rows()),
+        input_paragraph(
+            editor.buf(),
+            editor.cursor(),
+            app.streaming,
+            app.pending_below_rows(),
+        ),
         l.input,
     );
 }
 
 fn compute_input_height(buf: &str, width: u16) -> u16 {
+    use unicode_width::UnicodeWidthStr;
     let border_padding: u16 = 2;
     let prompt_len: u16 = 2;
     let usable = width.saturating_sub(border_padding + prompt_len).max(1) as usize;
-    let visible = buf.chars().count();
-    let lines = visible.div_ceil(usable).max(1);
-    (lines as u16 + border_padding).clamp(3, 7)
+    let mut wrapped_rows: usize = 0;
+    for logical_line in buf.split('\n') {
+        let w = logical_line.width().max(1);
+        wrapped_rows += w.div_ceil(usable);
+    }
+    let content = wrapped_rows.max(1) as u16;
+    (content + border_padding).clamp(3, 9)
 }
