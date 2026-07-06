@@ -55,13 +55,13 @@ pub fn build_lines_with_ranges(
     let mut all_lines: Vec<Line<'static>> = Vec::with_capacity(items.len() * 3);
     let mut ranges: Vec<ItemRange> = Vec::with_capacity(items.len());
     let mut cursor: u16 = 0;
-    let usable_width = width.max(1);
     for (idx, item) in items.iter().enumerate() {
         let item_lines = render_item(item, ctx);
         let rows = if width == 0 {
             item_lines.len() as u16
         } else {
-            estimate_wrapped_rows(&item_lines, usable_width)
+            let p = Paragraph::new(item_lines.clone()).wrap(Wrap { trim: false });
+            p.line_count(width) as u16
         };
         ranges.push(ItemRange {
             item_index: idx,
@@ -72,23 +72,6 @@ pub fn build_lines_with_ranges(
         all_lines.extend(item_lines);
     }
     (all_lines, ranges, cursor)
-}
-
-fn estimate_wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
-    use unicode_width::UnicodeWidthStr;
-    let w = width as usize;
-    let mut rows: u32 = 0;
-    for line in lines {
-        let display: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        let display_w = display.width();
-        let this_rows = if display_w == 0 {
-            1
-        } else {
-            display_w.div_ceil(w) as u32
-        };
-        rows = rows.saturating_add(this_rows);
-    }
-    rows.min(u16::MAX as u32) as u16
 }
 
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {

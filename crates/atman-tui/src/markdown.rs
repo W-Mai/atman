@@ -29,6 +29,8 @@ struct Renderer {
     in_table: bool,
     in_table_head: bool,
     table_row: Vec<String>,
+    table_header: Vec<String>,
+    table_body: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -244,51 +246,72 @@ impl Renderer {
                 self.style_stack.pop();
             }
             TagEnd::Table => {
+                self.flush_table();
                 self.in_table = false;
                 self.blank_line();
             }
-            TagEnd::TableHead | TagEnd::TableRow => {
-                let is_head = matches!(end, TagEnd::TableHead);
+            TagEnd::TableHead => {
                 if !self.table_row.is_empty() {
-                    let cell_style = if is_head {
-                        Style::default()
-                            .fg(Color::LightCyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    let border_style = Style::default().fg(Color::DarkGray);
-                    let mut spans: Vec<Span<'static>> =
-                        Vec::with_capacity(self.table_row.len() * 2 + 1);
-                    spans.push(Span::styled("│", border_style));
-                    for (i, cell) in self.table_row.iter().enumerate() {
-                        if i > 0 {
-                            spans.push(Span::styled("│", border_style));
-                        }
-                        spans.push(Span::styled(format!(" {cell} "), cell_style));
-                    }
-                    spans.push(Span::styled("│", border_style));
-                    self.lines.push(Line::from(spans));
-                    self.fresh_line = true;
-                    if is_head {
-                        let width: usize = self
-                            .table_row
-                            .iter()
-                            .map(|c| c.chars().count() + 2)
-                            .sum::<usize>()
-                            + self.table_row.len().saturating_sub(1)
-                            + 2;
-                        self.lines
-                            .push(Line::from(Span::styled("─".repeat(width), border_style)));
-                    }
-                    self.table_row.clear();
+                    self.table_header = std::mem::take(&mut self.table_row);
                 }
-                if is_head {
-                    self.in_table_head = false;
+                self.in_table_head = false;
+            }
+            TagEnd::TableRow => {
+                if !self.table_row.is_empty() {
+                    self.table_body.push(std::mem::take(&mut self.table_row));
                 }
             }
             _ => {}
         }
+    }
+
+    fn flush_table(&mut self) {
+        use unicode_width::UnicodeWidthStr;
+        if self.table_header.is_empty() && self.table_body.is_empty() {
+            return;
+        }
+        let col_count = self
+            .table_header
+            .len()
+            .max(self.table_body.iter().map(|r| r.len()).max().unwrap_or(0));
+        if col_count == 0 {
+            return;
+        }
+        let mut widths = vec![0usize; col_count];
+        for (i, cell) in self.table_header.iter().enumerate() {
+            widths[i] = widths[i].max(cell.width());
+        }
+        for row in &self.table_body {
+            for (i, cell) in row.iter().enumerate() {
+                widths[i] = widths[i].max(cell.width());
+            }
+        }
+        let border_style = Style::default().fg(Color::DarkGray);
+        let head_style = Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD);
+        let top = format!("┌{}┐", horizontal_border(&widths, '┬'));
+        let mid = format!("├{}┤", horizontal_border(&widths, '┼'));
+        let bot = format!("└{}┘", horizontal_border(&widths, '┴'));
+
+        self.lines.push(Line::from(Span::styled(top, border_style)));
+        if !self.table_header.is_empty() {
+            self.lines.push(row_line(
+                &self.table_header,
+                &widths,
+                head_style,
+                border_style,
+            ));
+            self.lines.push(Line::from(Span::styled(mid, border_style)));
+        }
+        for row in &self.table_body {
+            self.lines
+                .push(row_line(row, &widths, Style::default(), border_style));
+        }
+        self.lines.push(Line::from(Span::styled(bot, border_style)));
+        self.table_header.clear();
+        self.table_body.clear();
+        self.fresh_line = true;
     }
 
     fn render_code_block(&mut self, lang: &str, body: &str) {
@@ -329,6 +352,38 @@ impl Renderer {
         }
         self.lines
     }
+}
+
+fn horizontal_border(widths: &[usize], junction: char) -> String {
+    let mut out = String::new();
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            out.push(junction);
+        }
+        out.push_str(&"─".repeat(w + 2));
+    }
+    out
+}
+
+fn row_line(
+    cells: &[String],
+    widths: &[usize],
+    cell_style: Style,
+    border_style: Style,
+) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(widths.len() * 2 + 1);
+    spans.push(Span::styled("│", border_style));
+    for (i, w) in widths.iter().enumerate() {
+        let cell = cells.get(i).map(String::as_str).unwrap_or("");
+        let pad = w.saturating_sub(cell.width());
+        spans.push(Span::styled(
+            format!(" {cell}{} ", " ".repeat(pad)),
+            cell_style,
+        ));
+        spans.push(Span::styled("│", border_style));
+    }
+    Line::from(spans)
 }
 
 fn heading_hashes(level: HeadingLevel) -> usize {
