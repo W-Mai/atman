@@ -193,9 +193,32 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *expanded,
             ctx.animation_frame,
         ),
+        OutputItem::WorkflowPanel { graph, .. } => render_workflow_panel_stub(graph),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
     lines
+}
+
+fn render_workflow_panel_stub(
+    graph: &atman_runtime::workflow::WorkflowGraph,
+) -> Vec<Line<'static>> {
+    let count = count_workflow_nodes(&graph.root);
+    vec![Line::from(vec![
+        Span::styled(
+            "⚡ workflow · ".to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{count} nodes")),
+    ])]
+}
+
+fn count_workflow_nodes(nodes: &[atman_runtime::workflow::WorkflowNode]) -> usize {
+    nodes
+        .iter()
+        .map(|n| 1 + count_workflow_nodes(&n.children))
+        .sum()
 }
 
 fn render_tool_call(

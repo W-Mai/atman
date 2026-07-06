@@ -216,6 +216,124 @@ impl WorkflowGraph {
     pub fn find_node_mut(&mut self, id: &str) -> Option<&mut WorkflowNode> {
         find_node_mut(&mut self.root, id)
     }
+
+    pub fn apply_stream_frame(&mut self, frame: &crate::stream::StreamFrame) {
+        use crate::stream::StreamFrame;
+        let now = Utc::now();
+        match frame {
+            StreamFrame::FlowGraph { run_id, graph } => {
+                if self.find_node(run_id).is_none() {
+                    self.root.push(WorkflowNode {
+                        id: run_id.clone(),
+                        kind: WorkflowNodeKind::Flow {
+                            run_id: run_id.clone(),
+                            flow_name: graph.flow_name.clone(),
+                        },
+                        label: graph.flow_name.clone(),
+                        status: NodeStatus::Running,
+                        started_at: Some(now),
+                        ended_at: None,
+                        output_preview: None,
+                        children: Vec::new(),
+                        parallelism: Parallelism::Serial,
+                    });
+                }
+            }
+            StreamFrame::FlowNodeStart {
+                run_id,
+                node_id,
+                label,
+                parent_node_id,
+                ..
+            } => {
+                let parent_id = parent_node_id.clone().unwrap_or_else(|| run_id.clone());
+                let kind = if let Some(idx) = parse_branch_index(node_id) {
+                    WorkflowNodeKind::FanoutBranch { branch_index: idx }
+                } else {
+                    WorkflowNodeKind::Stmt
+                };
+                let node = WorkflowNode {
+                    id: node_id.clone(),
+                    kind,
+                    label: label.clone(),
+                    status: NodeStatus::Running,
+                    started_at: Some(now),
+                    ended_at: None,
+                    output_preview: None,
+                    children: Vec::new(),
+                    parallelism: Parallelism::Serial,
+                };
+                if let Some(parent) = find_node_mut(&mut self.root, &parent_id) {
+                    if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. }) {
+                        parent.parallelism = Parallelism::Parallel;
+                    }
+                    parent.children.push(node);
+                }
+            }
+            StreamFrame::FlowNodeEnd {
+                node_id,
+                status,
+                output_preview,
+                ..
+            } => {
+                if let Some(n) = find_node_mut(&mut self.root, node_id) {
+                    n.status = match status {
+                        FlowNodeStatus::Ok => NodeStatus::Ok,
+                        FlowNodeStatus::Err => NodeStatus::Err,
+                        FlowNodeStatus::Cancelled => NodeStatus::Cancelled,
+                    };
+                    n.ended_at = Some(now);
+                    if let Some(p) = output_preview {
+                        n.output_preview = Some(p.clone());
+                    }
+                }
+            }
+            StreamFrame::ToolNode {
+                parent_node_id,
+                tool_use_id,
+                tool,
+                args_preview,
+                ..
+            } => {
+                let node = WorkflowNode {
+                    id: format!("tool:{tool_use_id}"),
+                    kind: WorkflowNodeKind::ToolCall {
+                        tool_use_id: tool_use_id.clone(),
+                        tool: tool.clone(),
+                        args_preview: args_preview.clone(),
+                        result_preview: None,
+                    },
+                    label: tool.clone(),
+                    status: NodeStatus::Running,
+                    started_at: Some(now),
+                    ended_at: None,
+                    output_preview: None,
+                    children: Vec::new(),
+                    parallelism: Parallelism::Serial,
+                };
+                if let Some(parent) = find_node_mut(&mut self.root, parent_node_id) {
+                    parent.children.push(node);
+                }
+            }
+            StreamFrame::ToolUseDone {
+                id, ok, preview, ..
+            } => {
+                let tool_id = format!("tool:{id}");
+                if let Some(n) = find_node_mut(&mut self.root, &tool_id) {
+                    n.status = if *ok { NodeStatus::Ok } else { NodeStatus::Err };
+                    n.ended_at = Some(now);
+                    n.output_preview = Some(preview.clone());
+                }
+            }
+            StreamFrame::FlowDone { run_id, ok, .. } => {
+                if let Some(n) = find_node_mut(&mut self.root, run_id) {
+                    n.status = if *ok { NodeStatus::Ok } else { NodeStatus::Err };
+                    n.ended_at = Some(now);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn find_node<'a>(nodes: &'a [WorkflowNode], id: &str) -> Option<&'a WorkflowNode> {

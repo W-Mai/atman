@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use atman_runtime::event::FlowNodeStatus;
 use atman_runtime::nodegraph::FlowGraph;
 use atman_runtime::stream::StreamFrame;
+use atman_runtime::workflow::WorkflowGraph;
 
 const LAG_COOLDOWN: Duration = Duration::from_millis(300);
 
@@ -36,6 +37,14 @@ pub enum OutputItem {
         started_at: Instant,
         ended_at: Option<Instant>,
         expanded: bool,
+    },
+    WorkflowPanel {
+        turn_index: usize,
+        graph: WorkflowGraph,
+        expanded_nodes: HashSet<String>,
+        panel_expanded: bool,
+        started_at: Instant,
+        ended_at: Option<Instant>,
     },
 }
 
@@ -337,6 +346,10 @@ impl AppState {
                 });
             }
             StreamFrame::FlowGraph { run_id, graph } => {
+                let frame = StreamFrame::FlowGraph {
+                    run_id: run_id.clone(),
+                    graph: graph.clone(),
+                };
                 self.push_item(OutputItem::FlowPanel {
                     run_id,
                     flow_name: graph.flow_name.clone(),
@@ -346,25 +359,51 @@ impl AppState {
                     ended_at: None,
                     expanded: true,
                 });
+                self.ensure_workflow_panel_and_apply(&frame);
             }
             StreamFrame::FlowNodeStart {
-                run_id, node_id, ..
+                run_id,
+                node_id,
+                kind,
+                label,
+                parent_node_id,
             } => {
                 if let Some(panel) = self.find_flow_panel_mut(&run_id) {
-                    panel.insert(node_id, FlowNodeStatus::Ok);
+                    panel.insert(node_id.clone(), FlowNodeStatus::Ok);
                 }
+                let frame = StreamFrame::FlowNodeStart {
+                    run_id,
+                    node_id,
+                    kind,
+                    label,
+                    parent_node_id,
+                };
+                self.route_to_workflow_panel(&frame);
             }
             StreamFrame::FlowNodeEnd {
                 run_id,
                 node_id,
                 status,
-                ..
+                output_preview,
+                parent_node_id,
             } => {
                 if let Some(panel) = self.find_flow_panel_mut(&run_id) {
-                    panel.insert(node_id, status);
+                    panel.insert(node_id.clone(), status.clone());
                 }
+                let frame = StreamFrame::FlowNodeEnd {
+                    run_id,
+                    node_id,
+                    status,
+                    output_preview,
+                    parent_node_id,
+                };
+                self.route_to_workflow_panel(&frame);
             }
-            StreamFrame::FlowDone { run_id, ok, .. } => {
+            StreamFrame::FlowDone {
+                run_id,
+                ok,
+                flow_name,
+            } => {
                 if let Some(item) = self.find_flow_panel_item_mut(&run_id)
                     && let OutputItem::FlowPanel {
                         ended_at,
@@ -381,10 +420,63 @@ impl AppState {
                             .or_insert(FlowNodeStatus::Err);
                     }
                 }
+                let frame = StreamFrame::FlowDone {
+                    run_id,
+                    flow_name,
+                    ok,
+                };
+                self.route_to_workflow_panel(&frame);
             }
-            StreamFrame::ToolNode { .. } => {}
+            frame @ StreamFrame::ToolNode { .. } => {
+                self.route_to_workflow_panel(&frame);
+            }
             StreamFrame::Unknown => {}
         }
+    }
+
+    fn route_to_workflow_panel(&mut self, frame: &StreamFrame) {
+        if let Some(OutputItem::WorkflowPanel {
+            graph, ended_at, ..
+        }) = self
+            .items
+            .iter_mut()
+            .rev()
+            .find(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
+        {
+            graph.apply_stream_frame(frame);
+            if let StreamFrame::FlowDone { .. } = frame {
+                *ended_at = Some(Instant::now());
+            }
+        }
+    }
+
+    fn ensure_workflow_panel_and_apply(&mut self, frame: &StreamFrame) {
+        let has_open_panel = self
+            .items
+            .iter()
+            .rev()
+            .find_map(|it| match it {
+                OutputItem::WorkflowPanel { ended_at, .. } => Some(ended_at.is_none()),
+                OutputItem::UserTurn { .. } => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false);
+        if !has_open_panel {
+            let turn_index = self
+                .items
+                .iter()
+                .filter(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
+                .count();
+            self.push_item(OutputItem::WorkflowPanel {
+                turn_index,
+                graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+                expanded_nodes: HashSet::new(),
+                panel_expanded: true,
+                started_at: Instant::now(),
+                ended_at: None,
+            });
+        }
+        self.route_to_workflow_panel(frame);
     }
 
     fn find_flow_panel_mut(
@@ -777,5 +869,65 @@ mod tests {
             lag_texts,
             vec!["dropped 5 stream frames", "dropped 3 stream frames"]
         );
+    }
+
+    #[test]
+    fn flow_start_populates_workflow_panel_with_root() {
+        let mut app = AppState::new("s".into(), None);
+        let graph = atman_runtime::nodegraph::FlowGraph {
+            flow_name: "look_into".into(),
+            root: Vec::new(),
+        };
+        app.apply_stream_frame(StreamFrame::FlowGraph {
+            run_id: "r1".into(),
+            graph,
+        });
+        let panel = app
+            .items
+            .iter()
+            .find_map(|it| match it {
+                OutputItem::WorkflowPanel { graph, .. } => Some(graph),
+                _ => None,
+            })
+            .expect("workflow panel present");
+        assert_eq!(panel.root.len(), 1);
+        assert_eq!(panel.root[0].label, "look_into");
+    }
+
+    #[test]
+    fn nested_node_start_attaches_under_parent() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::FlowGraph {
+            run_id: "r1".into(),
+            graph: atman_runtime::nodegraph::FlowGraph {
+                flow_name: "f".into(),
+                root: Vec::new(),
+            },
+        });
+        app.apply_stream_frame(StreamFrame::FlowNodeStart {
+            run_id: "r1".into(),
+            node_id: "stmt_0".into(),
+            kind: atman_runtime::nodegraph::NodeKind::UserConfirm,
+            label: "stmt_0".into(),
+            parent_node_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::ToolNode {
+            run_id: "r1".into(),
+            parent_node_id: "stmt_0".into(),
+            tool_use_id: "tu_1".into(),
+            tool: "fs.read".into(),
+            args_preview: "{}".into(),
+        });
+        let panel = app
+            .items
+            .iter()
+            .find_map(|it| match it {
+                OutputItem::WorkflowPanel { graph, .. } => Some(graph),
+                _ => None,
+            })
+            .unwrap();
+        let stmt = panel.find_node("stmt_0").unwrap();
+        assert_eq!(stmt.children.len(), 1);
+        assert_eq!(stmt.children[0].id, "tool:tu_1");
     }
 }
