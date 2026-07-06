@@ -12,11 +12,13 @@ pub enum StreamFrame {
     ToolUseStart {
         tool: String,
         args_preview: String,
+        id: String,
     },
     ToolUseDone {
         tool: String,
         ok: bool,
         preview: String,
+        id: String,
     },
     Note(String),
 }

@@ -1199,10 +1199,14 @@ fn render_stream_frame(
             }
             pending.clear();
         }
-        StreamFrame::ToolUseStart { tool, args_preview } => {
+        StreamFrame::ToolUseStart {
+            tool, args_preview, ..
+        } => {
             emit(printer, format!("  ⟶ {tool}({args_preview})\n"));
         }
-        StreamFrame::ToolUseDone { tool, ok, preview } => {
+        StreamFrame::ToolUseDone {
+            tool, ok, preview, ..
+        } => {
             let mark = if ok { '✓' } else { '✗' };
             emit(printer, format!("  {mark} {tool} → {preview}\n"));
         }
@@ -2485,15 +2489,18 @@ async fn cmd_tui_preview() -> Result<()> {
             });
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
+        let demo_id = "demo_tool_1".to_string();
         let _ = tx.send(StreamFrame::ToolUseStart {
             tool: "fs.list".into(),
             args_preview: "path=\"examples\"".into(),
+            id: demo_id.clone(),
         });
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         let _ = tx.send(StreamFrame::ToolUseDone {
             tool: "fs.list".into(),
             ok: true,
             preview: "9 entries".into(),
+            id: demo_id,
         });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         for word in [

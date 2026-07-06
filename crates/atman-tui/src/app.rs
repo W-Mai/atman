@@ -183,16 +183,22 @@ impl AppState {
                 self.streaming = false;
                 self.reset_lag_state();
             }
-            StreamFrame::ToolUseStart { tool, args_preview } => {
+            StreamFrame::ToolUseStart {
+                tool,
+                args_preview,
+                id,
+            } => {
                 self.push_item(OutputItem::ToolCall {
                     tool,
                     args: args_preview,
                     status: ToolStatus::Running,
                     result: None,
-                    history_id: None,
+                    history_id: Some(id),
                 });
             }
-            StreamFrame::ToolUseDone { tool, ok, preview } => {
+            StreamFrame::ToolUseDone {
+                tool, ok, preview, ..
+            } => {
                 for item in self.items.iter_mut().rev() {
                     if let OutputItem::ToolCall {
                         tool: t,
@@ -299,11 +305,13 @@ mod tests {
         app.apply_stream_frame(StreamFrame::ToolUseStart {
             tool: "fs.read".into(),
             args_preview: "\"foo\"".into(),
+            id: "tc_1".into(),
         });
         app.apply_stream_frame(StreamFrame::ToolUseDone {
             tool: "fs.read".into(),
             ok: true,
             preview: "12 bytes".into(),
+            id: "tc_1".into(),
         });
         assert_eq!(app.items.len(), 1);
         match &app.items[0] {
@@ -327,15 +335,18 @@ mod tests {
         app.apply_stream_frame(StreamFrame::ToolUseStart {
             tool: "fs.read".into(),
             args_preview: "a".into(),
+            id: "tc_a".into(),
         });
         app.apply_stream_frame(StreamFrame::ToolUseStart {
             tool: "fs.read".into(),
             args_preview: "b".into(),
+            id: "tc_b".into(),
         });
         app.apply_stream_frame(StreamFrame::ToolUseDone {
             tool: "fs.read".into(),
             ok: false,
             preview: "err".into(),
+            id: "tc_b".into(),
         });
         assert_eq!(app.items.len(), 2);
         let statuses: Vec<_> = app

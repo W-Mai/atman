@@ -196,10 +196,12 @@ async fn dispatch_tool_call<'a>(
         ctx_with_anchors
     };
     let stream_tx = ctx.session.map(|s| s.stream_tx());
+    let tool_call_id = uuid::Uuid::now_v7().to_string();
     if let Some(tx) = &stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::ToolUseStart {
             tool: name.clone(),
             args_preview: preview_tool_args(&positional, &named),
+            id: tool_call_id.clone(),
         });
     }
     let outcome = tool
@@ -214,6 +216,7 @@ async fn dispatch_tool_call<'a>(
             tool: name.clone(),
             ok,
             preview,
+            id: tool_call_id,
         });
     }
     match outcome {
