@@ -1,7 +1,7 @@
 use std::io::{Stdout, stdout};
 
 use anyhow::Result;
-use crossterm::event::{Event as CtEvent, EventStream, MouseEventKind};
+use crossterm::event::{Event as CtEvent, EventStream, MouseButton, MouseEventKind};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -155,6 +155,17 @@ async fn run_frames(
                         match me.kind {
                             MouseEventKind::ScrollUp => app.scroll_up(3),
                             MouseEventKind::ScrollDown => app.scroll_down(3),
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(id) = app
+                                        .items
+                                        .get(idx)
+                                        .and_then(|it| it.tool_use_id())
+                                        .map(|s| s.to_string())
+                                {
+                                    app.toggle_tool_expansion(&id);
+                                }
+                            }
                             _ => {}
                         }
                         interrupt_prompt = false;
@@ -449,6 +460,10 @@ fn handle_key(
         }
         KeyAction::ToggleSidebar => {
             app.sidebar_mode = app.sidebar_mode.toggle();
+            *interrupt_prompt = false;
+        }
+        KeyAction::ToggleLastTool => {
+            app.toggle_last_tool_expansion();
             *interrupt_prompt = false;
         }
         KeyAction::HelpModal => {
