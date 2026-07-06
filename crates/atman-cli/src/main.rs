@@ -1026,22 +1026,30 @@ impl Reporter {
     }
 
     fn info(&self, text: impl Into<String>) {
+        let text = text.into();
         match self {
-            Self::Stdout => println!("{}", text.into()),
+            Self::Stdout => println!("{text}"),
             Self::Tui(tx) => {
-                let _ = tx.send(atman_tui::TuiNote::Info(text.into()));
+                let _ = tx.send(atman_tui::TuiNote::Info(strip_atman_tag(&text).to_string()));
             }
         }
     }
 
     fn error(&self, text: impl Into<String>) {
+        let text = text.into();
         match self {
-            Self::Stdout => eprintln!("{}", text.into()),
+            Self::Stdout => eprintln!("{text}"),
             Self::Tui(tx) => {
-                let _ = tx.send(atman_tui::TuiNote::Error(text.into()));
+                let _ = tx.send(atman_tui::TuiNote::Error(
+                    strip_atman_tag(&text).to_string(),
+                ));
             }
         }
     }
+}
+
+fn strip_atman_tag(s: &str) -> &str {
+    s.strip_prefix("[atman] ").unwrap_or(s)
 }
 
 type ExternalPrinter = Box<dyn rustyline::ExternalPrinter + Send>;
