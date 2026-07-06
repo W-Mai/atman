@@ -1,7 +1,7 @@
 use std::io::{Stdout, stdout};
 
 use anyhow::Result;
-use crossterm::event::{Event as CtEvent, EventStream};
+use crossterm::event::{Event as CtEvent, EventStream, MouseEventKind};
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -145,6 +145,15 @@ async fn run_frames(
                     }
                     Some(Ok(CtEvent::Paste(s))) => {
                         editor.insert_str(&s);
+                        interrupt_prompt = false;
+                        app.refresh_popup(editor.buf());
+                    }
+                    Some(Ok(CtEvent::Mouse(me))) => {
+                        match me.kind {
+                            MouseEventKind::ScrollUp => app.scroll_up(3),
+                            MouseEventKind::ScrollDown => app.scroll_down(3),
+                            _ => {}
+                        }
                         interrupt_prompt = false;
                     }
                     Some(Ok(CtEvent::Resize(_, _))) => {}
@@ -293,7 +302,7 @@ fn handle_key(
         return;
     }
     if app.popup.is_open() {
-        match action {
+        match &action {
             KeyAction::Escape => {
                 app.popup.close();
                 return;
