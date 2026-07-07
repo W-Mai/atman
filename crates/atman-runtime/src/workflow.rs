@@ -20,6 +20,8 @@ pub struct WorkflowNode {
     pub output_preview: Option<String>,
     pub children: Vec<WorkflowNode>,
     pub parallelism: Parallelism,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -55,6 +57,14 @@ pub enum NodeStatus {
     Ok,
     Err,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ApprovalState {
+    Pending { level: String },
+    Approved,
+    Denied { reason: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,6 +113,7 @@ impl WorkflowGraph {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 };
                 match (parent_run_id.as_ref(), parent_node_id.as_deref()) {
                     (Some(prid), Some(pid)) => {
@@ -158,6 +169,7 @@ impl WorkflowGraph {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &parent_id) {
                     if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. }) {
@@ -221,6 +233,7 @@ impl WorkflowGraph {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &scoped_parent) {
                     parent.children.push(node);
@@ -258,6 +271,7 @@ impl WorkflowGraph {
                             output_preview: None,
                             children: Vec::new(),
                             parallelism: Parallelism::Serial,
+                            approval: None,
                         };
                         if let Some(parent) = find_node_mut(&mut self.root, &flow_id) {
                             parent.children.push(node);
@@ -303,6 +317,45 @@ impl WorkflowGraph {
                     }
                 }
             }
+            Event::ToolPendingApproval {
+                run_id,
+                tool_use_id,
+                level,
+                ..
+            } => {
+                let rid = run_id.0.to_string();
+                let id = tool_node_id(&rid, tool_use_id);
+                if let Some(n) = find_node_mut(&mut self.root, &id) {
+                    n.approval = Some(ApprovalState::Pending {
+                        level: level.clone(),
+                    });
+                }
+            }
+            Event::ToolApproved {
+                run_id,
+                tool_use_id,
+                ..
+            } => {
+                let rid = run_id.0.to_string();
+                let id = tool_node_id(&rid, tool_use_id);
+                if let Some(n) = find_node_mut(&mut self.root, &id) {
+                    n.approval = Some(ApprovalState::Approved);
+                }
+            }
+            Event::ToolDenied {
+                run_id,
+                tool_use_id,
+                reason,
+                ..
+            } => {
+                let rid = run_id.0.to_string();
+                let id = tool_node_id(&rid, tool_use_id);
+                if let Some(n) = find_node_mut(&mut self.root, &id) {
+                    n.approval = Some(ApprovalState::Denied {
+                        reason: reason.clone(),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -342,6 +395,7 @@ impl WorkflowGraph {
                         output_preview: None,
                         children: Vec::new(),
                         parallelism: Parallelism::Serial,
+                        approval: None,
                     });
                 }
             }
@@ -375,6 +429,7 @@ impl WorkflowGraph {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 };
                 match (parent_run_id.as_deref(), parent_node_id.as_deref()) {
                     (Some(prid), Some(pid)) => {
@@ -417,6 +472,7 @@ impl WorkflowGraph {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &parent_id) {
                     if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. }) {
@@ -476,6 +532,7 @@ impl WorkflowGraph {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &scoped_parent) {
                     parent.children.push(node);
@@ -520,6 +577,41 @@ impl WorkflowGraph {
                     message: message.clone(),
                     ts: chrono::Utc::now(),
                 });
+            }
+            StreamFrame::ToolPendingApproval {
+                run_id,
+                tool_use_id,
+                level,
+                ..
+            } => {
+                let id = tool_node_id(run_id, tool_use_id);
+                if let Some(n) = find_node_mut(&mut self.root, &id) {
+                    n.approval = Some(ApprovalState::Pending {
+                        level: level.clone(),
+                    });
+                }
+            }
+            StreamFrame::ToolApproved {
+                run_id,
+                tool_use_id,
+                ..
+            } => {
+                let id = tool_node_id(run_id, tool_use_id);
+                if let Some(n) = find_node_mut(&mut self.root, &id) {
+                    n.approval = Some(ApprovalState::Approved);
+                }
+            }
+            StreamFrame::ToolDenied {
+                run_id,
+                tool_use_id,
+                reason,
+            } => {
+                let id = tool_node_id(run_id, tool_use_id);
+                if let Some(n) = find_node_mut(&mut self.root, &id) {
+                    n.approval = Some(ApprovalState::Denied {
+                        reason: reason.clone(),
+                    });
+                }
             }
             _ => {}
         }

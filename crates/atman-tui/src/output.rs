@@ -291,6 +291,7 @@ fn render_workflow_panel_with_regions(
     ]);
     let mut lines = vec![header];
     let mut regions: Vec<NodeRegion> = Vec::new();
+    let mut pending_counter: u8 = 0;
     if panel_expanded {
         let child_count = graph.root.len();
         for (i, node) in graph.root.iter().enumerate() {
@@ -306,6 +307,7 @@ fn render_workflow_panel_with_regions(
                 is_last,
                 animation_frame,
                 running,
+                &mut pending_counter,
             );
         }
     }
@@ -380,8 +382,9 @@ fn append_workflow_node(
     is_last: bool,
     animation_frame: u32,
     flow_running: bool,
+    pending_counter: &mut u8,
 ) {
-    use atman_runtime::workflow::{NodeStatus, WorkflowNodeKind};
+    use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
     let start_row = out.len() as u16;
     let effective = node;
     let (branch_glyph, branch_color) = if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. })
@@ -444,8 +447,38 @@ fn append_workflow_node(
     } else {
         "▸ "
     };
+    let (approval_prefix, approval_suffix) = match &effective.approval {
+        Some(ApprovalState::Pending { level }) => {
+            *pending_counter = pending_counter.saturating_add(1);
+            let key = if *pending_counter <= 9 {
+                format!("{pending_counter}")
+            } else {
+                "•".into()
+            };
+            (
+                Some((
+                    format!("[{key}] "),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Some((
+                    format!("  ⏸ waiting approval ({level})"),
+                    Style::default().fg(Color::Yellow),
+                )),
+            )
+        }
+        Some(ApprovalState::Denied { reason }) => (
+            None,
+            Some((
+                format!("  ⊘ denied: {reason}"),
+                Style::default().fg(Color::Red),
+            )),
+        ),
+        _ => (None, None),
+    };
     let label = base_label;
-    out.push(Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!("{ancestor_prefix}{branch_glyph} "),
             Style::default().fg(branch_color),
@@ -455,9 +488,19 @@ fn append_workflow_node(
             expand_glyph.to_string(),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
-        Span::raw(label),
-    ]));
+    ];
+    if let Some((text, style)) = approval_prefix {
+        spans.push(Span::styled(text, style));
+    }
+    spans.push(Span::styled(
+        format!("{kind_glyph} "),
+        Style::default().fg(kind_color),
+    ));
+    spans.push(Span::raw(label));
+    if let Some((text, style)) = approval_suffix {
+        spans.push(Span::styled(text, style));
+    }
+    out.push(Line::from(spans));
     regions.push(NodeRegion {
         panel_item_index: 0,
         path_key: path.to_string(),
@@ -483,6 +526,7 @@ fn append_workflow_node(
             child_last,
             animation_frame,
             flow_running,
+            pending_counter,
         );
     }
 }
@@ -678,6 +722,7 @@ mod tests {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 },
                 WorkflowNode {
                     id: "s1".into(),
@@ -691,9 +736,11 @@ mod tests {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 },
             ],
             parallelism: Parallelism::Serial,
+            approval: None,
         });
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
@@ -741,8 +788,10 @@ mod tests {
                 output_preview: None,
                 children: Vec::new(),
                 parallelism: Parallelism::Serial,
+                approval: None,
             }],
             parallelism: Parallelism::Serial,
+            approval: None,
         });
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
@@ -780,6 +829,7 @@ mod tests {
                     output_preview: None,
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
+                    approval: None,
                 }]
             };
             WorkflowNode {
@@ -795,6 +845,7 @@ mod tests {
                 output_preview: None,
                 children: deeper,
                 parallelism: Parallelism::Serial,
+                approval: None,
             }
         }
 
