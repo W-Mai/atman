@@ -69,6 +69,23 @@ pub enum StreamFrame {
         flow_run_id: Option<String>,
         message: crate::message::Message,
     },
+    ToolPendingApproval {
+        run_id: String,
+        tool_use_id: String,
+        tool_name: String,
+        args_preview: String,
+        level: String,
+    },
+    ToolApproved {
+        run_id: String,
+        tool_use_id: String,
+        decided_by: String,
+    },
+    ToolDenied {
+        run_id: String,
+        tool_use_id: String,
+        reason: String,
+    },
     #[serde(other)]
     Unknown,
 }

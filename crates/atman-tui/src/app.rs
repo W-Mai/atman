@@ -346,7 +346,10 @@ impl AppState {
             | StreamFrame::FlowDone { .. }
             | StreamFrame::ToolNode { .. }
             | StreamFrame::AssistantMsg { .. }
-            | StreamFrame::ToolResultMsg { .. }) => {
+            | StreamFrame::ToolResultMsg { .. }
+            | StreamFrame::ToolPendingApproval { .. }
+            | StreamFrame::ToolApproved { .. }
+            | StreamFrame::ToolDenied { .. }) => {
                 self.ensure_workflow_panel_and_apply(&frame);
             }
             StreamFrame::Unknown => {}

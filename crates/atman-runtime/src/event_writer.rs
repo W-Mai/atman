@@ -222,7 +222,10 @@ fn extract_ts(event: &Event) -> String {
         | Event::FlowNodeStart { ts, .. }
         | Event::FlowNodeEnd { ts, .. }
         | Event::ToolNode { ts, .. }
-        | Event::AttachmentDegraded { ts, .. } => ts.to_rfc3339(),
+        | Event::AttachmentDegraded { ts, .. }
+        | Event::ToolPendingApproval { ts, .. }
+        | Event::ToolApproved { ts, .. }
+        | Event::ToolDenied { ts, .. } => ts.to_rfc3339(),
     }
 }
 
@@ -250,6 +253,9 @@ fn event_kind(event: &Event) -> &'static str {
         Event::FlowNodeEnd { .. } => "flow_node_end",
         Event::ToolNode { .. } => "tool_node",
         Event::AttachmentDegraded { .. } => "attachment_degraded",
+        Event::ToolPendingApproval { .. } => "tool_pending_approval",
+        Event::ToolApproved { .. } => "tool_approved",
+        Event::ToolDenied { .. } => "tool_denied",
     }
 }
 
@@ -306,7 +312,10 @@ fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
         Event::FlowGraph { run_id, .. }
         | Event::FlowNodeStart { run_id, .. }
         | Event::FlowNodeEnd { run_id, .. }
-        | Event::ToolNode { run_id, .. } => (None, Some(run_id.0.to_string())),
+        | Event::ToolNode { run_id, .. }
+        | Event::ToolPendingApproval { run_id, .. }
+        | Event::ToolApproved { run_id, .. }
+        | Event::ToolDenied { run_id, .. } => (None, Some(run_id.0.to_string())),
         Event::AttachmentDegraded {
             turn_id,
             flow_run_id,

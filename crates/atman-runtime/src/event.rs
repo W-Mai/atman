@@ -232,6 +232,32 @@ pub enum Event {
         reason: String,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    ToolPendingApproval {
+        #[serde(default)]
+        seq: u64,
+        run_id: FlowRunId,
+        tool_use_id: String,
+        tool_name: String,
+        args_preview: String,
+        level: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    ToolApproved {
+        #[serde(default)]
+        seq: u64,
+        run_id: FlowRunId,
+        tool_use_id: String,
+        decided_by: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
+    ToolDenied {
+        #[serde(default)]
+        seq: u64,
+        run_id: FlowRunId,
+        tool_use_id: String,
+        reason: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -266,7 +292,10 @@ impl Event {
             | Event::FlowNodeStart { seq, .. }
             | Event::FlowNodeEnd { seq, .. }
             | Event::ToolNode { seq, .. }
-            | Event::AttachmentDegraded { seq, .. } => *seq = new_seq,
+            | Event::AttachmentDegraded { seq, .. }
+            | Event::ToolPendingApproval { seq, .. }
+            | Event::ToolApproved { seq, .. }
+            | Event::ToolDenied { seq, .. } => *seq = new_seq,
         }
     }
 
@@ -293,7 +322,10 @@ impl Event {
             | Event::FlowNodeStart { seq, .. }
             | Event::FlowNodeEnd { seq, .. }
             | Event::ToolNode { seq, .. }
-            | Event::AttachmentDegraded { seq, .. } => *seq,
+            | Event::AttachmentDegraded { seq, .. }
+            | Event::ToolPendingApproval { seq, .. }
+            | Event::ToolApproved { seq, .. }
+            | Event::ToolDenied { seq, .. } => *seq,
         }
     }
 }
@@ -557,5 +589,55 @@ mod tests {
         };
         ev.set_seq(101);
         assert_eq!(ev.seq(), 101);
+    }
+
+    #[test]
+    fn tool_pending_approval_round_trip() {
+        let ev = Event::ToolPendingApproval {
+            seq: 5,
+            run_id: FlowRunId::now(),
+            tool_use_id: "tu1".into(),
+            tool_name: "fs.write".into(),
+            args_preview: "{}".into(),
+            level: "approve".into(),
+            ts: chrono::Utc::now(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["type"], "tool_pending_approval");
+        assert_eq!(v["tool_use_id"], "tu1");
+        assert_eq!(v["level"], "approve");
+    }
+
+    #[test]
+    fn seq_and_set_seq_cover_approval_variants() {
+        let rid = FlowRunId::now();
+        for mut ev in [
+            Event::ToolPendingApproval {
+                seq: 0,
+                run_id: rid.clone(),
+                tool_use_id: "t".into(),
+                tool_name: "n".into(),
+                args_preview: "{}".into(),
+                level: "approve".into(),
+                ts: chrono::Utc::now(),
+            },
+            Event::ToolApproved {
+                seq: 0,
+                run_id: rid.clone(),
+                tool_use_id: "t".into(),
+                decided_by: "user".into(),
+                ts: chrono::Utc::now(),
+            },
+            Event::ToolDenied {
+                seq: 0,
+                run_id: rid.clone(),
+                tool_use_id: "t".into(),
+                reason: "no".into(),
+                ts: chrono::Utc::now(),
+            },
+        ] {
+            ev.set_seq(77);
+            assert_eq!(ev.seq(), 77);
+        }
     }
 }

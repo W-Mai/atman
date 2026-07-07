@@ -1363,6 +1363,9 @@ fn render_stream_frame(
         | StreamFrame::ToolNode { .. }
         | StreamFrame::AssistantMsg { .. }
         | StreamFrame::ToolResultMsg { .. }
+        | StreamFrame::ToolPendingApproval { .. }
+        | StreamFrame::ToolApproved { .. }
+        | StreamFrame::ToolDenied { .. }
         | StreamFrame::Unknown => {}
     }
 }
