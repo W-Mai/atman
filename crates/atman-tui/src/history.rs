@@ -31,12 +31,15 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
         *current = Some(idx);
         idx
     };
-    let apply_workflow = |out: &mut Vec<OutputItem>, idx: usize, frame: &StreamFrame| {
+    let apply_workflow = |out: &mut Vec<OutputItem>,
+                          idx: usize,
+                          frame: &StreamFrame,
+                          ts: Option<chrono::DateTime<chrono::Utc>>| {
         if let Some(OutputItem::WorkflowPanel {
             graph, ended_at, ..
         }) = out.get_mut(idx)
         {
-            graph.apply_stream_frame(frame);
+            graph.apply_stream_frame_at(frame, ts);
             if let StreamFrame::FlowDone { .. } = frame {
                 *ended_at = Some(Instant::now());
             }
@@ -64,7 +67,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 }
                 flatten_message(msg, &mut out);
             }
-            TranscriptEntry::FlowGraph { run_id, graph, .. } => {
+            TranscriptEntry::FlowGraph {
+                run_id, graph, ts, ..
+            } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -73,10 +78,14 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         run_id: run_id.clone(),
                         graph: graph.clone(),
                     },
+                    *ts,
                 );
             }
             TranscriptEntry::FlowStart {
-                run_id, flow_name, ..
+                run_id,
+                flow_name,
+                ts,
+                ..
             } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
@@ -89,6 +98,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                             root: Vec::new(),
                         },
                     },
+                    *ts,
                 );
             }
             TranscriptEntry::FlowNodeStart {
@@ -97,6 +107,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 kind,
                 label,
                 parent_node_id,
+                ts,
             } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
@@ -109,6 +120,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         label: label.clone(),
                         parent_node_id: parent_node_id.clone(),
                     },
+                    *ts,
                 );
             }
             TranscriptEntry::FlowNodeEnd {
@@ -116,6 +128,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 node_id,
                 status,
                 output_preview,
+                ts,
             } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
@@ -128,6 +141,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         output_preview: output_preview.clone(),
                         parent_node_id: None,
                     },
+                    *ts,
                 );
             }
             TranscriptEntry::ToolNode {
@@ -136,6 +150,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 tool_use_id,
                 tool_name,
                 args_preview,
+                ts,
             } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
@@ -148,9 +163,10 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         tool: tool_name.clone(),
                         args_preview: args_preview.clone(),
                     },
+                    *ts,
                 );
             }
-            TranscriptEntry::FlowDone { run_id, ok } => {
+            TranscriptEntry::FlowDone { run_id, ok, ts } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -160,6 +176,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         flow_name: String::new(),
                         ok: *ok,
                     },
+                    *ts,
                 );
             }
         }
@@ -322,16 +339,19 @@ mod tests {
                     flow_name: "look_into".into(),
                     root: Vec::new(),
                 },
+                ts: None,
             },
             TranscriptEntry::FlowNodeEnd {
                 run_id: "r1".into(),
                 node_id: "stmt_0".into(),
                 status: FlowNodeStatus::Ok,
                 output_preview: None,
+                ts: None,
             },
             TranscriptEntry::FlowDone {
                 run_id: "r1".into(),
                 ok: true,
+                ts: None,
             },
         ];
         let out = flatten_transcript(&entries);

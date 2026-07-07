@@ -188,22 +188,13 @@ fn render_workflow_panel(
     graph: &atman_runtime::workflow::WorkflowGraph,
     expanded_nodes: &std::collections::HashSet<String>,
     panel_expanded: bool,
-    started_at: std::time::Instant,
-    ended_at: Option<std::time::Instant>,
+    _started_at: std::time::Instant,
+    _ended_at: Option<std::time::Instant>,
     animation_frame: u32,
 ) -> Vec<Line<'static>> {
     let count = count_workflow_nodes(&graph.root);
     let (status_str, status_style, running) = workflow_overall_status(&graph.root);
-    let elapsed = if running {
-        std::time::Instant::now()
-            .saturating_duration_since(started_at)
-            .as_secs()
-    } else {
-        ended_at
-            .unwrap_or_else(std::time::Instant::now)
-            .saturating_duration_since(started_at)
-            .as_secs()
-    };
+    let elapsed = compute_elapsed_secs(&graph.root, running);
     let fold_glyph = if panel_expanded { "▼" } else { "▶" };
     let flow_glyph = if running {
         spinner_char(animation_frame)
@@ -241,6 +232,37 @@ fn render_workflow_panel(
         }
     }
     lines
+}
+
+fn compute_elapsed_secs(nodes: &[atman_runtime::workflow::WorkflowNode], running: bool) -> i64 {
+    fn walk(
+        ns: &[atman_runtime::workflow::WorkflowNode],
+        min: &mut Option<chrono::DateTime<chrono::Utc>>,
+        max: &mut Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        for n in ns {
+            if let Some(t) = n.started_at {
+                *min = Some(min.map(|m| m.min(t)).unwrap_or(t));
+                *max = Some(max.map(|m| m.max(t)).unwrap_or(t));
+            }
+            if let Some(t) = n.ended_at {
+                *max = Some(max.map(|m| m.max(t)).unwrap_or(t));
+            }
+            walk(&n.children, min, max);
+        }
+    }
+    let mut min = None;
+    let mut max = None;
+    walk(nodes, &mut min, &mut max);
+    let Some(start) = min else {
+        return 0;
+    };
+    let end = if running {
+        chrono::Utc::now()
+    } else {
+        max.unwrap_or(start)
+    };
+    (end - start).num_seconds().max(0)
 }
 
 fn count_workflow_nodes(nodes: &[atman_runtime::workflow::WorkflowNode]) -> usize {
@@ -444,13 +466,13 @@ fn collapsed_tool_view(node: &atman_runtime::workflow::WorkflowNode) -> Option<(
 fn stmt_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, Color) {
     use atman_runtime::nodegraph::NodeKind;
     match kind {
-        NodeKind::Llm { .. } => ("✦", Color::Yellow),
+        NodeKind::Llm { .. } => ("✦", Color::Magenta),
         NodeKind::ToolCall { .. } => ("🔧", Color::Blue),
         NodeKind::Fanout { .. } => ("⇉", Color::Magenta),
         NodeKind::UserConfirm => ("?", Color::LightCyan),
         NodeKind::Subflow { .. } => ("↳", Color::Cyan),
         NodeKind::Message { .. } => ("✉", Color::White),
-        NodeKind::FixUntilTest => ("↻", Color::Yellow),
+        NodeKind::FixUntilTest => ("↻", Color::LightMagenta),
         NodeKind::When { .. } => ("⋯", Color::DarkGray),
         NodeKind::Return => ("←", Color::Green),
     }

@@ -265,6 +265,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "atman-runtime",
+ "chrono",
  "crossterm",
  "futures",
  "pulldown-cmark",

@@ -303,8 +303,16 @@ impl WorkflowGraph {
     }
 
     pub fn apply_stream_frame(&mut self, frame: &crate::stream::StreamFrame) {
+        self.apply_stream_frame_at(frame, None);
+    }
+
+    pub fn apply_stream_frame_at(
+        &mut self,
+        frame: &crate::stream::StreamFrame,
+        override_ts: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
         use crate::stream::StreamFrame;
-        let now = Utc::now();
+        let now = override_ts.unwrap_or_else(Utc::now);
         match frame {
             StreamFrame::FlowGraph { run_id, graph } => {
                 if self.find_node(run_id).is_none() {

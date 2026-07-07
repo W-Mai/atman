@@ -105,12 +105,14 @@ pub enum TranscriptEntry {
         run_id: String,
         flow_name: String,
         graph: crate::nodegraph::FlowGraph,
+        ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     FlowStart {
         run_id: String,
         flow_name: String,
         parent_run_id: Option<String>,
         parent_node_id: Option<String>,
+        ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     FlowNodeStart {
         run_id: String,
@@ -118,12 +120,14 @@ pub enum TranscriptEntry {
         kind: crate::nodegraph::NodeKind,
         label: String,
         parent_node_id: Option<String>,
+        ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     FlowNodeEnd {
         run_id: String,
         node_id: String,
         status: crate::event::FlowNodeStatus,
         output_preview: Option<String>,
+        ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     ToolNode {
         run_id: String,
@@ -131,10 +135,12 @@ pub enum TranscriptEntry {
         tool_use_id: String,
         tool_name: String,
         args_preview: String,
+        ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     FlowDone {
         run_id: String,
         ok: bool,
+        ts: Option<chrono::DateTime<chrono::Utc>>,
     },
 }
 
@@ -154,6 +160,13 @@ struct AttachmentPatch {
     part_index: usize,
     file_basename: String,
     reason: String,
+}
+
+fn parse_ts(v: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    v.get("ts")?
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
 fn parse_json_lines(text: &str) -> Vec<serde_json::Value> {
@@ -247,6 +260,7 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     .and_then(|g| g["flow_name"].as_str())
                     .unwrap_or("")
                     .to_string();
+                let ts = parse_ts(v);
                 if let Some(g) = v.get("graph")
                     && let Ok(graph) =
                         serde_json::from_value::<crate::nodegraph::FlowGraph>(g.clone())
@@ -255,6 +269,7 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                         run_id,
                         flow_name,
                         graph,
+                        ts,
                     });
                 }
             }
@@ -263,11 +278,13 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let flow_name = v["flow_name"].as_str().unwrap_or("").to_string();
                 let parent_run_id = v["parent_run_id"].as_str().map(String::from);
                 let parent_node_id = v["parent_node_id"].as_str().map(String::from);
+                let ts = parse_ts(v);
                 out.push(TranscriptEntry::FlowStart {
                     run_id,
                     flow_name,
                     parent_run_id,
                     parent_node_id,
+                    ts,
                 });
             }
             "flow_node_start" => {
@@ -279,12 +296,14 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     .get("kind")
                     .and_then(|k| serde_json::from_value(k.clone()).ok())
                     .unwrap_or(crate::nodegraph::NodeKind::UserConfirm);
+                let ts = parse_ts(v);
                 out.push(TranscriptEntry::FlowNodeStart {
                     run_id,
                     node_id,
                     kind,
                     label,
                     parent_node_id,
+                    ts,
                 });
             }
             "flow_node_end" => {
@@ -295,11 +314,13 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     .and_then(|s| serde_json::from_value(s.clone()).ok())
                     .unwrap_or(crate::event::FlowNodeStatus::Ok);
                 let output_preview = v["output_preview"].as_str().map(String::from);
+                let ts = parse_ts(v);
                 out.push(TranscriptEntry::FlowNodeEnd {
                     run_id,
                     node_id,
                     status,
                     output_preview,
+                    ts,
                 });
             }
             "tool_node" => {
@@ -308,18 +329,21 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let tool_use_id = v["tool_use_id"].as_str().unwrap_or("").to_string();
                 let tool_name = v["tool_name"].as_str().unwrap_or("").to_string();
                 let args_preview = v["args_preview"].as_str().unwrap_or("").to_string();
+                let ts = parse_ts(v);
                 out.push(TranscriptEntry::ToolNode {
                     run_id,
                     parent_node_id,
                     tool_use_id,
                     tool_name,
                     args_preview,
+                    ts,
                 });
             }
             "flow_end" => {
                 let run_id = v["run_id"].as_str().unwrap_or("").to_string();
                 let ok = v["status"]["kind"].as_str() == Some("ok");
-                out.push(TranscriptEntry::FlowDone { run_id, ok });
+                let ts = parse_ts(v);
+                out.push(TranscriptEntry::FlowDone { run_id, ok, ts });
             }
             _ => {}
         }
