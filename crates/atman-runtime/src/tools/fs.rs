@@ -151,6 +151,159 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
     }
 }
 
+pub struct FsEdit;
+
+impl Tool for FsEdit {
+    fn name(&self) -> &str {
+        "fs.edit"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Two
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Replace an exact text snippet in a file. Preferred over fs.write for changing part of \
+             an existing file. `old_string` must match VERBATIM (whitespace + newlines) and, by \
+             default, appear exactly once — if it matches multiple times the error tells you how \
+             to disambiguate. Use `replace_all: true` to change every occurrence. \
+             Example: {\"path\":\"a.rs\",\"old_string\":\"fn foo() {}\",\"new_string\":\"fn foo() { println!(\\\"hi\\\"); }\"}",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Target file path."},
+                "old_string": {"type": "string", "description": "Exact text to find. Match is literal, not regex."},
+                "new_string": {"type": "string", "description": "Replacement text. May be empty to delete."},
+                "replace_all": {"type": "boolean", "description": "Replace every occurrence. Default false (unique match required)."}
+            },
+            "required": ["path", "old_string", "new_string"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let path = extract_path(&args, "path", 0)?;
+            let old_string = extract_string(&args, "old_string", 1)?;
+            let new_string = extract_string(&args, "new_string", 2)?;
+            let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
+            if old_string == new_string {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "fs.edit({}): old_string equals new_string — edit would be a no-op",
+                    path.display()
+                )));
+            }
+            if old_string.is_empty() {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "fs.edit({}): old_string is empty — refusing to insert at every byte boundary",
+                    path.display()
+                )));
+            }
+            let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+                RuntimeError::ToolFailed(format!("fs.edit({}): {e}", path.display()))
+            })?;
+            let match_lines = find_match_lines(&content, &old_string);
+            if match_lines.is_empty() {
+                let similar = similar_line_hint(&content, &old_string);
+                let snippet: String = old_string.chars().take(60).collect();
+                return Err(RuntimeError::ToolFailed(format!(
+                    "fs.edit({}): old_string not found. First 60 chars searched: {snippet:?}. {similar}",
+                    path.display()
+                )));
+            }
+            if !replace_all && match_lines.len() > 1 {
+                let sample: Vec<String> = match_lines
+                    .iter()
+                    .take(3)
+                    .map(|n| format!("line {n}"))
+                    .collect();
+                return Err(RuntimeError::ToolFailed(format!(
+                    "fs.edit({}): old_string matches {} times ({}). Add surrounding context so it is unique, or pass replace_all=true.",
+                    path.display(),
+                    match_lines.len(),
+                    sample.join(", ")
+                )));
+            }
+            let updated = if replace_all {
+                content.replace(&old_string, &new_string)
+            } else {
+                content.replacen(&old_string, &new_string, 1)
+            };
+            tokio::fs::write(&path, updated.as_bytes())
+                .await
+                .map_err(|e| {
+                    RuntimeError::ToolFailed(format!(
+                        "fs.edit({}): write failed: {e}",
+                        path.display()
+                    ))
+                })?;
+            let replaced = if replace_all { match_lines.len() } else { 1 };
+            let first_line = match_lines[0];
+            Ok(Value::Str(format!(
+                "[fs.edit({}): replaced {replaced} occurrence(s), first at line {first_line}]",
+                path.display()
+            )))
+        })
+    }
+}
+
+fn find_match_lines(content: &str, needle: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(pos) = content[cursor..].find(needle) {
+        let abs = cursor + pos;
+        let line = content[..abs].bytes().filter(|b| *b == b'\n').count() + 1;
+        out.push(line);
+        cursor = abs + needle.len().max(1);
+        if needle.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+fn similar_line_hint(content: &str, needle: &str) -> String {
+    let first_needle_line = needle.lines().next().unwrap_or("").trim();
+    if first_needle_line.is_empty() {
+        return "No similar lines to suggest.".into();
+    }
+    let needle_tokens: Vec<&str> = first_needle_line
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+        .collect();
+    if needle_tokens.is_empty() {
+        return "No similar lines to suggest.".into();
+    }
+    let mut scored: Vec<(usize, usize, &str)> = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let mut hits = 0usize;
+        for tok in &needle_tokens {
+            if line.contains(tok) {
+                hits += 1;
+            }
+        }
+        if hits > 0 {
+            scored.push((hits, i + 1, line));
+        }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.truncate(3);
+    if scored.is_empty() {
+        "No similar lines found — perhaps whitespace differs or the file was already edited.".into()
+    } else {
+        let joined = scored
+            .iter()
+            .map(|(_, n, l)| format!("  line {n}: {}", l.trim_end()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Similar lines in file:\n{joined}")
+    }
+}
+
 pub struct FsList;
 
 impl Tool for FsList {
@@ -339,6 +492,145 @@ mod tests {
             _ => panic!(),
         };
         assert!(s.contains("offset=99 exceeds"), "expected bounds msg: {s}");
+    }
+
+    #[tokio::test]
+    async fn fs_edit_unique_match_replaces_and_returns_diff_summary() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, b"fn foo() {}\nfn bar() {}\n")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(path.clone())),
+                ("old_string".into(), Value::Str("fn foo() {}".into())),
+                (
+                    "new_string".into(),
+                    Value::Str("fn foo() { println!(\"hi\"); }".into()),
+                ),
+            ],
+        };
+        let v = FsEdit.call(args, &ctx).await.unwrap();
+        let s = match v {
+            Value::Str(s) => s,
+            _ => panic!(),
+        };
+        assert!(s.contains("replaced 1 occurrence"), "summary: {s}");
+        assert!(s.contains("line 1"));
+        let updated = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(updated.starts_with("fn foo() { println!(\"hi\"); }\n"));
+        assert!(updated.contains("fn bar() {}"));
+    }
+
+    #[tokio::test]
+    async fn fs_edit_missing_match_returns_similar_lines_hint() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, b"fn foo() {}\nfn baz() {}\n")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(path)),
+                ("old_string".into(), Value::Str("fn bar() {}".into())),
+                ("new_string".into(), Value::Str("changed".into())),
+            ],
+        };
+        let err = FsEdit.call(args, &ctx).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("not found"), "msg: {msg}");
+        assert!(
+            msg.contains("line 1") || msg.contains("line 2"),
+            "msg: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_edit_ambiguous_match_reports_locations() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, b"TODO\nline\nTODO\n")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(path)),
+                ("old_string".into(), Value::Str("TODO".into())),
+                ("new_string".into(), Value::Str("DONE".into())),
+            ],
+        };
+        let err = FsEdit.call(args, &ctx).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("matches 2 times"), "msg: {msg}");
+        assert!(msg.contains("line 1"));
+        assert!(msg.contains("line 3"));
+        assert!(msg.contains("replace_all=true"));
+    }
+
+    #[tokio::test]
+    async fn fs_edit_replace_all_replaces_every_occurrence() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, b"TODO\nTODO\nTODO\n")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(path.clone())),
+                ("old_string".into(), Value::Str("TODO".into())),
+                ("new_string".into(), Value::Str("DONE".into())),
+                ("replace_all".into(), Value::Bool(true)),
+            ],
+        };
+        FsEdit.call(args, &ctx).await.unwrap();
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(after, "DONE\nDONE\nDONE\n");
+    }
+
+    #[tokio::test]
+    async fn fs_edit_noop_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, b"same\n").await.unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(path)),
+                ("old_string".into(), Value::Str("same".into())),
+                ("new_string".into(), Value::Str("same".into())),
+            ],
+        };
+        let err = FsEdit.call(args, &ctx).await.unwrap_err();
+        assert!(format!("{err}").contains("no-op"));
+    }
+
+    #[tokio::test]
+    async fn fs_edit_new_string_containing_old_string_does_not_loop() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, b"foo bar\n").await.unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(path.clone())),
+                ("old_string".into(), Value::Str("foo".into())),
+                ("new_string".into(), Value::Str("foo foo".into())),
+            ],
+        };
+        FsEdit.call(args, &ctx).await.unwrap();
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(after, "foo foo bar\n");
     }
 
     #[tokio::test]
