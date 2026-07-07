@@ -84,19 +84,19 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             TranscriptEntry::FlowStart {
                 run_id,
                 flow_name,
+                parent_run_id,
+                parent_node_id,
                 ts,
-                ..
             } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
                     panel_idx,
-                    &StreamFrame::FlowGraph {
+                    &StreamFrame::FlowStart {
                         run_id: run_id.clone(),
-                        graph: atman_runtime::nodegraph::FlowGraph {
-                            flow_name: flow_name.clone(),
-                            root: Vec::new(),
-                        },
+                        flow_name: flow_name.clone(),
+                        parent_run_id: parent_run_id.clone(),
+                        parent_node_id: parent_node_id.clone(),
                     },
                     *ts,
                 );
