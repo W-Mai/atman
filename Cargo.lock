@@ -164,6 +164,7 @@ dependencies = [
  "atman-runtime",
  "atman-tui",
  "axum",
+ "base64",
  "clap",
  "directories",
  "futures",

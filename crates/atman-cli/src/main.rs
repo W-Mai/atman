@@ -2000,6 +2000,8 @@ fn handle_builtin(
                 ":todo done <id>      — mark todo done (uuid or list index)",
                 ":todo cancel <id>    — mark todo cancelled",
                 ":todo clear          — remove all todos",
+                ":copy last-message   — push last assistant text to terminal clipboard (OSC 52)",
+                ":copy last-tool      — push last tool_result text to terminal clipboard",
                 "",
                 "resume a prior session: exit, then run `atman --continue <session_id>`",
                 "@./path or @/abs     — inline attach in bare input",
@@ -2020,10 +2022,65 @@ fn handle_builtin(
             true
         }
         other => {
+            if let Some(rest) = other.strip_prefix("copy") {
+                handle_copy_builtin(rest.trim(), session, reporter);
+                return true;
+            }
             reporter.error(format!("unknown builtin `:{other}` — try `:help`"));
             true
         }
     }
+}
+
+fn handle_copy_builtin(arg: &str, session: &Session, reporter: &Reporter) {
+    use atman_runtime::message::{MessagePart, MessageRole};
+    let target = if arg.is_empty() { "last-message" } else { arg };
+    let msgs = session.messages();
+    let text = match target {
+        "last-message" | "last" => msgs
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::Assistant))
+            .and_then(|m| {
+                let mut buf = String::new();
+                for part in &m.parts {
+                    if let MessagePart::Text { text } = part {
+                        buf.push_str(text);
+                    }
+                }
+                if buf.is_empty() { None } else { Some(buf) }
+            }),
+        "last-tool" => msgs.iter().rev().find_map(|m| {
+            m.parts.iter().rev().find_map(|part| match part {
+                MessagePart::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+        }),
+        other => {
+            reporter.error(format!(
+                ":copy: unknown target `{other}` — use last-message | last-tool"
+            ));
+            return;
+        }
+    };
+    let Some(payload) = text else {
+        reporter.info(format!(":copy: nothing to copy for {target}"));
+        return;
+    };
+    write_osc52(&payload);
+    reporter.info(format!(
+        ":copy: pushed {} chars to terminal clipboard (OSC 52)",
+        payload.chars().count()
+    ));
+}
+
+fn write_osc52(payload: &str) {
+    use base64::Engine;
+    use std::io::Write;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+    let seq = format!("\x1b]52;c;{encoded}\x07");
+    let _ = std::io::stderr().write_all(seq.as_bytes());
+    let _ = std::io::stderr().flush();
 }
 
 async fn handle_suggest(
