@@ -647,6 +647,25 @@ impl Session {
         self.messages.lock().unwrap().push(msg);
     }
 
+    pub fn emit_attachment_degrade(
+        &self,
+        message_seq: u64,
+        part_index: usize,
+        file_basename: String,
+        reason: String,
+    ) {
+        self.sink.emit(Event::AttachmentDegraded {
+            seq: 0,
+            turn_id: None,
+            flow_run_id: None,
+            message_seq,
+            part_index,
+            file_basename,
+            reason,
+            ts: chrono::Utc::now(),
+        });
+    }
+
     pub fn record_attachment_degrade(&self, reason: &str) -> usize {
         let target = self.last_image_user_msg.lock().unwrap().take();
         let Some(entry) = target else {
