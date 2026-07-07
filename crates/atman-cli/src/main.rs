@@ -181,7 +181,15 @@ enum LogsAction {
 
 #[derive(Subcommand, Debug)]
 enum SessionAction {
-    List,
+    List {
+        #[arg(
+            long,
+            help = "Show sessions from every project (default: only current project)"
+        )]
+        all: bool,
+        #[arg(long, help = "Filter by an explicit project root path")]
+        project: Option<PathBuf>,
+    },
     Show {
         session_id: String,
     },
@@ -226,8 +234,8 @@ async fn main() -> Result<()> {
                 },
         }) => cmd_logs_stream(session_id, port, since_seq).await,
         Some(Cmd::Session {
-            action: SessionAction::List,
-        }) => cmd_session_list().await,
+            action: SessionAction::List { all, project },
+        }) => cmd_session_list(all, project).await,
         Some(Cmd::Session {
             action: SessionAction::Show { session_id },
         }) => cmd_session_show(session_id).await,
@@ -534,19 +542,32 @@ async fn cmd_run(
     }
 }
 
-async fn cmd_session_list() -> Result<()> {
+async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
     let root = data_dir()?;
     let sessions = root.join("sessions");
     if !sessions.exists() {
         return Ok(());
     }
-    let mut rows: Vec<(std::time::SystemTime, String, u64, usize)> = Vec::new();
+    let filter = resolve_session_list_filter(all, project.as_deref())?;
+    let mut rows: Vec<(std::time::SystemTime, String, u64, usize, String)> = Vec::new();
     for entry in std::fs::read_dir(&sessions)? {
         let entry = entry?;
         if !entry.path().is_dir() {
             continue;
         }
         let sid = entry.file_name().to_string_lossy().to_string();
+        let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
+        let fingerprint = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
+        if let SessionListFilter::Project(ref want) = filter {
+            if fingerprint.as_deref() != Some(want.as_str()) {
+                continue;
+            }
+        }
+        let project_label = meta
+            .as_ref()
+            .and_then(|m| m.project_root.as_deref())
+            .map(short_project_path)
+            .unwrap_or_else(|| "-".into());
         let events_path = entry.path().join("events.jsonl");
         let (bytes, events) = match std::fs::metadata(&events_path) {
             Ok(m) => (m.len(), count_lines(&events_path)),
@@ -556,14 +577,67 @@ async fn cmd_session_list() -> Result<()> {
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(std::time::UNIX_EPOCH);
-        rows.push((modified, sid, bytes, events));
+        rows.push((modified, sid, bytes, events, project_label));
     }
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
-    println!("{:<38} {:>10} {:>10}", "session_id", "events", "bytes");
-    for (_, sid, bytes, events) in rows {
-        println!("{:<38} {:>10} {:>10}", sid, events, bytes);
+    match &filter {
+        SessionListFilter::All => {}
+        SessionListFilter::Project(fp) if rows.is_empty() => {
+            println!(
+                "no sessions match project fingerprint {fp}. Use --all to list every session."
+            );
+            return Ok(());
+        }
+        SessionListFilter::Project(_) => {}
+    }
+    let header_sid = "session_id";
+    let header_events = "events";
+    let header_bytes = "bytes";
+    let header_project = "project";
+    println!("{header_sid:<38} {header_events:>8} {header_bytes:>10} {header_project}");
+    for (_, sid, bytes, events, project_label) in rows {
+        println!("{sid:<38} {events:>8} {bytes:>10} {project_label}");
     }
     Ok(())
+}
+
+enum SessionListFilter {
+    All,
+    Project(String),
+}
+
+fn resolve_session_list_filter(all: bool, project: Option<&Path>) -> Result<SessionListFilter> {
+    if all {
+        return Ok(SessionListFilter::All);
+    }
+    if let Some(path) = project {
+        if !path.exists() {
+            bail!("--project path does not exist: {}", path.display());
+        }
+        return Ok(SessionListFilter::Project(
+            atman_runtime::session_meta::fingerprint_from_root(path),
+        ));
+    }
+    let cwd = std::env::current_dir().context("reading cwd")?;
+    match atman_runtime::session_meta::find_project_root(&cwd) {
+        Some(root) => Ok(SessionListFilter::Project(
+            atman_runtime::session_meta::fingerprint_from_root(&root),
+        )),
+        None => bail!(
+            "cwd is not inside any project (looked for .atman/ or .git/). Use --all or --project PATH."
+        ),
+    }
+}
+
+fn short_project_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy().to_string();
+        if let Some(rest) = s.strip_prefix(&home) {
+            return format!("~{rest}");
+        }
+    }
+    s
 }
 
 async fn cmd_session_show(sid: String) -> Result<()> {
