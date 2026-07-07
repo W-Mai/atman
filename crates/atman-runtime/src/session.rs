@@ -48,8 +48,122 @@ pub struct Session {
     streamed_this_turn: std::sync::atomic::AtomicBool,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
+    approval: std::sync::Arc<ApprovalRegistry>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub args_preview: String,
+    pub preview: Option<String>,
+    pub level: crate::tool::ApprovalLevel,
+    pub run_id: FlowRunId,
+    pub emitted_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ApprovalDecision {
+    Approve,
+    Deny { reason: String },
+}
+
+pub struct ApprovalRegistry {
+    entries: std::sync::Mutex<Vec<ApprovalEntry>>,
+    auto_ceiling: std::sync::Mutex<crate::tool::ApprovalLevel>,
+    watch_tx: watch::Sender<Vec<PendingApproval>>,
+}
+
+struct ApprovalEntry {
+    pending: PendingApproval,
+    responder: tokio::sync::oneshot::Sender<ApprovalDecision>,
+}
+
+impl ApprovalRegistry {
+    pub fn new() -> Self {
+        let (watch_tx, _) = watch::channel(Vec::new());
+        Self {
+            entries: std::sync::Mutex::new(Vec::new()),
+            auto_ceiling: std::sync::Mutex::new(crate::tool::ApprovalLevel::Approve),
+            watch_tx,
+        }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<Vec<PendingApproval>> {
+        self.watch_tx.subscribe()
+    }
+
+    pub fn list_pending(&self) -> Vec<PendingApproval> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.pending.clone())
+            .collect()
+    }
+
+    pub fn set_auto_ceiling(&self, level: crate::tool::ApprovalLevel) {
+        *self.auto_ceiling.lock().unwrap() = level;
+    }
+
+    pub fn request(
+        &self,
+        pending: PendingApproval,
+    ) -> tokio::sync::oneshot::Receiver<ApprovalDecision> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if pending.level <= *self.auto_ceiling.lock().unwrap() {
+            let _ = tx.send(ApprovalDecision::Approve);
+            return rx;
+        }
+        {
+            let mut entries = self.entries.lock().unwrap();
+            entries.push(ApprovalEntry {
+                pending,
+                responder: tx,
+            });
+        }
+        self.broadcast_snapshot();
+        rx
+    }
+
+    pub fn decide(&self, tool_use_id: &str, decision: ApprovalDecision) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(pos) = entries
+            .iter()
+            .position(|e| e.pending.tool_use_id == tool_use_id)
+        {
+            let entry = entries.remove(pos);
+            let _ = entry.responder.send(decision);
+            drop(entries);
+            self.broadcast_snapshot();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn decide_all(&self, decision: ApprovalDecision) -> usize {
+        let mut entries = self.entries.lock().unwrap();
+        let count = entries.len();
+        for entry in entries.drain(..) {
+            let _ = entry.responder.send(decision.clone());
+        }
+        drop(entries);
+        self.broadcast_snapshot();
+        count
+    }
+
+    fn broadcast_snapshot(&self) {
+        let snapshot = self
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.pending.clone())
+            .collect();
+        let _ = self.watch_tx.send(snapshot);
+    }
+}
 type ImagePart = (usize, String);
 
 #[derive(Debug, Clone)]
@@ -394,6 +508,7 @@ impl Session {
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
+            approval: std::sync::Arc::new(ApprovalRegistry::new()),
         })
     }
 
@@ -450,6 +565,7 @@ impl Session {
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
+            approval: std::sync::Arc::new(ApprovalRegistry::new()),
         })
     }
 
@@ -480,7 +596,12 @@ impl Session {
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
+            approval: std::sync::Arc::new(ApprovalRegistry::new()),
         }
+    }
+
+    pub fn approval(&self) -> std::sync::Arc<ApprovalRegistry> {
+        self.approval.clone()
     }
 
     pub fn read_files(
@@ -942,6 +1063,72 @@ mod tests {
             msg.parts[1],
             crate::message::MessagePart::Text { .. }
         ));
+    }
+
+    #[test]
+    fn approval_registry_auto_approves_when_level_leq_ceiling() {
+        let reg = ApprovalRegistry::new();
+        reg.set_auto_ceiling(crate::tool::ApprovalLevel::Approve);
+        let pending = PendingApproval {
+            tool_use_id: "tu1".into(),
+            tool_name: "fs.read".into(),
+            args_preview: "{}".into(),
+            preview: None,
+            level: crate::tool::ApprovalLevel::Auto,
+            run_id: FlowRunId::now(),
+            emitted_at: chrono::Utc::now(),
+        };
+        let rx = reg.request(pending);
+        let got = rx.blocking_recv().unwrap();
+        assert!(matches!(got, ApprovalDecision::Approve));
+        assert!(reg.list_pending().is_empty());
+    }
+
+    #[test]
+    fn approval_registry_queues_when_level_above_ceiling() {
+        let reg = std::sync::Arc::new(ApprovalRegistry::new());
+        reg.set_auto_ceiling(crate::tool::ApprovalLevel::Auto);
+        let pending = PendingApproval {
+            tool_use_id: "tu42".into(),
+            tool_name: "fs.write".into(),
+            args_preview: "{}".into(),
+            preview: None,
+            level: crate::tool::ApprovalLevel::Approve,
+            run_id: FlowRunId::now(),
+            emitted_at: chrono::Utc::now(),
+        };
+        let mut rx = reg.request(pending);
+        assert_eq!(reg.list_pending().len(), 1);
+        assert!(rx.try_recv().is_err(), "should still be queued");
+        assert!(reg.decide("tu42", ApprovalDecision::Approve));
+        let got = rx.blocking_recv().unwrap();
+        assert!(matches!(got, ApprovalDecision::Approve));
+        assert!(reg.list_pending().is_empty());
+    }
+
+    #[test]
+    fn approval_registry_decide_all_flushes_queue() {
+        let reg = ApprovalRegistry::new();
+        reg.set_auto_ceiling(crate::tool::ApprovalLevel::Auto);
+        for i in 0..3 {
+            let _ = reg.request(PendingApproval {
+                tool_use_id: format!("tu{i}"),
+                tool_name: "bash.exec".into(),
+                args_preview: "{}".into(),
+                preview: None,
+                level: crate::tool::ApprovalLevel::Dangerous,
+                run_id: FlowRunId::now(),
+                emitted_at: chrono::Utc::now(),
+            });
+        }
+        assert_eq!(reg.list_pending().len(), 3);
+        assert_eq!(
+            reg.decide_all(ApprovalDecision::Deny {
+                reason: "user cancelled".into()
+            }),
+            3
+        );
+        assert!(reg.list_pending().is_empty());
     }
 
     #[test]
