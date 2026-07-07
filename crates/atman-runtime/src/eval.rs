@@ -282,6 +282,11 @@ async fn dispatch_tool_call<'a>(
     {
         session.refresh_todos_from_store_async().await;
     }
+    if let Some(session) = ctx.session
+        && (name == "plan.write" || name == "plan.tick")
+    {
+        session.refresh_plans_from_store_async().await;
+    }
     match outcome {
         Ok(v) => v,
         Err(e) => Value::Err(e),
@@ -727,6 +732,17 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 && let Some(goal) = session.goal()
             {
                 let prefix = format!("[session goal]\n{goal}\n[/session goal]");
+                system = Some(match system.take() {
+                    Some(existing) if !existing.is_empty() => format!("{prefix}\n\n{existing}"),
+                    _ => prefix,
+                });
+            }
+            if let Some(session) = ctx.session
+                && let Some(plan) = session.plan_system_prompt().await
+            {
+                let prefix = format!(
+                    "[active plan]\n{plan}\n[/active plan]\n\nCall plan.tick to mark a step done. Call plan.write to revise."
+                );
                 system = Some(match system.take() {
                     Some(existing) if !existing.is_empty() => format!("{prefix}\n\n{existing}"),
                     _ => prefix,

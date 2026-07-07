@@ -19,7 +19,8 @@ async fn confess_three_and_fetch_returns_three_via_flow() {
 
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_memory(&mut ex.tools, todo, confession.clone(), goal);
+    let plan = std::sync::Arc::new(atman_runtime::memory::PlanStore::at(dir.path()));
+    tools::register_memory(&mut ex.tools, todo, confession.clone(), goal, plan);
     tools::register_spec_memory(&mut ex.tools, spec);
 
     let src = r#"flow t() -> Int {

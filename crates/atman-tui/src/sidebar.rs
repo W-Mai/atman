@@ -14,6 +14,7 @@ pub struct SidebarInputs<'a> {
     pub session_dir: &'a str,
     pub streaming: bool,
     pub todos: &'a [atman_runtime::memory::todo::Todo],
+    pub plans: &'a [atman_runtime::memory::plan::Plan],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -51,60 +52,109 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         return;
     }
 
-    let (goal_h, context_h, todos_h, session_h) = section_heights(inner.height);
+    let heights = section_heights(inner.height);
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(goal_h),
-            Constraint::Length(context_h),
-            Constraint::Length(todos_h),
-            Constraint::Length(session_h),
+            Constraint::Length(heights.goal),
+            Constraint::Length(heights.context),
+            Constraint::Length(heights.plans),
+            Constraint::Length(heights.todos),
+            Constraint::Length(heights.session),
         ])
         .split(inner);
 
-    if goal_h > 0 {
+    if heights.goal > 0 {
         f.render_widget(goal_section(inputs.goal), sections[0]);
     }
-    if context_h > 0 {
+    if heights.context > 0 {
         f.render_widget(
             context_section(inputs.context, inputs.attach_count, inputs.streaming),
             sections[1],
         );
     }
-    if todos_h > 0 {
-        f.render_widget(todos_section(inputs.todos, todos_h), sections[2]);
+    if heights.plans > 0 {
+        f.render_widget(plans_section(inputs.plans, heights.plans), sections[2]);
     }
-    if session_h > 0 {
+    if heights.todos > 0 {
+        f.render_widget(todos_section(inputs.todos, heights.todos), sections[3]);
+    }
+    if heights.session > 0 {
         f.render_widget(
             session_section(inputs.session_id, inputs.session_dir),
-            sections[3],
+            sections[4],
         );
     }
 }
 
-fn section_heights(inner_h: u16) -> (u16, u16, u16, u16) {
-    let context_h = 8u16;
-    let session_h = 4u16;
-    let todos_h = 3u16;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SectionHeights {
+    goal: u16,
+    context: u16,
+    plans: u16,
+    todos: u16,
+    session: u16,
+}
+
+fn section_heights(inner_h: u16) -> SectionHeights {
+    let context = 8u16;
+    let session = 4u16;
+    let todos = 3u16;
+    let plans = 3u16;
     let goal_max = 7u16;
-    if inner_h >= context_h + session_h + todos_h + goal_max {
-        return (goal_max, context_h, todos_h, session_h);
+    let full = context + session + todos + plans + goal_max;
+    if inner_h >= full {
+        return SectionHeights {
+            goal: goal_max,
+            context,
+            plans,
+            todos,
+            session,
+        };
     }
-    if inner_h >= context_h + session_h + todos_h + 3 {
-        return (
-            inner_h - context_h - session_h - todos_h,
-            context_h,
-            todos_h,
-            session_h,
-        );
+    if inner_h >= context + session + todos + plans + 3 {
+        return SectionHeights {
+            goal: inner_h - context - session - todos - plans,
+            context,
+            plans,
+            todos,
+            session,
+        };
     }
-    if inner_h >= context_h + session_h + 3 {
-        return (inner_h - context_h - session_h, context_h, 0, session_h);
+    if inner_h >= context + session + todos + 3 {
+        return SectionHeights {
+            goal: inner_h - context - session - todos,
+            context,
+            plans: 0,
+            todos,
+            session,
+        };
     }
-    if inner_h >= context_h + 3 {
-        return (inner_h - context_h, context_h, 0, 0);
+    if inner_h >= context + session + 3 {
+        return SectionHeights {
+            goal: inner_h - context - session,
+            context,
+            plans: 0,
+            todos: 0,
+            session,
+        };
     }
-    (0, inner_h, 0, 0)
+    if inner_h >= context + 3 {
+        return SectionHeights {
+            goal: inner_h - context,
+            context,
+            plans: 0,
+            todos: 0,
+            session: 0,
+        };
+    }
+    SectionHeights {
+        goal: 0,
+        context: inner_h,
+        plans: 0,
+        todos: 0,
+        session: 0,
+    }
 }
 
 fn goal_section(goal: Option<&str>) -> Paragraph<'_> {
@@ -152,6 +202,42 @@ fn context_section<'a>(
             plain,
         ),
     ];
+    Paragraph::new(lines)
+}
+
+fn plans_section<'a>(plans: &'a [atman_runtime::memory::plan::Plan], max_h: u16) -> Paragraph<'a> {
+    let latest = plans.iter().max_by_key(|p| p.updated_at);
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(max_h as usize);
+    let header = match latest {
+        Some(p) => {
+            let (done, total) = p.progress();
+            format!("▸ Plan ({done}/{total})")
+        }
+        None => "▸ Plan".to_string(),
+    };
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    match latest {
+        None => {
+            lines.push(Line::from(Span::styled(
+                "  (no active plan)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        Some(p) => {
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    truncate_line(&p.title, 28),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+    }
     Paragraph::new(lines)
 }
 
@@ -303,26 +389,32 @@ mod tests {
     }
 
     #[test]
-    fn section_heights_full_room() {
-        let (g, c, t, s) = section_heights(25);
-        assert_eq!((g, c, t, s), (7, 8, 3, 4));
+    fn section_heights_full_room_keeps_every_section() {
+        let h = section_heights(28);
+        assert_eq!(h.context, 8);
+        assert_eq!(h.session, 4);
+        assert_eq!(h.todos, 3);
+        assert_eq!(h.plans, 3);
+        assert_eq!(h.goal, 7);
     }
 
     #[test]
-    fn section_heights_tight_drops_todos_first() {
-        let (g, c, t, s) = section_heights(15);
-        assert_eq!(c, 8);
-        assert_eq!(s, 4);
-        assert_eq!(t, 0);
-        assert!(g >= 3);
+    fn section_heights_tight_drops_plans_first() {
+        let h = section_heights(19);
+        assert_eq!(h.context, 8);
+        assert_eq!(h.session, 4);
+        assert_eq!(h.todos, 3);
+        assert_eq!(h.plans, 0);
+        assert!(h.goal >= 3);
     }
 
     #[test]
-    fn section_heights_very_tight_drops_session_and_todos() {
-        let (g, c, t, s) = section_heights(11);
-        assert_eq!(c, 8);
-        assert_eq!(t, 0);
-        assert_eq!(s, 0);
-        assert!(g >= 3);
+    fn section_heights_very_tight_drops_session_and_below() {
+        let h = section_heights(11);
+        assert_eq!(h.context, 8);
+        assert_eq!(h.todos, 0);
+        assert_eq!(h.plans, 0);
+        assert_eq!(h.session, 0);
+        assert!(h.goal >= 3);
     }
 }

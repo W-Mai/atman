@@ -9,6 +9,7 @@ pub mod git;
 pub mod hunk;
 pub mod memory;
 pub mod memory_stubs;
+pub mod plan;
 pub mod preview;
 pub mod stdlib;
 pub mod test;
@@ -77,6 +78,7 @@ pub fn register_memory(
     todo_store: Arc<crate::memory::todo::TodoStore>,
     confession_store: Arc<crate::memory::confession::ConfessionStore>,
     goal_store: Arc<crate::memory::goal::GoalStore>,
+    plan_store: Arc<crate::memory::plan::PlanStore>,
 ) {
     reg.register(Arc::new(memory::MemoryTodoSet {
         store: todo_store.clone(),
@@ -96,6 +98,13 @@ pub fn register_memory(
     }));
     reg.register(Arc::new(memory::MemoryGoalClear { store: goal_store }));
     reg.register(Arc::new(memory::MemoryRecentTurns));
+    reg.register(Arc::new(plan::PlanWrite {
+        store: plan_store.clone(),
+    }));
+    reg.register(Arc::new(plan::PlanRead {
+        store: plan_store.clone(),
+    }));
+    reg.register(Arc::new(plan::PlanTick { store: plan_store }));
 }
 
 pub fn register_spec_memory(

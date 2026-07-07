@@ -214,7 +214,8 @@ async fn dsl_goal_set_persists_to_disk() {
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));
-    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal.clone());
+    let plan = Arc::new(atman_runtime::memory::PlanStore::at(session.dir()));
+    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal.clone(), plan);
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_fallback(Value::Str("ok".into())),
     ));

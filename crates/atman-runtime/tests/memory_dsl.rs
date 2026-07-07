@@ -29,6 +29,7 @@ async fn memory_confess_persists_via_dsl_call() {
         Arc::new(TodoStore::at(dir.path())),
         store.clone(),
         Arc::new(atman_runtime::memory::GoalStore::at(dir.path())),
+        Arc::new(atman_runtime::memory::PlanStore::at(dir.path())),
     );
     ex.run(&file, "t", vec![]).await.unwrap();
 
@@ -61,6 +62,7 @@ async fn memory_todo_set_and_done_via_dsl() {
         todo_store.clone(),
         confession_store,
         Arc::new(atman_runtime::memory::GoalStore::at(dir.path())),
+        Arc::new(atman_runtime::memory::PlanStore::at(dir.path())),
     );
     let id = ex.run(&file, "t", vec![]).await.unwrap();
     let id_str = match id {
@@ -106,6 +108,7 @@ async fn memory_fetch_confessions_returns_registered_entries() {
         Arc::new(TodoStore::at(dir.path())),
         store,
         Arc::new(atman_runtime::memory::GoalStore::at(dir.path())),
+        Arc::new(atman_runtime::memory::PlanStore::at(dir.path())),
     );
     let out = ex.run(&file, "t", vec![]).await.unwrap();
     match out {

@@ -254,6 +254,7 @@ pub fn attach_memory_stores_with_redactor(
     };
     let todo_store = Arc::new(atman_runtime::memory::todo::TodoStore::at(session_dir));
     let goal_store = Arc::new(atman_runtime::memory::goal::GoalStore::at(session_dir));
+    let plan_store = Arc::new(atman_runtime::memory::plan::PlanStore::at(session_dir));
     let mut confession_store =
         atman_runtime::memory::confession::ConfessionStore::at(confession_root);
     let mut spec_store = atman_runtime::memory::spec::SpecStore::new(spec_root.to_path_buf());
@@ -271,6 +272,7 @@ pub fn attach_memory_stores_with_redactor(
         todo_store,
         confession_store,
         goal_store,
+        plan_store,
     );
     tools::register_spec_memory(&mut executor.tools, spec_store);
 }

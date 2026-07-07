@@ -1095,6 +1095,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
             todos_rx: Some(session.subscribe_todos()),
+            plans_rx: Some(session.subscribe_plans()),
             approvals_rx: Some(session.subscribe_pending_approvals()),
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),

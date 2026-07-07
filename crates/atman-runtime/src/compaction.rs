@@ -34,6 +34,19 @@ pub struct CompactRange {
     pub tokens_saved_estimate: u64,
 }
 
+pub fn is_plan_related(msg: &Message) -> bool {
+    for part in &msg.parts {
+        match part {
+            MessagePart::ToolUse { name, .. } if name.starts_with("plan.") => return true,
+            MessagePart::ToolResult { content, .. } if content.starts_with("# Plan:") => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRange> {
     let total = estimate_tokens_for_messages(messages);
     if total <= budget || messages.len() < 4 {
@@ -48,7 +61,7 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
     let mut cur_start: Option<usize> = None;
     let mut cur_tokens: u64 = 0;
     for (i, msg) in messages.iter().enumerate().take(tail).skip(head) {
-        if matches!(msg.role, MessageRole::System) {
+        if matches!(msg.role, MessageRole::System) || is_plan_related(msg) {
             if let Some(start) = cur_start.take()
                 && i - start >= 3
             {

@@ -58,6 +58,7 @@ pub struct AppState {
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,
     pub todos: Vec<atman_runtime::memory::todo::Todo>,
+    pub plans: Vec<atman_runtime::memory::plan::Plan>,
     pub pending_approvals: Vec<atman_runtime::session::PendingApproval>,
     pub yank_mode: bool,
     pub yank_index: usize,

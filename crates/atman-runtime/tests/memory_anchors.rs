@@ -17,11 +17,13 @@ async fn memory_confess_auto_fills_flow_run_and_turn_anchors_when_called_from_fl
 
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
+    let plan_store = Arc::new(atman_runtime::memory::PlanStore::at(tmp.path()));
     tools::register_memory(
         &mut ex.tools,
         todo_store,
         confession_store.clone(),
         goal_store,
+        plan_store,
     );
     tools::register_spec_memory(&mut ex.tools, spec_store);
     ex.providers.register(Arc::new(
@@ -67,11 +69,13 @@ async fn memory_confess_appends_user_anchors_after_auto_anchors() {
 
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
+    let plan_store = Arc::new(atman_runtime::memory::PlanStore::at(tmp.path()));
     tools::register_memory(
         &mut ex.tools,
         todo_store,
         confession_store.clone(),
         goal_store,
+        plan_store,
     );
     tools::register_spec_memory(&mut ex.tools, spec_store);
 

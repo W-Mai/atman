@@ -74,6 +74,7 @@ pub struct TuiHandle {
     pub context_rx: Option<tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
     pub attach_rx: Option<tokio::sync::watch::Receiver<usize>>,
     pub todos_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>>,
+    pub plans_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>>,
     pub approvals_rx:
         Option<tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
     pub flow_names: Vec<(String, String)>,
@@ -97,6 +98,7 @@ impl TuiHandle {
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
             todos_rx: Some(session.subscribe_todos()),
+            plans_rx: Some(session.subscribe_plans()),
             approvals_rx: Some(session.subscribe_pending_approvals()),
             flow_names: Vec::new(),
             session: Some(session),
@@ -229,6 +231,11 @@ async fn run_frames(
                     app.todos = rx.borrow().clone();
                 }
             }
+            _ = wait_plans_change(handle.plans_rx.as_mut()) => {
+                if let Some(rx) = handle.plans_rx.as_mut() {
+                    app.plans = rx.borrow().clone();
+                }
+            }
             _ = wait_approvals_change(handle.approvals_rx.as_mut()) => {
                 if let Some(rx) = handle.approvals_rx.as_mut() {
                     app.pending_approvals = rx.borrow().clone();
@@ -286,6 +293,17 @@ async fn wait_attach_change(rx: Option<&mut tokio::sync::watch::Receiver<usize>>
 
 async fn wait_todos_change(
     rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>>,
+) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_plans_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>>,
 ) {
     match rx {
         Some(r) => {
@@ -801,6 +819,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 session_dir: &app.session_dir,
                 streaming: app.streaming,
                 todos: &app.todos,
+                plans: &app.plans,
             },
         );
     }

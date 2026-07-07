@@ -14,7 +14,8 @@ async fn recent_turns_returns_empty_before_any_message() {
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));
-    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal);
+    let plan = Arc::new(atman_runtime::memory::PlanStore::at(session.dir()));
+    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
     xs = memory.recent_turns(n: 5)
@@ -51,7 +52,8 @@ async fn recent_turns_picks_up_appended_messages() {
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));
-    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal);
+    let plan = Arc::new(atman_runtime::memory::PlanStore::at(session.dir()));
+    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
     xs = memory.recent_turns(n: 5)
@@ -95,7 +97,8 @@ async fn recent_turns_caps_output_at_n() {
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));
-    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal);
+    let plan = Arc::new(atman_runtime::memory::PlanStore::at(session.dir()));
+    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
     xs = memory.recent_turns(n: 3)

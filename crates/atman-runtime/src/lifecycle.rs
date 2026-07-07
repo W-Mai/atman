@@ -136,7 +136,8 @@ mod tests {
         let todo = std::sync::Arc::new(crate::memory::TodoStore::at(dir));
         let confession = std::sync::Arc::new(crate::memory::ConfessionStore::at(dir));
         let goal = std::sync::Arc::new(crate::memory::GoalStore::at(dir));
-        crate::tools::register_memory(&mut ex.tools, todo, confession, goal);
+        let plan = std::sync::Arc::new(crate::memory::PlanStore::at(dir));
+        crate::tools::register_memory(&mut ex.tools, todo, confession, goal, plan);
         ex
     }
 

@@ -45,6 +45,7 @@ pub struct Session {
     goal_watch: watch::Sender<Option<String>>,
     attach_watch: watch::Sender<usize>,
     todos_watch: watch::Sender<Vec<crate::memory::todo::Todo>>,
+    plans_watch: watch::Sender<Vec<crate::memory::plan::Plan>>,
     streamed_this_turn: std::sync::atomic::AtomicBool,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
@@ -502,6 +503,7 @@ impl Session {
         let (goal_watch, _) = watch::channel(None);
         let (attach_watch, _) = watch::channel(0);
         let (todos_watch, _) = watch::channel(Vec::new());
+        let (plans_watch, _) = watch::channel(Vec::new());
         Ok(Self {
             id,
             dir,
@@ -517,6 +519,7 @@ impl Session {
             goal_watch,
             attach_watch,
             todos_watch,
+            plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
@@ -559,6 +562,7 @@ impl Session {
         let (goal_watch, _) = watch::channel(initial_goal);
         let (attach_watch, _) = watch::channel(0);
         let (todos_watch, _) = watch::channel(Vec::new());
+        let (plans_watch, _) = watch::channel(Vec::new());
         Ok(Self {
             id,
             dir,
@@ -574,6 +578,7 @@ impl Session {
             goal_watch,
             attach_watch,
             todos_watch,
+            plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
@@ -590,6 +595,7 @@ impl Session {
         let (goal_watch, _) = watch::channel(None);
         let (attach_watch, _) = watch::channel(0);
         let (todos_watch, _) = watch::channel(Vec::new());
+        let (plans_watch, _) = watch::channel(Vec::new());
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -605,6 +611,7 @@ impl Session {
             goal_watch,
             attach_watch,
             todos_watch,
+            plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
@@ -658,6 +665,12 @@ impl Session {
 
     pub fn events_path(&self) -> Option<&Path> {
         self.writer.as_ref().map(|w| w.events_path())
+    }
+
+    pub async fn plan_system_prompt(&self) -> Option<String> {
+        let store = crate::memory::plan::PlanStore::at(&self.dir);
+        let plan = store.latest().await.ok().flatten()?;
+        Some(crate::tools::plan::render_plan(&plan))
     }
 
     pub fn goal(&self) -> Option<String> {
@@ -728,6 +741,25 @@ impl Session {
 
     pub fn subscribe_todos(&self) -> watch::Receiver<Vec<crate::memory::todo::Todo>> {
         self.todos_watch.subscribe()
+    }
+
+    pub fn subscribe_plans(&self) -> watch::Receiver<Vec<crate::memory::plan::Plan>> {
+        self.plans_watch.subscribe()
+    }
+
+    pub async fn refresh_plans_from_store_async(&self) {
+        if self.dir.as_os_str().is_empty() {
+            return;
+        }
+        let store = crate::memory::plan::PlanStore::at(&self.dir);
+        match store.list().await {
+            Ok(list) => {
+                let _ = self.plans_watch.send(list);
+            }
+            Err(e) => {
+                eprintln!("[atman] refresh_plans_from_store_async: {e}");
+            }
+        }
     }
 
     pub fn refresh_todos_from_store(&self) {
