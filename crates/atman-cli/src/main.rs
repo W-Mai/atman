@@ -193,6 +193,20 @@ enum SessionAction {
     Show {
         session_id: String,
     },
+    Search {
+        query: String,
+        #[arg(long, help = "Restrict search to a single session id")]
+        session: Option<String>,
+        #[arg(
+            long,
+            help = "Search sessions from every project (default: current project)"
+        )]
+        all: bool,
+        #[arg(long, help = "Search sessions under an explicit project root")]
+        project: Option<PathBuf>,
+        #[arg(long, default_value_t = 20, help = "Maximum results returned")]
+        limit: usize,
+    },
     Gc,
     Sanitize {
         session_id: String,
@@ -239,6 +253,16 @@ async fn main() -> Result<()> {
         Some(Cmd::Session {
             action: SessionAction::Show { session_id },
         }) => cmd_session_show(session_id).await,
+        Some(Cmd::Session {
+            action:
+                SessionAction::Search {
+                    query,
+                    session,
+                    all,
+                    project,
+                    limit,
+                },
+        }) => cmd_session_search(query, session, all, project, limit).await,
         Some(Cmd::Session {
             action: SessionAction::Gc,
         }) => cmd_session_gc().await,
@@ -673,6 +697,112 @@ async fn cmd_session_show(sid: String) -> Result<()> {
     println!("flow_end:   {flow_end}");
     println!("llm_call:   {llm_call}");
     Ok(())
+}
+
+async fn cmd_session_search(
+    query: String,
+    session: Option<String>,
+    all: bool,
+    project: Option<PathBuf>,
+    limit: usize,
+) -> Result<()> {
+    if query.trim().is_empty() {
+        bail!("empty search query");
+    }
+    if limit == 0 {
+        bail!("--limit must be >= 1");
+    }
+    let root = data_dir()?;
+    let sessions_root = root.join("sessions");
+    if !sessions_root.exists() {
+        return Ok(());
+    }
+    let filter = if session.is_some() {
+        SessionListFilter::All
+    } else {
+        resolve_session_list_filter(all, project.as_deref())?
+    };
+    let mut targets: Vec<PathBuf> = Vec::new();
+    if let Some(sid) = session {
+        let dir = sessions_root.join(&sid);
+        if !dir.is_dir() {
+            bail!("session not found: {}", dir.display());
+        }
+        targets.push(dir);
+    } else {
+        for entry in std::fs::read_dir(&sessions_root)? {
+            let entry = entry?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            if let SessionListFilter::Project(want) = &filter {
+                let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
+                let fp = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
+                if fp.as_deref() != Some(want.as_str()) {
+                    continue;
+                }
+            }
+            targets.push(entry.path());
+        }
+    }
+    let mut hits: Vec<(String, String, u64, String, String)> = Vec::new();
+    for dir in targets {
+        let sid = dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let idx = match atman_runtime::index::AnchorIndex::open_session(&dir) {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let rows = match idx.fts_search_events(&query, limit) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for row in rows {
+            let snippet = extract_snippet(&row.payload, &query);
+            hits.push((row.ts.clone(), sid.clone(), row.seq, row.kind, snippet));
+        }
+    }
+    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    hits.truncate(limit);
+    if hits.is_empty() {
+        println!("(no matches)");
+        return Ok(());
+    }
+    let hdr_sid = "session";
+    let hdr_seq = "seq";
+    let hdr_kind = "kind";
+    let hdr_ts = "ts";
+    println!("{hdr_sid:<12} {hdr_seq:>6} {hdr_kind:<20} {hdr_ts:<20} snippet");
+    for (ts, sid, seq, kind, snippet) in hits {
+        let short_sid: String = sid.chars().take(8).collect();
+        let short_ts = ts.chars().take(19).collect::<String>();
+        let short_kind: String = kind.chars().take(20).collect();
+        println!("{short_sid:<12} {seq:>6} {short_kind:<20} {short_ts:<20} {snippet}");
+    }
+    Ok(())
+}
+
+fn extract_snippet(payload: &str, query: &str) -> String {
+    let needle_lower = query.trim_matches('"').to_lowercase();
+    let payload_lower = payload.to_lowercase();
+    let idx = payload_lower.find(&needle_lower).unwrap_or(0);
+    let start = payload
+        .char_indices()
+        .rev()
+        .find(|(i, _)| *i <= idx.saturating_sub(40))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let end = (idx + 160).min(payload.len());
+    let chunk: String = payload
+        .chars()
+        .skip(start)
+        .take(200)
+        .collect::<String>()
+        .replace('\n', " ");
+    let _ = end;
+    chunk
 }
 
 async fn cmd_session_gc() -> Result<()> {
