@@ -396,6 +396,20 @@ impl EventSink {
             + 1
     }
 
+    pub fn emit_returning_seq(&self, event: Event) -> u64 {
+        let next = self
+            .seq_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let mut event = event;
+        event.set_seq(next);
+        if let Some(tx) = &self.forwarder {
+            let _ = tx.send(event.clone());
+        }
+        self.events.lock().expect("event sink poisoned").push(event);
+        next
+    }
+
     pub fn emit(&self, mut event: Event) {
         let next = self
             .seq_counter

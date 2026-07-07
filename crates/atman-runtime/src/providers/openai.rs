@@ -9,6 +9,7 @@ use crate::provider::{
     AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
     estimate_tokens,
 };
+use crate::providers::classify_attachment_error;
 use crate::tool::BoxFut;
 
 pub struct OpenAiProvider {
@@ -223,10 +224,12 @@ impl Provider for OpenAiProvider {
             let body: ChatCompletionsResponse = if status.is_success() {
                 resp.json().await.map_err(net_err)?
             } else {
+                let body_text = resp.text().await.unwrap_or_default();
+                if let Some(reason) = classify_attachment_error(status.as_u16(), &body_text) {
+                    return Err(RuntimeError::AttachmentError { reason });
+                }
                 return Err(RuntimeError::ToolFailed(format!(
-                    "openai http {}: {}",
-                    status,
-                    resp.text().await.unwrap_or_default()
+                    "openai http {status}: {body_text}"
                 )));
             };
             Ok(response_to_assistant(body, turn_id))
@@ -252,6 +255,9 @@ impl Provider for OpenAiProvider {
                 let status = resp.status();
                 if !status.is_success() {
                     let body = resp.text().await.unwrap_or_default();
+                    if let Some(reason) = classify_attachment_error(status.as_u16(), &body) {
+                        return Err(RuntimeError::AttachmentError { reason });
+                    }
                     return Err(RuntimeError::ToolFailed(format!(
                         "openai http {status}: {body}"
                     )));

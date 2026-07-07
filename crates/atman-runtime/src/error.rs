@@ -32,6 +32,9 @@ pub enum RuntimeError {
         partial_output: String,
         partial_tokens: u64,
     },
+
+    #[error("attachment error: {reason}")]
+    AttachmentError { reason: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,6 +105,7 @@ impl RuntimeError {
             RuntimeError::Redirect(_) => ErrorKind::Cancelled,
             RuntimeError::L2Restart { .. } => ErrorKind::UserError,
             RuntimeError::ToolFailed(msg) => classify_tool_failed(msg),
+            RuntimeError::AttachmentError { .. } => ErrorKind::InvalidRequest,
         }
     }
 }

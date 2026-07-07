@@ -274,6 +274,25 @@ async fn call_and_maybe_stream(
     req: crate::provider::LlmRequest,
     session: Option<&crate::session::Session>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
+    let result = call_and_maybe_stream_inner(provider, req, session).await;
+    if let (Some(sess), Err(RuntimeError::AttachmentError { reason })) = (session, &result) {
+        let count = sess.record_attachment_degrade(reason);
+        if count > 0 {
+            let _ = sess.stream_tx().send(crate::stream::StreamFrame::Note(
+                format!(
+                    "attachment degraded ({reason}); {count} image part(s) replaced. re-issue your last message to retry without them."
+                ),
+            ));
+        }
+    }
+    result
+}
+
+async fn call_and_maybe_stream_inner(
+    provider: &dyn crate::provider::Provider,
+    req: crate::provider::LlmRequest,
+    session: Option<&crate::session::Session>,
+) -> Result<crate::provider::AssistantMessage, RuntimeError> {
     let Some(session) = session else {
         return provider.call(req).await;
     };

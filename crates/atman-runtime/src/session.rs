@@ -46,6 +46,15 @@ pub struct Session {
     attach_watch: watch::Sender<usize>,
     todos_watch: watch::Sender<Vec<crate::memory::todo::Todo>>,
     streamed_this_turn: std::sync::atomic::AtomicBool,
+    last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
+}
+
+type ImagePart = (usize, String);
+
+#[derive(Debug, Clone)]
+struct LastImageUserMsg {
+    message_seq: u64,
+    images: Vec<ImagePart>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -356,6 +365,7 @@ impl Session {
             attach_watch,
             todos_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
+            last_image_user_msg: Mutex::new(None),
         })
     }
 
@@ -408,6 +418,7 @@ impl Session {
             attach_watch,
             todos_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
+            last_image_user_msg: Mutex::new(None),
         })
     }
 
@@ -434,6 +445,7 @@ impl Session {
             attach_watch,
             todos_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
+            last_image_user_msg: Mutex::new(None),
         }
     }
 
@@ -604,8 +616,70 @@ impl Session {
                 ts,
             },
         };
-        self.sink.emit(event);
+        let seq = self.sink.emit_returning_seq(event);
+        if matches!(msg.role, MessageRole::User) {
+            let images: Vec<(usize, String)> = msg
+                .parts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| match p {
+                    crate::message::MessagePart::Image { source } => {
+                        let basename = match &source.data {
+                            crate::message::ImageData::Path { path } => path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            crate::message::ImageData::Base64 { .. } => "base64".into(),
+                        };
+                        Some((i, basename))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !images.is_empty() {
+                *self.last_image_user_msg.lock().unwrap() = Some(LastImageUserMsg {
+                    message_seq: seq,
+                    images,
+                });
+            }
+        }
         self.messages.lock().unwrap().push(msg);
+    }
+
+    pub fn record_attachment_degrade(&self, reason: &str) -> usize {
+        let target = self.last_image_user_msg.lock().unwrap().take();
+        let Some(entry) = target else {
+            return 0;
+        };
+        let turn_id = self.current_turn.lock().unwrap().clone();
+        let now = chrono::Utc::now();
+        for (part_index, basename) in &entry.images {
+            self.sink.emit(Event::AttachmentDegraded {
+                seq: 0,
+                turn_id: turn_id.clone(),
+                flow_run_id: None,
+                message_seq: entry.message_seq,
+                part_index: *part_index,
+                file_basename: basename.clone(),
+                reason: reason.into(),
+                ts: now,
+            });
+        }
+        if let Ok(mut msgs) = self.messages.lock() {
+            for m in msgs.iter_mut() {
+                for (part_index, basename) in &entry.images {
+                    if let Some(part) = m.parts.get_mut(*part_index)
+                        && matches!(part, crate::message::MessagePart::Image { .. })
+                    {
+                        *part = crate::message::MessagePart::Text {
+                            text: format!("[attachment unavailable: {basename} — {reason}]"),
+                        };
+                    }
+                }
+            }
+        }
+        entry.images.len()
     }
 
     pub fn messages(&self) -> Vec<Message> {
