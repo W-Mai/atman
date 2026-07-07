@@ -1306,9 +1306,11 @@ async fn run_turn_with_interjection(
 
     match result {
         Ok(v) => {
-            let rendered = render_value(&v);
-            if !rendered.is_empty() {
-                reporter.info(rendered);
+            if !reporter.is_tui() {
+                let rendered = render_value(&v);
+                if !rendered.is_empty() {
+                    reporter.info(rendered);
+                }
             }
         }
         Err(e) => reporter.error(format!("error: {e}")),
