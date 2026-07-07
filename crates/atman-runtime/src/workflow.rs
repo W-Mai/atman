@@ -62,9 +62,15 @@ pub enum NodeStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ApprovalState {
-    Pending { level: String },
+    Pending {
+        level: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+    },
     Approved,
-    Denied { reason: String },
+    Denied {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -321,6 +327,7 @@ impl WorkflowGraph {
                 run_id,
                 tool_use_id,
                 level,
+                preview,
                 ..
             } => {
                 let rid = run_id.0.to_string();
@@ -328,6 +335,7 @@ impl WorkflowGraph {
                 if let Some(n) = find_node_mut(&mut self.root, &id) {
                     n.approval = Some(ApprovalState::Pending {
                         level: level.clone(),
+                        preview: preview.clone(),
                     });
                 }
             }
@@ -582,12 +590,14 @@ impl WorkflowGraph {
                 run_id,
                 tool_use_id,
                 level,
+                preview,
                 ..
             } => {
                 let id = tool_node_id(run_id, tool_use_id);
                 if let Some(n) = find_node_mut(&mut self.root, &id) {
                     n.approval = Some(ApprovalState::Pending {
                         level: level.clone(),
+                        preview: preview.clone(),
                     });
                 }
             }

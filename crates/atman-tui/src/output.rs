@@ -448,7 +448,7 @@ fn append_workflow_node(
         "▸ "
     };
     let (approval_prefix, approval_suffix) = match &effective.approval {
-        Some(ApprovalState::Pending { level }) => {
+        Some(ApprovalState::Pending { level, .. }) => {
             *pending_counter = pending_counter.saturating_add(1);
             let key = if *pending_counter <= 9 {
                 format!("{pending_counter}")
@@ -558,6 +558,13 @@ fn append_expanded_details(
         && sections.iter().all(|(_, v)| v != preview)
     {
         sections.push(("output", preview.to_string()));
+    }
+    if let Some(atman_runtime::workflow::ApprovalState::Pending {
+        preview: Some(p), ..
+    }) = &node.approval
+        && !p.is_empty()
+    {
+        sections.push(("diff", p.clone()));
     }
     for (label, body) in sections {
         out.push(Line::from(vec![Span::styled(

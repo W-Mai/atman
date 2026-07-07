@@ -862,7 +862,8 @@ async fn partition_and_gate(
                 call_args,
             } => {
                 let level = tool.approval_level();
-                let approved = request_approval(ctx, &id, &name, &call_args, level).await;
+                let approved =
+                    request_approval(ctx, &id, &name, &call_args, level, Some(tool.as_ref())).await;
                 match approved {
                     ApprovalOutcome::Approve => {
                         let a = Approved {

@@ -254,6 +254,7 @@ async fn dispatch_tool_call<'a>(
         &name,
         &call_args,
         level,
+        Some(tool.as_ref()),
     )
     .await;
     let outcome = match gate {

@@ -190,6 +190,13 @@ pub trait Tool: Send + Sync {
         serde_json::json!({"type": "object"})
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult>;
+    fn preview_call<'a>(
+        &'a self,
+        _args: &'a ToolArgs,
+        _ctx: &'a ToolCtx,
+    ) -> BoxFut<'a, Option<String>> {
+        Box::pin(async { None })
+    }
 }
 
 pub fn tool_spec(tool: &dyn Tool) -> ToolSpec {

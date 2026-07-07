@@ -19,6 +19,7 @@ pub async fn request_approval(
     name: &str,
     call_args: &ToolArgs,
     level: ApprovalLevel,
+    tool: Option<&dyn crate::tool::Tool>,
 ) -> ApprovalOutcome {
     let Some(approval) = &ctx.approval else {
         return ApprovalOutcome::Approve;
@@ -30,11 +31,19 @@ pub async fn request_approval(
         .chars()
         .take(4000)
         .collect();
+    let preview = if level == ApprovalLevel::Auto {
+        None
+    } else {
+        match tool {
+            Some(t) => t.preview_call(call_args, ctx).await,
+            None => None,
+        }
+    };
     let pending = crate::session::PendingApproval {
         tool_use_id: id.to_string(),
         tool_name: name.to_string(),
         args_preview: args_preview.clone(),
-        preview: None,
+        preview: preview.clone(),
         level,
         run_id: run_id.clone(),
         emitted_at: chrono::Utc::now(),
@@ -48,6 +57,7 @@ pub async fn request_approval(
             tool_name: name.to_string(),
             args_preview: args_preview.clone(),
             level: level_str(level).into(),
+            preview: preview.clone(),
             ts: chrono::Utc::now(),
         });
     }
@@ -58,6 +68,7 @@ pub async fn request_approval(
             tool_name: name.to_string(),
             args_preview,
             level: level_str(level).into(),
+            preview: preview.clone(),
         });
     }
     let decision = rx.await.unwrap_or(crate::session::ApprovalDecision::Deny {

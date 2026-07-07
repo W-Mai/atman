@@ -240,6 +240,8 @@ pub enum Event {
         tool_name: String,
         args_preview: String,
         level: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
         ts: chrono::DateTime<chrono::Utc>,
     },
     ToolApproved {
@@ -600,6 +602,7 @@ mod tests {
             tool_name: "fs.write".into(),
             args_preview: "{}".into(),
             level: "approve".into(),
+            preview: None,
             ts: chrono::Utc::now(),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
@@ -619,6 +622,7 @@ mod tests {
                 tool_name: "n".into(),
                 args_preview: "{}".into(),
                 level: "approve".into(),
+                preview: None,
                 ts: chrono::Utc::now(),
             },
             Event::ToolApproved {

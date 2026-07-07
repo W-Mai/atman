@@ -75,6 +75,8 @@ pub enum StreamFrame {
         tool_name: String,
         args_preview: String,
         level: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
     },
     ToolApproved {
         run_id: String,

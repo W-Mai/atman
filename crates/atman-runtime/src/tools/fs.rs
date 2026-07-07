@@ -199,6 +199,33 @@ impl Tool for FsEdit {
         })
     }
 
+    fn preview_call<'a>(
+        &'a self,
+        args: &'a ToolArgs,
+        _ctx: &'a ToolCtx,
+    ) -> BoxFut<'a, Option<String>> {
+        Box::pin(async move {
+            let path = extract_path(args, "path", 0).ok()?;
+            let old_string = extract_string(args, "old_string", 1).ok()?;
+            let new_string = extract_string(args, "new_string", 2).ok()?;
+            let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
+            let content = tokio::fs::read_to_string(&path).await.ok()?;
+            let updated = if replace_all {
+                content.replace(&old_string, &new_string)
+            } else {
+                content.replacen(&old_string, &new_string, 1)
+            };
+            if updated == content {
+                return None;
+            }
+            Some(unified_diff_preview(
+                &path.display().to_string(),
+                &content,
+                &updated,
+            ))
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
@@ -270,6 +297,43 @@ impl Tool for FsEdit {
                 path.display()
             )))
         })
+    }
+}
+
+fn unified_diff_preview(path: &str, before: &str, after: &str) -> String {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(before, after);
+    let mut out = format!("--- {path}\n+++ {path}\n");
+    for (shown, hunk) in diff
+        .unified_diff()
+        .context_radius(3)
+        .iter_hunks()
+        .enumerate()
+    {
+        if shown >= 4 {
+            out.push_str("... (truncated) ...\n");
+            break;
+        }
+        out.push_str(&hunk.header().to_string());
+        out.push('\n');
+        for change in hunk.iter_changes() {
+            let sign = match change.tag() {
+                ChangeTag::Delete => '-',
+                ChangeTag::Insert => '+',
+                ChangeTag::Equal => ' ',
+            };
+            let line = change.value();
+            let trimmed = line.strip_suffix('\n').unwrap_or(line);
+            out.push(sign);
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+    if out.chars().count() > 4000 {
+        let head: String = out.chars().take(4000).collect();
+        format!("{head}\n... (preview truncated at 4000 chars) ...")
+    } else {
+        out
     }
 }
 
