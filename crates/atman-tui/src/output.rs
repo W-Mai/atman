@@ -388,32 +388,38 @@ fn append_workflow_node(
             }
         }
     };
-    let collapsed_tool = collapsed_tool_view(effective);
     let (kind_glyph, kind_color) = match &effective.kind {
         WorkflowNodeKind::Flow { .. } => ("⚡", Color::Cyan),
         WorkflowNodeKind::Subflow { .. } => ("↳", Color::Cyan),
-        WorkflowNodeKind::Stmt { node_kind } => {
-            if collapsed_tool.is_some() {
-                ("🔧", Color::Blue)
-            } else {
-                stmt_kind_glyph(node_kind)
-            }
-        }
+        WorkflowNodeKind::Stmt { node_kind } => stmt_kind_glyph(node_kind),
         WorkflowNodeKind::ToolCall { .. } => ("🔧", Color::Blue),
         WorkflowNodeKind::FanoutBranch { .. } => ("⇉", Color::Magenta),
     };
-    let base_label = if let Some((tool, args)) = &collapsed_tool {
-        format!("{tool}({})", truncate_preview(args, 60))
-    } else {
-        match &effective.kind {
-            WorkflowNodeKind::ToolCall {
-                tool, args_preview, ..
-            } => format!("{tool}({})", truncate_preview(args_preview, 60)),
-            WorkflowNodeKind::FanoutBranch { branch_index } => {
-                format!("branch[{branch_index}]  {}", effective.label)
-            }
-            _ => effective.label.clone(),
+    let base_label = match &effective.kind {
+        WorkflowNodeKind::ToolCall {
+            tool, args_preview, ..
+        } => format!("{tool}({})", truncate_preview(args_preview, 60)),
+        WorkflowNodeKind::Stmt {
+            node_kind: atman_runtime::nodegraph::NodeKind::When { condition_preview },
+        } if !condition_preview.is_empty() && condition_preview != "when" => {
+            format!("when {condition_preview}")
         }
+        WorkflowNodeKind::FanoutBranch { branch_index } => {
+            format!("branch[{branch_index}]  {}", effective.label)
+        }
+        _ => effective.label.clone(),
+    };
+    let expandable = matches!(
+        &effective.kind,
+        WorkflowNodeKind::ToolCall { .. } | WorkflowNodeKind::Stmt { .. }
+    );
+    let is_expanded = expanded_nodes.contains(&effective.id);
+    let expand_glyph = if !expandable {
+        "  "
+    } else if is_expanded {
+        "▾ "
+    } else {
+        "▸ "
     };
     let label = base_label;
     out.push(Line::from(vec![
@@ -422,6 +428,10 @@ fn append_workflow_node(
             Style::default().fg(branch_color),
         ),
         Span::styled(format!("{status_glyph} "), status_style),
+        Span::styled(
+            expand_glyph.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
         Span::raw(label),
     ]));
@@ -433,21 +443,8 @@ fn append_workflow_node(
     });
     let vertical = if is_last { "   " } else { "│  " };
     let child_prefix = format!("{ancestor_prefix}{vertical}");
-    if expanded_nodes.contains(&effective.id)
-        && let Some(preview) = effective.output_preview.as_deref()
-    {
-        for line in preview.lines().take(6) {
-            out.push(Line::from(vec![
-                Span::styled(
-                    format!("{child_prefix}  "),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(line.to_string(), Style::default().fg(Color::DarkGray)),
-            ]));
-        }
-    }
-    if collapsed_tool.is_some() {
-        return;
+    if is_expanded {
+        append_expanded_details(out, effective, &child_prefix);
     }
     let child_count = effective.children.len();
     for (i, child) in effective.children.iter().enumerate() {
@@ -465,23 +462,49 @@ fn append_workflow_node(
     }
 }
 
-fn collapsed_tool_view(node: &atman_runtime::workflow::WorkflowNode) -> Option<(String, String)> {
-    use atman_runtime::nodegraph::NodeKind;
+fn append_expanded_details(
+    out: &mut Vec<Line<'static>>,
+    node: &atman_runtime::workflow::WorkflowNode,
+    prefix: &str,
+) {
     use atman_runtime::workflow::WorkflowNodeKind;
-    let is_tool_stmt = matches!(
-        &node.kind,
-        WorkflowNodeKind::Stmt {
-            node_kind: NodeKind::ToolCall { .. }
+    let mut sections: Vec<(&str, String)> = Vec::new();
+    if let WorkflowNodeKind::ToolCall {
+        args_preview,
+        result_preview,
+        ..
+    } = &node.kind
+    {
+        if !args_preview.is_empty() {
+            sections.push(("args", args_preview.clone()));
         }
-    );
-    if !is_tool_stmt || node.children.len() != 1 {
-        return None;
+        if let Some(r) = result_preview.as_deref()
+            && !r.is_empty()
+        {
+            sections.push(("result", r.to_string()));
+        }
     }
-    match &node.children[0].kind {
-        WorkflowNodeKind::ToolCall {
-            tool, args_preview, ..
-        } => Some((tool.clone(), args_preview.clone())),
-        _ => None,
+    if let Some(preview) = node.output_preview.as_deref()
+        && !preview.is_empty()
+        && sections.iter().all(|(_, v)| v != preview)
+    {
+        sections.push(("output", preview.to_string()));
+    }
+    for (label, body) in sections {
+        out.push(Line::from(vec![Span::styled(
+            format!("{prefix}  ▪ {label}:"),
+            Style::default().fg(Color::DarkGray),
+        )]));
+        for line in body.lines().take(20) {
+            let trimmed: String = line.chars().take(200).collect();
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("{prefix}    "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(trimmed, Style::default().fg(Color::Gray)),
+            ]));
+        }
     }
 }
 

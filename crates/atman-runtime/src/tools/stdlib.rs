@@ -790,7 +790,10 @@ impl Tool for DispatchAll {
                     ctx.flow_run_id.clone(),
                     &ctx.current_node_id,
                 ) {
-                    let args_preview = format!("{:?}", input).chars().take(200).collect::<String>();
+                    let args_preview = format!("{:?}", input)
+                        .chars()
+                        .take(4000)
+                        .collect::<String>();
                     sink.emit(crate::event::Event::ToolNode {
                         seq: 0,
                         run_id: run_id.clone(),

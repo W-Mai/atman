@@ -347,7 +347,7 @@ fn preview_tool_args(positional: &[Value], named: &[(String, Value)]) -> String 
     for (k, v) in named {
         parts.push(format!("{k}={}", preview_tool_value(v)));
     }
-    truncate(&parts.join(", "), 120)
+    truncate(&parts.join(", "), 4000)
 }
 
 fn preview_tool_value(v: &Value) -> String {

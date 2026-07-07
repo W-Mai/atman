@@ -566,10 +566,7 @@ mod tests {
             app.hit_test_node(10, 3),
             Some((3, "run_a::stmt_0".to_string()))
         );
-        assert_eq!(
-            app.hit_test_node(10, 4),
-            Some((3, "tool:tu_1".to_string()))
-        );
+        assert_eq!(app.hit_test_node(10, 4), Some((3, "tool:tu_1".to_string())));
         assert_eq!(app.hit_test_node(10, 5), None);
     }
 
