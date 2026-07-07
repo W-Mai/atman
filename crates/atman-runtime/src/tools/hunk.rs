@@ -59,6 +59,10 @@ impl Tool for HunkReview {
         Tier::One
     }
 
+    fn approval_level(&self) -> crate::tool::ApprovalLevel {
+        crate::tool::ApprovalLevel::Auto
+    }
+
     fn description(&self) -> Option<&str> {
         Some(
             "Present an EditProposal to a human reviewer (or auto-approve if no resolver is \

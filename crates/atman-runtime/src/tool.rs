@@ -22,6 +22,23 @@ pub enum Tier {
     Four,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ApprovalLevel {
+    Auto,
+    Approve,
+    Dangerous,
+}
+
+impl ApprovalLevel {
+    pub fn from_tier(tier: Tier) -> Self {
+        match tier {
+            Tier::Zero => ApprovalLevel::Auto,
+            Tier::One | Tier::Two => ApprovalLevel::Approve,
+            Tier::Three | Tier::Four => ApprovalLevel::Dangerous,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelBehavior {
     AbortSafe,
@@ -151,6 +168,9 @@ impl ToolCtx {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn tier(&self) -> Tier;
+    fn approval_level(&self) -> ApprovalLevel {
+        ApprovalLevel::from_tier(self.tier())
+    }
     fn cancel_behavior(&self) -> CancelBehavior {
         CancelBehavior::AbortSafe
     }
@@ -203,5 +223,31 @@ impl ToolRegistry {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.keys().map(String::as_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_level_default_maps_from_tier() {
+        assert_eq!(ApprovalLevel::from_tier(Tier::Zero), ApprovalLevel::Auto);
+        assert_eq!(ApprovalLevel::from_tier(Tier::One), ApprovalLevel::Approve);
+        assert_eq!(ApprovalLevel::from_tier(Tier::Two), ApprovalLevel::Approve);
+        assert_eq!(
+            ApprovalLevel::from_tier(Tier::Three),
+            ApprovalLevel::Dangerous
+        );
+        assert_eq!(
+            ApprovalLevel::from_tier(Tier::Four),
+            ApprovalLevel::Dangerous
+        );
+    }
+
+    #[test]
+    fn approval_level_ordered_auto_lt_approve_lt_dangerous() {
+        assert!(ApprovalLevel::Auto < ApprovalLevel::Approve);
+        assert!(ApprovalLevel::Approve < ApprovalLevel::Dangerous);
     }
 }
