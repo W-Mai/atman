@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::tool::ToolRegistry;
 
+pub mod agent_ctrl;
 pub mod bash;
 pub mod fs;
 pub mod git;
@@ -52,6 +53,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(hunk::FsEdit));
     reg.register(Arc::new(hunk::HunkApply));
     reg.register(Arc::new(hunk::HunkReview));
+    reg.register(Arc::new(agent_ctrl::AgentSpawn));
 }
 
 pub fn register_shell(reg: &mut ToolRegistry) {

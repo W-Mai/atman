@@ -82,6 +82,7 @@ pub struct ToolCtx {
     pub read_files:
         Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>>,
     pub approval: Option<std::sync::Arc<crate::session::ApprovalRegistry>>,
+    pub providers: Option<std::sync::Arc<crate::provider::ProviderRegistry>>,
 }
 
 impl ToolCtx {
@@ -139,6 +140,14 @@ impl ToolCtx {
         set: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     ) -> Self {
         self.read_files = Some(set);
+        self
+    }
+
+    pub fn with_providers(
+        mut self,
+        providers: std::sync::Arc<crate::provider::ProviderRegistry>,
+    ) -> Self {
+        self.providers = Some(providers);
         self
     }
 
@@ -239,6 +248,10 @@ impl ToolRegistry {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.keys().map(String::as_str)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Arc<dyn Tool>)> {
+        self.tools.iter()
     }
 }
 
