@@ -92,18 +92,21 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
 }
 
 flow agent_loop(messages: list, iteration: int) -> string {
-    when iteration >= 20 {
-        return "[agent: max iterations reached]"
+    when iteration >= 200 {
+        return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
     }
     reply = llm {
         model: "claude-opus-4.7"
         messages: messages
         tools: [
-            fs.read, fs.write, fs.list,
+            fs.read, fs.write, fs.edit, fs.list,
             bash.exec,
             hunk.review, hunk.apply,
-            memory.confess, memory.todo.set, memory.todo.done,
-            memory.goal.get
+            memory.confess,
+            memory.todo.set, memory.todo.done,
+            memory.goal.get, memory.goal.set, memory.goal.clear,
+            plan.write, plan.read, plan.tick,
+            agent.spawn
         ]
     }
     tool_uses = extract_tool_uses(reply)
