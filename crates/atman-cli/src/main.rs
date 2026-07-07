@@ -1053,6 +1053,30 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             while let Some(msg) = ctrl_rx.recv().await {
                 match msg {
                     atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
+                    atman_tui::TuiControl::ApproveTool(id) => {
+                        session_for_ctrl
+                            .approval()
+                            .decide(&id, atman_runtime::session::ApprovalDecision::Approve);
+                    }
+                    atman_tui::TuiControl::DenyTool {
+                        tool_use_id,
+                        reason,
+                    } => {
+                        session_for_ctrl.approval().decide(
+                            &tool_use_id,
+                            atman_runtime::session::ApprovalDecision::Deny { reason },
+                        );
+                    }
+                    atman_tui::TuiControl::ApproveAllPending => {
+                        session_for_ctrl
+                            .approval()
+                            .decide_all(atman_runtime::session::ApprovalDecision::Approve);
+                    }
+                    atman_tui::TuiControl::DenyAllPending { reason } => {
+                        session_for_ctrl
+                            .approval()
+                            .decide_all(atman_runtime::session::ApprovalDecision::Deny { reason });
+                    }
                 }
             }
         });
@@ -1071,6 +1095,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
             todos_rx: Some(session.subscribe_todos()),
+            approvals_rx: Some(session.subscribe_pending_approvals()),
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
         };

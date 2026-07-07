@@ -671,6 +671,10 @@ impl Session {
         self.attach_watch.subscribe()
     }
 
+    pub fn subscribe_pending_approvals(&self) -> watch::Receiver<Vec<PendingApproval>> {
+        self.approval.subscribe()
+    }
+
     pub fn set_goal(&self, goal: Option<String>) {
         let _ = self.goal_watch.send(goal);
     }

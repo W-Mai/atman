@@ -58,6 +58,7 @@ pub struct AppState {
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,
     pub todos: Vec<atman_runtime::memory::todo::Todo>,
+    pub pending_approvals: Vec<atman_runtime::session::PendingApproval>,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,

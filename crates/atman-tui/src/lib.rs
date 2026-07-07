@@ -48,6 +48,10 @@ impl TuiNote {
 
 pub enum TuiControl {
     CancelFlow,
+    ApproveTool(String),
+    DenyTool { tool_use_id: String, reason: String },
+    ApproveAllPending,
+    DenyAllPending { reason: String },
 }
 
 pub enum TuiCommand {
@@ -69,6 +73,8 @@ pub struct TuiHandle {
     pub context_rx: Option<tokio::sync::watch::Receiver<atman_runtime::ContextSnapshot>>,
     pub attach_rx: Option<tokio::sync::watch::Receiver<usize>>,
     pub todos_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::todo::Todo>>>,
+    pub approvals_rx:
+        Option<tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
 }
@@ -90,6 +96,7 @@ impl TuiHandle {
             context_rx: Some(session.subscribe_context()),
             attach_rx: Some(session.subscribe_attach()),
             todos_rx: Some(session.subscribe_todos()),
+            approvals_rx: Some(session.subscribe_pending_approvals()),
             flow_names: Vec::new(),
             session: Some(session),
         }
@@ -221,6 +228,11 @@ async fn run_frames(
                     app.todos = rx.borrow().clone();
                 }
             }
+            _ = wait_approvals_change(handle.approvals_rx.as_mut()) => {
+                if let Some(rx) = handle.approvals_rx.as_mut() {
+                    app.pending_approvals = rx.borrow().clone();
+                }
+            }
             cmd = recv_cmd(handle.cmd_rx.as_mut()) => {
                 if let Some(cmd) = cmd {
                     match cmd {
@@ -282,6 +294,17 @@ async fn wait_todos_change(
     }
 }
 
+async fn wait_approvals_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
+) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
 #[cfg(unix)]
 fn build_sigterm_stream() -> Option<tokio::signal::unix::Signal> {
     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()
@@ -320,6 +343,62 @@ async fn wait_shutdown(rx: Option<&mut tokio::sync::oneshot::Receiver<()>>) {
             let _ = r.await;
         }
         None => std::future::pending().await,
+    }
+}
+
+fn handle_approval_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) -> bool {
+    let Some(tx) = control_tx else {
+        return false;
+    };
+    let queue = &app.pending_approvals;
+    match action {
+        KeyAction::Char(c) => match c {
+            '1'..='9' => {
+                let idx = (*c as u8 - b'1') as usize;
+                if let Some(p) = queue.get(idx) {
+                    let _ = tx.send(TuiControl::ApproveTool(p.tool_use_id.clone()));
+                    app.push_note(
+                        format!("approved {} ({})", p.tool_name, p.tool_use_id),
+                        app::NoteLevel::Info,
+                    );
+                }
+                true
+            }
+            'a' | 'A' => {
+                let _ = tx.send(TuiControl::ApproveAllPending);
+                app.push_note(
+                    format!("approved all {} pending", queue.len()),
+                    app::NoteLevel::Info,
+                );
+                true
+            }
+            'd' | 'D' => {
+                if let Some(p) = queue.first() {
+                    let _ = tx.send(TuiControl::DenyTool {
+                        tool_use_id: p.tool_use_id.clone(),
+                        reason: "denied by user".into(),
+                    });
+                    app.push_note(format!("denied {}", p.tool_name), app::NoteLevel::Warn);
+                }
+                true
+            }
+            _ => false,
+        },
+        KeyAction::Escape => {
+            let _ = tx.send(TuiControl::DenyAllPending {
+                reason: "user pressed Esc".into(),
+            });
+            app.push_note(
+                format!("denied all {} pending", queue.len()),
+                app::NoteLevel::Warn,
+            );
+            true
+        }
+        _ => false,
     }
 }
 
@@ -364,6 +443,12 @@ fn handle_key(
                 app.popup.close();
             }
         }
+    }
+    if !app.pending_approvals.is_empty()
+        && editor.buf().is_empty()
+        && handle_approval_key(&action, app, control_tx)
+    {
+        return;
     }
     let mut edited = false;
     match action {
