@@ -62,6 +62,7 @@ pub struct AppState {
     pub pending_approvals: Vec<atman_runtime::session::PendingApproval>,
     pub yank_mode: bool,
     pub yank_index: usize,
+    pub palette: crate::palette::CommandPalette,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,

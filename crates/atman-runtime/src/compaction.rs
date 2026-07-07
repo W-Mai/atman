@@ -160,14 +160,15 @@ pub async fn maybe_auto_compact(
     model: &str,
     providers: &crate::provider::ProviderRegistry,
 ) {
+    let forced = session.take_manual_compact_request();
     let info = crate::model_registry::model_info(model);
     let threshold = info.compact_threshold_tokens();
     let msgs = session.messages();
     let current = estimate_tokens_for_messages(&msgs);
-    if current <= threshold {
+    if !forced && current <= threshold {
         return;
     }
-    if !session.approval_cooldown_ok_for_compact() {
+    if !forced && !session.approval_cooldown_ok_for_compact() {
         return;
     }
     let Some(range) = find_compact_range(&msgs, info.context_budget) else {

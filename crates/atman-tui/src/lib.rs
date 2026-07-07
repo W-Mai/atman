@@ -21,6 +21,7 @@ pub mod keys;
 pub mod layout;
 pub mod markdown;
 pub mod output;
+pub mod palette;
 pub mod sidebar;
 pub mod status;
 pub mod terminal_guard;
@@ -53,6 +54,7 @@ pub enum TuiControl {
     DenyTool { tool_use_id: String, reason: String },
     ApproveAllPending,
     DenyAllPending { reason: String },
+    CompactNow,
 }
 
 pub enum TuiCommand {
@@ -401,6 +403,102 @@ fn yank_selected_text(app: &AppState) -> Option<String> {
     }
 }
 
+fn handle_palette_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    match action {
+        KeyAction::Escape => app.palette.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => app.palette.move_up(),
+        KeyAction::HistoryDown | KeyAction::CursorRight => app.palette.move_down(),
+        KeyAction::Backspace => app.palette.backspace(),
+        KeyAction::Char(c) => app.palette.push_char(*c),
+        KeyAction::Submit => {
+            if let Some(id) = app.palette.selected() {
+                app.palette.close();
+                dispatch_palette_entry(id, app, control_tx);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn dispatch_palette_entry(
+    id: crate::palette::PaletteEntryId,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    use crate::palette::PaletteEntryId;
+    match id {
+        PaletteEntryId::YankMode => {
+            let cands = yank_candidate_indices(app);
+            if cands.is_empty() {
+                app.push_note("nothing to yank yet", app::NoteLevel::Warn);
+                return;
+            }
+            app.yank_mode = true;
+            app.yank_index = cands.len().saturating_sub(1);
+            app.push_note(
+                "yank mode — j/k to move, Enter to copy, Esc to cancel",
+                app::NoteLevel::Info,
+            );
+        }
+        PaletteEntryId::CopyLastMessage => copy_last_message(app),
+        PaletteEntryId::CopyLastTool => copy_last_tool(app),
+        PaletteEntryId::CompactNow => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::CompactNow);
+                app.push_note("requested transcript compaction", app::NoteLevel::Info);
+            }
+        }
+        PaletteEntryId::SwitchSession => {
+            app.push_note("session switcher not wired yet", app::NoteLevel::Warn);
+        }
+        PaletteEntryId::SearchHistory => {
+            app.push_note("history search modal not wired yet", app::NoteLevel::Warn);
+        }
+        PaletteEntryId::ToggleSidebar => {
+            app.sidebar_mode = app.sidebar_mode.toggle();
+        }
+        PaletteEntryId::ShowHelp => {
+            app.cheatsheet_open = true;
+        }
+    }
+}
+
+fn copy_last_message(app: &mut AppState) {
+    let text = app.items.iter().rev().find_map(|item| match item {
+        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
+        _ => None,
+    });
+    match text {
+        Some(t) if !t.is_empty() => {
+            let n = t.chars().count();
+            crate::clipboard::write_osc52(&t);
+            app.push_note(
+                format!("copied {n} chars from last message"),
+                app::NoteLevel::Info,
+            );
+        }
+        _ => app.push_note("no assistant message to copy", app::NoteLevel::Warn),
+    }
+}
+
+fn copy_last_tool(app: &mut AppState) {
+    let text = app.items.iter().rev().find_map(|item| match item {
+        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
+        _ => None,
+    });
+    match text {
+        Some(t) if !t.is_empty() => {
+            crate::clipboard::write_osc52(&t);
+            app.push_note("copied last tool output", app::NoteLevel::Info);
+        }
+        _ => app.push_note("no tool output to copy", app::NoteLevel::Warn),
+    }
+}
+
 fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {
     let cands = yank_candidate_indices(app);
     if cands.is_empty() {
@@ -519,6 +617,14 @@ fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if app.palette.open {
+        handle_palette_key(&action, app, control_tx);
+        return;
+    }
+    if let KeyAction::OpenCommandPalette = action {
+        app.palette.open();
+        return;
+    }
     if app.cheatsheet_open {
         match action {
             KeyAction::Escape | KeyAction::HelpModal => app.cheatsheet_open = false,
@@ -565,22 +671,13 @@ fn handle_key(
     let mut edited = false;
     match action {
         KeyAction::Char(c) => {
-            if c == 'y' && editor.buf().is_empty() && !app.yank_mode {
-                let cands = yank_candidate_indices(app);
-                if !cands.is_empty() {
-                    app.yank_mode = true;
-                    app.yank_index = cands.len().saturating_sub(1);
-                    app.push_note(
-                        "yank mode — j/k to move, Enter to copy, Esc to cancel",
-                        app::NoteLevel::Info,
-                    );
-                    *interrupt_prompt = false;
-                    return;
-                }
-            }
             editor.insert_char(c);
             *interrupt_prompt = false;
             edited = true;
+        }
+        KeyAction::OpenCommandPalette => {
+            app.palette.open();
+            *interrupt_prompt = false;
         }
         KeyAction::Backspace => {
             editor.backspace();
@@ -847,6 +944,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.cheatsheet_open {
         completion::render_cheatsheet(f, area);
+    }
+    if app.palette.open {
+        palette::render(f, area, &app.palette);
     }
 }
 

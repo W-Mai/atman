@@ -47,6 +47,7 @@ pub struct Session {
     todos_watch: watch::Sender<Vec<crate::memory::todo::Todo>>,
     plans_watch: watch::Sender<Vec<crate::memory::plan::Plan>>,
     streamed_this_turn: std::sync::atomic::AtomicBool,
+    manual_compact_pending: std::sync::atomic::AtomicBool,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     approval: std::sync::Arc<ApprovalRegistry>,
@@ -559,6 +560,7 @@ impl Session {
             todos_watch,
             plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
+            manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -618,6 +620,7 @@ impl Session {
             todos_watch,
             plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
+            manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -651,6 +654,7 @@ impl Session {
             todos_watch,
             plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
+            manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -736,6 +740,16 @@ impl Session {
 
     pub fn meta(&self) -> Option<crate::session_meta::SessionMeta> {
         crate::session_meta::SessionMeta::load(&self.dir)
+    }
+
+    pub fn request_manual_compact(&self) {
+        self.manual_compact_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn take_manual_compact_request(&self) -> bool {
+        self.manual_compact_pending
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_goal(&self, goal: Option<String>) {

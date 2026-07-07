@@ -1281,6 +1281,9 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                             .approval()
                             .decide_all(atman_runtime::session::ApprovalDecision::Deny { reason });
                     }
+                    atman_tui::TuiControl::CompactNow => {
+                        session_for_ctrl.request_manual_compact();
+                    }
                 }
             }
         });
