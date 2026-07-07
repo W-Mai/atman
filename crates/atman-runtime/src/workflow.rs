@@ -104,13 +104,14 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                 };
-                match parent_node_id.as_deref() {
-                    None => self.root.push(node),
-                    Some(pid) => {
-                        if let Some(parent) = find_node_mut(&mut self.root, pid) {
+                match (parent_run_id.as_ref(), parent_node_id.as_deref()) {
+                    (Some(prid), Some(pid)) => {
+                        let scoped = scope_id(&prid.0.to_string(), pid);
+                        if let Some(parent) = find_node_mut(&mut self.root, &scoped) {
                             parent.children.push(node);
                         }
                     }
+                    _ => self.root.push(node),
                 }
             }
             Event::FlowEnd {
@@ -134,9 +135,12 @@ impl WorkflowGraph {
                 ts,
                 ..
             } => {
+                let rid = run_id.0.to_string();
+                let scoped_id = scope_id(&rid, node_id);
                 let parent_id = parent_node_id
-                    .clone()
-                    .unwrap_or_else(|| run_id.0.to_string());
+                    .as_deref()
+                    .map(|p| scope_id(&rid, p))
+                    .unwrap_or_else(|| rid.clone());
                 let kind = if let Some(idx) = parse_branch_index(node_id) {
                     WorkflowNodeKind::FanoutBranch { branch_index: idx }
                 } else {
@@ -145,7 +149,7 @@ impl WorkflowGraph {
                     }
                 };
                 let node = WorkflowNode {
-                    id: node_id.clone(),
+                    id: scoped_id,
                     kind,
                     label: label.clone(),
                     status: NodeStatus::Running,
@@ -163,25 +167,35 @@ impl WorkflowGraph {
                 }
             }
             Event::FlowNodeEnd {
+                run_id,
                 node_id,
                 status,
                 output_preview,
                 ts,
                 ..
             } => {
-                if let Some(n) = find_node_mut(&mut self.root, node_id) {
-                    n.status = match status {
+                let scoped = scope_id(&run_id.0.to_string(), node_id);
+                if let Some(n) = find_node_mut(&mut self.root, &scoped) {
+                    let new_status = match status {
                         FlowNodeStatus::Ok => NodeStatus::Ok,
                         FlowNodeStatus::Err => NodeStatus::Err,
                         FlowNodeStatus::Cancelled => NodeStatus::Cancelled,
                     };
+                    n.status = new_status;
                     n.ended_at = Some(*ts);
                     if let Some(p) = output_preview {
                         n.output_preview = Some(p.clone());
                     }
+                    for child in n.children.iter_mut() {
+                        if matches!(child.status, NodeStatus::Running | NodeStatus::Pending) {
+                            child.status = new_status;
+                            child.ended_at = Some(*ts);
+                        }
+                    }
                 }
             }
             Event::ToolNode {
+                run_id,
                 parent_node_id,
                 tool_use_id,
                 tool_name,
@@ -189,6 +203,8 @@ impl WorkflowGraph {
                 ts,
                 ..
             } => {
+                let rid = run_id.0.to_string();
+                let scoped_parent = scope_id(&rid, parent_node_id);
                 let id = format!("tool:{tool_use_id}");
                 let node = WorkflowNode {
                     id,
@@ -206,7 +222,7 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                 };
-                if let Some(parent) = find_node_mut(&mut self.root, parent_node_id) {
+                if let Some(parent) = find_node_mut(&mut self.root, &scoped_parent) {
                     parent.children.push(node);
                 }
             }
@@ -315,7 +331,11 @@ impl WorkflowGraph {
                 label,
                 parent_node_id,
             } => {
-                let parent_id = parent_node_id.clone().unwrap_or_else(|| run_id.clone());
+                let scoped_id = scope_id(run_id, node_id);
+                let parent_id = parent_node_id
+                    .as_deref()
+                    .map(|p| scope_id(run_id, p))
+                    .unwrap_or_else(|| run_id.clone());
                 let kind = if let Some(idx) = parse_branch_index(node_id) {
                     WorkflowNodeKind::FanoutBranch { branch_index: idx }
                 } else {
@@ -324,7 +344,7 @@ impl WorkflowGraph {
                     }
                 };
                 let node = WorkflowNode {
-                    id: node_id.clone(),
+                    id: scoped_id,
                     kind,
                     label: label.clone(),
                     status: NodeStatus::Running,
@@ -342,30 +362,41 @@ impl WorkflowGraph {
                 }
             }
             StreamFrame::FlowNodeEnd {
+                run_id,
                 node_id,
                 status,
                 output_preview,
                 ..
             } => {
-                if let Some(n) = find_node_mut(&mut self.root, node_id) {
-                    n.status = match status {
+                let scoped = scope_id(run_id, node_id);
+                if let Some(n) = find_node_mut(&mut self.root, &scoped) {
+                    let new_status = match status {
                         FlowNodeStatus::Ok => NodeStatus::Ok,
                         FlowNodeStatus::Err => NodeStatus::Err,
                         FlowNodeStatus::Cancelled => NodeStatus::Cancelled,
                     };
+                    n.status = new_status;
                     n.ended_at = Some(now);
                     if let Some(p) = output_preview {
                         n.output_preview = Some(p.clone());
                     }
+                    for child in n.children.iter_mut() {
+                        if matches!(child.status, NodeStatus::Running | NodeStatus::Pending) {
+                            child.status = new_status;
+                            child.ended_at = Some(now);
+                        }
+                    }
                 }
             }
             StreamFrame::ToolNode {
+                run_id,
                 parent_node_id,
                 tool_use_id,
                 tool,
                 args_preview,
                 ..
             } => {
+                let scoped_parent = scope_id(run_id, parent_node_id);
                 let node = WorkflowNode {
                     id: format!("tool:{tool_use_id}"),
                     kind: WorkflowNodeKind::ToolCall {
@@ -382,7 +413,7 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                 };
-                if let Some(parent) = find_node_mut(&mut self.root, parent_node_id) {
+                if let Some(parent) = find_node_mut(&mut self.root, &scoped_parent) {
                     parent.children.push(node);
                 }
             }
@@ -454,6 +485,10 @@ fn find_node_mut<'a>(nodes: &'a mut [WorkflowNode], id: &str) -> Option<&'a mut 
         }
     }
     None
+}
+
+fn scope_id(run_id: &str, node_id: &str) -> String {
+    format!("{run_id}::{node_id}")
 }
 
 fn parse_branch_index(node_id: &str) -> Option<usize> {
@@ -539,11 +574,12 @@ mod tests {
         g.apply_event(&stmt_start(parent_flow.clone(), "stmt_0", None));
         g.apply_event(&subflow_start(
             child_flow.clone(),
-            parent_flow,
+            parent_flow.clone(),
             "stmt_0",
             "inner",
         ));
-        let stmt = g.find_node("stmt_0").unwrap();
+        let scoped = scope_id(&parent_flow.0.to_string(), "stmt_0");
+        let stmt = g.find_node(&scoped).unwrap();
         assert_eq!(stmt.children.len(), 1);
         assert!(matches!(
             stmt.children[0].kind,
@@ -570,12 +606,13 @@ mod tests {
         g.apply_event(&stmt_end(rid.clone(), "stmt_0", FlowNodeStatus::Ok));
         g.apply_event(&Event::FlowEnd {
             seq: 0,
-            run_id: rid,
+            run_id: rid.clone(),
             flow_name: "main".into(),
             status: FlowStatus::Ok,
             ts: now(),
         });
-        let stmt = g.find_node("stmt_0").unwrap();
+        let scoped = scope_id(&rid.0.to_string(), "stmt_0");
+        let stmt = g.find_node(&scoped).unwrap();
         assert_eq!(stmt.status, NodeStatus::Ok);
         assert_eq!(stmt.children.len(), 1);
         let tool = &stmt.children[0];
@@ -591,8 +628,9 @@ mod tests {
         g.apply_event(&flow_start(rid.clone(), "main"));
         g.apply_event(&stmt_start(rid.clone(), "stmt_1", None));
         g.apply_event(&stmt_start(rid.clone(), "stmt_1.branch[0]", Some("stmt_1")));
-        g.apply_event(&stmt_start(rid, "stmt_1.branch[1]", Some("stmt_1")));
-        let parent = g.find_node("stmt_1").unwrap();
+        g.apply_event(&stmt_start(rid.clone(), "stmt_1.branch[1]", Some("stmt_1")));
+        let scoped = scope_id(&rid.0.to_string(), "stmt_1");
+        let parent = g.find_node(&scoped).unwrap();
         assert_eq!(parent.parallelism, Parallelism::Parallel);
         assert_eq!(parent.children.len(), 2);
         assert!(matches!(

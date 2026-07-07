@@ -770,7 +770,7 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let stmt = panel.find_node("stmt_0").unwrap();
+        let stmt = panel.find_node("r1::stmt_0").unwrap();
         assert_eq!(stmt.children.len(), 1);
         assert_eq!(stmt.children[0].id, "tool:tu_1");
     }

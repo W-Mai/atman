@@ -133,14 +133,19 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         ])],
         OutputItem::AssistantMd { md } => crate::markdown::render_markdown(md),
         OutputItem::SystemNote { text, level } => {
-            let color = match level {
-                NoteLevel::Info => Color::Blue,
-                NoteLevel::Warn => Color::Yellow,
-                NoteLevel::Error => Color::Red,
+            let (glyph, color) = match level {
+                NoteLevel::Info => ("·", Color::Blue),
+                NoteLevel::Warn => ("!", Color::Yellow),
+                NoteLevel::Error => ("✗", Color::Red),
             };
+            let cleaned = text
+                .strip_prefix("[atman] ")
+                .or_else(|| text.strip_prefix("[atman]"))
+                .unwrap_or(text)
+                .to_string();
             vec![Line::from(vec![
-                Span::styled("[atman] ".to_string(), Style::default().fg(color)),
-                Span::raw(text.clone()),
+                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+                Span::raw(cleaned),
             ])]
         }
         OutputItem::Divider => vec![
@@ -283,21 +288,32 @@ fn append_workflow_node(
             }
         }
     };
+    let collapsed_tool = collapsed_tool_view(node);
     let (kind_glyph, kind_color) = match &node.kind {
         WorkflowNodeKind::Flow { .. } => ("⚡", Color::Cyan),
         WorkflowNodeKind::Subflow { .. } => ("↳", Color::Cyan),
-        WorkflowNodeKind::Stmt { node_kind } => stmt_kind_glyph(node_kind),
+        WorkflowNodeKind::Stmt { node_kind } => {
+            if collapsed_tool.is_some() {
+                ("🔧", Color::Blue)
+            } else {
+                stmt_kind_glyph(node_kind)
+            }
+        }
         WorkflowNodeKind::ToolCall { .. } => ("🔧", Color::Blue),
         WorkflowNodeKind::FanoutBranch { .. } => ("⇉", Color::Magenta),
     };
-    let label = match &node.kind {
-        WorkflowNodeKind::ToolCall {
-            tool, args_preview, ..
-        } => format!("{tool}({})", truncate_preview(args_preview, 40)),
-        WorkflowNodeKind::FanoutBranch { branch_index } => {
-            format!("branch[{branch_index}]  {}", node.label)
+    let label = if let Some((tool, args)) = &collapsed_tool {
+        format!("{tool}({})", truncate_preview(args, 60))
+    } else {
+        match &node.kind {
+            WorkflowNodeKind::ToolCall {
+                tool, args_preview, ..
+            } => format!("{tool}({})", truncate_preview(args_preview, 60)),
+            WorkflowNodeKind::FanoutBranch { branch_index } => {
+                format!("branch[{branch_index}]  {}", node.label)
+            }
+            _ => node.label.clone(),
         }
-        _ => node.label.clone(),
     };
     out.push(Line::from(vec![
         Span::styled(
@@ -323,6 +339,9 @@ fn append_workflow_node(
             ]));
         }
     }
+    if collapsed_tool.is_some() {
+        return;
+    }
     let child_count = node.children.len();
     for (i, child) in node.children.iter().enumerate() {
         let child_last = i + 1 == child_count;
@@ -335,6 +354,26 @@ fn append_workflow_node(
             animation_frame,
             flow_running,
         );
+    }
+}
+
+fn collapsed_tool_view(node: &atman_runtime::workflow::WorkflowNode) -> Option<(String, String)> {
+    use atman_runtime::nodegraph::NodeKind;
+    use atman_runtime::workflow::WorkflowNodeKind;
+    let is_tool_stmt = matches!(
+        &node.kind,
+        WorkflowNodeKind::Stmt {
+            node_kind: NodeKind::ToolCall { .. }
+        }
+    );
+    if !is_tool_stmt || node.children.len() != 1 {
+        return None;
+    }
+    match &node.children[0].kind {
+        WorkflowNodeKind::ToolCall {
+            tool, args_preview, ..
+        } => Some((tool.clone(), args_preview.clone())),
+        _ => None,
     }
 }
 
