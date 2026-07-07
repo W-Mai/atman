@@ -86,8 +86,14 @@ pub fn exec_stmts_prefixed<'a>(
             };
             emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
             let stmt_ctx = ctx.with_node(&node_id);
-            let outcome = exec_stmt(stmt, env, &stmt_ctx, &watches).await;
-            emit_flow_node_end(ctx, &node_id, &outcome, parent_node_id.as_deref());
+            let (outcome, preview) = exec_stmt(stmt, env, &stmt_ctx, &watches).await;
+            emit_flow_node_end(
+                ctx,
+                &node_id,
+                &outcome,
+                parent_node_id.as_deref(),
+                preview.as_deref(),
+            );
             match outcome {
                 StmtOutcome::Continue => continue,
                 other => return other,
@@ -132,11 +138,41 @@ fn emit_flow_node_start(
         });
 }
 
+fn value_preview(v: &Value) -> Option<String> {
+    let raw = match v {
+        Value::Str(s) => s.clone(),
+        Value::Message(m) => m.text_concat(),
+        Value::Path(p) => p.display().to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Unit => return None,
+        Value::Err(e) => format!("err: {e}"),
+        Value::List(items) => format!("list[{}]", items.len()),
+        Value::Struct(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::EditProposal(_) => "<edit proposal>".into(),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.chars().take(4000).collect())
+    }
+}
+
 fn emit_flow_node_end(
     ctx: &EvalCtx<'_>,
     node_id: &str,
     outcome: &StmtOutcome,
     parent_node_id: Option<&str>,
+    output_preview: Option<&str>,
 ) {
     let Some(session) = ctx.session else {
         return;
@@ -148,13 +184,14 @@ fn emit_flow_node_end(
         StmtOutcome::Err(_) => crate::event::FlowNodeStatus::Err,
         _ => crate::event::FlowNodeStatus::Ok,
     };
+    let preview_owned = output_preview.map(String::from);
     if let Some(sink) = ctx.events {
         sink.emit(crate::event::Event::FlowNodeEnd {
             seq: 0,
             run_id: run_id.clone(),
             node_id: node_id.to_string(),
             status: status.clone(),
-            output_preview: None,
+            output_preview: preview_owned.clone(),
             ts: chrono::Utc::now(),
         });
     }
@@ -164,7 +201,7 @@ fn emit_flow_node_end(
             run_id: run_id.0.to_string(),
             node_id: node_id.to_string(),
             status,
-            output_preview: None,
+            output_preview: preview_owned,
             parent_node_id: parent_node_id.map(String::from),
         });
 }
@@ -227,7 +264,7 @@ fn exec_stmt<'a>(
     env: &'a mut Env,
     ctx: &'a EvalCtx<'a>,
     watches: &'a HashMap<String, Vec<&'a WatchDecl>>,
-) -> BoxFut<'a, StmtOutcome> {
+) -> BoxFut<'a, (StmtOutcome, Option<String>)> {
     Box::pin(async move {
         match stmt {
             Stmt::Bind { name, value } => {
@@ -237,46 +274,52 @@ fn exec_stmt<'a>(
                 {
                     match eval_bind_with_watches(value, env, ctx, ws).await {
                         Ok(v) => v,
-                        Err(e) => return StmtOutcome::Err(e),
+                        Err(e) => return (StmtOutcome::Err(e), None),
                     }
                 } else {
                     eval_expr(value, env, ctx).await
                 };
                 if let Value::Err(e) = v {
-                    return StmtOutcome::Err(e);
+                    return (StmtOutcome::Err(e), None);
                 }
+                let preview = value_preview(&v);
                 if let Err(e) = bind_pattern(name, v, env) {
-                    return StmtOutcome::Err(e);
+                    return (StmtOutcome::Err(e), None);
                 }
-                StmtOutcome::Continue
+                (StmtOutcome::Continue, preview)
             }
             Stmt::When { cond, body } => {
                 let c = eval_expr(cond, env, ctx).await;
                 match c {
-                    Value::Bool(true) => exec_stmts(body, env, ctx).await,
-                    Value::Bool(false) => StmtOutcome::Continue,
-                    Value::Err(e) => StmtOutcome::Err(e),
-                    other => StmtOutcome::Err(RuntimeError::TypeMismatch {
-                        expected: "bool".into(),
-                        actual: other.kind_name().into(),
-                    }),
+                    Value::Bool(true) => (exec_stmts(body, env, ctx).await, Some("true".into())),
+                    Value::Bool(false) => (StmtOutcome::Continue, Some("false".into())),
+                    Value::Err(e) => (StmtOutcome::Err(e), None),
+                    other => (
+                        StmtOutcome::Err(RuntimeError::TypeMismatch {
+                            expected: "bool".into(),
+                            actual: other.kind_name().into(),
+                        }),
+                        None,
+                    ),
                 }
             }
             Stmt::Return { value } => {
                 let v = eval_expr(value, env, ctx).await;
                 if let Value::Err(e) = v {
-                    return StmtOutcome::Err(e);
+                    return (StmtOutcome::Err(e), None);
                 }
-                StmtOutcome::Return(v)
+                let preview = value_preview(&v);
+                (StmtOutcome::Return(v), preview)
             }
             Stmt::Expr(e) => {
                 let v = eval_expr(e, env, ctx).await;
                 if let Value::Err(err) = v {
-                    return StmtOutcome::Err(err);
+                    return (StmtOutcome::Err(err), None);
                 }
-                StmtOutcome::Continue
+                let preview = value_preview(&v);
+                (StmtOutcome::Continue, preview)
             }
-            Stmt::Watch(_) => StmtOutcome::Continue,
+            Stmt::Watch(_) => (StmtOutcome::Continue, None),
         }
     })
 }

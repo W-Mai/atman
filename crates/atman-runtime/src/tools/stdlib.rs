@@ -781,6 +781,32 @@ impl Tool for DispatchAll {
                         });
                     }
                 };
+                let missing = missing_required_fields(&tool.input_schema(), &named);
+                if !missing.is_empty() {
+                    let msg = crate::message::Message {
+                        role: crate::message::MessageRole::Tool,
+                        parts: vec![crate::message::MessagePart::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: format!(
+                                "tool `{name}` received empty/incomplete input. Missing required fields: {}. Retry with a complete argument object like {{{}}} — do NOT reuse an empty {{}} input.",
+                                missing.join(", "),
+                                missing
+                                    .iter()
+                                    .map(|f| format!("\"{f}\":\"...\""))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            is_error: true,
+                        }],
+                        turn_id: ctx
+                            .turn_id
+                            .clone()
+                            .unwrap_or_else(crate::event::TurnId::now),
+                    };
+                    emit_tool_result(ctx, &msg);
+                    out.push(Value::Message(msg));
+                    continue;
+                }
                 let call_args = ToolArgs {
                     positional: Vec::new(),
                     named,
@@ -835,6 +861,19 @@ impl Tool for DispatchAll {
             Ok(Value::List(out))
         })
     }
+}
+
+fn missing_required_fields(schema: &serde_json::Value, named: &[(String, Value)]) -> Vec<String> {
+    let Some(required) = schema.get("required").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let have: std::collections::HashSet<&str> = named.iter().map(|(k, _)| k.as_str()).collect();
+    required
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|k| !have.contains(k))
+        .map(String::from)
+        .collect()
 }
 
 fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) {

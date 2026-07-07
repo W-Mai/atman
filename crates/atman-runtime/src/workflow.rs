@@ -205,7 +205,7 @@ impl WorkflowGraph {
             } => {
                 let rid = run_id.0.to_string();
                 let scoped_parent = scope_id(&rid, parent_node_id);
-                let id = format!("tool:{tool_use_id}");
+                let id = tool_node_id(&rid, tool_use_id);
                 let node = WorkflowNode {
                     id,
                     kind: WorkflowNodeKind::ToolCall {
@@ -237,7 +237,7 @@ impl WorkflowGraph {
                 };
                 for part in &message.parts {
                     if let crate::message::MessagePart::ToolUse { id, name, input } = part {
-                        let node_id = format!("tool:{id}");
+                        let node_id = tool_node_id(&flow_id, id);
                         if find_node(&self.root, &node_id).is_some() {
                             continue;
                         }
@@ -265,7 +265,13 @@ impl WorkflowGraph {
                     }
                 }
             }
-            Event::ToolResultMsg { message, ts, .. } => {
+            Event::ToolResultMsg {
+                flow_run_id,
+                message,
+                ts,
+                ..
+            } => {
+                let flow_id = flow_run_id.as_ref().map(|r| r.0.to_string());
                 for part in &message.parts {
                     if let crate::message::MessagePart::ToolResult {
                         tool_use_id,
@@ -273,8 +279,15 @@ impl WorkflowGraph {
                         is_error,
                     } = part
                     {
-                        let node_id = format!("tool:{tool_use_id}");
-                        if let Some(n) = find_node_mut(&mut self.root, &node_id) {
+                        let scoped_hit = flow_id.as_deref().and_then(|rid| {
+                            let id = tool_node_id(rid, tool_use_id);
+                            find_node_mut(&mut self.root, &id).map(|_| id)
+                        });
+                        let node = match scoped_hit {
+                            Some(id) => find_node_mut(&mut self.root, &id),
+                            None => find_tool_node_by_tool_use_id(&mut self.root, tool_use_id),
+                        };
+                        if let Some(n) = node {
                             n.status = if *is_error {
                                 NodeStatus::Err
                             } else {
@@ -449,7 +462,7 @@ impl WorkflowGraph {
             } => {
                 let scoped_parent = scope_id(run_id, parent_node_id);
                 let node = WorkflowNode {
-                    id: format!("tool:{tool_use_id}"),
+                    id: tool_node_id(run_id, tool_use_id),
                     kind: WorkflowNodeKind::ToolCall {
                         tool_use_id: tool_use_id.clone(),
                         tool: tool.clone(),
@@ -471,8 +484,7 @@ impl WorkflowGraph {
             StreamFrame::ToolUseDone {
                 id, ok, preview, ..
             } => {
-                let tool_id = format!("tool:{id}");
-                if let Some(n) = find_node_mut(&mut self.root, &tool_id) {
+                if let Some(n) = find_tool_node_by_tool_use_id(&mut self.root, id) {
                     n.status = if *ok { NodeStatus::Ok } else { NodeStatus::Err };
                     n.ended_at = Some(now);
                     n.output_preview = Some(preview.clone());
@@ -540,6 +552,29 @@ fn find_node_mut<'a>(nodes: &'a mut [WorkflowNode], id: &str) -> Option<&'a mut 
 
 fn scope_id(run_id: &str, node_id: &str) -> String {
     format!("{run_id}::{node_id}")
+}
+
+fn tool_node_id(run_id: &str, tool_use_id: &str) -> String {
+    format!("tool:{run_id}:{tool_use_id}")
+}
+
+fn find_tool_node_by_tool_use_id<'a>(
+    nodes: &'a mut [WorkflowNode],
+    tool_use_id: &str,
+) -> Option<&'a mut WorkflowNode> {
+    for n in nodes.iter_mut() {
+        if let WorkflowNodeKind::ToolCall {
+            tool_use_id: tid, ..
+        } = &n.kind
+            && tid == tool_use_id
+        {
+            return Some(n);
+        }
+        if let Some(hit) = find_tool_node_by_tool_use_id(&mut n.children, tool_use_id) {
+            return Some(hit);
+        }
+    }
+    None
 }
 
 fn parse_branch_index(node_id: &str) -> Option<usize> {
@@ -667,7 +702,7 @@ mod tests {
         assert_eq!(stmt.status, NodeStatus::Ok);
         assert_eq!(stmt.children.len(), 1);
         let tool = &stmt.children[0];
-        assert_eq!(tool.id, "tool:tu_1");
+        assert_eq!(tool.id, tool_node_id(&rid.0.to_string(), "tu_1"));
         assert!(matches!(tool.kind, WorkflowNodeKind::ToolCall { .. }));
         assert_eq!(g.root[0].status, NodeStatus::Ok);
     }
