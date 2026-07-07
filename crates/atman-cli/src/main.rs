@@ -2002,6 +2002,7 @@ fn handle_builtin(
                 ":todo clear          — remove all todos",
                 ":copy last-message   — push last assistant text to terminal clipboard (OSC 52)",
                 ":copy last-tool      — push last tool_result text to terminal clipboard",
+                ":compact             — force auto-compact the transcript now",
                 "",
                 "resume a prior session: exit, then run `atman --continue <session_id>`",
                 "@./path or @/abs     — inline attach in bare input",
@@ -2021,6 +2022,10 @@ fn handle_builtin(
             ));
             true
         }
+        "compact" => {
+            handle_compact_builtin(session, reporter);
+            true
+        }
         other => {
             if let Some(rest) = other.strip_prefix("copy") {
                 handle_copy_builtin(rest.trim(), session, reporter);
@@ -2028,6 +2033,30 @@ fn handle_builtin(
             }
             reporter.error(format!("unknown builtin `:{other}` — try `:help`"));
             true
+        }
+    }
+}
+
+fn handle_compact_builtin(session: &Session, reporter: &Reporter) {
+    let model = session.last_model();
+    let model = if model.is_empty() {
+        "claude-opus-4.7".to_string()
+    } else {
+        model
+    };
+    let summary = format!("manual :compact (model {model})");
+    match session.compact_messages(summary) {
+        Some(result) => {
+            reporter.info(format!(
+                ":compact — {}..{} · {} → {} tokens",
+                result.compacted_start,
+                result.compacted_end,
+                result.before_tokens,
+                result.after_tokens
+            ));
+        }
+        None => {
+            reporter.info(":compact — nothing to compact (history too short or already compacted)");
         }
     }
 }
