@@ -25,6 +25,7 @@ base64.workspace = true
 similar.workspace = true
 rusqlite.workspace = true
 regex.workspace = true
+ignore.workspace = true
 toml.workspace = true
 blake3.workspace = true
 git2.workspace = true

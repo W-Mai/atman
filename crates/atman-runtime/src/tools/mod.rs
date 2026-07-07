@@ -24,6 +24,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(fs::FsWrite));
     reg.register(Arc::new(fs::FsEdit));
+    reg.register(Arc::new(fs::FsGrep));
     reg.register(Arc::new(memory_stubs::FetchConfessions));
     reg.register(Arc::new(fetch_rule));
     reg.register(Arc::new(stdlib::ShellQuote));

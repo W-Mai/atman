@@ -453,6 +453,127 @@ fn extract_path(args: &ToolArgs, name: &str, pos: usize) -> Result<PathBuf, Runt
     }
 }
 
+pub struct FsGrep;
+
+impl Tool for FsGrep {
+    fn name(&self) -> &str {
+        "fs.grep"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Search files under `path` for a regex `pattern` (like ripgrep). Returns matches \
+             grouped by file with `context_lines` before + after each match. Honors .gitignore \
+             and hidden-file rules by default. Params: pattern (regex, required), path (dir or \
+             file, default cwd), context_lines (int 0..=10, default 3), case_sensitive (bool, \
+             default false), limit (int, default 50 matches, max 200). Use this INSTEAD of \
+             bash.exec + rg — it's faster and returns structured results.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string"},
+                "context_lines": {"type": "integer", "default": 3},
+                "case_sensitive": {"type": "boolean", "default": false},
+                "limit": {"type": "integer", "default": 50}
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move { fs_grep_impl(args).await })
+    }
+}
+
+async fn fs_grep_impl(args: ToolArgs) -> ToolResult {
+    let pattern = extract_string(&args, "pattern", 0)?;
+    if pattern.is_empty() {
+        return Err(RuntimeError::ToolFailed("fs.grep: empty pattern".into()));
+    }
+    let base_path: std::path::PathBuf = match args.named("path") {
+        Some(Value::Str(s)) => std::path::PathBuf::from(s),
+        Some(Value::Path(p)) => p.clone(),
+        Some(other) => {
+            return Err(RuntimeError::TypeMismatch {
+                expected: "path or string".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+        None => std::env::current_dir()
+            .map_err(|e| RuntimeError::ToolFailed(format!("fs.grep: cwd: {e}")))?,
+    };
+    let context_lines: usize = match args.named("context_lines") {
+        Some(Value::Int(n)) if *n >= 0 => (*n as usize).min(10),
+        _ => 3,
+    };
+    let case_sensitive = matches!(args.named("case_sensitive"), Some(Value::Bool(true)));
+    let limit: usize = match args.named("limit") {
+        Some(Value::Int(n)) if *n > 0 => (*n as usize).min(200),
+        _ => 50,
+    };
+    let re = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|e| RuntimeError::ToolFailed(format!("fs.grep: invalid regex: {e}")))?;
+    let walker = ignore::WalkBuilder::new(&base_path).build();
+    let mut hits: Vec<Value> = Vec::new();
+    for entry in walker {
+        if hits.len() >= limit {
+            break;
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.file_type().is_none_or(|ft| !ft.is_file()) {
+            continue;
+        }
+        let contents = match tokio::fs::read_to_string(entry.path()).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let lines: Vec<&str> = contents.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            if !re.is_match(line) {
+                continue;
+            }
+            let before_start = idx.saturating_sub(context_lines);
+            let after_end = (idx + context_lines + 1).min(lines.len());
+            let before: Vec<Value> = lines[before_start..idx]
+                .iter()
+                .map(|s| Value::Str((*s).to_string()))
+                .collect();
+            let after: Vec<Value> = lines[idx + 1..after_end]
+                .iter()
+                .map(|s| Value::Str((*s).to_string()))
+                .collect();
+            hits.push(Value::Struct(vec![
+                (
+                    "file".into(),
+                    Value::Str(entry.path().display().to_string()),
+                ),
+                ("line".into(), Value::Int((idx + 1) as i64)),
+                ("before".into(), Value::List(before)),
+                ("match".into(), Value::Str((*line).to_string())),
+                ("after".into(), Value::List(after)),
+            ]));
+            if hits.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(Value::List(hits))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,5 +895,96 @@ mod tests {
         };
         let v = FsRead.call(args, &ctx).await.unwrap();
         assert!(matches!(v, Value::Str(s) if s == "one\ntwo\n"));
+    }
+
+    #[tokio::test]
+    async fn fs_grep_finds_matches_with_context() {
+        let dir = TempDir::new().unwrap();
+        let file_a = dir.path().join("a.txt");
+        tokio::fs::write(&file_a, b"foo\nhello world\nbar\nbaz\n")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                ("pattern".into(), Value::Str("world".into())),
+                (
+                    "path".into(),
+                    Value::Str(dir.path().to_string_lossy().to_string()),
+                ),
+                ("context_lines".into(), Value::Int(1)),
+            ],
+        };
+        let out = FsGrep.call(args, &ctx).await.unwrap();
+        let items = match out {
+            Value::List(v) => v,
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert_eq!(items.len(), 1);
+        let fields = match &items[0] {
+            Value::Struct(f) => f.clone(),
+            other => panic!("expected struct, got {other:?}"),
+        };
+        let matched = fields.iter().find(|(k, _)| k == "match").unwrap();
+        assert!(matches!(&matched.1, Value::Str(s) if s == "hello world"));
+        let line = fields.iter().find(|(k, _)| k == "line").unwrap();
+        assert!(matches!(line.1, Value::Int(2)));
+    }
+
+    #[tokio::test]
+    async fn fs_grep_case_insensitive_by_default() {
+        let dir = TempDir::new().unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), b"HELLO World")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                ("pattern".into(), Value::Str("hello".into())),
+                (
+                    "path".into(),
+                    Value::Str(dir.path().to_string_lossy().to_string()),
+                ),
+            ],
+        };
+        let out = FsGrep.call(args, &ctx).await.unwrap();
+        let n = match out {
+            Value::List(v) => v.len(),
+            _ => 0,
+        };
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn fs_grep_respects_gitignore() {
+        let dir = TempDir::new().unwrap();
+        tokio::fs::write(dir.path().join(".ignore"), b"skip.txt\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("skip.txt"), b"needle")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("keep.txt"), b"needle")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                ("pattern".into(), Value::Str("needle".into())),
+                (
+                    "path".into(),
+                    Value::Str(dir.path().to_string_lossy().to_string()),
+                ),
+            ],
+        };
+        let out = FsGrep.call(args, &ctx).await.unwrap();
+        let items = match out {
+            Value::List(v) => v,
+            _ => panic!("list"),
+        };
+        assert_eq!(items.len(), 1, "gitignored file should be skipped");
     }
 }

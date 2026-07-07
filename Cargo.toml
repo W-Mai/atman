@@ -38,6 +38,7 @@ utoipa     = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 rusqlite   = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
 regex      = "1"
 blake3     = "1"
+ignore     = "0.4"
 git2       = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
 
 [profile.release]
