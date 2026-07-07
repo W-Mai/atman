@@ -296,6 +296,7 @@ impl AppState {
                 });
             }
             frame @ (StreamFrame::FlowGraph { .. }
+            | StreamFrame::FlowStart { .. }
             | StreamFrame::FlowNodeStart { .. }
             | StreamFrame::FlowNodeEnd { .. }
             | StreamFrame::FlowDone { .. }

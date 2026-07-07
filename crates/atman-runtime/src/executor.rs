@@ -128,6 +128,16 @@ impl Executor {
             parent_node_id: None,
             ts: chrono::Utc::now(),
         });
+        if let Some(sess) = session {
+            let _ = sess
+                .stream_tx()
+                .send(crate::stream::StreamFrame::FlowStart {
+                    run_id: run_id.0.to_string(),
+                    flow_name: flow.name.name.clone(),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                });
+        }
         let graph = crate::nodegraph::extract_graph(flow);
         self.events.emit(Event::FlowGraph {
             seq: 0,

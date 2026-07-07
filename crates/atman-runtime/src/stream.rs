@@ -25,6 +25,14 @@ pub enum StreamFrame {
         run_id: String,
         graph: crate::nodegraph::FlowGraph,
     },
+    FlowStart {
+        run_id: String,
+        flow_name: String,
+        #[serde(default)]
+        parent_run_id: Option<String>,
+        #[serde(default)]
+        parent_node_id: Option<String>,
+    },
     FlowNodeStart {
         run_id: String,
         node_id: String,

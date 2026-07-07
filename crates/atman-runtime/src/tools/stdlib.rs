@@ -793,13 +793,22 @@ impl Tool for DispatchAll {
                     let args_preview = format!("{:?}", input).chars().take(200).collect::<String>();
                     sink.emit(crate::event::Event::ToolNode {
                         seq: 0,
-                        run_id,
+                        run_id: run_id.clone(),
                         parent_node_id: parent_node.clone(),
                         tool_use_id: id.clone(),
                         tool_name: name.clone(),
-                        args_preview,
+                        args_preview: args_preview.clone(),
                         ts: chrono::Utc::now(),
                     });
+                    if let Some(tx) = &ctx.stream_tx {
+                        let _ = tx.send(crate::stream::StreamFrame::ToolNode {
+                            run_id: run_id.0.to_string(),
+                            parent_node_id: parent_node.clone(),
+                            tool_use_id: id.clone(),
+                            tool: name.clone(),
+                            args_preview,
+                        });
+                    }
                 }
                 let (content, is_error) = match tool.call(call_args, ctx).await {
                     Ok(v) => (render_tool_result_text(&v), false),
@@ -836,6 +845,12 @@ fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) {
         message: msg.clone(),
         ts: chrono::Utc::now(),
     });
+    if let Some(tx) = &ctx.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
+            flow_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+            message: msg.clone(),
+        });
+    }
 }
 
 fn render_tool_result_text(v: &Value) -> String {

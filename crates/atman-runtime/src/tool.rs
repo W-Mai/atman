@@ -61,6 +61,7 @@ pub struct ToolCtx {
     pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
     pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
     pub current_node_id: Option<String>,
+    pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
 }
 
 impl ToolCtx {
@@ -110,6 +111,14 @@ impl ToolCtx {
 
     pub fn with_current_node(mut self, node_id: Option<String>) -> Self {
         self.current_node_id = node_id;
+        self
+    }
+
+    pub fn with_stream_tx(
+        mut self,
+        tx: tokio::sync::broadcast::Sender<crate::stream::StreamFrame>,
+    ) -> Self {
+        self.stream_tx = Some(tx);
         self
     }
 }

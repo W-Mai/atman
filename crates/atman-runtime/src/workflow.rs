@@ -324,6 +324,49 @@ impl WorkflowGraph {
                     });
                 }
             }
+            StreamFrame::FlowStart {
+                run_id,
+                flow_name,
+                parent_run_id,
+                parent_node_id,
+            } => {
+                if self.find_node(run_id).is_some() {
+                    return;
+                }
+                let kind = if parent_run_id.is_some() {
+                    WorkflowNodeKind::Subflow {
+                        run_id: run_id.clone(),
+                        flow_name: flow_name.clone(),
+                    }
+                } else {
+                    WorkflowNodeKind::Flow {
+                        run_id: run_id.clone(),
+                        flow_name: flow_name.clone(),
+                    }
+                };
+                let node = WorkflowNode {
+                    id: run_id.clone(),
+                    kind,
+                    label: flow_name.clone(),
+                    status: NodeStatus::Running,
+                    started_at: Some(now),
+                    ended_at: None,
+                    output_preview: None,
+                    children: Vec::new(),
+                    parallelism: Parallelism::Serial,
+                };
+                match (parent_run_id.as_deref(), parent_node_id.as_deref()) {
+                    (Some(prid), Some(pid)) => {
+                        let scoped = scope_id(prid, pid);
+                        if let Some(parent) = find_node_mut(&mut self.root, &scoped) {
+                            parent.children.push(node);
+                        } else {
+                            self.root.push(node);
+                        }
+                    }
+                    _ => self.root.push(node),
+                }
+            }
             StreamFrame::FlowNodeStart {
                 run_id,
                 node_id,

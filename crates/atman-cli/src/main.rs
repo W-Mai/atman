@@ -1220,6 +1220,7 @@ fn render_stream_frame(
         }
         StreamFrame::Note(s) => render_note(printer, s),
         StreamFrame::FlowGraph { .. }
+        | StreamFrame::FlowStart { .. }
         | StreamFrame::FlowNodeStart { .. }
         | StreamFrame::FlowNodeEnd { .. }
         | StreamFrame::FlowDone { .. }
