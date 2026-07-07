@@ -221,6 +221,17 @@ pub enum Event {
         args_preview: String,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    AttachmentDegraded {
+        #[serde(default)]
+        seq: u64,
+        turn_id: Option<TurnId>,
+        flow_run_id: Option<FlowRunId>,
+        message_seq: u64,
+        part_index: usize,
+        file_basename: String,
+        reason: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -254,7 +265,8 @@ impl Event {
             | Event::FlowGraph { seq, .. }
             | Event::FlowNodeStart { seq, .. }
             | Event::FlowNodeEnd { seq, .. }
-            | Event::ToolNode { seq, .. } => *seq = new_seq,
+            | Event::ToolNode { seq, .. }
+            | Event::AttachmentDegraded { seq, .. } => *seq = new_seq,
         }
     }
 
@@ -280,7 +292,8 @@ impl Event {
             | Event::FlowGraph { seq, .. }
             | Event::FlowNodeStart { seq, .. }
             | Event::FlowNodeEnd { seq, .. }
-            | Event::ToolNode { seq, .. } => *seq,
+            | Event::ToolNode { seq, .. }
+            | Event::AttachmentDegraded { seq, .. } => *seq,
         }
     }
 }
@@ -490,5 +503,45 @@ mod tests {
         };
         ev.set_seq(99);
         assert_eq!(ev.seq(), 99);
+    }
+
+    #[test]
+    fn attachment_degraded_serializes_all_fields() {
+        let turn = TurnId::now();
+        let flow = FlowRunId::now();
+        let ev = Event::AttachmentDegraded {
+            seq: 55,
+            turn_id: Some(turn.clone()),
+            flow_run_id: Some(flow.clone()),
+            message_seq: 42,
+            part_index: 1,
+            file_basename: "photo.png".into(),
+            reason: "image_too_large".into(),
+            ts: chrono::Utc::now(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["type"], "attachment_degraded");
+        assert_eq!(v["message_seq"], 42);
+        assert_eq!(v["part_index"], 1);
+        assert_eq!(v["file_basename"], "photo.png");
+        assert_eq!(v["reason"], "image_too_large");
+        assert_eq!(v["turn_id"], serde_json::json!(turn.0.to_string()));
+        assert_eq!(v["flow_run_id"], serde_json::json!(flow.0.to_string()));
+    }
+
+    #[test]
+    fn seq_and_set_seq_cover_attachment_degraded() {
+        let mut ev = Event::AttachmentDegraded {
+            seq: 0,
+            turn_id: None,
+            flow_run_id: None,
+            message_seq: 10,
+            part_index: 0,
+            file_basename: "x".into(),
+            reason: "y".into(),
+            ts: chrono::Utc::now(),
+        };
+        ev.set_seq(101);
+        assert_eq!(ev.seq(), 101);
     }
 }

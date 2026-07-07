@@ -221,7 +221,8 @@ fn extract_ts(event: &Event) -> String {
         | Event::FlowGraph { ts, .. }
         | Event::FlowNodeStart { ts, .. }
         | Event::FlowNodeEnd { ts, .. }
-        | Event::ToolNode { ts, .. } => ts.to_rfc3339(),
+        | Event::ToolNode { ts, .. }
+        | Event::AttachmentDegraded { ts, .. } => ts.to_rfc3339(),
     }
 }
 
@@ -248,6 +249,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::FlowNodeStart { .. } => "flow_node_start",
         Event::FlowNodeEnd { .. } => "flow_node_end",
         Event::ToolNode { .. } => "tool_node",
+        Event::AttachmentDegraded { .. } => "attachment_degraded",
     }
 }
 
@@ -305,6 +307,14 @@ fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
         | Event::FlowNodeStart { run_id, .. }
         | Event::FlowNodeEnd { run_id, .. }
         | Event::ToolNode { run_id, .. } => (None, Some(run_id.0.to_string())),
+        Event::AttachmentDegraded {
+            turn_id,
+            flow_run_id,
+            ..
+        } => (
+            turn_id.as_ref().map(|t| t.0.to_string()),
+            flow_run_id.as_ref().map(|r| r.0.to_string()),
+        ),
         Event::LlmCall { .. }
         | Event::ContextCompact { .. }
         | Event::PendingPrompt { .. }
@@ -319,6 +329,11 @@ fn extract_text_content(event: &Event) -> Option<String> {
         | Event::ToolResultMsg { message, .. }
         | Event::SystemMsg { message, .. } => Some(message.text_concat()),
         Event::WatchWarn { message, .. } => Some(message.clone()),
+        Event::AttachmentDegraded {
+            file_basename,
+            reason,
+            ..
+        } => Some(format!("{file_basename} {reason}")),
         _ => None,
     }
 }
