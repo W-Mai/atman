@@ -266,6 +266,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "atman-runtime",
+ "base64",
  "chrono",
  "crossterm",
  "futures",

@@ -238,7 +238,22 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
     f.render_stateful_widget(list, popup_rect, &mut list_state);
 }
 
-pub fn render_hint_strip(f: &mut ratatui::Frame, rect: Rect, narrow: bool, mouse_captured: bool) {
+pub fn render_hint_strip(
+    f: &mut ratatui::Frame,
+    rect: Rect,
+    narrow: bool,
+    mouse_captured: bool,
+    yank_mode: bool,
+) {
+    if yank_mode {
+        let text = " [YANK MODE] j/k select · Enter copy · Esc cancel";
+        let p = Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::Magenta),
+        )));
+        f.render_widget(p, rect);
+        return;
+    }
     if !mouse_captured {
         let text = " [SELECT MODE] drag to copy · F3 resume interaction";
         let p = Paragraph::new(Line::from(Span::styled(
@@ -251,7 +266,7 @@ pub fn render_hint_strip(f: &mut ratatui::Frame, rect: Rect, narrow: bool, mouse
     let text = if narrow {
         " /  :  !  @  F1  F3"
     } else {
-        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar · F3 select mode"
+        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar · F3 select mode · y yank"
     };
     let p = Paragraph::new(Line::from(Span::styled(
         text,

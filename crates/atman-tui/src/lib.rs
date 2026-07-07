@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
+pub mod clipboard;
 pub mod completion;
 pub mod highlight;
 pub mod history;
@@ -346,6 +347,96 @@ async fn wait_shutdown(rx: Option<&mut tokio::sync::oneshot::Receiver<()>>) {
     }
 }
 
+fn yank_candidate_indices(app: &AppState) -> Vec<usize> {
+    app.items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| match it {
+            app::OutputItem::AssistantMd { .. } | app::OutputItem::UserTurn { .. } => Some(i),
+            _ => None,
+        })
+        .collect()
+}
+
+fn emit_yank_selection_note(app: &mut AppState, cands: &[usize]) {
+    let total = cands.len();
+    let cur = app.yank_index.min(total.saturating_sub(1)) + 1;
+    let kind = cands
+        .get(app.yank_index)
+        .and_then(|i| app.items.get(*i))
+        .map(|it| match it {
+            app::OutputItem::AssistantMd { .. } => "assistant",
+            app::OutputItem::UserTurn { .. } => "user",
+            _ => "other",
+        })
+        .unwrap_or("?");
+    app.push_note(format!("yank {cur}/{total} — {kind}"), app::NoteLevel::Info);
+}
+
+fn yank_selected_text(app: &AppState) -> Option<String> {
+    let cands = yank_candidate_indices(app);
+    let item_idx = *cands.get(app.yank_index)?;
+    match app.items.get(item_idx)? {
+        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
+        app::OutputItem::UserTurn { text } => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {
+    let cands = yank_candidate_indices(app);
+    if cands.is_empty() {
+        app.yank_mode = false;
+        return true;
+    }
+    match action {
+        KeyAction::Escape => {
+            app.yank_mode = false;
+            app.push_note("yank cancelled", app::NoteLevel::Info);
+            true
+        }
+        KeyAction::Char('y') | KeyAction::Char('Y') => {
+            app.yank_mode = false;
+            true
+        }
+        KeyAction::Char('j') | KeyAction::HistoryDown | KeyAction::CursorRight => {
+            app.yank_index = (app.yank_index + 1).min(cands.len().saturating_sub(1));
+            emit_yank_selection_note(app, &cands);
+            true
+        }
+        KeyAction::Char('k') | KeyAction::HistoryUp | KeyAction::CursorLeft => {
+            app.yank_index = app.yank_index.saturating_sub(1);
+            emit_yank_selection_note(app, &cands);
+            true
+        }
+        KeyAction::Char('g') => {
+            app.yank_index = 0;
+            emit_yank_selection_note(app, &cands);
+            true
+        }
+        KeyAction::Char('G') => {
+            app.yank_index = cands.len().saturating_sub(1);
+            emit_yank_selection_note(app, &cands);
+            true
+        }
+        KeyAction::Submit => {
+            if let Some(text) = yank_selected_text(app) {
+                let n = text.chars().count();
+                crate::clipboard::write_osc52(&text);
+                app.push_note(
+                    format!("yanked {n} chars to clipboard (OSC 52)"),
+                    app::NoteLevel::Info,
+                );
+            } else {
+                app.push_note("yank: nothing selected", app::NoteLevel::Warn);
+            }
+            app.yank_mode = false;
+            true
+        }
+        _ => true,
+    }
+}
+
 fn handle_approval_key(
     action: &KeyAction,
     app: &mut AppState,
@@ -450,9 +541,25 @@ fn handle_key(
     {
         return;
     }
+    if app.yank_mode && handle_yank_key(&action, app) {
+        return;
+    }
     let mut edited = false;
     match action {
         KeyAction::Char(c) => {
+            if c == 'y' && editor.buf().is_empty() && !app.yank_mode {
+                let cands = yank_candidate_indices(app);
+                if !cands.is_empty() {
+                    app.yank_mode = true;
+                    app.yank_index = cands.len().saturating_sub(1);
+                    app.push_note(
+                        "yank mode — j/k to move, Enter to copy, Esc to cancel",
+                        app::NoteLevel::Info,
+                    );
+                    *interrupt_prompt = false;
+                    return;
+                }
+            }
             editor.insert_char(c);
             *interrupt_prompt = false;
             edited = true;
@@ -707,7 +814,13 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         l.input,
     );
     if let Some(hint_area) = l.hint {
-        completion::render_hint_strip(f, hint_area, hint_area.width < 60, app.mouse_captured);
+        completion::render_hint_strip(
+            f,
+            hint_area,
+            hint_area.width < 60,
+            app.mouse_captured,
+            app.yank_mode,
+        );
     }
     if app.popup.is_open() {
         completion::render_popup(f, l.input, &app.popup);
