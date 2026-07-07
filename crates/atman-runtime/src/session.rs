@@ -79,6 +79,12 @@ struct ApprovalEntry {
     responder: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
+impl Default for ApprovalRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ApprovalRegistry {
     pub fn new() -> Self {
         let (watch_tx, _) = watch::channel(Vec::new());
@@ -1110,8 +1116,9 @@ mod tests {
     fn approval_registry_decide_all_flushes_queue() {
         let reg = ApprovalRegistry::new();
         reg.set_auto_ceiling(crate::tool::ApprovalLevel::Auto);
+        let mut rxs = Vec::new();
         for i in 0..3 {
-            let _ = reg.request(PendingApproval {
+            rxs.push(reg.request(PendingApproval {
                 tool_use_id: format!("tu{i}"),
                 tool_name: "bash.exec".into(),
                 args_preview: "{}".into(),
@@ -1119,7 +1126,7 @@ mod tests {
                 level: crate::tool::ApprovalLevel::Dangerous,
                 run_id: FlowRunId::now(),
                 emitted_at: chrono::Utc::now(),
-            });
+            }));
         }
         assert_eq!(reg.list_pending().len(), 3);
         assert_eq!(

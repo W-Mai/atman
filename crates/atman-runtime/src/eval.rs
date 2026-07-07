@@ -246,9 +246,22 @@ async fn dispatch_tool_call<'a>(
             id: tool_call_id.clone(),
         });
     }
-    let outcome = tool
-        .call(ToolArgs { positional, named }, &ctx_with_anchors)
-        .await;
+    let call_args = ToolArgs { positional, named };
+    let level = tool.approval_level();
+    let gate = crate::approval::request_approval(
+        &ctx_with_anchors,
+        &tool_call_id,
+        &name,
+        &call_args,
+        level,
+    )
+    .await;
+    let outcome = match gate {
+        crate::approval::ApprovalOutcome::Deny { reason } => Err(RuntimeError::ToolFailed(
+            format!("tool `{name}` denied by user: {reason}"),
+        )),
+        crate::approval::ApprovalOutcome::Approve => tool.call(call_args, &ctx_with_anchors).await,
+    };
     if let Some(tx) = &stream_tx {
         let (ok, preview) = match &outcome {
             Ok(v) => (true, preview_tool_value(v)),

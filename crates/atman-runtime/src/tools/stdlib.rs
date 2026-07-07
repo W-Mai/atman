@@ -1,3 +1,4 @@
+use crate::approval::{ApprovalOutcome, request_approval};
 use crate::error::RuntimeError;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
@@ -835,7 +836,6 @@ fn prepare_dispatch(
 struct Approved {
     index: usize,
     id: String,
-    name: String,
     tool: std::sync::Arc<dyn Tool>,
     call_args: ToolArgs,
 }
@@ -868,7 +868,6 @@ async fn partition_and_gate(
                         let a = Approved {
                             index,
                             id,
-                            name,
                             tool,
                             call_args,
                         };
@@ -892,111 +891,6 @@ async fn partition_and_gate(
         }
     }
     (auto_batch, serial_batch, out_slots)
-}
-
-enum ApprovalOutcome {
-    Approve,
-    Deny { reason: String },
-}
-
-async fn request_approval(
-    ctx: &ToolCtx,
-    id: &str,
-    name: &str,
-    call_args: &ToolArgs,
-    level: crate::tool::ApprovalLevel,
-) -> ApprovalOutcome {
-    let Some(approval) = &ctx.approval else {
-        return ApprovalOutcome::Approve;
-    };
-    let Some(run_id) = ctx.flow_run_id.clone() else {
-        return ApprovalOutcome::Approve;
-    };
-    let args_preview: String = format!("{:?}", call_args.named)
-        .chars()
-        .take(4000)
-        .collect();
-    let pending = crate::session::PendingApproval {
-        tool_use_id: id.to_string(),
-        tool_name: name.to_string(),
-        args_preview: args_preview.clone(),
-        preview: None,
-        level,
-        run_id: run_id.clone(),
-        emitted_at: chrono::Utc::now(),
-    };
-    let rx = approval.request(pending);
-    if let Some(sink) = ctx.events.as_ref() {
-        sink.emit(crate::event::Event::ToolPendingApproval {
-            seq: 0,
-            run_id: run_id.clone(),
-            tool_use_id: id.to_string(),
-            tool_name: name.to_string(),
-            args_preview: args_preview.clone(),
-            level: level_str(level).into(),
-            ts: chrono::Utc::now(),
-        });
-    }
-    if let Some(tx) = &ctx.stream_tx {
-        let _ = tx.send(crate::stream::StreamFrame::ToolPendingApproval {
-            run_id: run_id.0.to_string(),
-            tool_use_id: id.to_string(),
-            tool_name: name.to_string(),
-            args_preview,
-            level: level_str(level).into(),
-        });
-    }
-    let decision = rx.await.unwrap_or(crate::session::ApprovalDecision::Deny {
-        reason: "approval channel dropped".into(),
-    });
-    match decision {
-        crate::session::ApprovalDecision::Approve => {
-            if let Some(sink) = ctx.events.as_ref() {
-                sink.emit(crate::event::Event::ToolApproved {
-                    seq: 0,
-                    run_id: run_id.clone(),
-                    tool_use_id: id.to_string(),
-                    decided_by: "user".into(),
-                    ts: chrono::Utc::now(),
-                });
-            }
-            if let Some(tx) = &ctx.stream_tx {
-                let _ = tx.send(crate::stream::StreamFrame::ToolApproved {
-                    run_id: run_id.0.to_string(),
-                    tool_use_id: id.to_string(),
-                    decided_by: "user".into(),
-                });
-            }
-            ApprovalOutcome::Approve
-        }
-        crate::session::ApprovalDecision::Deny { reason } => {
-            if let Some(sink) = ctx.events.as_ref() {
-                sink.emit(crate::event::Event::ToolDenied {
-                    seq: 0,
-                    run_id: run_id.clone(),
-                    tool_use_id: id.to_string(),
-                    reason: reason.clone(),
-                    ts: chrono::Utc::now(),
-                });
-            }
-            if let Some(tx) = &ctx.stream_tx {
-                let _ = tx.send(crate::stream::StreamFrame::ToolDenied {
-                    run_id: run_id.0.to_string(),
-                    tool_use_id: id.to_string(),
-                    reason: reason.clone(),
-                });
-            }
-            ApprovalOutcome::Deny { reason }
-        }
-    }
-}
-
-fn level_str(level: crate::tool::ApprovalLevel) -> &'static str {
-    match level {
-        crate::tool::ApprovalLevel::Auto => "auto",
-        crate::tool::ApprovalLevel::Approve => "approve",
-        crate::tool::ApprovalLevel::Dangerous => "dangerous",
-    }
 }
 
 async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {

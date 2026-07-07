@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod compaction;
 pub mod cost;
 pub mod env;
