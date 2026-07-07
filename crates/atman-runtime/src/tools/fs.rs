@@ -110,11 +110,17 @@ impl Tool for FsWrite {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Write text content to a file, replacing anything already there. \
-             MUST provide BOTH `path` and `content` fields in the same tool call — \
-             do not emit an empty {} input. \
-             Example: {\"path\":\"index.html\",\"content\":\"<html>...</html>\"}. \
-             For large files, keep the entire content in one call — do not split across tool calls.",
+            "Create a new file or rewrite an existing one from scratch. \
+             Provide BOTH `path` and `content` — never emit an empty {} input. \
+             \
+             PREFER fs.edit INSTEAD when: (a) the file already exists and you \
+             only want to change part of it, (b) the file is longer than ~200 \
+             lines, or (c) the intended content would exceed 4KB. Repeatedly \
+             regenerating a large file via fs.write tends to fail — use \
+             fs.read + fs.edit to apply targeted str_replace edits. \
+             \
+             Example (new file): \
+             {\"path\":\"index.html\",\"content\":\"<html>...</html>\"}",
         )
     }
 
@@ -306,7 +312,7 @@ fn similar_line_hint(content: &str, needle: &str) -> String {
             scored.push((hits, i + 1, line));
         }
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|x| std::cmp::Reverse(x.0));
     scored.truncate(3);
     if scored.is_empty() {
         "No similar lines found — perhaps whitespace differs or the file was already edited.".into()
