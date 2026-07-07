@@ -21,6 +21,7 @@ pub mod mcp;
 pub mod memory;
 pub mod message;
 pub mod migration;
+pub mod model_registry;
 pub mod nodegraph;
 pub mod provider;
 pub mod providers;
