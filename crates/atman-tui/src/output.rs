@@ -65,12 +65,7 @@ pub fn build_lines_with_ranges(
     let mut cursor: u16 = 0;
     for (idx, item) in items.iter().enumerate() {
         let (item_lines, mut item_regions) = render_item_with_regions(item, ctx);
-        let rows = if width == 0 {
-            item_lines.len() as u16
-        } else {
-            let p = Paragraph::new(item_lines.clone()).wrap(Wrap { trim: false });
-            p.line_count(width) as u16
-        };
+        let (rows, line_row_offsets) = wrap_row_offsets(&item_lines, width);
         ranges.push(ItemRange {
             item_index: idx,
             start_row: cursor,
@@ -78,14 +73,39 @@ pub fn build_lines_with_ranges(
         });
         for r in item_regions.iter_mut() {
             r.panel_item_index = idx;
-            r.start_row = r.start_row.saturating_add(cursor);
-            r.end_row = r.end_row.saturating_add(cursor);
+            let s = r.start_row as usize;
+            let e = r.end_row as usize;
+            let wrapped_start = line_row_offsets.get(s).copied().unwrap_or(rows);
+            let wrapped_end = line_row_offsets.get(e).copied().unwrap_or(rows);
+            r.start_row = cursor.saturating_add(wrapped_start);
+            r.end_row = cursor.saturating_add(wrapped_end);
         }
         node_regions.extend(item_regions);
         cursor = cursor.saturating_add(rows);
         all_lines.extend(item_lines);
     }
     (all_lines, ranges, node_regions, cursor)
+}
+
+fn wrap_row_offsets(lines: &[Line<'static>], width: u16) -> (u16, Vec<u16>) {
+    let mut offsets: Vec<u16> = Vec::with_capacity(lines.len() + 1);
+    let mut cursor: u16 = 0;
+    offsets.push(0);
+    if width == 0 {
+        for _ in lines {
+            cursor = cursor.saturating_add(1);
+            offsets.push(cursor);
+        }
+        return (cursor, offsets);
+    }
+    for line in lines {
+        let single = vec![line.clone()];
+        let p = Paragraph::new(single).wrap(Wrap { trim: false });
+        let rows = p.line_count(width) as u16;
+        cursor = cursor.saturating_add(rows.max(1));
+        offsets.push(cursor);
+    }
+    (cursor, offsets)
 }
 
 pub fn render_item_with_regions(
