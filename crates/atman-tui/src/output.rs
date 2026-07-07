@@ -46,16 +46,25 @@ pub struct ItemRange {
     pub end_row: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRegion {
+    pub panel_item_index: usize,
+    pub node_id: String,
+    pub start_row: u16,
+    pub end_row: u16,
+}
+
 pub fn build_lines_with_ranges(
     items: &[OutputItem],
     width: u16,
     ctx: &RenderCtx<'_>,
-) -> (Vec<Line<'static>>, Vec<ItemRange>, u16) {
+) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u16) {
     let mut all_lines: Vec<Line<'static>> = Vec::with_capacity(items.len() * 3);
     let mut ranges: Vec<ItemRange> = Vec::with_capacity(items.len());
+    let mut node_regions: Vec<NodeRegion> = Vec::new();
     let mut cursor: u16 = 0;
     for (idx, item) in items.iter().enumerate() {
-        let item_lines = render_item(item, ctx);
+        let (item_lines, mut item_regions) = render_item_with_regions(item, ctx);
         let rows = if width == 0 {
             item_lines.len() as u16
         } else {
@@ -67,10 +76,38 @@ pub fn build_lines_with_ranges(
             start_row: cursor,
             end_row: cursor.saturating_add(rows),
         });
+        for r in item_regions.iter_mut() {
+            r.panel_item_index = idx;
+            r.start_row = r.start_row.saturating_add(cursor);
+            r.end_row = r.end_row.saturating_add(cursor);
+        }
+        node_regions.extend(item_regions);
         cursor = cursor.saturating_add(rows);
         all_lines.extend(item_lines);
     }
-    (all_lines, ranges, cursor)
+    (all_lines, ranges, node_regions, cursor)
+}
+
+pub fn render_item_with_regions(
+    item: &OutputItem,
+    ctx: &RenderCtx<'_>,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    if let OutputItem::WorkflowPanel {
+        graph,
+        expanded_nodes,
+        panel_expanded,
+        ..
+    } = item
+    {
+        render_workflow_panel_with_regions(
+            graph,
+            expanded_nodes,
+            *panel_expanded,
+            ctx.animation_frame,
+        )
+    } else {
+        (render_item(item, ctx), Vec::new())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +123,7 @@ pub struct LayoutCache {
     key: Option<LayoutKey>,
     lines: Vec<Line<'static>>,
     ranges: Vec<ItemRange>,
+    node_regions: Vec<NodeRegion>,
     total_rows: u16,
 }
 
@@ -95,15 +133,22 @@ impl LayoutCache {
         key: LayoutKey,
         items: &[OutputItem],
         ctx: &RenderCtx<'_>,
-    ) -> (&[Line<'static>], &[ItemRange], u16) {
+    ) -> (&[Line<'static>], &[ItemRange], &[NodeRegion], u16) {
         if self.key != Some(key) {
-            let (lines, ranges, total) = build_lines_with_ranges(items, key.width, ctx);
+            let (lines, ranges, node_regions, total) =
+                build_lines_with_ranges(items, key.width, ctx);
             self.lines = lines;
             self.ranges = ranges;
+            self.node_regions = node_regions;
             self.total_rows = total;
             self.key = Some(key);
         }
-        (&self.lines, &self.ranges, self.total_rows)
+        (
+            &self.lines,
+            &self.ranges,
+            &self.node_regions,
+            self.total_rows,
+        )
     }
 
     pub fn invalidate(&mut self) {
@@ -192,6 +237,15 @@ fn render_workflow_panel(
     _ended_at: Option<std::time::Instant>,
     animation_frame: u32,
 ) -> Vec<Line<'static>> {
+    render_workflow_panel_with_regions(graph, expanded_nodes, panel_expanded, animation_frame).0
+}
+
+fn render_workflow_panel_with_regions(
+    graph: &atman_runtime::workflow::WorkflowGraph,
+    expanded_nodes: &std::collections::HashSet<String>,
+    panel_expanded: bool,
+    animation_frame: u32,
+) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let count = count_workflow_nodes(&graph.root);
     let (status_str, status_style, running) = workflow_overall_status(&graph.root);
     let elapsed = compute_elapsed_secs(&graph.root, running);
@@ -216,12 +270,14 @@ fn render_workflow_panel(
         Span::styled(status_str, status_style),
     ]);
     let mut lines = vec![header];
+    let mut regions: Vec<NodeRegion> = Vec::new();
     if panel_expanded {
         let child_count = graph.root.len();
         for (i, node) in graph.root.iter().enumerate() {
             let is_last = i + 1 == child_count;
             append_workflow_node(
                 &mut lines,
+                &mut regions,
                 node,
                 expanded_nodes,
                 "",
@@ -231,7 +287,7 @@ fn render_workflow_panel(
             );
         }
     }
-    lines
+    (lines, regions)
 }
 
 fn compute_elapsed_secs(nodes: &[atman_runtime::workflow::WorkflowNode], running: bool) -> i64 {
@@ -291,8 +347,10 @@ fn workflow_overall_status(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_workflow_node(
     out: &mut Vec<Line<'static>>,
+    regions: &mut Vec<NodeRegion>,
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
     ancestor_prefix: &str,
@@ -301,6 +359,7 @@ fn append_workflow_node(
     flow_running: bool,
 ) {
     use atman_runtime::workflow::{NodeStatus, WorkflowNodeKind};
+    let start_row = out.len() as u16;
     let effective = node;
     let (branch_glyph, branch_color) = if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. })
     {
@@ -366,6 +425,12 @@ fn append_workflow_node(
         Span::styled(format!("{kind_glyph} "), Style::default().fg(kind_color)),
         Span::raw(label),
     ]));
+    regions.push(NodeRegion {
+        panel_item_index: 0,
+        node_id: node.id.clone(),
+        start_row,
+        end_row: start_row.saturating_add(1),
+    });
     let vertical = if is_last { "   " } else { "│  " };
     let child_prefix = format!("{ancestor_prefix}{vertical}");
     if expanded_nodes.contains(&effective.id)
@@ -389,6 +454,7 @@ fn append_workflow_node(
         let child_last = i + 1 == child_count;
         append_workflow_node(
             out,
+            regions,
             child,
             expanded_nodes,
             &child_prefix,
@@ -502,7 +568,8 @@ mod tests {
             OutputItem::UserTurn { text: "hi".into() },
             OutputItem::Divider,
         ];
-        let (_lines, ranges, total) = build_lines_with_ranges(&items, 80, &RenderCtx::empty());
+        let (_lines, ranges, _regions, total) =
+            build_lines_with_ranges(&items, 80, &RenderCtx::empty());
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].item_index, 0);
         assert_eq!(ranges[1].item_index, 1);
@@ -512,7 +579,8 @@ mod tests {
 
     #[test]
     fn build_lines_with_ranges_empty_items_returns_empty_vecs() {
-        let (lines, ranges, total) = build_lines_with_ranges(&[], 80, &RenderCtx::empty());
+        let (lines, ranges, _regions, total) =
+            build_lines_with_ranges(&[], 80, &RenderCtx::empty());
         assert!(lines.is_empty());
         assert!(ranges.is_empty());
         assert_eq!(total, 0);

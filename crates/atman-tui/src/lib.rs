@@ -163,7 +163,11 @@ async fn run_frames(
                             MouseEventKind::ScrollUp => app.scroll_up(3),
                             MouseEventKind::ScrollDown => app.scroll_down(3),
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some(idx) = app.hit_test(me.column, me.row)
+                                if let Some((panel_idx, node_id)) =
+                                    app.hit_test_node(me.column, me.row)
+                                {
+                                    app.toggle_workflow_node(panel_idx, &node_id);
+                                } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
                                         app.items.get(idx)
                                 {
@@ -565,8 +569,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             animation_frame: animation_key,
         };
         let mut cache = std::mem::take(&mut app.layout_cache);
-        let (lines, ranges, total_rows) = cache.get_or_build(cache_key, &app.items, &ctx);
+        let (lines, ranges, node_regions, total_rows) =
+            cache.get_or_build(cache_key, &app.items, &ctx);
         app.last_item_ranges = ranges.to_vec();
+        app.last_node_regions = node_regions.to_vec();
         let lines_owned = lines.to_vec();
         app.layout_cache = cache;
         app.resolve_scroll(total_rows, transcript_area.height);

@@ -65,6 +65,7 @@ pub struct AppState {
     pub expanded_tools: HashSet<String>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub last_item_ranges: Vec<crate::output::ItemRange>,
+    pub last_node_regions: Vec<crate::output::NodeRegion>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub animation_frame: u32,
     pub items_version: u64,
@@ -192,6 +193,24 @@ impl AppState {
             .iter()
             .find(|r| rel >= r.start_row && rel < r.end_row)
             .map(|r| r.item_index)
+    }
+
+    pub fn hit_test_node(&self, col: u16, row: u16) -> Option<(usize, String)> {
+        let rect = self.last_transcript_rect?;
+        if col < rect.x
+            || col >= rect.x.saturating_add(rect.width)
+            || row < rect.y
+            || row >= rect.y.saturating_add(rect.height)
+        {
+            return None;
+        }
+        let rel = row
+            .saturating_sub(rect.y)
+            .saturating_add(self.scroll_offset);
+        self.last_node_regions
+            .iter()
+            .find(|r| rel >= r.start_row && rel < r.end_row)
+            .map(|r| (r.panel_item_index, r.node_id.clone()))
     }
 
     pub fn refresh_popup(&mut self, editor_buf: &str) {
@@ -520,6 +539,38 @@ mod tests {
         assert_eq!(app.hit_test(10, 3), Some(0));
         assert_eq!(app.hit_test(10, 4), Some(1));
         assert_eq!(app.hit_test(10, 6), Some(1));
+    }
+
+    #[test]
+    fn hit_test_node_maps_row_to_workflow_node_id() {
+        use crate::output::NodeRegion;
+        use ratatui::layout::Rect;
+        let mut app = AppState::new("s".into(), None);
+        app.last_transcript_rect = Some(Rect::new(0, 2, 80, 20));
+        app.last_node_regions = vec![
+            NodeRegion {
+                panel_item_index: 3,
+                node_id: "run_a::stmt_0".into(),
+                start_row: 1,
+                end_row: 2,
+            },
+            NodeRegion {
+                panel_item_index: 3,
+                node_id: "tool:tu_1".into(),
+                start_row: 2,
+                end_row: 3,
+            },
+        ];
+        app.scroll_offset = 0;
+        assert_eq!(
+            app.hit_test_node(10, 3),
+            Some((3, "run_a::stmt_0".to_string()))
+        );
+        assert_eq!(
+            app.hit_test_node(10, 4),
+            Some((3, "tool:tu_1".to_string()))
+        );
+        assert_eq!(app.hit_test_node(10, 5), None);
     }
 
     #[test]
