@@ -268,19 +268,11 @@ fn workflow_overall_status(
     let mut has_err = false;
     walk(nodes, &mut has_running, &mut has_err);
     if has_running {
-        (
-            "running…".into(),
-            Style::default().fg(Color::Yellow),
-            true,
-        )
+        ("running…".into(), Style::default().fg(Color::Yellow), true)
     } else if has_err {
         ("err".into(), Style::default().fg(Color::Red), false)
     } else if nodes.is_empty() {
-        (
-            "empty".into(),
-            Style::default().fg(Color::DarkGray),
-            false,
-        )
+        ("empty".into(), Style::default().fg(Color::DarkGray), false)
     } else {
         ("ok".into(), Style::default().fg(Color::Green), false)
     }
@@ -296,8 +288,9 @@ fn append_workflow_node(
     flow_running: bool,
 ) {
     use atman_runtime::workflow::{NodeStatus, WorkflowNodeKind};
+    let (chain_depth, effective) = unwrap_tail_recursion(node);
     let branch_glyph = if is_last { "└─" } else { "├─" };
-    let (status_glyph, status_style) = match node.status {
+    let (status_glyph, status_style) = match effective.status {
         NodeStatus::Ok => ("✓", Style::default().fg(Color::Green)),
         NodeStatus::Err => ("✗", Style::default().fg(Color::Red)),
         NodeStatus::Cancelled => ("⊘", Style::default().fg(Color::DarkGray)),
@@ -312,8 +305,8 @@ fn append_workflow_node(
             }
         }
     };
-    let collapsed_tool = collapsed_tool_view(node);
-    let (kind_glyph, kind_color) = match &node.kind {
+    let collapsed_tool = collapsed_tool_view(effective);
+    let (kind_glyph, kind_color) = match &effective.kind {
         WorkflowNodeKind::Flow { .. } => ("⚡", Color::Cyan),
         WorkflowNodeKind::Subflow { .. } => ("↳", Color::Cyan),
         WorkflowNodeKind::Stmt { node_kind } => {
@@ -326,18 +319,23 @@ fn append_workflow_node(
         WorkflowNodeKind::ToolCall { .. } => ("🔧", Color::Blue),
         WorkflowNodeKind::FanoutBranch { .. } => ("⇉", Color::Magenta),
     };
-    let label = if let Some((tool, args)) = &collapsed_tool {
+    let base_label = if let Some((tool, args)) = &collapsed_tool {
         format!("{tool}({})", truncate_preview(args, 60))
     } else {
-        match &node.kind {
+        match &effective.kind {
             WorkflowNodeKind::ToolCall {
                 tool, args_preview, ..
             } => format!("{tool}({})", truncate_preview(args_preview, 60)),
             WorkflowNodeKind::FanoutBranch { branch_index } => {
-                format!("branch[{branch_index}]  {}", node.label)
+                format!("branch[{branch_index}]  {}", effective.label)
             }
-            _ => node.label.clone(),
+            _ => effective.label.clone(),
         }
+    };
+    let label = if chain_depth > 1 {
+        format!("{base_label}  ×{chain_depth} iterations")
+    } else {
+        base_label
     };
     out.push(Line::from(vec![
         Span::styled(
@@ -350,8 +348,8 @@ fn append_workflow_node(
     ]));
     let vertical = if is_last { "   " } else { "│  " };
     let child_prefix = format!("{ancestor_prefix}{vertical}");
-    if expanded_nodes.contains(&node.id)
-        && let Some(preview) = node.output_preview.as_deref()
+    if expanded_nodes.contains(&effective.id)
+        && let Some(preview) = effective.output_preview.as_deref()
     {
         for line in preview.lines().take(6) {
             out.push(Line::from(vec![
@@ -366,8 +364,8 @@ fn append_workflow_node(
     if collapsed_tool.is_some() {
         return;
     }
-    let child_count = node.children.len();
-    for (i, child) in node.children.iter().enumerate() {
+    let child_count = effective.children.len();
+    for (i, child) in effective.children.iter().enumerate() {
         let child_last = i + 1 == child_count;
         append_workflow_node(
             out,
@@ -379,6 +377,48 @@ fn append_workflow_node(
             flow_running,
         );
     }
+}
+
+fn unwrap_tail_recursion(
+    node: &atman_runtime::workflow::WorkflowNode,
+) -> (usize, &atman_runtime::workflow::WorkflowNode) {
+    use atman_runtime::workflow::WorkflowNodeKind;
+    let flow_name = match &node.kind {
+        WorkflowNodeKind::Subflow { flow_name, .. } | WorkflowNodeKind::Flow { flow_name, .. } => {
+            flow_name.clone()
+        }
+        _ => return (1, node),
+    };
+    let mut depth = 1usize;
+    let mut cur = node;
+    loop {
+        let next = find_same_named_subflow_descendant(cur, &flow_name);
+        match next {
+            Some(child) => {
+                depth += 1;
+                cur = child;
+            }
+            None => return (depth, cur),
+        }
+    }
+}
+
+fn find_same_named_subflow_descendant<'a>(
+    node: &'a atman_runtime::workflow::WorkflowNode,
+    flow_name: &str,
+) -> Option<&'a atman_runtime::workflow::WorkflowNode> {
+    use atman_runtime::workflow::WorkflowNodeKind;
+    for child in &node.children {
+        if let WorkflowNodeKind::Subflow { flow_name: cn, .. } = &child.kind
+            && cn == flow_name
+        {
+            return Some(child);
+        }
+        if let Some(hit) = find_same_named_subflow_descendant(child, flow_name) {
+            return Some(hit);
+        }
+    }
+    None
 }
 
 fn collapsed_tool_view(node: &atman_runtime::workflow::WorkflowNode) -> Option<(String, String)> {
@@ -622,5 +662,65 @@ mod tests {
         let flat = flatten_lines(&lines);
         assert!(flat.contains("workflow"));
         assert!(!flat.contains("hidden-child"), "collapsed leaks: {flat}");
+    }
+
+    #[test]
+    fn recursive_subflow_chain_collapses_to_iteration_count() {
+        use atman_runtime::workflow::{
+            NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
+        };
+
+        fn subflow_layer(depth: usize, remaining: usize) -> WorkflowNode {
+            let deeper = if remaining > 0 {
+                vec![subflow_layer(depth + 1, remaining - 1)]
+            } else {
+                vec![WorkflowNode {
+                    id: format!("leaf_{depth}"),
+                    kind: WorkflowNodeKind::Stmt {
+                        node_kind: atman_runtime::nodegraph::NodeKind::Return,
+                    },
+                    label: "final".into(),
+                    status: NodeStatus::Ok,
+                    started_at: None,
+                    ended_at: None,
+                    output_preview: None,
+                    children: Vec::new(),
+                    parallelism: Parallelism::Serial,
+                }]
+            };
+            WorkflowNode {
+                id: format!("loop_{depth}"),
+                kind: WorkflowNodeKind::Subflow {
+                    run_id: format!("r_{depth}"),
+                    flow_name: "agent_loop".into(),
+                },
+                label: "agent_loop".into(),
+                status: NodeStatus::Ok,
+                started_at: None,
+                ended_at: None,
+                output_preview: None,
+                children: deeper,
+                parallelism: Parallelism::Serial,
+            }
+        }
+
+        let mut graph = WorkflowGraph::new(atman_runtime::event::TurnId::now());
+        graph.root.push(subflow_layer(0, 4));
+        let panel = OutputItem::WorkflowPanel {
+            turn_index: 0,
+            graph,
+            expanded_nodes: std::collections::HashSet::new(),
+            panel_expanded: true,
+            started_at: std::time::Instant::now(),
+            ended_at: Some(std::time::Instant::now()),
+        };
+        let lines = render_item(&panel, &RenderCtx::empty());
+        let flat = flatten_lines(&lines);
+        assert!(flat.contains("×5 iterations"), "expected collapse: {flat}");
+        assert!(flat.contains("final"), "deepest child should render");
+        assert!(
+            flat.matches("agent_loop").count() == 1,
+            "intermediate agent_loop nodes should collapse, got: {flat}"
+        );
     }
 }
