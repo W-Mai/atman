@@ -364,6 +364,7 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
     let values = parse_json_lines(&text);
     let patches = collect_attachment_patches(&values);
     let mut out = Vec::new();
+    let mut msg_indices: Vec<usize> = Vec::new();
     for v in &values {
         let ty = v["type"].as_str().unwrap_or("");
         match ty {
@@ -377,10 +378,44 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                         apply_attachment_patches(&mut msg, ps);
                     }
                     let flow_run_id = v["flow_run_id"].as_str().map(String::from);
+                    msg_indices.push(out.len());
                     out.push(TranscriptEntry::Message {
                         message: msg,
                         flow_run_id,
                     });
+                }
+            }
+            "context_compact" => {
+                let has_summary = v.get("summary_text").is_some();
+                let has_replacement = v.get("replacement_msg_seq").is_some();
+                if !has_summary && !has_replacement {
+                    continue;
+                }
+                let range_start = v["compacted_range_start"].as_u64().unwrap_or(0) as usize;
+                let range_end = v["compacted_range_end"].as_u64().unwrap_or(0) as usize;
+                if range_start > range_end || range_end >= msg_indices.len() {
+                    continue;
+                }
+                let replacement_ordinal = msg_indices.len().saturating_sub(1);
+                if replacement_ordinal <= range_end {
+                    continue;
+                }
+                let replacement_out_idx = msg_indices[replacement_ordinal];
+                let replacement_entry = out.remove(replacement_out_idx);
+                msg_indices.pop();
+                let removed_out_start = msg_indices[range_start];
+                let removed_count = range_end - range_start + 1;
+                for _ in 0..removed_count {
+                    out.remove(removed_out_start);
+                }
+                msg_indices.drain(range_start..=range_end);
+                out.insert(removed_out_start, replacement_entry);
+                msg_indices.insert(range_start, removed_out_start);
+                for (i, ordinal_out_idx) in msg_indices.iter_mut().enumerate() {
+                    if i > range_start {
+                        *ordinal_out_idx =
+                            ordinal_out_idx.saturating_sub(removed_count.saturating_sub(1));
+                    }
                 }
             }
             "flow_graph" => {
