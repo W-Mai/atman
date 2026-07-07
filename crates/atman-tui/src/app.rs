@@ -225,9 +225,15 @@ impl AppState {
         let rel = row
             .saturating_sub(rect.y)
             .saturating_add(self.scroll_offset);
+        let rel_col = col.saturating_sub(rect.x);
         self.last_node_regions
             .iter()
-            .find(|r| rel >= r.start_row && rel < r.end_row)
+            .filter(|r| rel >= r.start_row && rel < r.end_row)
+            .filter(|r| match (r.col_start, r.col_end) {
+                (Some(s), Some(e)) => rel_col >= s && rel_col < e,
+                _ => true,
+            })
+            .max_by_key(|r| (r.col_start.is_some() as u8, r.path_key.len()))
             .map(|r| (r.panel_item_index, r.path_key.clone()))
     }
 
@@ -586,12 +592,16 @@ mod tests {
                 path_key: "0".into(),
                 start_row: 1,
                 end_row: 2,
+                col_start: None,
+                col_end: None,
             },
             NodeRegion {
                 panel_item_index: 3,
                 path_key: "0/0".into(),
                 start_row: 2,
                 end_row: 3,
+                col_start: None,
+                col_end: None,
             },
         ];
         app.scroll_offset = 0;

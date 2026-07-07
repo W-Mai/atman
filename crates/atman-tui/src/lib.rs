@@ -782,6 +782,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             expanded_tools: &app.expanded_tools,
             messages: &messages,
             animation_frame: app.animation_frame,
+            panel_width: transcript_area.width,
         };
         let animation_key = if app.has_running_workflow() {
             Some(app.animation_frame)

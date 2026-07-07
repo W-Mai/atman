@@ -11,6 +11,7 @@ pub struct RenderCtx<'a> {
     pub expanded_tools: &'a std::collections::HashSet<String>,
     pub messages: &'a [Message],
     pub animation_frame: u32,
+    pub panel_width: u16,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -21,6 +22,7 @@ impl<'a> RenderCtx<'a> {
             expanded_tools: EMPTY_SET.get_or_init(std::collections::HashSet::new),
             messages: &[],
             animation_frame: 0,
+            panel_width: 80,
         }
     }
 }
@@ -52,6 +54,8 @@ pub struct NodeRegion {
     pub path_key: String,
     pub start_row: u16,
     pub end_row: u16,
+    pub col_start: Option<u16>,
+    pub col_end: Option<u16>,
 }
 
 pub fn build_lines_with_ranges(
@@ -124,6 +128,7 @@ pub fn render_item_with_regions(
             expanded_nodes,
             *panel_expanded,
             ctx.animation_frame,
+            ctx.panel_width,
         )
     } else {
         (render_item(item, ctx), Vec::new())
@@ -243,6 +248,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *started_at,
             *ended_at,
             ctx.animation_frame,
+            ctx.panel_width,
         ),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
@@ -256,8 +262,16 @@ fn render_workflow_panel(
     _started_at: std::time::Instant,
     _ended_at: Option<std::time::Instant>,
     animation_frame: u32,
+    panel_width: u16,
 ) -> Vec<Line<'static>> {
-    render_workflow_panel_with_regions(graph, expanded_nodes, panel_expanded, animation_frame).0
+    render_workflow_panel_with_regions(
+        graph,
+        expanded_nodes,
+        panel_expanded,
+        animation_frame,
+        panel_width,
+    )
+    .0
 }
 
 fn render_workflow_panel_with_regions(
@@ -265,6 +279,7 @@ fn render_workflow_panel_with_regions(
     expanded_nodes: &std::collections::HashSet<String>,
     panel_expanded: bool,
     animation_frame: u32,
+    panel_width: u16,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let count = count_workflow_nodes(&graph.root);
     let (status_str, status_style, running) = workflow_overall_status(&graph.root);
@@ -308,6 +323,7 @@ fn render_workflow_panel_with_regions(
                 animation_frame,
                 running,
                 &mut pending_counter,
+                panel_width,
             );
         }
     }
@@ -371,6 +387,175 @@ fn workflow_overall_status(
     }
 }
 
+const FANOUT_MIN_WIDTH: u16 = 120;
+const FANOUT_MAX_BRANCHES: usize = 4;
+const FANOUT_MIN_COL_WIDTH: u16 = 20;
+
+fn is_fanout_group(node: &atman_runtime::workflow::WorkflowNode) -> bool {
+    use atman_runtime::workflow::WorkflowNodeKind;
+    !node.children.is_empty()
+        && node
+            .children
+            .iter()
+            .all(|c| matches!(c.kind, WorkflowNodeKind::FanoutBranch { .. }))
+}
+
+fn horizontal_layout_feasible(branch_count: usize, panel_width: u16, prefix: &str) -> bool {
+    if !(2..=FANOUT_MAX_BRANCHES).contains(&branch_count) {
+        return false;
+    }
+    if panel_width < FANOUT_MIN_WIDTH {
+        return false;
+    }
+    let prefix_cols = prefix.chars().count() as u16;
+    let usable = panel_width.saturating_sub(prefix_cols);
+    let per_branch = usable / (branch_count as u16).max(1);
+    per_branch >= FANOUT_MIN_COL_WIDTH
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_fanout_horizontal(
+    out: &mut Vec<Line<'static>>,
+    regions: &mut Vec<NodeRegion>,
+    branches: &[atman_runtime::workflow::WorkflowNode],
+    expanded_nodes: &std::collections::HashSet<String>,
+    child_prefix: &str,
+    parent_path: &str,
+    animation_frame: u32,
+    flow_running: bool,
+    pending_counter: &mut u8,
+    panel_width: u16,
+) {
+    let branch_count = branches.len();
+    let prefix_cols = child_prefix.chars().count() as u16;
+    let usable = panel_width.saturating_sub(prefix_cols);
+    let col_width = usable / branch_count as u16;
+    let base_col = prefix_cols;
+    let mut per_branch_lines: Vec<Vec<Line<'static>>> = Vec::with_capacity(branch_count);
+    let mut per_branch_regions: Vec<Vec<NodeRegion>> = Vec::with_capacity(branch_count);
+    for (i, branch) in branches.iter().enumerate() {
+        let mut b_lines: Vec<Line<'static>> = Vec::new();
+        let mut b_regions: Vec<NodeRegion> = Vec::new();
+        let branch_path = format!("{parent_path}/{i}");
+        append_workflow_node(
+            &mut b_lines,
+            &mut b_regions,
+            branch,
+            expanded_nodes,
+            "",
+            &branch_path,
+            i + 1 == branch_count,
+            animation_frame,
+            flow_running,
+            pending_counter,
+            col_width,
+        );
+        per_branch_lines.push(b_lines);
+        per_branch_regions.push(b_regions);
+    }
+    let fork_row = out.len() as u16;
+    let mut fork_spans = vec![Span::styled(
+        child_prefix.to_string(),
+        Style::default().fg(Color::DarkGray),
+    )];
+    let mut cursor: u16 = 0;
+    for i in 0..branch_count {
+        let mid = cursor + col_width / 2;
+        while cursor < mid {
+            fork_spans.push(Span::styled(
+                "─".to_string(),
+                Style::default().fg(Color::Magenta),
+            ));
+            cursor += 1;
+        }
+        fork_spans.push(Span::styled(
+            "┬".to_string(),
+            Style::default().fg(Color::Magenta),
+        ));
+        cursor += 1;
+        let _ = i;
+        while cursor < ((i + 1) as u16) * col_width {
+            fork_spans.push(Span::styled(
+                "─".to_string(),
+                Style::default().fg(Color::Magenta),
+            ));
+            cursor += 1;
+        }
+    }
+    out.push(Line::from(fork_spans));
+    let body_start_row = out.len() as u16;
+    let max_height = per_branch_lines.iter().map(|b| b.len()).max().unwrap_or(0);
+    for row_i in 0..max_height {
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(child_prefix.to_string())];
+        for (b, branch_lines) in per_branch_lines.iter().enumerate() {
+            let mut written: u16 = 0;
+            let target = col_width;
+            if let Some(line) = branch_lines.get(row_i) {
+                for span in line.spans.iter() {
+                    let take = span
+                        .content
+                        .chars()
+                        .take((target - written) as usize)
+                        .collect::<String>();
+                    let taken = take.chars().count() as u16;
+                    spans.push(Span::styled(take, span.style));
+                    written = written.saturating_add(taken);
+                    if written >= target {
+                        break;
+                    }
+                }
+            }
+            while written < target {
+                spans.push(Span::raw(" ".to_string()));
+                written += 1;
+            }
+            let _ = b;
+        }
+        out.push(Line::from(spans));
+    }
+    let merge_row = out.len() as u16;
+    let mut merge_spans = vec![Span::styled(
+        child_prefix.to_string(),
+        Style::default().fg(Color::DarkGray),
+    )];
+    let mut cursor: u16 = 0;
+    for i in 0..branch_count {
+        let mid = cursor + col_width / 2;
+        while cursor < mid {
+            merge_spans.push(Span::styled(
+                "─".to_string(),
+                Style::default().fg(Color::Magenta),
+            ));
+            cursor += 1;
+        }
+        merge_spans.push(Span::styled(
+            "┴".to_string(),
+            Style::default().fg(Color::Magenta),
+        ));
+        cursor += 1;
+        while cursor < ((i + 1) as u16) * col_width {
+            merge_spans.push(Span::styled(
+                "─".to_string(),
+                Style::default().fg(Color::Magenta),
+            ));
+            cursor += 1;
+        }
+    }
+    out.push(Line::from(merge_spans));
+    for (b, branch_regions) in per_branch_regions.into_iter().enumerate() {
+        let col_start = base_col + (b as u16) * col_width;
+        let col_end = col_start + col_width;
+        for mut r in branch_regions {
+            r.start_row = body_start_row.saturating_add(r.start_row);
+            r.end_row = body_start_row.saturating_add(r.end_row);
+            r.col_start = Some(col_start);
+            r.col_end = Some(col_end);
+            regions.push(r);
+        }
+    }
+    let _ = (fork_row, merge_row);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_workflow_node(
     out: &mut Vec<Line<'static>>,
@@ -383,6 +568,7 @@ fn append_workflow_node(
     animation_frame: u32,
     flow_running: bool,
     pending_counter: &mut u8,
+    panel_width: u16,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
     let start_row = out.len() as u16;
@@ -506,6 +692,8 @@ fn append_workflow_node(
         path_key: path.to_string(),
         start_row,
         end_row: start_row.saturating_add(1),
+        col_start: None,
+        col_end: None,
     });
     let vertical = if is_last { "   " } else { "│  " };
     let child_prefix = format!("{ancestor_prefix}{vertical}");
@@ -513,6 +701,24 @@ fn append_workflow_node(
         append_expanded_details(out, effective, &child_prefix);
     }
     let child_count = effective.children.len();
+    if child_count > 1
+        && is_fanout_group(effective)
+        && horizontal_layout_feasible(effective.children.len(), panel_width, &child_prefix)
+    {
+        append_fanout_horizontal(
+            out,
+            regions,
+            &effective.children,
+            expanded_nodes,
+            &child_prefix,
+            path,
+            animation_frame,
+            flow_running,
+            pending_counter,
+            panel_width,
+        );
+        return;
+    }
     for (i, child) in effective.children.iter().enumerate() {
         let child_last = i + 1 == child_count;
         let child_path = format!("{path}/{i}");
@@ -527,6 +733,7 @@ fn append_workflow_node(
             animation_frame,
             flow_running,
             pending_counter,
+            panel_width,
         );
     }
 }
