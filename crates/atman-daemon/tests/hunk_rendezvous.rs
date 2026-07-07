@@ -23,7 +23,7 @@ async fn hunk_review_reuses_daemon_rendezvous_when_resolver_present() {
 
     let src = format!(
         r#"flow t() -> string {{
-    proposal = fs.edit(
+    proposal = hunk.plan_edit(
         path: "{}",
         new_content: "line1\nrewritten\nline3\n"
     )
@@ -82,7 +82,7 @@ async fn hunk_review_falls_back_to_auto_when_no_resolver() {
 
     let src = format!(
         r#"flow t() -> string {{
-    proposal = fs.edit(
+    proposal = hunk.plan_edit(
         path: "{}",
         new_content: "a\nX\nc\n"
     )

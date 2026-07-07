@@ -9,7 +9,7 @@ pub struct FsEdit;
 
 impl Tool for FsEdit {
     fn name(&self) -> &str {
-        "fs.edit"
+        "hunk.plan_edit"
     }
 
     fn tier(&self) -> Tier {
@@ -19,7 +19,8 @@ impl Tool for FsEdit {
     fn description(&self) -> Option<&str> {
         Some(
             "Compute a hunk-level EditProposal for replacing a file with new content. \
-             Nothing is written; feed the proposal into hunk.review or hunk.apply.",
+             Nothing is written; feed the proposal into hunk.review or hunk.apply. \
+             For straightforward str_replace edits, prefer fs.edit instead.",
         )
     }
 
@@ -70,7 +71,7 @@ impl Tool for HunkReview {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "proposal": {"description": "EditProposal value from fs.edit."},
+                "proposal": {"description": "EditProposal value from hunk.plan_edit."},
                 "timeout_secs": {"type": "integer", "description": "Seconds to wait for a reviewer answer (default 300)."}
             },
             "required": ["proposal"]
@@ -230,7 +231,7 @@ impl Tool for HunkApply {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "proposal": {"description": "EditProposal value from fs.edit."},
+                "proposal": {"description": "EditProposal value from hunk.plan_edit."},
                 "hunks": {
                     "type": "array",
                     "items": {"type": "integer"},

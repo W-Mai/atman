@@ -26,7 +26,7 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
 
     let src = format!(
         r#"flow t() -> string {{
-    proposal = fs.edit(
+    proposal = hunk.plan_edit(
         path: "{}",
         new_content: "line1\nrewritten\nline3\n"
     )

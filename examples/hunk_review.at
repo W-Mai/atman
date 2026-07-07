@@ -6,7 +6,7 @@ flow hunk_review(file: path, new_content: string) -> HunkResult {
         }
     }
 
-    proposal = fs.edit(file, new_content)
+    proposal = hunk.plan_edit(file, new_content)
 
     audit = preview.push(
         topic: "hunk-review",

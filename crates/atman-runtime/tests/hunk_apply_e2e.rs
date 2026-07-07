@@ -4,19 +4,19 @@ use atman_runtime::{Executor, Value, tools};
 fn base_flow() -> &'static str {
     r#"flow apply_all(file: path, new_content: string) -> HunkResult {
     contract { scope { read: [project_root] write: [project_root] } }
-    proposal = fs.edit(file, new_content)
+    proposal = hunk.plan_edit(file, new_content)
     return hunk.apply(proposal, hunks: "all")
 }
 
 flow apply_none(file: path, new_content: string) -> HunkResult {
     contract { scope { read: [project_root] write: [project_root] } }
-    proposal = fs.edit(file, new_content)
+    proposal = hunk.plan_edit(file, new_content)
     return hunk.apply(proposal, hunks: "none")
 }
 
 flow apply_first_only(file: path, new_content: string) -> HunkResult {
     contract { scope { read: [project_root] write: [project_root] } }
-    proposal = fs.edit(file, new_content)
+    proposal = hunk.plan_edit(file, new_content)
     return hunk.apply(proposal, hunks: [1])
 }
 "#
