@@ -73,6 +73,8 @@ pub struct AppState {
     pub layout_cache: crate::output::LayoutCache,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
+    pub mouse_captured: bool,
+    pub select_mode_hinted: bool,
     last_lag_note_idx: Option<usize>,
     last_lag_at: Option<Instant>,
     last_lag_count: u64,
@@ -84,8 +86,15 @@ impl AppState {
             session_id,
             goal,
             follow_tail: true,
+            mouse_captured: true,
             ..Default::default()
         }
+    }
+
+    pub fn toggle_mouse_capture(&mut self) -> bool {
+        self.mouse_captured = !self.mouse_captured;
+        self.mark_items_dirty();
+        self.mouse_captured
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
@@ -440,6 +449,18 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toggle_mouse_capture_flips_state() {
+        let mut app = AppState::new("s".into(), None);
+        assert!(app.mouse_captured, "default is captured");
+        let now_on = app.toggle_mouse_capture();
+        assert!(!now_on);
+        assert!(!app.mouse_captured);
+        let now_on2 = app.toggle_mouse_capture();
+        assert!(now_on2);
+        assert!(app.mouse_captured);
+    }
 
     #[test]
     fn chunks_stream_incrementally_into_single_markdown_item() {

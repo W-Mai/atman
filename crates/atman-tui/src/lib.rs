@@ -486,6 +486,22 @@ fn handle_key(
             app.sidebar_mode = app.sidebar_mode.toggle();
             *interrupt_prompt = false;
         }
+        KeyAction::ToggleMouseCapture => {
+            let now_on = app.toggle_mouse_capture();
+            if let Err(e) = crate::terminal_guard::set_mouse_capture(now_on) {
+                app.push_note(
+                    format!("mouse capture toggle failed: {e}"),
+                    app::NoteLevel::Warn,
+                );
+            } else if !now_on && !app.select_mode_hinted {
+                app.push_note(
+                    "SELECT MODE — drag mouse to copy; press F3 to resume interaction",
+                    app::NoteLevel::Info,
+                );
+                app.select_mode_hinted = true;
+            }
+            *interrupt_prompt = false;
+        }
         KeyAction::ToggleLastTool => {
             app.toggle_last_tool_expansion();
             *interrupt_prompt = false;
@@ -606,7 +622,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         l.input,
     );
     if let Some(hint_area) = l.hint {
-        completion::render_hint_strip(f, hint_area, hint_area.width < 60);
+        completion::render_hint_strip(f, hint_area, hint_area.width < 60, app.mouse_captured);
     }
     if app.popup.is_open() {
         completion::render_popup(f, l.input, &app.popup);

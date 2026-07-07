@@ -238,11 +238,20 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
     f.render_stateful_widget(list, popup_rect, &mut list_state);
 }
 
-pub fn render_hint_strip(f: &mut ratatui::Frame, rect: Rect, narrow: bool) {
+pub fn render_hint_strip(f: &mut ratatui::Frame, rect: Rect, narrow: bool, mouse_captured: bool) {
+    if !mouse_captured {
+        let text = " [SELECT MODE] drag to copy · F3 resume interaction";
+        let p = Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::Yellow),
+        )));
+        f.render_widget(p, rect);
+        return;
+    }
     let text = if narrow {
-        " /  :  !  @  F1"
+        " /  :  !  @  F1  F3"
     } else {
-        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar"
+        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar · F3 select mode"
     };
     let p = Paragraph::new(Line::from(Span::styled(
         text,

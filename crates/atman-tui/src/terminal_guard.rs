@@ -73,6 +73,15 @@ fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
+pub fn set_mouse_capture(enabled: bool) -> Result<()> {
+    if enabled {
+        execute!(stdout(), EnableMouseCapture).context("enable mouse capture")?;
+    } else {
+        execute!(stdout(), DisableMouseCapture).context("disable mouse capture")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
