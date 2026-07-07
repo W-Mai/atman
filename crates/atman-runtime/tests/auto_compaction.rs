@@ -55,13 +55,56 @@ async fn maybe_auto_compact_emits_warning_when_no_range_found() {
     session.append_message(Message::user_text(TurnId::now(), big.clone()), None);
     session.append_message(Message::assistant_text(TurnId::now(), big), None);
     session.record_llm_call("llama-3b", 0, 0);
-    maybe_auto_compact(&session, "llama-3b");
+    let providers = atman_runtime::provider::ProviderRegistry::new();
+    maybe_auto_compact(&session, "llama-3b", &providers).await;
     let warned = session
         .sink()
         .snapshot()
         .iter()
         .any(|e| matches!(e, atman_runtime::event::Event::WatchWarn { target, .. } if target == "context.compaction"));
     assert!(warned, "expected a WatchWarn for skipped compaction");
+}
+
+#[tokio::test]
+async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
+    use atman_runtime::compaction::maybe_auto_compact;
+    use atman_runtime::event::Event;
+    use atman_runtime::provider::ProviderRegistry;
+    use atman_runtime::providers::mock::MockProvider;
+    use atman_runtime::value::Value;
+    use std::sync::Arc;
+    let tmp = tempfile::tempdir().unwrap();
+    let session = Session::open(tmp.path()).unwrap();
+    build_long_history(&session, 60);
+    session.record_llm_call("mock-summary", 0, 0);
+    let mut providers = ProviderRegistry::new();
+    providers.register(Arc::new(MockProvider::new("mock-summary").with_fallback(
+        Value::Str("We investigated compaction and shipped the anchor-based fs.read tool.".into()),
+    )));
+    maybe_auto_compact(&session, "mock-summary", &providers).await;
+    let events = session.sink().snapshot();
+    let compact_event = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ContextCompact {
+                summary_text,
+                replacement_msg_seq,
+                ..
+            } => Some((summary_text.clone(), *replacement_msg_seq)),
+            _ => None,
+        })
+        .expect("expected ContextCompact event");
+    let (summary_text, replacement_seq) = compact_event;
+    assert!(
+        summary_text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("compaction"),
+        "expected LLM summary text, got {summary_text:?}"
+    );
+    assert!(replacement_seq.is_some());
+    let has_system_msg = events.iter().any(|e| matches!(e, Event::SystemMsg { .. }));
+    assert!(has_system_msg, "expected a paired SystemMsg event");
 }
 
 #[tokio::test]

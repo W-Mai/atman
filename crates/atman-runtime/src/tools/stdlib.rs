@@ -284,6 +284,8 @@ impl Tool for ReplaceMessagesRange {
                     after_tokens,
                     compacted_range_start: seq_span.0,
                     compacted_range_end: seq_span.1,
+                    summary_text: None,
+                    replacement_msg_seq: None,
                     ts: chrono::Utc::now(),
                 });
             }

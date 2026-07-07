@@ -136,6 +136,10 @@ pub enum Event {
         after_tokens: u64,
         compacted_range_start: u64,
         compacted_range_end: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary_text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replacement_msg_seq: Option<u64>,
         ts: chrono::DateTime<chrono::Utc>,
     },
     ContextTruncated {

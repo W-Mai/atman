@@ -155,7 +155,11 @@ fn parse_compact_footer(text: &str, idx: usize) -> Option<CompactSummary> {
     })
 }
 
-pub fn maybe_auto_compact(session: &crate::session::Session, model: &str) {
+pub async fn maybe_auto_compact(
+    session: &crate::session::Session,
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+) {
     let info = crate::model_registry::model_info(model);
     let threshold = info.compact_threshold_tokens();
     let msgs = session.messages();
@@ -166,10 +170,34 @@ pub fn maybe_auto_compact(session: &crate::session::Session, model: &str) {
     if !session.approval_cooldown_ok_for_compact() {
         return;
     }
-    let summary = format!(
-        "auto-compacted at {} tokens (budget {}, threshold {})",
-        current, info.context_budget, threshold
-    );
+    let Some(range) = find_compact_range(&msgs, info.context_budget) else {
+        session.emit_compact_warning(
+            model,
+            current,
+            threshold,
+            info.context_budget,
+            "no compactible span — history too short or already fully compacted",
+        );
+        return;
+    };
+    let slice = &msgs[range.start..range.end];
+    let summary = match generate_llm_summary(slice, model, providers).await {
+        Ok(text) => text,
+        Err(err) => {
+            session.emit_compact_warning(
+                model,
+                current,
+                threshold,
+                info.context_budget,
+                &format!("LLM summary failed: {err}. Degraded to placeholder."),
+            );
+            format!(
+                "[atman: compacted {} messages, LLM summary unavailable at {}]",
+                range.end - range.start,
+                chrono::Utc::now().to_rfc3339()
+            )
+        }
+    };
     match session.compact_messages(summary) {
         Some(result) => {
             session.push_system_note(format!(
@@ -190,6 +218,48 @@ pub fn maybe_auto_compact(session: &crate::session::Session, model: &str) {
             );
         }
     }
+}
+
+const SUMMARY_SYSTEM_PROMPT: &str = "You are summarizing a slice of an ongoing conversation so a future model can continue without losing context. Write 200-400 words focused on: key facts and decisions (files touched, tools invoked, verdicts reached); open threads (unfinished tasks, unresolved questions); what the user asked and what the assistant delivered. Rules: no code fences; include file, function, library, package names verbatim; write in past tense first-person from the assistant's perspective (\"I investigated foo.rs, decided to...\"); no speculation, only what actually happened in the transcript.";
+
+async fn generate_llm_summary(
+    slice: &[Message],
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+) -> Result<String, crate::error::RuntimeError> {
+    let provider = providers.resolve(model).ok_or_else(|| {
+        crate::error::RuntimeError::ToolFailed(format!("no provider for {model}"))
+    })?;
+    let payload = format_slice_for_summary(slice);
+    let user = format!("Summarize these {} messages:\n\n{}", slice.len(), payload);
+    let req = crate::provider::LlmRequest {
+        model: model.into(),
+        messages: vec![Message::user_text(crate::event::TurnId::now(), user)],
+        system: Some(SUMMARY_SYSTEM_PROMPT.into()),
+        input: crate::value::Value::Unit,
+        schema: None,
+        cache_prompt: false,
+        tools: Vec::new(),
+    };
+    let outcome = provider.call(req).await?;
+    let text = outcome.text_concat();
+    if text.trim().is_empty() {
+        return Err(crate::error::RuntimeError::ToolFailed(
+            "empty summary from provider".into(),
+        ));
+    }
+    Ok(text)
+}
+
+fn format_slice_for_summary(slice: &[Message]) -> String {
+    let mut out = String::new();
+    for (i, msg) in slice.iter().enumerate() {
+        let role = msg.role.as_str();
+        let text = msg.text_concat();
+        let truncated: String = text.chars().take(2000).collect();
+        out.push_str(&format!("[{i}] {role}: {truncated}\n\n"));
+    }
+    out.chars().take(60_000).collect()
 }
 
 pub fn replace_range_with_summary(

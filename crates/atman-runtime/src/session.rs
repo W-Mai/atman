@@ -1000,12 +1000,24 @@ impl Session {
             range.end - range.start
         );
         let annotated = format!("{summary}{footer}");
-        let after = replace_range_with_summary(&before, &range, annotated, turn_id);
+        let after = replace_range_with_summary(&before, &range, annotated.clone(), turn_id.clone());
         let before_tokens = estimate_tokens_for_messages(&before);
         let after_tokens = estimate_tokens_for_messages(&after);
+        let replacement_msg = after
+            .get(range.start)
+            .cloned()
+            .unwrap_or_else(|| Message::system_text(turn_id.clone(), annotated));
         *guard = after;
         drop(guard);
         self.sink.mark_compacted();
+        let replacement_seq = self.sink.next_seq_peek();
+        let ts = chrono::Utc::now();
+        self.sink.emit(Event::SystemMsg {
+            seq: 0,
+            turn_id: turn_id.clone(),
+            message: replacement_msg,
+            ts,
+        });
         self.sink.emit(Event::ContextCompact {
             seq: 0,
             session_id: self.id.to_string(),
@@ -1013,7 +1025,9 @@ impl Session {
             after_tokens,
             compacted_range_start: range.start as u64,
             compacted_range_end: range.end.saturating_sub(1) as u64,
-            ts: chrono::Utc::now(),
+            summary_text: Some(summary),
+            replacement_msg_seq: Some(replacement_seq),
+            ts,
         });
         self.reset_input_tokens_to(after_tokens);
         Some(CompactResult {
