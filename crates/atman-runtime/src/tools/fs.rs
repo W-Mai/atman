@@ -18,7 +18,9 @@ impl Tool for FsRead {
     fn description(&self) -> Option<&str> {
         Some(
             "Read a UTF-8 text file. Use `offset` (1-indexed) + `limit` to fetch a slice of a large \
-             file (recommended over reading the whole file when you only need part of it).",
+             file. Alternatively pass `anchor` (literal substring) to jump to the first line \
+             containing it and return `context` lines on each side (default 5). Explicit \
+             offset/limit take precedence over anchor.",
         )
     }
 
@@ -26,9 +28,11 @@ impl Tool for FsRead {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Absolute or relative file path."},
-                "offset": {"type": "integer", "description": "1-indexed start line. Omit to read from the beginning."},
-                "limit": {"type": "integer", "description": "Maximum number of lines to return. Omit to read to end."}
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "description": "1-indexed start line."},
+                "limit": {"type": "integer", "description": "Maximum lines to return."},
+                "anchor": {"type": "string", "description": "Literal substring; when set, defaults offset to the matched line."},
+                "context": {"type": "integer", "description": "Lines around the anchor (default 5)."}
             },
             "required": ["path"]
         })
@@ -37,13 +41,55 @@ impl Tool for FsRead {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
-            let offset = extract_optional_int(&args, "offset")?;
-            let limit = extract_optional_int(&args, "limit")?;
+            let mut offset = extract_optional_int(&args, "offset")?;
+            let mut limit = extract_optional_int(&args, "limit")?;
+            let anchor = match args.named("anchor") {
+                Some(Value::Str(s)) if !s.is_empty() => Some(s.clone()),
+                Some(Value::Unit) | None => None,
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "string anchor".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            };
+            let context: usize = match args.named("context") {
+                Some(Value::Int(n)) if *n >= 0 => (*n as usize).min(200),
+                _ => 5,
+            };
             let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
                 RuntimeError::ToolFailed(format!("fs.read({}): {e}", path.display()))
             })?;
             let canonical = canonicalize_or_owned(&path);
             ctx.note_read(&canonical);
+            let anchor_line = if let Some(needle) = anchor.as_deref() {
+                let mut hit: Option<usize> = None;
+                for (idx, line) in content.split_inclusive('\n').enumerate() {
+                    if line.contains(needle) {
+                        hit = Some(idx + 1);
+                        break;
+                    }
+                }
+                match hit {
+                    Some(l) => Some(l),
+                    None => {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "fs.read({}): anchor `{needle}` not found",
+                            path.display()
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(anchor_line) = anchor_line {
+                if offset.is_none() {
+                    offset = Some((anchor_line.saturating_sub(context).max(1)) as i64);
+                }
+                if limit.is_none() {
+                    limit = Some((context * 2 + 1) as i64);
+                }
+            }
             if offset.is_none() && limit.is_none() {
                 return Ok(Value::Str(content));
             }
@@ -895,6 +941,47 @@ mod tests {
         };
         let v = FsRead.call(args, &ctx).await.unwrap();
         assert!(matches!(v, Value::Str(s) if s == "one\ntwo\n"));
+    }
+
+    #[tokio::test]
+    async fn fs_read_anchor_jumps_to_matched_line_with_context() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("story.txt");
+        let body = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        tokio::fs::write(&path, body.as_bytes()).await.unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Path(path)],
+            named: vec![
+                ("anchor".into(), Value::Str("line 10".into())),
+                ("context".into(), Value::Int(2)),
+            ],
+        };
+        let v = FsRead.call(args, &ctx).await.unwrap();
+        let text = match v {
+            Value::Str(s) => s,
+            other => panic!("expected string, got {other:?}"),
+        };
+        assert!(text.contains("lines 8-12"), "header was: {text}");
+        assert!(text.contains("line 10"));
+        assert!(!text.contains("line 7"), "context boundary respected");
+    }
+
+    #[tokio::test]
+    async fn fs_read_anchor_missing_reports_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("body.txt");
+        tokio::fs::write(&path, b"only this line\n").await.unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Path(path)],
+            named: vec![("anchor".into(), Value::Str("nope".into()))],
+        };
+        let err = FsRead.call(args, &ctx).await.unwrap_err();
+        assert!(format!("{err}").contains("anchor `nope` not found"));
     }
 
     #[tokio::test]
