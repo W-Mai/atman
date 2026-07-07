@@ -99,12 +99,13 @@ flow agent_loop(messages: list, iteration: int) -> string {
         model: "claude-opus-4.7"
         messages: messages
         tools: [
-            fs.read, fs.write, fs.edit, fs.list,
+            fs.read, fs.write, fs.edit, fs.list, fs.grep,
             bash.exec,
             hunk.review, hunk.apply,
             memory.confess,
             memory.todo.set, memory.todo.done,
             memory.goal.get, memory.goal.set, memory.goal.clear,
+            memory.recent_turns, memory.history.search, memory.history.read,
             plan.write, plan.read, plan.tick,
             agent.spawn
         ]
