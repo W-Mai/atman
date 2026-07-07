@@ -137,25 +137,30 @@ impl AppState {
 
     fn toggle_last_workflow_tool_node(&mut self) -> bool {
         use atman_runtime::workflow::WorkflowNode;
-        fn last_tool_id(nodes: &[WorkflowNode]) -> Option<String> {
-            for n in nodes.iter().rev() {
-                if let Some(id) = last_tool_id(&n.children) {
-                    return Some(id);
+        fn last_tool_path(nodes: &[WorkflowNode], prefix: &str) -> Option<String> {
+            for (i, n) in nodes.iter().enumerate().rev() {
+                let cur = if prefix.is_empty() {
+                    format!("{i}")
+                } else {
+                    format!("{prefix}/{i}")
+                };
+                if let Some(hit) = last_tool_path(&n.children, &cur) {
+                    return Some(hit);
                 }
                 if matches!(
                     n.kind,
                     atman_runtime::workflow::WorkflowNodeKind::ToolCall { .. }
                 ) {
-                    return Some(n.id.clone());
+                    return Some(cur);
                 }
             }
             None
         }
         for (idx, item) in self.items.iter().enumerate().rev() {
             if let OutputItem::WorkflowPanel { graph, .. } = item
-                && let Some(id) = last_tool_id(&graph.root)
+                && let Some(path) = last_tool_path(&graph.root, "")
             {
-                self.toggle_workflow_node(idx, &id);
+                self.toggle_workflow_node(idx, &path);
                 return true;
             }
         }
@@ -210,7 +215,7 @@ impl AppState {
         self.last_node_regions
             .iter()
             .find(|r| rel >= r.start_row && rel < r.end_row)
-            .map(|r| (r.panel_item_index, r.node_id.clone()))
+            .map(|r| (r.panel_item_index, r.path_key.clone()))
     }
 
     pub fn refresh_popup(&mut self, editor_buf: &str) {
@@ -550,23 +555,20 @@ mod tests {
         app.last_node_regions = vec![
             NodeRegion {
                 panel_item_index: 3,
-                node_id: "run_a::stmt_0".into(),
+                path_key: "0".into(),
                 start_row: 1,
                 end_row: 2,
             },
             NodeRegion {
                 panel_item_index: 3,
-                node_id: "tool:tu_1".into(),
+                path_key: "0/0".into(),
                 start_row: 2,
                 end_row: 3,
             },
         ];
         app.scroll_offset = 0;
-        assert_eq!(
-            app.hit_test_node(10, 3),
-            Some((3, "run_a::stmt_0".to_string()))
-        );
-        assert_eq!(app.hit_test_node(10, 4), Some((3, "tool:tu_1".to_string())));
+        assert_eq!(app.hit_test_node(10, 3), Some((3, "0".to_string())));
+        assert_eq!(app.hit_test_node(10, 4), Some((3, "0/0".to_string())));
         assert_eq!(app.hit_test_node(10, 5), None);
     }
 
@@ -812,7 +814,7 @@ mod tests {
             OutputItem::WorkflowPanel { expanded_nodes, .. } => Some(expanded_nodes.clone()),
             _ => None,
         });
-        assert!(expanded.unwrap().contains("tool:r1:tu_last"));
+        assert!(expanded.unwrap().contains("0/0/0"));
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub struct ItemRange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRegion {
     pub panel_item_index: usize,
-    pub node_id: String,
+    pub path_key: String,
     pub start_row: u16,
     pub end_row: u16,
 }
@@ -295,12 +295,14 @@ fn render_workflow_panel_with_regions(
         let child_count = graph.root.len();
         for (i, node) in graph.root.iter().enumerate() {
             let is_last = i + 1 == child_count;
+            let path = format!("{i}");
             append_workflow_node(
                 &mut lines,
                 &mut regions,
                 node,
                 expanded_nodes,
                 "",
+                &path,
                 is_last,
                 animation_frame,
                 running,
@@ -374,6 +376,7 @@ fn append_workflow_node(
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
     ancestor_prefix: &str,
+    path: &str,
     is_last: bool,
     animation_frame: u32,
     flow_running: bool,
@@ -433,7 +436,7 @@ fn append_workflow_node(
         &effective.kind,
         WorkflowNodeKind::ToolCall { .. } | WorkflowNodeKind::Stmt { .. }
     );
-    let is_expanded = expanded_nodes.contains(&effective.id);
+    let is_expanded = expanded_nodes.contains(path);
     let expand_glyph = if !expandable {
         "  "
     } else if is_expanded {
@@ -457,7 +460,7 @@ fn append_workflow_node(
     ]));
     regions.push(NodeRegion {
         panel_item_index: 0,
-        node_id: node.id.clone(),
+        path_key: path.to_string(),
         start_row,
         end_row: start_row.saturating_add(1),
     });
@@ -469,12 +472,14 @@ fn append_workflow_node(
     let child_count = effective.children.len();
     for (i, child) in effective.children.iter().enumerate() {
         let child_last = i + 1 == child_count;
+        let child_path = format!("{path}/{i}");
         append_workflow_node(
             out,
             regions,
             child,
             expanded_nodes,
             &child_prefix,
+            &child_path,
             child_last,
             animation_frame,
             flow_running,
