@@ -142,6 +142,29 @@ fn parse_compact_footer(text: &str, idx: usize) -> Option<CompactSummary> {
     })
 }
 
+pub fn maybe_auto_compact(session: &crate::session::Session, model: &str) {
+    let info = crate::model_registry::model_info(model);
+    let threshold = info.compact_threshold_tokens();
+    let msgs = session.messages();
+    let current = estimate_tokens_for_messages(&msgs);
+    if current <= threshold {
+        return;
+    }
+    if !session.approval_cooldown_ok_for_compact() {
+        return;
+    }
+    let summary = format!(
+        "auto-compacted at {} tokens (budget {}, threshold {})",
+        current, info.context_budget, threshold
+    );
+    if let Some(result) = session.compact_messages(summary) {
+        session.push_system_note(format!(
+            "auto-compacted {}..{} — {} → {} tokens",
+            result.compacted_start, result.compacted_end, result.before_tokens, result.after_tokens
+        ));
+    }
+}
+
 pub fn replace_range_with_summary(
     messages: &[Message],
     range: &CompactRange,

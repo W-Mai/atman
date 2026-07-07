@@ -787,6 +787,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     Ok(am) => {
                         if let Some(session) = ctx.session {
                             session.append_message(am.message.clone(), ctx.flow_run_id.clone());
+                            crate::compaction::maybe_auto_compact(session, &model);
                         }
                         return crate::provider::assistant_message_to_value(&am);
                     }

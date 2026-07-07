@@ -178,6 +178,14 @@ struct LastImageUserMsg {
     images: Vec<ImagePart>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactResult {
+    pub before_tokens: u64,
+    pub after_tokens: u64,
+    pub compacted_start: usize,
+    pub compacted_end: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ContextSnapshot {
     pub model: String,
@@ -901,6 +909,57 @@ impl Session {
 
     pub fn message_count(&self) -> usize {
         self.messages.lock().unwrap().len()
+    }
+
+    pub fn push_system_note(&self, text: String) {
+        let _ = self.stream_tx.send(crate::stream::StreamFrame::Note(text));
+    }
+
+    pub fn approval_cooldown_ok_for_compact(&self) -> bool {
+        self.sink.last_compact_ago_seconds().is_none_or(|s| s >= 60)
+    }
+
+    pub fn compact_messages(&self, summary: String) -> Option<CompactResult> {
+        use crate::compaction::{
+            estimate_tokens_for_messages, find_compact_range, replace_range_with_summary,
+        };
+        let mut guard = self.messages.lock().unwrap();
+        let before = guard.clone();
+        let budget = crate::model_registry::model_info(&self.last_model()).context_budget;
+        let range = find_compact_range(&before, budget)?;
+        let turn_id = before
+            .get(range.start)
+            .map(|m| m.turn_id.clone())
+            .unwrap_or_else(TurnId::now);
+        let footer = format!(
+            "\n\n[atman:compact seq_start={} seq_end={} count={}]",
+            range.start,
+            range.end.saturating_sub(1),
+            range.end - range.start
+        );
+        let annotated = format!("{summary}{footer}");
+        let after = replace_range_with_summary(&before, &range, annotated, turn_id);
+        let before_tokens = estimate_tokens_for_messages(&before);
+        let after_tokens = estimate_tokens_for_messages(&after);
+        *guard = after;
+        drop(guard);
+        self.sink.mark_compacted();
+        self.sink.emit(Event::ContextCompact {
+            seq: 0,
+            session_id: self.id.to_string(),
+            before_tokens,
+            after_tokens,
+            compacted_range_start: range.start as u64,
+            compacted_range_end: range.end.saturating_sub(1) as u64,
+            ts: chrono::Utc::now(),
+        });
+        self.reset_input_tokens_to(after_tokens);
+        Some(CompactResult {
+            before_tokens,
+            after_tokens,
+            compacted_start: range.start,
+            compacted_end: range.end,
+        })
     }
 
     pub fn begin_turn(&self, user_msg: Message) -> TurnId {
