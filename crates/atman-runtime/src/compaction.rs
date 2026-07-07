@@ -157,11 +157,25 @@ pub fn maybe_auto_compact(session: &crate::session::Session, model: &str) {
         "auto-compacted at {} tokens (budget {}, threshold {})",
         current, info.context_budget, threshold
     );
-    if let Some(result) = session.compact_messages(summary) {
-        session.push_system_note(format!(
-            "auto-compacted {}..{} — {} → {} tokens",
-            result.compacted_start, result.compacted_end, result.before_tokens, result.after_tokens
-        ));
+    match session.compact_messages(summary) {
+        Some(result) => {
+            session.push_system_note(format!(
+                "auto-compacted {}..{} — {} → {} tokens",
+                result.compacted_start,
+                result.compacted_end,
+                result.before_tokens,
+                result.after_tokens
+            ));
+        }
+        None => {
+            session.emit_compact_warning(
+                model,
+                current,
+                threshold,
+                info.context_budget,
+                "no compactible span — history too short or already fully compacted",
+            );
+        }
     }
 }
 

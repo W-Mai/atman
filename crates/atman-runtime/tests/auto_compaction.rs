@@ -47,6 +47,24 @@ async fn compact_messages_returns_none_below_budget() {
 }
 
 #[tokio::test]
+async fn maybe_auto_compact_emits_warning_when_no_range_found() {
+    use atman_runtime::compaction::maybe_auto_compact;
+    let tmp = tempfile::tempdir().unwrap();
+    let session = Session::open(tmp.path()).unwrap();
+    let big = "y".repeat(50_000);
+    session.append_message(Message::user_text(TurnId::now(), big.clone()), None);
+    session.append_message(Message::assistant_text(TurnId::now(), big), None);
+    session.record_llm_call("llama-3b", 0, 0);
+    maybe_auto_compact(&session, "llama-3b");
+    let warned = session
+        .sink()
+        .snapshot()
+        .iter()
+        .any(|e| matches!(e, atman_runtime::event::Event::WatchWarn { target, .. } if target == "context.compaction"));
+    assert!(warned, "expected a WatchWarn for skipped compaction");
+}
+
+#[tokio::test]
 async fn cooldown_blocks_repeat_compaction_within_window() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Session::open(tmp.path()).unwrap();

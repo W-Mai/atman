@@ -919,6 +919,29 @@ impl Session {
         self.sink.last_compact_ago_seconds().is_none_or(|s| s >= 60)
     }
 
+    pub fn emit_compact_warning(
+        &self,
+        model: &str,
+        current_tokens: u64,
+        threshold: u64,
+        budget: u64,
+        reason: &str,
+    ) {
+        let message = format!(
+            "context {current_tokens} > threshold {threshold} (budget {budget}, model {model}); skipping compaction: {reason}"
+        );
+        self.sink.emit(Event::WatchWarn {
+            seq: 0,
+            turn_id: self.current_turn.lock().unwrap().clone(),
+            flow_run_id: None,
+            target: "context.compaction".into(),
+            trigger: "auto_compact".into(),
+            message,
+            ts: chrono::Utc::now(),
+        });
+        self.push_system_note(format!("[warn] compaction skipped: {reason}"));
+    }
+
     pub fn compact_messages(&self, summary: String) -> Option<CompactResult> {
         use crate::compaction::{
             estimate_tokens_for_messages, find_compact_range, replace_range_with_summary,
