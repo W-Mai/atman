@@ -13,6 +13,7 @@ pub enum OutputItem {
     },
     AssistantMd {
         md: String,
+        streaming: bool,
     },
     SystemNote {
         text: String,
@@ -71,7 +72,6 @@ pub struct AppState {
     pub layout_cache: crate::output::LayoutCache,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
-    pub pending_llm_text: String,
     last_lag_note_idx: Option<usize>,
     last_lag_at: Option<Instant>,
     last_lag_count: u64,
@@ -276,14 +276,25 @@ impl AppState {
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         match frame {
             StreamFrame::LlmChunk { text, .. } => {
-                self.pending_llm_text.push_str(&text);
-                self.streaming = true;
-                self.reset_lag_state();
+                if let Some(OutputItem::AssistantMd { md, streaming }) = self.items.last_mut()
+                    && *streaming
+                {
+                    md.push_str(&text);
+                    self.items_version = self.items_version.wrapping_add(1);
+                    self.streaming = true;
+                    self.reset_lag_state();
+                } else {
+                    self.push_item(OutputItem::AssistantMd {
+                        md: text,
+                        streaming: true,
+                    });
+                    self.streaming = true;
+                }
             }
             StreamFrame::LlmDone { .. } => {
-                if !self.pending_llm_text.is_empty() {
-                    let md = std::mem::take(&mut self.pending_llm_text);
-                    self.push_item(OutputItem::AssistantMd { md });
+                if let Some(OutputItem::AssistantMd { streaming, .. }) = self.items.last_mut() {
+                    *streaming = false;
+                    self.items_version = self.items_version.wrapping_add(1);
                 }
                 self.streaming = false;
                 self.reset_lag_state();
@@ -311,18 +322,13 @@ impl AppState {
 
     fn route_to_workflow_panel(&mut self, frame: &StreamFrame) {
         let mut mutated = false;
-        if let Some(OutputItem::WorkflowPanel {
-            graph, ended_at, ..
-        }) = self
+        if let Some(OutputItem::WorkflowPanel { graph, .. }) = self
             .items
             .iter_mut()
             .rev()
             .find(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
         {
             graph.apply_stream_frame(frame);
-            if let StreamFrame::FlowDone { .. } = frame {
-                *ended_at = Some(Instant::now());
-            }
             mutated = true;
         }
         if mutated {
@@ -331,17 +337,18 @@ impl AppState {
     }
 
     fn ensure_workflow_panel_and_apply(&mut self, frame: &StreamFrame) {
-        let has_open_panel = self
-            .items
-            .iter()
-            .rev()
-            .find_map(|it| match it {
-                OutputItem::WorkflowPanel { ended_at, .. } => Some(ended_at.is_none()),
-                OutputItem::UserTurn { .. } => Some(false),
-                _ => None,
-            })
-            .unwrap_or(false);
-        if !has_open_panel {
+        let mut panel_after_user_turn = false;
+        for it in self.items.iter().rev() {
+            match it {
+                OutputItem::WorkflowPanel { .. } => {
+                    panel_after_user_turn = true;
+                    break;
+                }
+                OutputItem::UserTurn { .. } => break,
+                _ => {}
+            }
+        }
+        if !panel_after_user_turn {
             let turn_index = self
                 .items
                 .iter()
@@ -357,6 +364,18 @@ impl AppState {
             });
         }
         self.route_to_workflow_panel(frame);
+    }
+
+    pub fn close_current_workflow_panel(&mut self) {
+        for it in self.items.iter_mut().rev() {
+            if let OutputItem::WorkflowPanel { ended_at, .. } = it {
+                if ended_at.is_none() {
+                    *ended_at = Some(Instant::now());
+                    self.items_version = self.items_version.wrapping_add(1);
+                }
+                return;
+            }
+        }
     }
 
     pub fn record_lag(&mut self, dropped: u64, now: Instant) {
@@ -388,6 +407,7 @@ impl AppState {
     }
 
     pub fn push_user_turn(&mut self, text: String) {
+        self.close_current_workflow_panel();
         self.push_item(OutputItem::UserTurn { text });
         self.items.push(OutputItem::Divider);
     }
@@ -398,7 +418,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunks_buffer_without_pushing_items_until_done() {
+    fn chunks_stream_incrementally_into_single_markdown_item() {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "hello ".into(),
@@ -408,26 +428,34 @@ mod tests {
             text: "world".into(),
             model: "m".into(),
         });
-        assert!(app.items.is_empty(), "no partial items during streaming");
-        assert_eq!(app.pending_llm_text, "hello world");
+        assert_eq!(app.items.len(), 1);
+        match &app.items[0] {
+            OutputItem::AssistantMd { md, streaming } => {
+                assert_eq!(md, "hello world");
+                assert!(*streaming);
+            }
+            _ => panic!("expected streaming assistant md"),
+        }
         assert!(app.streaming);
     }
 
     #[test]
-    fn done_flushes_pending_buffer_into_one_markdown_item() {
+    fn llm_done_flips_streaming_flag_without_duplicating_item() {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "hi".into(),
             model: "m".into(),
         });
         app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 3 });
-        assert_eq!(app.items.len(), 1);
+        assert_eq!(app.items.len(), 1, "no extra markdown item after done");
         match &app.items[0] {
-            OutputItem::AssistantMd { md } => assert_eq!(md, "hi"),
+            OutputItem::AssistantMd { md, streaming } => {
+                assert_eq!(md, "hi");
+                assert!(!streaming);
+            }
             _ => panic!(),
         }
         assert!(!app.streaming);
-        assert!(app.pending_llm_text.is_empty());
     }
 
     #[test]

@@ -131,7 +131,16 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             ),
             Span::raw(text.clone()),
         ])],
-        OutputItem::AssistantMd { md } => crate::markdown::render_markdown(md),
+        OutputItem::AssistantMd { md, streaming } => {
+            let mut lines = crate::markdown::render_markdown(md);
+            if *streaming {
+                lines.push(Line::from(Span::styled(
+                    "▏".to_string(),
+                    Style::default().add_modifier(Modifier::SLOW_BLINK),
+                )));
+            }
+            lines
+        }
         OutputItem::SystemNote { text, level } => {
             let (glyph, color) = match level {
                 NoteLevel::Info => ("·", Color::Blue),
@@ -420,6 +429,7 @@ mod tests {
             OutputItem::UserTurn { text: "hi".into() },
             OutputItem::AssistantMd {
                 md: "one line".into(),
+                streaming: false,
             },
             OutputItem::SystemNote {
                 text: "note".into(),

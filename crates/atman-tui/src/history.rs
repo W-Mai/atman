@@ -197,7 +197,10 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>) {
         MessageRole::Assistant => {
             for part in &msg.parts {
                 if let MessagePart::Text { text } = part {
-                    out.push(OutputItem::AssistantMd { md: text.clone() });
+                    out.push(OutputItem::AssistantMd {
+                        md: text.clone(),
+                        streaming: false,
+                    });
                 }
             }
         }

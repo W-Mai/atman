@@ -381,15 +381,15 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 ts: chrono::Utc::now(),
                             });
                             if let Some(session) = ctx.session {
-                                let _ = session
-                                    .stream_tx()
-                                    .send(crate::stream::StreamFrame::FlowNodeStart {
+                                let _ = session.stream_tx().send(
+                                    crate::stream::StreamFrame::FlowNodeStart {
                                         run_id: run_id.0.to_string(),
                                         node_id: branch_id.clone(),
                                         kind: crate::nodegraph::NodeKind::UserConfirm,
                                         label: format!("branch[{i}]"),
                                         parent_node_id: parent_id.clone(),
-                                    });
+                                    },
+                                );
                             }
                         }
                         ctx.with_node(branch_id)
@@ -418,15 +418,16 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             ts: chrono::Utc::now(),
                         });
                         if let Some(session) = ctx.session {
-                            let _ = session
-                                .stream_tx()
-                                .send(crate::stream::StreamFrame::FlowNodeEnd {
-                                    run_id: run_id.0.to_string(),
-                                    node_id: bid.clone(),
-                                    status,
-                                    output_preview: None,
-                                    parent_node_id: parent_id.clone(),
-                                });
+                            let _ =
+                                session
+                                    .stream_tx()
+                                    .send(crate::stream::StreamFrame::FlowNodeEnd {
+                                        run_id: run_id.0.to_string(),
+                                        node_id: bid.clone(),
+                                        status,
+                                        output_preview: None,
+                                        parent_node_id: parent_id.clone(),
+                                    });
                         }
                     }
                 }
