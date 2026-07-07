@@ -207,7 +207,9 @@ async fn dispatch_tool_call<'a>(
     };
     let ctx_with_anchors = ctx_with_anchors.with_current_node(ctx.current_node_id.clone());
     let ctx_with_anchors = if let Some(session) = ctx.session {
-        ctx_with_anchors.with_stream_tx(session.stream_tx())
+        ctx_with_anchors
+            .with_stream_tx(session.stream_tx())
+            .with_read_files(session.read_files())
     } else {
         ctx_with_anchors
     };

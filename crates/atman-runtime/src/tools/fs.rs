@@ -34,7 +34,7 @@ impl Tool for FsRead {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
             let offset = extract_optional_int(&args, "offset")?;
@@ -42,6 +42,8 @@ impl Tool for FsRead {
             let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
                 RuntimeError::ToolFailed(format!("fs.read({}): {e}", path.display()))
             })?;
+            let canonical = canonicalize_or_owned(&path);
+            ctx.note_read(&canonical);
             if offset.is_none() && limit.is_none() {
                 return Ok(Value::Str(content));
             }
@@ -49,6 +51,10 @@ impl Tool for FsRead {
             Ok(Value::Str(out))
         })
     }
+}
+
+fn canonicalize_or_owned(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn slice_lines(
@@ -123,7 +129,7 @@ impl Tool for FsWrite {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
             let content = extract_string(&args, "content", 1)?;
@@ -132,6 +138,8 @@ impl Tool for FsWrite {
                 .map_err(|e| {
                     RuntimeError::ToolFailed(format!("fs.write({}): {e}", path.display()))
                 })?;
+            let canonical = canonicalize_or_owned(&path);
+            ctx.note_read(&canonical);
             Ok(Value::Path(path))
         })
     }
@@ -185,12 +193,20 @@ impl Tool for FsEdit {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
             let old_string = extract_string(&args, "old_string", 1)?;
             let new_string = extract_string(&args, "new_string", 2)?;
             let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
+            let canonical = canonicalize_or_owned(&path);
+            if ctx.read_files.is_some() && !ctx.has_read(&canonical) {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "fs.edit({}): file has not been read in this session. Call fs.read({}) first so the model works on current content.",
+                    path.display(),
+                    path.display()
+                )));
+            }
             if old_string == new_string {
                 return Err(RuntimeError::ToolFailed(format!(
                     "fs.edit({}): old_string equals new_string — edit would be a no-op",
@@ -612,6 +628,49 @@ mod tests {
         };
         let err = FsEdit.call(args, &ctx).await.unwrap_err();
         assert!(format!("{err}").contains("no-op"));
+    }
+
+    #[tokio::test]
+    async fn fs_edit_requires_prior_read_when_tracker_present() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, b"foo\n").await.unwrap();
+        let ctx = ToolCtx::new().with_read_files(std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashSet::new(),
+        )));
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(path)),
+                ("old_string".into(), Value::Str("foo".into())),
+                ("new_string".into(), Value::Str("bar".into())),
+            ],
+        };
+        let err = FsEdit.call(args, &ctx).await.unwrap_err();
+        assert!(format!("{err}").contains("has not been read"));
+    }
+
+    #[tokio::test]
+    async fn fs_edit_allowed_after_fs_read() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, b"foo\n").await.unwrap();
+        let tracker = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let ctx = ToolCtx::new().with_read_files(tracker);
+        let read_args = ToolArgs {
+            positional: vec![Value::Path(path.clone())],
+            named: vec![],
+        };
+        FsRead.call(read_args, &ctx).await.unwrap();
+        let edit_args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(path.clone())),
+                ("old_string".into(), Value::Str("foo".into())),
+                ("new_string".into(), Value::Str("bar".into())),
+            ],
+        };
+        FsEdit.call(edit_args, &ctx).await.unwrap();
     }
 
     #[tokio::test]

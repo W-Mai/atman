@@ -47,6 +47,7 @@ pub struct Session {
     todos_watch: watch::Sender<Vec<crate::memory::todo::Todo>>,
     streamed_this_turn: std::sync::atomic::AtomicBool,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
+    read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
 }
 
 type ImagePart = (usize, String);
@@ -390,6 +391,9 @@ impl Session {
             todos_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
+            read_files: std::sync::Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
         })
     }
 
@@ -443,6 +447,9 @@ impl Session {
             todos_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
+            read_files: std::sync::Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
         })
     }
 
@@ -470,6 +477,24 @@ impl Session {
             todos_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             last_image_user_msg: Mutex::new(None),
+            read_files: std::sync::Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
+        }
+    }
+
+    pub fn read_files(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> {
+        self.read_files.clone()
+    }
+
+    pub fn mark_file_read(&self, path: &std::path::Path) {
+        if let Ok(mut set) = self.read_files.lock() {
+            set.insert(path.to_path_buf());
+            if let Ok(canonical) = std::fs::canonicalize(path) {
+                set.insert(canonical);
+            }
         }
     }
 

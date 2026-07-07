@@ -62,6 +62,8 @@ pub struct ToolCtx {
     pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
     pub current_node_id: Option<String>,
     pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    pub read_files:
+        Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>>,
 }
 
 impl ToolCtx {
@@ -112,6 +114,29 @@ impl ToolCtx {
     pub fn with_current_node(mut self, node_id: Option<String>) -> Self {
         self.current_node_id = node_id;
         self
+    }
+
+    pub fn with_read_files(
+        mut self,
+        set: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
+    ) -> Self {
+        self.read_files = Some(set);
+        self
+    }
+
+    pub fn note_read(&self, path: &std::path::Path) {
+        if let Some(set) = &self.read_files
+            && let Ok(mut lock) = set.lock()
+        {
+            lock.insert(path.to_path_buf());
+        }
+    }
+
+    pub fn has_read(&self, path: &std::path::Path) -> bool {
+        self.read_files
+            .as_ref()
+            .and_then(|set| set.lock().ok().map(|lock| lock.contains(path)))
+            .unwrap_or(false)
     }
 
     pub fn with_stream_tx(
