@@ -140,6 +140,64 @@ fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
     Ok(out)
 }
 
+#[derive(Debug, Clone)]
+struct AttachmentPatch {
+    part_index: usize,
+    file_basename: String,
+    reason: String,
+}
+
+fn parse_json_lines(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .filter_map(|line| {
+            let t = line.trim();
+            if t.is_empty() {
+                None
+            } else {
+                serde_json::from_str::<serde_json::Value>(t).ok()
+            }
+        })
+        .collect()
+}
+
+fn collect_attachment_patches(
+    values: &[serde_json::Value],
+) -> std::collections::HashMap<u64, Vec<AttachmentPatch>> {
+    let mut map: std::collections::HashMap<u64, Vec<AttachmentPatch>> =
+        std::collections::HashMap::new();
+    for v in values {
+        if v["type"].as_str() == Some("attachment_degraded") {
+            let Some(msg_seq) = v["message_seq"].as_u64() else {
+                continue;
+            };
+            let Some(part_index) = v["part_index"].as_u64() else {
+                continue;
+            };
+            let file_basename = v["file_basename"].as_str().unwrap_or("").to_string();
+            let reason = v["reason"].as_str().unwrap_or("degraded").to_string();
+            map.entry(msg_seq).or_default().push(AttachmentPatch {
+                part_index: part_index as usize,
+                file_basename,
+                reason,
+            });
+        }
+    }
+    map
+}
+
+fn apply_attachment_patches(msg: &mut Message, patches: &[AttachmentPatch]) {
+    for p in patches {
+        if let Some(part) = msg.parts.get_mut(p.part_index) {
+            *part = crate::message::MessagePart::Text {
+                text: format!(
+                    "[attachment unavailable: {} — {}]",
+                    p.file_basename, p.reason
+                ),
+            };
+        }
+    }
+}
+
 pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, SessionOpenError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -151,21 +209,21 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
             });
         }
     };
+    let values = parse_json_lines(&text);
+    let patches = collect_attachment_patches(&values);
     let mut out = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
+    for v in &values {
         let ty = v["type"].as_str().unwrap_or("");
         match ty {
             "user_msg" | "assistant_msg" | "tool_result_msg" | "system_msg" => {
                 if let Some(m) = v.get("message")
-                    && let Ok(msg) = serde_json::from_value::<Message>(m.clone())
+                    && let Ok(mut msg) = serde_json::from_value::<Message>(m.clone())
                 {
+                    if let Some(seq) = v["seq"].as_u64()
+                        && let Some(ps) = patches.get(&seq)
+                    {
+                        apply_attachment_patches(&mut msg, ps);
+                    }
                     let flow_run_id = v["flow_run_id"].as_str().map(String::from);
                     out.push(TranscriptEntry::Message {
                         message: msg,
@@ -703,4 +761,63 @@ impl Session {
 pub enum EnqueueError {
     #[error("enqueue_injection called with no active turn")]
     NoActiveTurn,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write_events(dir: &Path, lines: &[&str]) {
+        let path = dir.join("events.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    }
+
+    #[test]
+    fn replay_applies_attachment_degraded_patch() {
+        let dir = TempDir::new().unwrap();
+        let user_msg = r#"{"type":"user_msg","seq":5,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"image","source":{"media_type":"image/png","data":{"kind":"path","path":"/tmp/photo.png"}}},{"type":"text","text":"describe"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:00Z"}"#;
+        let degrade = r#"{"type":"attachment_degraded","seq":6,"turn_id":null,"flow_run_id":null,"message_seq":5,"part_index":0,"file_basename":"photo.png","reason":"image_too_large","ts":"2026-07-07T00:00:01Z"}"#;
+        write_events(dir.path(), &[user_msg, degrade]);
+        let entries = replay_transcript_from(&dir.path().join("events.jsonl")).unwrap();
+        let msg = entries
+            .into_iter()
+            .find_map(|e| match e {
+                TranscriptEntry::Message { message, .. } => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(msg.parts.len(), 2);
+        match &msg.parts[0] {
+            crate::message::MessagePart::Text { text } => {
+                assert!(text.contains("photo.png"), "expected basename: {text}");
+                assert!(text.contains("image_too_large"), "expected reason: {text}");
+                assert!(text.starts_with("[attachment unavailable"));
+            }
+            other => panic!("expected Text stub, got {other:?}"),
+        }
+        assert!(matches!(
+            msg.parts[1],
+            crate::message::MessagePart::Text { .. }
+        ));
+    }
+
+    #[test]
+    fn replay_without_degraded_events_preserves_image_parts() {
+        let dir = TempDir::new().unwrap();
+        let user_msg = r#"{"type":"user_msg","seq":1,"turn_id":"019f0000-0000-7000-0000-000000000002","message":{"role":"user","parts":[{"type":"image","source":{"media_type":"image/png","data":{"kind":"path","path":"/tmp/x.png"}}}],"turn_id":"019f0000-0000-7000-0000-000000000002"},"ts":"2026-07-07T00:00:00Z"}"#;
+        write_events(dir.path(), &[user_msg]);
+        let entries = replay_transcript_from(&dir.path().join("events.jsonl")).unwrap();
+        let msg = entries
+            .into_iter()
+            .find_map(|e| match e {
+                TranscriptEntry::Message { message, .. } => Some(message),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(
+            msg.parts[0],
+            crate::message::MessagePart::Image { .. }
+        ));
+    }
 }
