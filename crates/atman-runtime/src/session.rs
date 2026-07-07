@@ -493,6 +493,9 @@ impl Session {
         let id = SessionId::now();
         let dir = root.as_ref().join("sessions").join(id.to_string());
         let writer = EventWriter::spawn_with(&dir, redactor.clone())?;
+        if let Err(e) = crate::session_meta::SessionMeta::from_cwd().save(&dir) {
+            eprintln!("[atman] session meta write failed: {e}");
+        }
         let mut sink = EventSink::new().with_forwarder(writer.sender());
         if let Some(r) = redactor {
             sink = sink.with_redactor(r);
@@ -694,6 +697,10 @@ impl Session {
 
     pub fn subscribe_pending_approvals(&self) -> watch::Receiver<Vec<PendingApproval>> {
         self.approval.subscribe()
+    }
+
+    pub fn meta(&self) -> Option<crate::session_meta::SessionMeta> {
+        crate::session_meta::SessionMeta::load(&self.dir)
     }
 
     pub fn set_goal(&self, goal: Option<String>) {

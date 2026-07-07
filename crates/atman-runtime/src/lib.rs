@@ -30,6 +30,7 @@ pub mod rendezvous;
 pub mod safety;
 pub mod sandbox;
 pub mod session;
+pub mod session_meta;
 pub mod stream;
 pub mod tool;
 pub mod tool_naming;
