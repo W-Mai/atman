@@ -98,6 +98,8 @@ pub fn register_memory(
     }));
     reg.register(Arc::new(memory::MemoryGoalClear { store: goal_store }));
     reg.register(Arc::new(memory::MemoryRecentTurns));
+    reg.register(Arc::new(memory::MemoryHistorySearch));
+    reg.register(Arc::new(memory::MemoryHistoryRead));
     reg.register(Arc::new(plan::PlanWrite {
         store: plan_store.clone(),
     }));

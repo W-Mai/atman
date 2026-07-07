@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::RuntimeError;
@@ -413,6 +414,277 @@ impl Tool for MemoryFetchConfessions {
             Ok(Value::List(list))
         })
     }
+}
+
+pub struct MemoryHistorySearch;
+
+impl Tool for MemoryHistorySearch {
+    fn name(&self) -> &str {
+        "memory.history.search"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Full-text search the current session's chat history (or optionally every session \
+             in the same project). Use it to recall past turns that fell out of your working \
+             context — e.g. `plan we agreed on this morning`, `which files did we read`, \
+             `error the user reported earlier`. NOT for searching source code; use fs.grep for \
+             that. Params: query (FTS5 syntax, required), scope (\"session\"|\"project\", \
+             default \"session\"), limit (int, default 10, max 50).",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "scope": {"type": "string", "enum": ["session", "project"], "default": "session"},
+                "limit": {"type": "integer", "default": 10}
+            },
+            "required": ["query"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let query = required_string(&args, "query")?;
+            if query.trim().is_empty() {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.history.search: empty query".into(),
+                ));
+            }
+            let scope = match args.named("scope") {
+                Some(Value::Str(s)) if s == "project" => HistoryScope::Project,
+                _ => HistoryScope::Session,
+            };
+            let limit = match args.named("limit") {
+                Some(Value::Int(n)) if *n > 0 => (*n as usize).min(50),
+                _ => 10,
+            };
+            let Some(session_dir) = ctx.session_dir.as_ref() else {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.history.search: no session dir on context".into(),
+                ));
+            };
+            let dirs = match scope {
+                HistoryScope::Session => vec![session_dir.clone()],
+                HistoryScope::Project => sibling_sessions_for_project(session_dir)
+                    .unwrap_or_else(|| vec![session_dir.clone()]),
+            };
+            let mut hits: Vec<Value> = Vec::new();
+            for dir in dirs {
+                let idx = match crate::index::AnchorIndex::open_session(&dir) {
+                    Ok(i) => i,
+                    Err(_) => continue,
+                };
+                let rows = match idx.fts_search_events(&query, limit) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let sid = dir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                for row in rows {
+                    let snippet: String = row
+                        .payload
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                        .replace('\n', " ");
+                    hits.push(Value::Struct(vec![
+                        ("session_id".into(), Value::Str(sid.clone())),
+                        ("seq".into(), Value::Int(row.seq as i64)),
+                        ("ts".into(), Value::Str(row.ts.clone())),
+                        ("kind".into(), Value::Str(row.kind.clone())),
+                        ("snippet".into(), Value::Str(snippet)),
+                    ]));
+                }
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+            hits.truncate(limit);
+            Ok(Value::List(hits))
+        })
+    }
+}
+
+pub struct MemoryHistoryRead;
+
+impl Tool for MemoryHistoryRead {
+    fn name(&self) -> &str {
+        "memory.history.read"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Paginate through past messages of a session by turn index. Prefer \
+             memory.history.search first to find a hit, then call this for surrounding context. \
+             Params: session_id (string, default current session's directory name), offset \
+             (1-based turn index, default 1), limit (int, default 20, max 100), role_filter \
+             (comma-separated: user,assistant,tool; default all).",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "offset": {"type": "integer", "default": 1},
+                "limit": {"type": "integer", "default": 20},
+                "role_filter": {"type": "string"}
+            }
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let Some(current_dir) = ctx.session_dir.as_ref() else {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.history.read: no session dir on context".into(),
+                ));
+            };
+            let dir = match args.named("session_id") {
+                Some(Value::Str(sid)) if !sid.is_empty() => {
+                    let sessions_parent = current_dir.parent().unwrap_or(current_dir);
+                    let candidate = sessions_parent.join(sid);
+                    if !candidate.is_dir() {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "memory.history.read: session `{sid}` not found at {}",
+                            candidate.display()
+                        )));
+                    }
+                    candidate
+                }
+                _ => current_dir.clone(),
+            };
+            let offset = match args.named("offset") {
+                Some(Value::Int(n)) if *n >= 1 => *n as usize,
+                _ => 1,
+            };
+            let limit = match args.named("limit") {
+                Some(Value::Int(n)) if *n >= 1 => (*n as usize).min(100),
+                _ => 20,
+            };
+            let role_filter: Option<Vec<String>> = match args.named("role_filter") {
+                Some(Value::Str(s)) if !s.is_empty() => Some(
+                    s.split(',')
+                        .map(|t| t.trim().to_lowercase())
+                        .filter(|t| !t.is_empty())
+                        .collect(),
+                ),
+                _ => None,
+            };
+            let messages = load_session_messages(&dir, role_filter.as_deref())?;
+            let total = messages.len();
+            let start = offset.saturating_sub(1);
+            let end = (start + limit).min(total);
+            let slice: Vec<Value> = if start >= total {
+                Vec::new()
+            } else {
+                messages[start..end]
+                    .iter()
+                    .cloned()
+                    .map(Value::Message)
+                    .collect()
+            };
+            let header = format!("[history: turns {start}-{end} of {total}]");
+            Ok(Value::Struct(vec![
+                ("header".into(), Value::Str(header)),
+                ("turns".into(), Value::List(slice)),
+            ]))
+        })
+    }
+}
+
+enum HistoryScope {
+    Session,
+    Project,
+}
+
+fn sibling_sessions_for_project(session_dir: &std::path::Path) -> Option<Vec<PathBuf>> {
+    let meta = crate::session_meta::SessionMeta::load(session_dir)?;
+    let want = meta.project_fingerprint.as_deref()?;
+    let sessions_parent = session_dir.parent()?;
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(sessions_parent).ok()? {
+        let entry = entry.ok()?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let peer_meta = crate::session_meta::SessionMeta::load(&entry.path());
+        let fp = peer_meta
+            .as_ref()
+            .and_then(|m| m.project_fingerprint.clone());
+        if fp.as_deref() == Some(want) {
+            out.push(entry.path());
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn load_session_messages(
+    session_dir: &std::path::Path,
+    role_filter: Option<&[String]>,
+) -> Result<Vec<crate::message::Message>, RuntimeError> {
+    let events_path = session_dir.join("events.jsonl");
+    let contents = match std::fs::read_to_string(&events_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(RuntimeError::ToolFailed(format!(
+                "memory.history.read: reading {} failed: {e}",
+                events_path.display()
+            )));
+        }
+    };
+    let mut out = Vec::new();
+    for line in contents.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let kind = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if !matches!(
+            kind,
+            "user_msg" | "assistant_msg" | "tool_result_msg" | "system_msg"
+        ) {
+            continue;
+        }
+        let message_json = match value.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+        let msg: crate::message::Message = match serde_json::from_value(message_json.clone()) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if let Some(filter) = role_filter {
+            let role = msg.role.as_str();
+            if !filter.iter().any(|f| f == role) {
+                continue;
+            }
+        }
+        out.push(msg);
+    }
+    Ok(out)
 }
 
 fn required_string(args: &ToolArgs, name: &str) -> Result<String, RuntimeError> {

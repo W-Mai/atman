@@ -83,6 +83,8 @@ pub struct ToolCtx {
         Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>>,
     pub approval: Option<std::sync::Arc<crate::session::ApprovalRegistry>>,
     pub providers: Option<std::sync::Arc<crate::provider::ProviderRegistry>>,
+    pub session_dir: Option<std::path::PathBuf>,
+    pub data_root: Option<std::path::PathBuf>,
 }
 
 impl ToolCtx {
@@ -148,6 +150,16 @@ impl ToolCtx {
         providers: std::sync::Arc<crate::provider::ProviderRegistry>,
     ) -> Self {
         self.providers = Some(providers);
+        self
+    }
+
+    pub fn with_session_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.session_dir = Some(dir);
+        self
+    }
+
+    pub fn with_data_root(mut self, dir: std::path::PathBuf) -> Self {
+        self.data_root = Some(dir);
         self
     }
 
