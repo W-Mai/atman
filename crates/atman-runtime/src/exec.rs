@@ -483,6 +483,9 @@ async fn run_streaming_once<'a>(
             ev = events.recv() => {
                 match ev {
                     Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
+                        if let Some(session) = ctx.session {
+                            session.mark_streamed();
+                        }
                         if let Some(tx) = &stream_tx {
                             let _ = tx.send(crate::stream::StreamFrame::LlmChunk {
                                 text: text.clone(),
@@ -533,6 +536,9 @@ async fn run_streaming_once<'a>(
                 text,
                 cumulative_tokens,
             } => {
+                if let Some(session) = ctx.session {
+                    session.mark_streamed();
+                }
                 if let Some(tx) = &stream_tx {
                     let _ = tx.send(crate::stream::StreamFrame::LlmChunk {
                         text: text.clone(),

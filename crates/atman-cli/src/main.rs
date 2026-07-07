@@ -1304,9 +1304,10 @@ async fn run_turn_with_interjection(
         }
     };
 
+    let streamed = session.take_streamed_flag();
     match result {
         Ok(v) => {
-            if !reporter.is_tui() {
+            if !(reporter.is_tui() && streamed) {
                 let rendered = render_value(&v);
                 if !rendered.is_empty() {
                     reporter.info(rendered);

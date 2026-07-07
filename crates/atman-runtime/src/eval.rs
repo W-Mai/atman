@@ -289,6 +289,7 @@ async fn call_and_maybe_stream(
             ev = events.recv() => {
                 match ev {
                     Ok(crate::event::NodeEvent::LlmChunk { text, .. }) => {
+                        session.mark_streamed();
                         let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
                             text,
                             model: model_name.clone(),
@@ -304,6 +305,7 @@ async fn call_and_maybe_stream(
                 while let Ok(ev) = events.try_recv() {
                     match ev {
                         crate::event::NodeEvent::LlmChunk { text, .. } => {
+                            session.mark_streamed();
                             let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
                                 text,
                                 model: model_name.clone(),

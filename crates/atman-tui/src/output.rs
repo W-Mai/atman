@@ -192,13 +192,18 @@ fn render_workflow_panel(
     ended_at: Option<std::time::Instant>,
     animation_frame: u32,
 ) -> Vec<Line<'static>> {
-    let running = ended_at.is_none();
-    let elapsed = ended_at
-        .unwrap_or_else(std::time::Instant::now)
-        .saturating_duration_since(started_at)
-        .as_secs();
     let count = count_workflow_nodes(&graph.root);
-    let (status_str, status_style) = workflow_overall_status(&graph.root);
+    let (status_str, status_style, running) = workflow_overall_status(&graph.root);
+    let elapsed = if running {
+        std::time::Instant::now()
+            .saturating_duration_since(started_at)
+            .as_secs()
+    } else {
+        ended_at
+            .unwrap_or_else(std::time::Instant::now)
+            .saturating_duration_since(started_at)
+            .as_secs()
+    };
     let fold_glyph = if panel_expanded { "▼" } else { "▶" };
     let flow_glyph = if running {
         spinner_char(animation_frame)
@@ -245,7 +250,9 @@ fn count_workflow_nodes(nodes: &[atman_runtime::workflow::WorkflowNode]) -> usiz
         .sum()
 }
 
-fn workflow_overall_status(nodes: &[atman_runtime::workflow::WorkflowNode]) -> (String, Style) {
+fn workflow_overall_status(
+    nodes: &[atman_runtime::workflow::WorkflowNode],
+) -> (String, Style, bool) {
     use atman_runtime::workflow::NodeStatus;
     fn walk(ns: &[atman_runtime::workflow::WorkflowNode], running: &mut bool, err: &mut bool) {
         for n in ns {
@@ -260,14 +267,22 @@ fn workflow_overall_status(nodes: &[atman_runtime::workflow::WorkflowNode]) -> (
     let mut has_running = false;
     let mut has_err = false;
     walk(nodes, &mut has_running, &mut has_err);
-    if has_err {
-        ("err".into(), Style::default().fg(Color::Red))
-    } else if has_running {
-        ("running…".into(), Style::default().fg(Color::Yellow))
+    if has_running {
+        (
+            "running…".into(),
+            Style::default().fg(Color::Yellow),
+            true,
+        )
+    } else if has_err {
+        ("err".into(), Style::default().fg(Color::Red), false)
     } else if nodes.is_empty() {
-        ("empty".into(), Style::default().fg(Color::DarkGray))
+        (
+            "empty".into(),
+            Style::default().fg(Color::DarkGray),
+            false,
+        )
     } else {
-        ("ok".into(), Style::default().fg(Color::Green))
+        ("ok".into(), Style::default().fg(Color::Green), false)
     }
 }
 

@@ -45,6 +45,7 @@ pub struct Session {
     goal_watch: watch::Sender<Option<String>>,
     attach_watch: watch::Sender<usize>,
     todos_watch: watch::Sender<Vec<crate::memory::todo::Todo>>,
+    streamed_this_turn: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -296,6 +297,7 @@ impl Session {
             goal_watch,
             attach_watch,
             todos_watch,
+            streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -347,6 +349,7 @@ impl Session {
             goal_watch,
             attach_watch,
             todos_watch,
+            streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -372,6 +375,7 @@ impl Session {
             goal_watch,
             attach_watch,
             todos_watch,
+            streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -567,7 +571,19 @@ impl Session {
         turn_id
     }
 
+    pub fn mark_streamed(&self) {
+        self.streamed_this_turn
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn take_streamed_flag(&self) -> bool {
+        self.streamed_this_turn
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn end_turn(&self) {
+        self.streamed_this_turn
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let turn_id = self.current_turn.lock().unwrap().take();
         if let Some(turn_id) = turn_id {
             let now = chrono::Utc::now();
