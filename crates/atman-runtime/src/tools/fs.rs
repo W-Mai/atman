@@ -16,14 +16,19 @@ impl Tool for FsRead {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Read a UTF-8 text file from disk and return the whole contents as a string.")
+        Some(
+            "Read a UTF-8 text file. Use `offset` (1-indexed) + `limit` to fetch a slice of a large \
+             file (recommended over reading the whole file when you only need part of it).",
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Absolute or relative file path."}
+                "path": {"type": "string", "description": "Absolute or relative file path."},
+                "offset": {"type": "integer", "description": "1-indexed start line. Omit to read from the beginning."},
+                "limit": {"type": "integer", "description": "Maximum number of lines to return. Omit to read to end."}
             },
             "required": ["path"]
         })
@@ -32,11 +37,57 @@ impl Tool for FsRead {
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
+            let offset = extract_optional_int(&args, "offset")?;
+            let limit = extract_optional_int(&args, "limit")?;
             let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
                 RuntimeError::ToolFailed(format!("fs.read({}): {e}", path.display()))
             })?;
-            Ok(Value::Str(content))
+            if offset.is_none() && limit.is_none() {
+                return Ok(Value::Str(content));
+            }
+            let out = slice_lines(&content, offset, limit, &path);
+            Ok(Value::Str(out))
         })
+    }
+}
+
+fn slice_lines(
+    content: &str,
+    offset: Option<i64>,
+    limit: Option<i64>,
+    path: &std::path::Path,
+) -> String {
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let total = lines.len();
+    let start_line = offset.unwrap_or(1).max(1) as usize;
+    let start_idx = start_line.saturating_sub(1);
+    if start_idx >= total {
+        return format!(
+            "[fs.read({}): offset={start_line} exceeds file length {total}. File has {total} line(s).]",
+            path.display()
+        );
+    }
+    let take = match limit {
+        Some(n) if n > 0 => n as usize,
+        _ => total.saturating_sub(start_idx),
+    };
+    let end_idx = (start_idx + take).min(total);
+    let body: String = lines[start_idx..end_idx].concat();
+    let end_line = end_idx;
+    format!(
+        "[fs.read({}): lines {start_line}-{end_line} of {total}]\n{body}",
+        path.display()
+    )
+}
+
+fn extract_optional_int(args: &ToolArgs, name: &str) -> Result<Option<i64>, RuntimeError> {
+    match args.named(name) {
+        None => Ok(None),
+        Some(Value::Int(n)) => Ok(Some(*n)),
+        Some(other) => Err(RuntimeError::TypeMismatch {
+            expected: "integer".into(),
+            actual: other.kind_name().into(),
+        }),
     }
 }
 
@@ -244,5 +295,63 @@ mod tests {
         let args = ToolArgs::default();
         let err = FsRead.call(args, &ctx).await.unwrap_err();
         assert!(matches!(err, RuntimeError::MissingArg(_)));
+    }
+
+    #[tokio::test]
+    async fn fs_read_offset_limit_returns_slice_with_header() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("multi.txt");
+        tokio::fs::write(&path, b"line1\nline2\nline3\nline4\nline5\n")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Path(path.clone())],
+            named: vec![
+                ("offset".into(), Value::Int(2)),
+                ("limit".into(), Value::Int(2)),
+            ],
+        };
+        let v = FsRead.call(args, &ctx).await.unwrap();
+        let s = match v {
+            Value::Str(s) => s,
+            _ => panic!(),
+        };
+        assert!(s.contains("lines 2-3 of 5"), "header missing: {s}");
+        assert!(s.contains("line2\nline3"), "body wrong: {s}");
+        assert!(!s.contains("line1"));
+        assert!(!s.contains("line4"));
+    }
+
+    #[tokio::test]
+    async fn fs_read_offset_past_end_reports_bounds() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("short.txt");
+        tokio::fs::write(&path, b"only\n").await.unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Path(path)],
+            named: vec![("offset".into(), Value::Int(99))],
+        };
+        let v = FsRead.call(args, &ctx).await.unwrap();
+        let s = match v {
+            Value::Str(s) => s,
+            _ => panic!(),
+        };
+        assert!(s.contains("offset=99 exceeds"), "expected bounds msg: {s}");
+    }
+
+    #[tokio::test]
+    async fn fs_read_without_offset_limit_is_backward_compatible() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("plain.txt");
+        tokio::fs::write(&path, b"one\ntwo\n").await.unwrap();
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Path(path)],
+            named: vec![],
+        };
+        let v = FsRead.call(args, &ctx).await.unwrap();
+        assert!(matches!(v, Value::Str(s) if s == "one\ntwo\n"));
     }
 }
