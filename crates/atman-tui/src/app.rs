@@ -299,7 +299,9 @@ impl AppState {
             | StreamFrame::FlowNodeStart { .. }
             | StreamFrame::FlowNodeEnd { .. }
             | StreamFrame::FlowDone { .. }
-            | StreamFrame::ToolNode { .. }) => {
+            | StreamFrame::ToolNode { .. }
+            | StreamFrame::AssistantMsg { .. }
+            | StreamFrame::ToolResultMsg { .. }) => {
                 self.ensure_workflow_panel_and_apply(&frame);
             }
             StreamFrame::Unknown => {}

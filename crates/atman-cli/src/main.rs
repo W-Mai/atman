@@ -1224,6 +1224,8 @@ fn render_stream_frame(
         | StreamFrame::FlowNodeEnd { .. }
         | StreamFrame::FlowDone { .. }
         | StreamFrame::ToolNode { .. }
+        | StreamFrame::AssistantMsg { .. }
+        | StreamFrame::ToolResultMsg { .. }
         | StreamFrame::Unknown => {}
     }
 }

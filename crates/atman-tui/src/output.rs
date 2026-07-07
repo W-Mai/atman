@@ -286,7 +286,7 @@ fn append_workflow_node(
     let (kind_glyph, kind_color) = match &node.kind {
         WorkflowNodeKind::Flow { .. } => ("⚡", Color::Cyan),
         WorkflowNodeKind::Subflow { .. } => ("↳", Color::Cyan),
-        WorkflowNodeKind::Stmt => ("•", Color::White),
+        WorkflowNodeKind::Stmt { node_kind } => stmt_kind_glyph(node_kind),
         WorkflowNodeKind::ToolCall { .. } => ("🔧", Color::Blue),
         WorkflowNodeKind::FanoutBranch { .. } => ("⇉", Color::Magenta),
     };
@@ -335,6 +335,21 @@ fn append_workflow_node(
             animation_frame,
             flow_running,
         );
+    }
+}
+
+fn stmt_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, Color) {
+    use atman_runtime::nodegraph::NodeKind;
+    match kind {
+        NodeKind::Llm { .. } => ("✦", Color::Yellow),
+        NodeKind::ToolCall { .. } => ("🔧", Color::Blue),
+        NodeKind::Fanout { .. } => ("⇉", Color::Magenta),
+        NodeKind::UserConfirm => ("?", Color::LightCyan),
+        NodeKind::Subflow { .. } => ("↳", Color::Cyan),
+        NodeKind::Message { .. } => ("✉", Color::White),
+        NodeKind::FixUntilTest => ("↻", Color::Yellow),
+        NodeKind::When { .. } => ("⋯", Color::DarkGray),
+        NodeKind::Return => ("←", Color::Green),
     }
 }
 
@@ -455,7 +470,9 @@ mod tests {
             children: vec![
                 WorkflowNode {
                     id: "s0".into(),
-                    kind: WorkflowNodeKind::Stmt,
+                    kind: WorkflowNodeKind::Stmt {
+                        node_kind: atman_runtime::nodegraph::NodeKind::UserConfirm,
+                    },
                     label: "step0".into(),
                     status: NodeStatus::Ok,
                     started_at: None,
@@ -466,7 +483,9 @@ mod tests {
                 },
                 WorkflowNode {
                     id: "s1".into(),
-                    kind: WorkflowNodeKind::Stmt,
+                    kind: WorkflowNodeKind::Stmt {
+                        node_kind: atman_runtime::nodegraph::NodeKind::UserConfirm,
+                    },
                     label: "step1".into(),
                     status: NodeStatus::Ok,
                     started_at: None,
@@ -514,7 +533,9 @@ mod tests {
             output_preview: None,
             children: vec![WorkflowNode {
                 id: "child".into(),
-                kind: WorkflowNodeKind::Stmt,
+                kind: WorkflowNodeKind::Stmt {
+                    node_kind: atman_runtime::nodegraph::NodeKind::UserConfirm,
+                },
                 label: "hidden-child".into(),
                 status: NodeStatus::Ok,
                 started_at: None,

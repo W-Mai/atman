@@ -44,13 +44,23 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     };
     for entry in entries {
         match entry {
-            TranscriptEntry::Message(msg) => {
+            TranscriptEntry::Message {
+                message: msg,
+                flow_run_id,
+            } => {
                 if matches!(msg.role, MessageRole::User)
                     && let Some(i) = current_workflow_idx.take()
                     && let Some(OutputItem::WorkflowPanel { ended_at, .. }) = out.get_mut(i)
                     && ended_at.is_none()
                 {
                     *ended_at = Some(Instant::now());
+                }
+                if matches!(msg.role, MessageRole::Assistant | MessageRole::Tool)
+                    && flow_run_id.is_some()
+                    && let Some(idx) = current_workflow_idx
+                    && let Some(OutputItem::WorkflowPanel { graph, .. }) = out.get_mut(idx)
+                {
+                    apply_message_to_workflow(graph, msg, flow_run_id.as_deref());
                 }
                 flatten_message(msg, &mut out);
             }
@@ -65,10 +75,28 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     },
                 );
             }
-            TranscriptEntry::FlowNodeStatus {
+            TranscriptEntry::FlowStart {
+                run_id, flow_name, ..
+            } => {
+                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
+                apply_workflow(
+                    &mut out,
+                    panel_idx,
+                    &StreamFrame::FlowGraph {
+                        run_id: run_id.clone(),
+                        graph: atman_runtime::nodegraph::FlowGraph {
+                            flow_name: flow_name.clone(),
+                            root: Vec::new(),
+                        },
+                    },
+                );
+            }
+            TranscriptEntry::FlowNodeStart {
                 run_id,
                 node_id,
-                status,
+                kind,
+                label,
+                parent_node_id,
             } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
@@ -77,11 +105,19 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     &StreamFrame::FlowNodeStart {
                         run_id: run_id.clone(),
                         node_id: node_id.clone(),
-                        kind: atman_runtime::nodegraph::NodeKind::UserConfirm,
-                        label: node_id.clone(),
-                        parent_node_id: None,
+                        kind: kind.clone(),
+                        label: label.clone(),
+                        parent_node_id: parent_node_id.clone(),
                     },
                 );
+            }
+            TranscriptEntry::FlowNodeEnd {
+                run_id,
+                node_id,
+                status,
+                output_preview,
+            } => {
+                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
                     panel_idx,
@@ -89,8 +125,28 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         run_id: run_id.clone(),
                         node_id: node_id.clone(),
                         status: status.clone(),
-                        output_preview: None,
+                        output_preview: output_preview.clone(),
                         parent_node_id: None,
+                    },
+                );
+            }
+            TranscriptEntry::ToolNode {
+                run_id,
+                parent_node_id,
+                tool_use_id,
+                tool_name,
+                args_preview,
+            } => {
+                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
+                apply_workflow(
+                    &mut out,
+                    panel_idx,
+                    &StreamFrame::ToolNode {
+                        run_id: run_id.clone(),
+                        parent_node_id: parent_node_id.clone(),
+                        tool_use_id: tool_use_id.clone(),
+                        tool: tool_name.clone(),
+                        args_preview: args_preview.clone(),
                     },
                 );
             }
@@ -109,6 +165,24 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
         }
     }
     out
+}
+
+fn apply_message_to_workflow(graph: &mut WorkflowGraph, msg: &Message, flow_run_id: Option<&str>) {
+    match msg.role {
+        MessageRole::Assistant => {
+            graph.apply_stream_frame(&StreamFrame::AssistantMsg {
+                flow_run_id: flow_run_id.map(String::from),
+                message: msg.clone(),
+            });
+        }
+        MessageRole::Tool => {
+            graph.apply_stream_frame(&StreamFrame::ToolResultMsg {
+                flow_run_id: flow_run_id.map(String::from),
+                message: msg.clone(),
+            });
+        }
+        _ => {}
+    }
 }
 
 fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>) {
@@ -246,10 +320,11 @@ mod tests {
                     root: Vec::new(),
                 },
             },
-            TranscriptEntry::FlowNodeStatus {
+            TranscriptEntry::FlowNodeEnd {
                 run_id: "r1".into(),
                 node_id: "stmt_0".into(),
                 status: FlowNodeStatus::Ok,
+                output_preview: None,
             },
             TranscriptEntry::FlowDone {
                 run_id: "r1".into(),

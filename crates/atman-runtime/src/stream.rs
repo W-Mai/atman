@@ -53,6 +53,14 @@ pub enum StreamFrame {
         tool: String,
         args_preview: String,
     },
+    AssistantMsg {
+        flow_run_id: Option<String>,
+        message: crate::message::Message,
+    },
+    ToolResultMsg {
+        flow_run_id: Option<String>,
+        message: crate::message::Message,
+    },
     #[serde(other)]
     Unknown,
 }

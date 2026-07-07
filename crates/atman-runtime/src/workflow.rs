@@ -29,7 +29,9 @@ pub enum WorkflowNodeKind {
         run_id: String,
         flow_name: String,
     },
-    Stmt,
+    Stmt {
+        node_kind: crate::nodegraph::NodeKind,
+    },
     ToolCall {
         tool_use_id: String,
         tool: String,
@@ -126,6 +128,7 @@ impl WorkflowGraph {
             Event::FlowNodeStart {
                 run_id,
                 node_id,
+                kind: nk,
                 label,
                 parent_node_id,
                 ts,
@@ -137,7 +140,9 @@ impl WorkflowGraph {
                 let kind = if let Some(idx) = parse_branch_index(node_id) {
                     WorkflowNodeKind::FanoutBranch { branch_index: idx }
                 } else {
-                    WorkflowNodeKind::Stmt
+                    WorkflowNodeKind::Stmt {
+                        node_kind: nk.clone(),
+                    }
                 };
                 let node = WorkflowNode {
                     id: node_id.clone(),
@@ -205,6 +210,70 @@ impl WorkflowGraph {
                     parent.children.push(node);
                 }
             }
+            Event::AssistantMsg {
+                flow_run_id,
+                message,
+                ts,
+                ..
+            } => {
+                let Some(flow_id) = flow_run_id.as_ref().map(|r| r.0.to_string()) else {
+                    return;
+                };
+                for part in &message.parts {
+                    if let crate::message::MessagePart::ToolUse { id, name, input } = part {
+                        let node_id = format!("tool:{id}");
+                        if find_node(&self.root, &node_id).is_some() {
+                            continue;
+                        }
+                        let args_preview = serde_json::to_string(input).unwrap_or_default();
+                        let args_preview: String = args_preview.chars().take(200).collect();
+                        let node = WorkflowNode {
+                            id: node_id,
+                            kind: WorkflowNodeKind::ToolCall {
+                                tool_use_id: id.clone(),
+                                tool: name.clone(),
+                                args_preview: args_preview.clone(),
+                                result_preview: None,
+                            },
+                            label: name.clone(),
+                            status: NodeStatus::Running,
+                            started_at: Some(*ts),
+                            ended_at: None,
+                            output_preview: None,
+                            children: Vec::new(),
+                            parallelism: Parallelism::Serial,
+                        };
+                        if let Some(parent) = find_node_mut(&mut self.root, &flow_id) {
+                            parent.children.push(node);
+                        }
+                    }
+                }
+            }
+            Event::ToolResultMsg { message, ts, .. } => {
+                for part in &message.parts {
+                    if let crate::message::MessagePart::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = part
+                    {
+                        let node_id = format!("tool:{tool_use_id}");
+                        if let Some(n) = find_node_mut(&mut self.root, &node_id) {
+                            n.status = if *is_error {
+                                NodeStatus::Err
+                            } else {
+                                NodeStatus::Ok
+                            };
+                            n.ended_at = Some(*ts);
+                            let preview: String = content.chars().take(300).collect();
+                            n.output_preview = Some(preview.clone());
+                            if let WorkflowNodeKind::ToolCall { result_preview, .. } = &mut n.kind {
+                                *result_preview = Some(preview);
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -242,15 +311,17 @@ impl WorkflowGraph {
             StreamFrame::FlowNodeStart {
                 run_id,
                 node_id,
+                kind: nk,
                 label,
                 parent_node_id,
-                ..
             } => {
                 let parent_id = parent_node_id.clone().unwrap_or_else(|| run_id.clone());
                 let kind = if let Some(idx) = parse_branch_index(node_id) {
                     WorkflowNodeKind::FanoutBranch { branch_index: idx }
                 } else {
-                    WorkflowNodeKind::Stmt
+                    WorkflowNodeKind::Stmt {
+                        node_kind: nk.clone(),
+                    }
                 };
                 let node = WorkflowNode {
                     id: node_id.clone(),
@@ -330,6 +401,31 @@ impl WorkflowGraph {
                     n.status = if *ok { NodeStatus::Ok } else { NodeStatus::Err };
                     n.ended_at = Some(now);
                 }
+            }
+            StreamFrame::AssistantMsg {
+                flow_run_id,
+                message,
+            } => {
+                let Some(rid_str) = flow_run_id else { return };
+                let Ok(uuid) = uuid::Uuid::parse_str(rid_str) else {
+                    return;
+                };
+                self.apply_event(&Event::AssistantMsg {
+                    seq: 0,
+                    turn_id: crate::event::TurnId::now(),
+                    flow_run_id: Some(crate::event::FlowRunId(uuid)),
+                    message: message.clone(),
+                    ts: chrono::Utc::now(),
+                });
+            }
+            StreamFrame::ToolResultMsg { message, .. } => {
+                self.apply_event(&Event::ToolResultMsg {
+                    seq: 0,
+                    turn_id: crate::event::TurnId::now(),
+                    flow_run_id: None,
+                    message: message.clone(),
+                    ts: chrono::Utc::now(),
+                });
             }
             _ => {}
         }

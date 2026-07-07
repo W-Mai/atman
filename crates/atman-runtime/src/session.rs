@@ -87,16 +87,40 @@ fn load_goal(dir: &Path) -> Option<String> {
 
 #[derive(Debug, Clone)]
 pub enum TranscriptEntry {
-    Message(Message),
+    Message {
+        message: Message,
+        flow_run_id: Option<String>,
+    },
     FlowGraph {
         run_id: String,
         flow_name: String,
         graph: crate::nodegraph::FlowGraph,
     },
-    FlowNodeStatus {
+    FlowStart {
+        run_id: String,
+        flow_name: String,
+        parent_run_id: Option<String>,
+        parent_node_id: Option<String>,
+    },
+    FlowNodeStart {
+        run_id: String,
+        node_id: String,
+        kind: crate::nodegraph::NodeKind,
+        label: String,
+        parent_node_id: Option<String>,
+    },
+    FlowNodeEnd {
         run_id: String,
         node_id: String,
         status: crate::event::FlowNodeStatus,
+        output_preview: Option<String>,
+    },
+    ToolNode {
+        run_id: String,
+        parent_node_id: String,
+        tool_use_id: String,
+        tool_name: String,
+        args_preview: String,
     },
     FlowDone {
         run_id: String,
@@ -108,8 +132,8 @@ fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
     let entries = replay_transcript_from(path)?;
     let mut out = Vec::new();
     for entry in entries {
-        if let TranscriptEntry::Message(m) = entry {
-            out.push(m);
+        if let TranscriptEntry::Message { message, .. } = entry {
+            out.push(message);
         }
     }
     Ok(out)
@@ -141,7 +165,11 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 if let Some(m) = v.get("message")
                     && let Ok(msg) = serde_json::from_value::<Message>(m.clone())
                 {
-                    out.push(TranscriptEntry::Message(msg));
+                    let flow_run_id = v["flow_run_id"].as_str().map(String::from);
+                    out.push(TranscriptEntry::Message {
+                        message: msg,
+                        flow_run_id,
+                    });
                 }
             }
             "flow_graph" => {
@@ -162,13 +190,33 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     });
                 }
             }
+            "flow_start" => {
+                let run_id = v["run_id"].as_str().unwrap_or("").to_string();
+                let flow_name = v["flow_name"].as_str().unwrap_or("").to_string();
+                let parent_run_id = v["parent_run_id"].as_str().map(String::from);
+                let parent_node_id = v["parent_node_id"].as_str().map(String::from);
+                out.push(TranscriptEntry::FlowStart {
+                    run_id,
+                    flow_name,
+                    parent_run_id,
+                    parent_node_id,
+                });
+            }
             "flow_node_start" => {
                 let run_id = v["run_id"].as_str().unwrap_or("").to_string();
                 let node_id = v["node_id"].as_str().unwrap_or("").to_string();
-                out.push(TranscriptEntry::FlowNodeStatus {
+                let label = v["label"].as_str().unwrap_or(&node_id).to_string();
+                let parent_node_id = v["parent_node_id"].as_str().map(String::from);
+                let kind = v
+                    .get("kind")
+                    .and_then(|k| serde_json::from_value(k.clone()).ok())
+                    .unwrap_or(crate::nodegraph::NodeKind::UserConfirm);
+                out.push(TranscriptEntry::FlowNodeStart {
                     run_id,
                     node_id,
-                    status: crate::event::FlowNodeStatus::Ok,
+                    kind,
+                    label,
+                    parent_node_id,
                 });
             }
             "flow_node_end" => {
@@ -178,10 +226,26 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     .get("status")
                     .and_then(|s| serde_json::from_value(s.clone()).ok())
                     .unwrap_or(crate::event::FlowNodeStatus::Ok);
-                out.push(TranscriptEntry::FlowNodeStatus {
+                let output_preview = v["output_preview"].as_str().map(String::from);
+                out.push(TranscriptEntry::FlowNodeEnd {
                     run_id,
                     node_id,
                     status,
+                    output_preview,
+                });
+            }
+            "tool_node" => {
+                let run_id = v["run_id"].as_str().unwrap_or("").to_string();
+                let parent_node_id = v["parent_node_id"].as_str().unwrap_or("").to_string();
+                let tool_use_id = v["tool_use_id"].as_str().unwrap_or("").to_string();
+                let tool_name = v["tool_name"].as_str().unwrap_or("").to_string();
+                let args_preview = v["args_preview"].as_str().unwrap_or("").to_string();
+                out.push(TranscriptEntry::ToolNode {
+                    run_id,
+                    parent_node_id,
+                    tool_use_id,
+                    tool_name,
+                    args_preview,
                 });
             }
             "flow_end" => {
@@ -433,6 +497,7 @@ impl Session {
     /// so events.jsonl remains the authority (§I5).
     pub fn append_message(&self, msg: Message, flow_run_id: Option<FlowRunId>) {
         let ts = chrono::Utc::now();
+        let flow_run_id_str = flow_run_id.as_ref().map(|r| r.0.to_string());
         let event = match msg.role {
             MessageRole::User => Event::UserMsg {
                 seq: 0,
@@ -440,20 +505,36 @@ impl Session {
                 message: msg.clone(),
                 ts,
             },
-            MessageRole::Assistant => Event::AssistantMsg {
-                seq: 0,
-                turn_id: msg.turn_id.clone(),
-                flow_run_id,
-                message: msg.clone(),
-                ts,
-            },
-            MessageRole::Tool => Event::ToolResultMsg {
-                seq: 0,
-                turn_id: msg.turn_id.clone(),
-                flow_run_id,
-                message: msg.clone(),
-                ts,
-            },
+            MessageRole::Assistant => {
+                let _ = self
+                    .stream_tx
+                    .send(crate::stream::StreamFrame::AssistantMsg {
+                        flow_run_id: flow_run_id_str.clone(),
+                        message: msg.clone(),
+                    });
+                Event::AssistantMsg {
+                    seq: 0,
+                    turn_id: msg.turn_id.clone(),
+                    flow_run_id,
+                    message: msg.clone(),
+                    ts,
+                }
+            }
+            MessageRole::Tool => {
+                let _ = self
+                    .stream_tx
+                    .send(crate::stream::StreamFrame::ToolResultMsg {
+                        flow_run_id: flow_run_id_str.clone(),
+                        message: msg.clone(),
+                    });
+                Event::ToolResultMsg {
+                    seq: 0,
+                    turn_id: msg.turn_id.clone(),
+                    flow_run_id,
+                    message: msg.clone(),
+                    ts,
+                }
+            }
             MessageRole::System => Event::SystemMsg {
                 seq: 0,
                 turn_id: msg.turn_id.clone(),
