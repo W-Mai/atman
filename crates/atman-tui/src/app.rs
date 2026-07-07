@@ -63,6 +63,7 @@ pub struct AppState {
     pub yank_mode: bool,
     pub yank_index: usize,
     pub palette: crate::palette::CommandPalette,
+    pub session_switcher: crate::session_switcher::SessionSwitcher,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,

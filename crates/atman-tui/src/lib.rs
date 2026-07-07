@@ -22,6 +22,7 @@ pub mod layout;
 pub mod markdown;
 pub mod output;
 pub mod palette;
+pub mod session_switcher;
 pub mod sidebar;
 pub mod status;
 pub mod terminal_guard;
@@ -55,6 +56,16 @@ pub enum TuiControl {
     ApproveAllPending,
     DenyAllPending { reason: String },
     CompactNow,
+    SwitchSession(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionPickerRow {
+    pub id: String,
+    pub project: Option<String>,
+    pub message_count: usize,
+    pub updated_at: String,
+    pub goal: Option<String>,
 }
 
 pub enum TuiCommand {
@@ -403,6 +414,99 @@ fn yank_selected_text(app: &AppState) -> Option<String> {
     }
 }
 
+fn enumerate_session_rows(app: &AppState) -> Vec<crate::SessionPickerRow> {
+    let Some(session) = &app.session else {
+        return Vec::new();
+    };
+    let session_dir = session.dir();
+    let Some(sessions_root) = session_dir.parent() else {
+        return Vec::new();
+    };
+    let current_fp = session.meta().and_then(|m| m.project_fingerprint);
+    let mut rows = Vec::new();
+    let Ok(entries) = std::fs::read_dir(sessions_root) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let sid = entry.file_name().to_string_lossy().to_string();
+        if sid == session.id().to_string() {
+            continue;
+        }
+        let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
+        if let Some(current_fp) = current_fp.as_ref() {
+            let peer_fp = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
+            if peer_fp.as_deref() != Some(current_fp.as_str()) {
+                continue;
+            }
+        }
+        let project = meta
+            .as_ref()
+            .and_then(|m| m.project_root.as_ref())
+            .map(|p| p.display().to_string());
+        let updated_at = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|st| {
+                let ts: chrono::DateTime<chrono::Utc> = st.into();
+                ts.to_rfc3339()
+            })
+            .unwrap_or_default();
+        let events_path = entry.path().join("events.jsonl");
+        let message_count = count_message_events(&events_path);
+        rows.push(crate::SessionPickerRow {
+            id: sid,
+            project,
+            message_count,
+            updated_at,
+            goal: None,
+        });
+    }
+    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    rows.truncate(30);
+    rows
+}
+
+fn count_message_events(path: &std::path::Path) -> usize {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    contents
+        .lines()
+        .filter(|l| {
+            l.contains("\"type\":\"user_msg\"")
+                || l.contains("\"type\":\"assistant_msg\"")
+                || l.contains("\"type\":\"tool_result_msg\"")
+        })
+        .count()
+}
+
+fn handle_session_switcher_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    match action {
+        KeyAction::Escape => app.session_switcher.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => app.session_switcher.move_up(),
+        KeyAction::HistoryDown | KeyAction::CursorRight => app.session_switcher.move_down(),
+        KeyAction::Submit => {
+            if let Some(sid) = app.session_switcher.selected_id() {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::SwitchSession(sid.clone()));
+                    app.push_note(format!("switching to session {sid}…"), app::NoteLevel::Info);
+                }
+                app.session_switcher.close();
+            }
+        }
+        _ => {}
+    }
+}
+
 fn handle_palette_key(
     action: &KeyAction,
     app: &mut AppState,
@@ -453,7 +557,12 @@ fn dispatch_palette_entry(
             }
         }
         PaletteEntryId::SwitchSession => {
-            app.push_note("session switcher not wired yet", app::NoteLevel::Warn);
+            let rows = enumerate_session_rows(app);
+            if rows.is_empty() {
+                app.push_note("no other sessions to switch into", app::NoteLevel::Warn);
+                return;
+            }
+            app.session_switcher.open_with(rows);
         }
         PaletteEntryId::SearchHistory => {
             app.push_note("history search modal not wired yet", app::NoteLevel::Warn);
@@ -617,6 +726,10 @@ fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if app.session_switcher.open {
+        handle_session_switcher_key(&action, app, control_tx);
+        return;
+    }
     if app.palette.open {
         handle_palette_key(&action, app, control_tx);
         return;
@@ -947,6 +1060,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.palette.open {
         palette::render(f, area, &app.palette);
+    }
+    if app.session_switcher.open {
+        session_switcher::render(f, area, &app.session_switcher);
     }
 }
 

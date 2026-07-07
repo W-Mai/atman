@@ -1176,6 +1176,24 @@ struct PendingUserMessage {
 }
 
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
+    let mut current = resume_sid;
+    loop {
+        let switch_target = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        cmd_repl_once(current.take(), switch_target.clone()).await?;
+        match switch_target.lock().unwrap().take() {
+            Some(sid) => {
+                current = Some(sid);
+                println!("[atman] switching session…");
+            }
+            None => return Ok(()),
+        }
+    }
+}
+
+async fn cmd_repl_once(
+    resume_sid: Option<String>,
+    switch_target: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<()> {
     use std::collections::VecDeque;
     use tokio::sync::mpsc;
 
@@ -1249,10 +1267,15 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
     let (tui_task, tui_shutdown, ctrl_task, cmd_tx_for_repl) = if use_tui {
         let (sh_tx, sh_rx) = tokio::sync::oneshot::channel::<()>();
+        let sh_tx_shared: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(Some(sh_tx)));
+        let sh_tx_for_ctrl = sh_tx_shared.clone();
         let initial_items = atman_tui::history::flatten_transcript(&session.transcript_replay());
         let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<atman_tui::TuiControl>();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let session_for_ctrl = std::sync::Arc::clone(&session);
+        let switch_target_for_ctrl = switch_target.clone();
         let ctrl_task = tokio::spawn(async move {
             while let Some(msg) = ctrl_rx.recv().await {
                 match msg {
@@ -1284,6 +1307,14 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                     atman_tui::TuiControl::CompactNow => {
                         session_for_ctrl.request_manual_compact();
                     }
+                    atman_tui::TuiControl::SwitchSession(sid) => {
+                        *switch_target_for_ctrl.lock().unwrap() = Some(sid);
+                        session_for_ctrl.cancel_flow();
+                        if let Some(tx) = sh_tx_for_ctrl.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        break;
+                    }
                 }
             }
         });
@@ -1309,7 +1340,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         };
         (
             Some(tokio::spawn(atman_tui::run_tui(handle))),
-            Some(sh_tx),
+            Some(sh_tx_shared),
             Some(ctrl_task),
             Some(cmd_tx),
         )
@@ -1404,8 +1435,10 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         .await;
 
     drop(executor);
-    if let Some(sh) = tui_shutdown {
-        let _ = sh.send(());
+    if let Some(sh) = tui_shutdown
+        && let Some(tx) = sh.lock().unwrap().take()
+    {
+        let _ = tx.send(());
     }
     if let Some(handle) = tui_task {
         match handle.await {
