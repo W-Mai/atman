@@ -691,6 +691,20 @@ impl Session {
         });
     }
 
+    pub fn cumulative_input_tokens(&self) -> u64 {
+        self.context_watch.borrow().tokens_in
+    }
+
+    pub fn reset_input_tokens_to(&self, tokens: u64) {
+        self.context_watch.send_modify(|snap| {
+            snap.tokens_in = tokens;
+        });
+    }
+
+    pub fn last_model(&self) -> String {
+        self.context_watch.borrow().model.clone()
+    }
+
     pub fn set_mcp_totals(&self, ok: u16, total: u16) {
         self.context_watch.send_modify(|snap| {
             snap.mcp_ok = ok;
