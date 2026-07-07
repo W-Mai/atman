@@ -210,6 +210,7 @@ async fn dispatch_tool_call<'a>(
         ctx_with_anchors
             .with_stream_tx(session.stream_tx())
             .with_read_files(session.read_files())
+            .with_approval(session.approval())
     } else {
         ctx_with_anchors
     };

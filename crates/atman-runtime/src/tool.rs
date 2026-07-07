@@ -81,6 +81,7 @@ pub struct ToolCtx {
     pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     pub read_files:
         Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>>,
+    pub approval: Option<std::sync::Arc<crate::session::ApprovalRegistry>>,
 }
 
 impl ToolCtx {
@@ -138,6 +139,14 @@ impl ToolCtx {
         set: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     ) -> Self {
         self.read_files = Some(set);
+        self
+    }
+
+    pub fn with_approval(
+        mut self,
+        approval: std::sync::Arc<crate::session::ApprovalRegistry>,
+    ) -> Self {
+        self.approval = Some(approval);
         self
     }
 

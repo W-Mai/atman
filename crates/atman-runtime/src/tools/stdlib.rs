@@ -728,138 +728,371 @@ impl Tool for DispatchAll {
                     "dispatch_all: no tool registry available on ctx".into(),
                 ));
             };
-            let mut out = Vec::with_capacity(uses.len());
-            for entry in uses {
-                let Value::Struct(fields) = entry else {
-                    return Err(RuntimeError::TypeMismatch {
-                        expected: "struct {id, name, input}".into(),
-                        actual: entry.kind_name().into(),
-                    });
-                };
-                let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-                let id = match get("id") {
-                    Some(Value::Str(s)) => s,
-                    _ => {
-                        return Err(RuntimeError::ToolFailed(
-                            "dispatch_all: tool_use missing `id` string".into(),
-                        ));
-                    }
-                };
-                let name = match get("name") {
-                    Some(Value::Str(s)) => s,
-                    _ => {
-                        return Err(RuntimeError::ToolFailed(
-                            "dispatch_all: tool_use missing `name` string".into(),
-                        ));
-                    }
-                };
-                let input = get("input").unwrap_or(Value::Unit);
-                let Some(tool) = registry.get(&name) else {
-                    let msg = crate::message::Message {
-                        role: crate::message::MessageRole::Tool,
-                        parts: vec![crate::message::MessagePart::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: format!("dispatch_all: unknown tool `{name}`"),
-                            is_error: true,
-                        }],
-                        turn_id: ctx
-                            .turn_id
-                            .clone()
-                            .unwrap_or_else(crate::event::TurnId::now),
-                    };
-                    emit_tool_result(ctx, &msg);
-                    out.push(Value::Message(msg));
-                    continue;
-                };
-                let named = match &input {
-                    Value::Struct(fields) => fields.clone(),
-                    Value::Unit => Vec::new(),
-                    other => {
-                        return Err(RuntimeError::TypeMismatch {
-                            expected: "struct or unit for tool input".into(),
-                            actual: other.kind_name().into(),
-                        });
-                    }
-                };
-                let missing = missing_required_fields(&tool.input_schema(), &named);
-                if !missing.is_empty() {
-                    let msg = crate::message::Message {
-                        role: crate::message::MessageRole::Tool,
-                        parts: vec![crate::message::MessagePart::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: format!(
-                                "tool `{name}` received empty/incomplete input. Missing required fields: {}. Retry with a complete argument object like {{{}}} — do NOT reuse an empty {{}} input.",
-                                missing.join(", "),
-                                missing
-                                    .iter()
-                                    .map(|f| format!("\"{f}\":\"...\""))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
-                            is_error: true,
-                        }],
-                        turn_id: ctx
-                            .turn_id
-                            .clone()
-                            .unwrap_or_else(crate::event::TurnId::now),
-                    };
-                    emit_tool_result(ctx, &msg);
-                    out.push(Value::Message(msg));
-                    continue;
-                }
-                let call_args = ToolArgs {
-                    positional: Vec::new(),
-                    named,
-                };
-                if let (Some(sink), Some(run_id), Some(parent_node)) = (
-                    ctx.events.as_ref(),
-                    ctx.flow_run_id.clone(),
-                    &ctx.current_node_id,
-                ) {
-                    let args_preview = format!("{:?}", input)
-                        .chars()
-                        .take(4000)
-                        .collect::<String>();
-                    sink.emit(crate::event::Event::ToolNode {
-                        seq: 0,
-                        run_id: run_id.clone(),
-                        parent_node_id: parent_node.clone(),
-                        tool_use_id: id.clone(),
-                        tool_name: name.clone(),
-                        args_preview: args_preview.clone(),
-                        ts: chrono::Utc::now(),
-                    });
-                    if let Some(tx) = &ctx.stream_tx {
-                        let _ = tx.send(crate::stream::StreamFrame::ToolNode {
-                            run_id: run_id.0.to_string(),
-                            parent_node_id: parent_node.clone(),
-                            tool_use_id: id.clone(),
-                            tool: name.clone(),
-                            args_preview,
-                        });
-                    }
-                }
-                let (content, is_error) = match tool.call(call_args, ctx).await {
-                    Ok(v) => (render_tool_result_text(&v), false),
-                    Err(e) => (format!("{e}"), true),
-                };
-                let msg = crate::message::Message {
-                    role: crate::message::MessageRole::Tool,
-                    parts: vec![crate::message::MessagePart::ToolResult {
-                        tool_use_id: id,
-                        content,
-                        is_error,
-                    }],
-                    turn_id: ctx
-                        .turn_id
-                        .clone()
-                        .unwrap_or_else(crate::event::TurnId::now),
-                };
-                emit_tool_result(ctx, &msg);
-                out.push(Value::Message(msg));
-            }
+            let prepared = prepare_dispatch(&uses, registry.as_ref(), ctx)?;
+            let (auto_batch, serial_batch, mut out_slots) = partition_and_gate(prepared, ctx).await;
+            run_auto_parallel(auto_batch, ctx, &mut out_slots).await;
+            run_serial(serial_batch, ctx, &mut out_slots).await;
+            let out: Vec<Value> = out_slots.into_iter().flatten().collect();
             Ok(Value::List(out))
         })
+    }
+}
+
+enum PreparedEntry {
+    Ready {
+        index: usize,
+        id: String,
+        name: String,
+        tool: std::sync::Arc<dyn Tool>,
+        call_args: ToolArgs,
+    },
+    Failed {
+        index: usize,
+        msg: crate::message::Message,
+    },
+}
+
+fn prepare_dispatch(
+    uses: &[Value],
+    registry: &crate::tool::ToolRegistry,
+    ctx: &ToolCtx,
+) -> Result<Vec<PreparedEntry>, RuntimeError> {
+    let mut prepared = Vec::with_capacity(uses.len());
+    for (index, entry) in uses.iter().enumerate() {
+        let Value::Struct(fields) = entry else {
+            return Err(RuntimeError::TypeMismatch {
+                expected: "struct {id, name, input}".into(),
+                actual: entry.kind_name().into(),
+            });
+        };
+        let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let id = match get("id") {
+            Some(Value::Str(s)) => s,
+            _ => {
+                return Err(RuntimeError::ToolFailed(
+                    "dispatch_all: tool_use missing `id` string".into(),
+                ));
+            }
+        };
+        let name = match get("name") {
+            Some(Value::Str(s)) => s,
+            _ => {
+                return Err(RuntimeError::ToolFailed(
+                    "dispatch_all: tool_use missing `name` string".into(),
+                ));
+            }
+        };
+        let input = get("input").unwrap_or(Value::Unit);
+        let Some(tool) = registry.get(&name) else {
+            prepared.push(PreparedEntry::Failed {
+                index,
+                msg: build_error_result(ctx, &id, &format!("dispatch_all: unknown tool `{name}`")),
+            });
+            continue;
+        };
+        let named = match &input {
+            Value::Struct(fields) => fields.clone(),
+            Value::Unit => Vec::new(),
+            other => {
+                return Err(RuntimeError::TypeMismatch {
+                    expected: "struct or unit for tool input".into(),
+                    actual: other.kind_name().into(),
+                });
+            }
+        };
+        let missing = missing_required_fields(&tool.input_schema(), &named);
+        if !missing.is_empty() {
+            let content = format!(
+                "tool `{name}` received empty/incomplete input. Missing required fields: {}. Retry with a complete argument object like {{{}}} — do NOT reuse an empty {{}} input.",
+                missing.join(", "),
+                missing
+                    .iter()
+                    .map(|f| format!("\"{f}\":\"...\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            prepared.push(PreparedEntry::Failed {
+                index,
+                msg: build_error_result(ctx, &id, &content),
+            });
+            continue;
+        }
+        emit_tool_node(ctx, &id, &name, &input);
+        prepared.push(PreparedEntry::Ready {
+            index,
+            id,
+            name,
+            tool,
+            call_args: ToolArgs {
+                positional: Vec::new(),
+                named,
+            },
+        });
+    }
+    Ok(prepared)
+}
+
+struct Approved {
+    index: usize,
+    id: String,
+    name: String,
+    tool: std::sync::Arc<dyn Tool>,
+    call_args: ToolArgs,
+}
+
+async fn partition_and_gate(
+    prepared: Vec<PreparedEntry>,
+    ctx: &ToolCtx,
+) -> (Vec<Approved>, Vec<Approved>, Vec<Option<Value>>) {
+    let total = prepared.len();
+    let mut out_slots: Vec<Option<Value>> = vec![None; total];
+    let mut auto_batch = Vec::new();
+    let mut serial_batch = Vec::new();
+    for entry in prepared {
+        match entry {
+            PreparedEntry::Failed { index, msg } => {
+                emit_tool_result(ctx, &msg);
+                out_slots[index] = Some(Value::Message(msg));
+            }
+            PreparedEntry::Ready {
+                index,
+                id,
+                name,
+                tool,
+                call_args,
+            } => {
+                let level = tool.approval_level();
+                let approved = request_approval(ctx, &id, &name, &call_args, level).await;
+                match approved {
+                    ApprovalOutcome::Approve => {
+                        let a = Approved {
+                            index,
+                            id,
+                            name,
+                            tool,
+                            call_args,
+                        };
+                        if level == crate::tool::ApprovalLevel::Auto {
+                            auto_batch.push(a);
+                        } else {
+                            serial_batch.push(a);
+                        }
+                    }
+                    ApprovalOutcome::Deny { reason } => {
+                        let msg = build_error_result(
+                            ctx,
+                            &id,
+                            &format!("tool `{name}` denied by user: {reason}"),
+                        );
+                        emit_tool_result(ctx, &msg);
+                        out_slots[index] = Some(Value::Message(msg));
+                    }
+                }
+            }
+        }
+    }
+    (auto_batch, serial_batch, out_slots)
+}
+
+enum ApprovalOutcome {
+    Approve,
+    Deny { reason: String },
+}
+
+async fn request_approval(
+    ctx: &ToolCtx,
+    id: &str,
+    name: &str,
+    call_args: &ToolArgs,
+    level: crate::tool::ApprovalLevel,
+) -> ApprovalOutcome {
+    let Some(approval) = &ctx.approval else {
+        return ApprovalOutcome::Approve;
+    };
+    let Some(run_id) = ctx.flow_run_id.clone() else {
+        return ApprovalOutcome::Approve;
+    };
+    let args_preview: String = format!("{:?}", call_args.named)
+        .chars()
+        .take(4000)
+        .collect();
+    let pending = crate::session::PendingApproval {
+        tool_use_id: id.to_string(),
+        tool_name: name.to_string(),
+        args_preview: args_preview.clone(),
+        preview: None,
+        level,
+        run_id: run_id.clone(),
+        emitted_at: chrono::Utc::now(),
+    };
+    let rx = approval.request(pending);
+    if let Some(sink) = ctx.events.as_ref() {
+        sink.emit(crate::event::Event::ToolPendingApproval {
+            seq: 0,
+            run_id: run_id.clone(),
+            tool_use_id: id.to_string(),
+            tool_name: name.to_string(),
+            args_preview: args_preview.clone(),
+            level: level_str(level).into(),
+            ts: chrono::Utc::now(),
+        });
+    }
+    if let Some(tx) = &ctx.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::ToolPendingApproval {
+            run_id: run_id.0.to_string(),
+            tool_use_id: id.to_string(),
+            tool_name: name.to_string(),
+            args_preview,
+            level: level_str(level).into(),
+        });
+    }
+    let decision = rx.await.unwrap_or(crate::session::ApprovalDecision::Deny {
+        reason: "approval channel dropped".into(),
+    });
+    match decision {
+        crate::session::ApprovalDecision::Approve => {
+            if let Some(sink) = ctx.events.as_ref() {
+                sink.emit(crate::event::Event::ToolApproved {
+                    seq: 0,
+                    run_id: run_id.clone(),
+                    tool_use_id: id.to_string(),
+                    decided_by: "user".into(),
+                    ts: chrono::Utc::now(),
+                });
+            }
+            if let Some(tx) = &ctx.stream_tx {
+                let _ = tx.send(crate::stream::StreamFrame::ToolApproved {
+                    run_id: run_id.0.to_string(),
+                    tool_use_id: id.to_string(),
+                    decided_by: "user".into(),
+                });
+            }
+            ApprovalOutcome::Approve
+        }
+        crate::session::ApprovalDecision::Deny { reason } => {
+            if let Some(sink) = ctx.events.as_ref() {
+                sink.emit(crate::event::Event::ToolDenied {
+                    seq: 0,
+                    run_id: run_id.clone(),
+                    tool_use_id: id.to_string(),
+                    reason: reason.clone(),
+                    ts: chrono::Utc::now(),
+                });
+            }
+            if let Some(tx) = &ctx.stream_tx {
+                let _ = tx.send(crate::stream::StreamFrame::ToolDenied {
+                    run_id: run_id.0.to_string(),
+                    tool_use_id: id.to_string(),
+                    reason: reason.clone(),
+                });
+            }
+            ApprovalOutcome::Deny { reason }
+        }
+    }
+}
+
+fn level_str(level: crate::tool::ApprovalLevel) -> &'static str {
+    match level {
+        crate::tool::ApprovalLevel::Auto => "auto",
+        crate::tool::ApprovalLevel::Approve => "approve",
+        crate::tool::ApprovalLevel::Dangerous => "dangerous",
+    }
+}
+
+async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
+    if batch.is_empty() {
+        return;
+    }
+    let futs = batch.iter().map(|a| a.tool.call(a.call_args.clone(), ctx));
+    let results = futures::future::join_all(futs).await;
+    for (a, r) in batch.into_iter().zip(results) {
+        let (content, is_error) = match r {
+            Ok(v) => (render_tool_result_text(&v), false),
+            Err(e) => (format!("{e}"), true),
+        };
+        let msg = crate::message::Message {
+            role: crate::message::MessageRole::Tool,
+            parts: vec![crate::message::MessagePart::ToolResult {
+                tool_use_id: a.id.clone(),
+                content,
+                is_error,
+            }],
+            turn_id: ctx
+                .turn_id
+                .clone()
+                .unwrap_or_else(crate::event::TurnId::now),
+        };
+        emit_tool_result(ctx, &msg);
+        out_slots[a.index] = Some(Value::Message(msg));
+    }
+}
+
+async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
+    for a in batch {
+        let (content, is_error) = match a.tool.call(a.call_args, ctx).await {
+            Ok(v) => (render_tool_result_text(&v), false),
+            Err(e) => (format!("{e}"), true),
+        };
+        let msg = crate::message::Message {
+            role: crate::message::MessageRole::Tool,
+            parts: vec![crate::message::MessagePart::ToolResult {
+                tool_use_id: a.id.clone(),
+                content,
+                is_error,
+            }],
+            turn_id: ctx
+                .turn_id
+                .clone()
+                .unwrap_or_else(crate::event::TurnId::now),
+        };
+        emit_tool_result(ctx, &msg);
+        out_slots[a.index] = Some(Value::Message(msg));
+    }
+}
+
+fn emit_tool_node(ctx: &ToolCtx, id: &str, name: &str, input: &Value) {
+    if let (Some(sink), Some(run_id), Some(parent_node)) = (
+        ctx.events.as_ref(),
+        ctx.flow_run_id.clone(),
+        &ctx.current_node_id,
+    ) {
+        let args_preview = format!("{:?}", input)
+            .chars()
+            .take(4000)
+            .collect::<String>();
+        sink.emit(crate::event::Event::ToolNode {
+            seq: 0,
+            run_id: run_id.clone(),
+            parent_node_id: parent_node.clone(),
+            tool_use_id: id.to_string(),
+            tool_name: name.to_string(),
+            args_preview: args_preview.clone(),
+            ts: chrono::Utc::now(),
+        });
+        if let Some(tx) = &ctx.stream_tx {
+            let _ = tx.send(crate::stream::StreamFrame::ToolNode {
+                run_id: run_id.0.to_string(),
+                parent_node_id: parent_node.clone(),
+                tool_use_id: id.to_string(),
+                tool: name.to_string(),
+                args_preview,
+            });
+        }
+    }
+}
+
+fn build_error_result(ctx: &ToolCtx, tool_use_id: &str, content: &str) -> crate::message::Message {
+    crate::message::Message {
+        role: crate::message::MessageRole::Tool,
+        parts: vec![crate::message::MessagePart::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: content.to_string(),
+            is_error: true,
+        }],
+        turn_id: ctx
+            .turn_id
+            .clone()
+            .unwrap_or_else(crate::event::TurnId::now),
     }
 }
 
