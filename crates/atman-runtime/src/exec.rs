@@ -141,7 +141,23 @@ fn emit_flow_node_start(
 fn value_preview(v: &Value) -> Option<String> {
     let raw = match v {
         Value::Str(s) => s.clone(),
-        Value::Message(m) => m.text_concat(),
+        Value::Message(m) => {
+            let text = m.text_concat();
+            let tool_uses: Vec<String> = m
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    crate::message::MessagePart::ToolUse { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            match (text.trim().is_empty(), tool_uses.is_empty()) {
+                (false, true) => text,
+                (false, false) => format!("{}\n\n→ tool_uses: {}", text, tool_uses.join(", ")),
+                (true, false) => format!("→ tool_uses: {}", tool_uses.join(", ")),
+                (true, true) => return None,
+            }
+        }
         Value::Path(p) => p.display().to_string(),
         Value::Int(n) => n.to_string(),
         Value::Float(n) => n.to_string(),

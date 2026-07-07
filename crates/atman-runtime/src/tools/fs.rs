@@ -52,7 +52,13 @@ impl Tool for FsWrite {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Write text content to a file, replacing anything already there.")
+        Some(
+            "Write text content to a file, replacing anything already there. \
+             MUST provide BOTH `path` and `content` fields in the same tool call — \
+             do not emit an empty {} input. \
+             Example: {\"path\":\"index.html\",\"content\":\"<html>...</html>\"}. \
+             For large files, keep the entire content in one call — do not split across tool calls.",
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
