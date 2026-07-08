@@ -246,6 +246,43 @@ impl AnchorIndex {
         Ok(id)
     }
 
+    pub fn find_project_events_around(
+        &self,
+        session_id: &str,
+        seq: u64,
+        window: usize,
+    ) -> Result<Vec<ProjectEventRow>> {
+        let low = seq.saturating_sub(window as u64) as i64;
+        let high = seq.saturating_add(window as u64) as i64;
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload FROM events \
+             WHERE session_id = ? AND seq BETWEEN ? AND ? ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, low, high],
+            project_event_row_from,
+        )?;
+        collect(rows)
+    }
+
+    pub fn find_project_events_by_anchor(
+        &self,
+        session_id: &str,
+        kind: AnchorKind,
+        id: &str,
+    ) -> Result<Vec<ProjectEventRow>> {
+        let sql = format!(
+            "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload FROM events \
+             WHERE session_id = ? AND {} = ? ORDER BY seq",
+            kind.events_column()
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![session_id, id], project_event_row_from)?;
+        collect(rows)
+    }
+
     pub fn rebuild_events_from_sessions(
         &self,
         sessions_root: &Path,
@@ -656,6 +693,45 @@ mod tests {
             .fts_search_project_events("uniquetoken", None, 10)
             .unwrap();
         assert_eq!(hits.len(), 1, "same (session_id, seq) must upsert");
+    }
+
+    #[test]
+    fn find_project_events_around_scopes_to_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "sess-a", 1, "flow_start", None, Some("r"), "");
+        seed_project_event(&idx, "sess-a", 2, "user_msg", Some("t"), None, "hello");
+        seed_project_event(
+            &idx,
+            "sess-a",
+            3,
+            "assistant_msg",
+            Some("t"),
+            Some("r"),
+            "world",
+        );
+        seed_project_event(&idx, "sess-a", 4, "flow_end", None, Some("r"), "");
+        seed_project_event(&idx, "sess-b", 3, "user_msg", None, None, "unrelated");
+
+        let rows = idx.find_project_events_around("sess-a", 3, 1).unwrap();
+        let seqs: Vec<u64> = rows.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, vec![2, 3, 4]);
+        assert!(rows.iter().all(|r| r.session_id == "sess-a"));
+    }
+
+    #[test]
+    fn find_project_events_by_anchor_scopes_to_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "sess-a", 1, "flow_start", None, Some("run-x"), "");
+        seed_project_event(&idx, "sess-a", 2, "flow_end", None, Some("run-x"), "");
+        seed_project_event(&idx, "sess-b", 1, "flow_start", None, Some("run-x"), "");
+
+        let rows = idx
+            .find_project_events_by_anchor("sess-a", AnchorKind::FlowRunId, "run-x")
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.session_id == "sess-a"));
     }
 
     #[test]
