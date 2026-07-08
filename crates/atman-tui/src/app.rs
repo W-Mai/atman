@@ -65,6 +65,7 @@ pub struct AppState {
     pub palette: crate::palette::CommandPalette,
     pub session_switcher: crate::session_switcher::SessionSwitcher,
     pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
+    pub history_search: crate::history_search_modal::HistorySearchModal,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,

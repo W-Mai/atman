@@ -17,6 +17,7 @@ pub mod compact_review_modal;
 pub mod completion;
 pub mod highlight;
 pub mod history;
+pub mod history_search_modal;
 pub mod humanize;
 pub mod input;
 pub mod keys;
@@ -567,6 +568,71 @@ fn count_message_events(path: &std::path::Path) -> usize {
         .count()
 }
 
+fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
+    use crate::history_search_modal::{HistoryHit, HistorySearchScope};
+    match action {
+        KeyAction::Escape => app.history_search.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => app.history_search.move_up(),
+        KeyAction::HistoryDown | KeyAction::CursorRight => app.history_search.move_down(),
+        KeyAction::Tab => {
+            app.history_search.scope = app.history_search.scope.toggle();
+        }
+        KeyAction::Submit => {
+            let query = app.history_search.editor.buf().trim().to_string();
+            if query.is_empty() {
+                app.history_search.set_error("empty query".into());
+                return;
+            }
+            let Some(session) = app.session.as_ref() else {
+                app.history_search.set_error("no session in context".into());
+                return;
+            };
+            let Some(idx) = session.project_index() else {
+                app.history_search
+                    .set_error("project index unavailable".into());
+                return;
+            };
+            let session_filter = match app.history_search.scope {
+                HistorySearchScope::Session => Some(session.id().to_string()),
+                HistorySearchScope::Project => None,
+            };
+            let rows = match idx.fts_search_project_events(&query, session_filter.as_deref(), 50) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    app.history_search.set_error(format!("search failed: {e}"));
+                    return;
+                }
+            };
+            let hits: Vec<HistoryHit> = rows
+                .into_iter()
+                .map(|row| {
+                    let snippet: String = row
+                        .payload
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                        .replace('\n', " ");
+                    HistoryHit {
+                        session_id: row.session_id,
+                        seq: row.seq,
+                        ts: row.ts,
+                        kind: row.kind,
+                        snippet,
+                    }
+                })
+                .collect();
+            app.history_search.set_results(hits, query);
+        }
+        KeyAction::Char(c) => {
+            app.history_search.editor.insert_char(*c);
+        }
+        KeyAction::Backspace => {
+            app.history_search.editor.backspace();
+        }
+        _ => {}
+    }
+}
+
 fn handle_session_switcher_key(
     action: &KeyAction,
     app: &mut AppState,
@@ -650,7 +716,7 @@ fn dispatch_palette_entry(
             app.session_switcher.open_with(rows, scope);
         }
         PaletteEntryId::SearchHistory => {
-            app.push_note("history search modal not wired yet", app::NoteLevel::Warn);
+            app.history_search.open();
         }
         PaletteEntryId::ToggleSidebar => {
             app.sidebar_mode = app.sidebar_mode.toggle();
@@ -864,6 +930,10 @@ fn handle_key(
     }
     if app.session_switcher.open {
         handle_session_switcher_key(&action, app, control_tx);
+        return;
+    }
+    if app.history_search.open {
+        handle_history_search_key(&action, app);
         return;
     }
     if app.palette.open {
@@ -1202,6 +1272,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if let Some(modal) = app.compact_review.as_ref() {
         compact_review_modal::render(f, area, modal);
+    }
+    if app.history_search.open {
+        history_search_modal::render(f, area, &app.history_search);
     }
 }
 
