@@ -406,6 +406,29 @@ pub enum TranscriptEntry {
     },
 }
 
+fn replay_context_snapshot_from(path: &Path) -> ContextSnapshot {
+    let mut snap = ContextSnapshot::default();
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return snap,
+    };
+    for value in parse_json_lines(&text) {
+        if value["type"].as_str() != Some("llm_call") {
+            continue;
+        }
+        if let Some(model) = value["model"].as_str() {
+            snap.model = model.to_string();
+        }
+        let usage = &value["usage"];
+        let input = usage["input"].as_u64().unwrap_or(0);
+        let cached = usage["cached_input"].as_u64().unwrap_or(0);
+        let output = usage["output"].as_u64().unwrap_or(0);
+        snap.tokens_in = snap.tokens_in.saturating_add(input).saturating_add(cached);
+        snap.tokens_out = snap.tokens_out.saturating_add(output);
+    }
+    snap
+}
+
 fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
     let entries = replay_transcript_from(path)?;
     let mut out = Vec::new();
@@ -727,11 +750,13 @@ impl Session {
         if let Some(r) = redactor {
             sink = sink.with_redactor(r);
         }
-        let messages = replay_messages_from(&dir.join("events.jsonl"))?;
+        let events_path = dir.join("events.jsonl");
+        let messages = replay_messages_from(&events_path)?;
+        let initial_context = replay_context_snapshot_from(&events_path);
         let initial_goal = load_goal(&dir);
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(256);
-        let (context_watch, _) = watch::channel(ContextSnapshot::default());
+        let (context_watch, _) = watch::channel(initial_context);
         let (goal_watch, _) = watch::channel(initial_goal);
         let (attach_watch, _) = watch::channel(0);
         let (todos_watch, _) = watch::channel(Vec::new());
@@ -1556,6 +1581,21 @@ mod tests {
         assert!(reg.decide("r3", CompactReviewDecision::Reject));
         let got = rx.blocking_recv().unwrap();
         assert!(matches!(got, CompactReviewDecision::Reject));
+    }
+
+    #[test]
+    fn replay_context_snapshot_accumulates_llm_call_usage() {
+        let dir = TempDir::new().unwrap();
+        let events = [
+            r#"{"type":"llm_call","seq":1,"model":"anthropic/claude-4","provider":"anthropic","usage":{"input":100,"cached_input":10,"output":50,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"ts":"2026-07-08T00:00:00Z"}"#,
+            r#"{"type":"user_msg","seq":2,"turn_id":"019f0000-0000-7000-0000-000000000002","message":{"role":"user","parts":[{"type":"text","text":"hi"}],"turn_id":"019f0000-0000-7000-0000-000000000002"},"ts":"2026-07-08T00:00:00Z"}"#,
+            r#"{"type":"llm_call","seq":3,"model":"anthropic/claude-4","provider":"anthropic","usage":{"input":200,"cached_input":0,"output":80,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"ts":"2026-07-08T00:00:01Z"}"#,
+        ];
+        write_events(dir.path(), &events);
+        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
+        assert_eq!(snap.model, "anthropic/claude-4");
+        assert_eq!(snap.tokens_in, 310);
+        assert_eq!(snap.tokens_out, 130);
     }
 
     #[test]

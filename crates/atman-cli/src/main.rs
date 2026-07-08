@@ -1249,6 +1249,7 @@ async fn cmd_repl_once(
     }
     attach_memory_stores(&mut executor, session.dir(), false)?;
     session.refresh_todos_from_store_async().await;
+    session.refresh_plans_from_store_async().await;
 
     let lifecycles = match config_dir() {
         Ok(cfg) => atman_runtime::lifecycle::LifecycleRunner::from_dir(&cfg),
