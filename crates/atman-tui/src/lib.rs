@@ -536,7 +536,7 @@ fn enumerate_session_rows(
             .or_else(|_| entry.metadata().and_then(|m| m.modified()))
             .ok()
             .map(|st| {
-                let ts: chrono::DateTime<chrono::Utc> = st.into();
+                let ts: chrono::DateTime<chrono::Local> = st.into();
                 ts.to_rfc3339()
             })
             .unwrap_or_default();
