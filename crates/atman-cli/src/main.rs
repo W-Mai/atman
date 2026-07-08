@@ -1308,6 +1308,22 @@ async fn cmd_repl_once(
                     atman_tui::TuiControl::CompactNow => {
                         session_for_ctrl.request_manual_compact();
                     }
+                    atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
+                        let decision = match edited {
+                            Some(summary) => {
+                                atman_runtime::CompactReviewDecision::AcceptEdited { summary }
+                            }
+                            None => atman_runtime::CompactReviewDecision::AcceptAsIs,
+                        };
+                        session_for_ctrl
+                            .compact_reviews()
+                            .decide(&review_id, decision);
+                    }
+                    atman_tui::TuiControl::CompactReviewReject { review_id } => {
+                        session_for_ctrl
+                            .compact_reviews()
+                            .decide(&review_id, atman_runtime::CompactReviewDecision::Reject);
+                    }
                     atman_tui::TuiControl::SwitchSession(sid) => {
                         *switch_target_for_ctrl.lock().unwrap() = Some(sid);
                         session_for_ctrl.cancel_flow();
@@ -1336,6 +1352,7 @@ async fn cmd_repl_once(
             todos_rx: Some(session.subscribe_todos()),
             plans_rx: Some(session.subscribe_plans()),
             approvals_rx: Some(session.subscribe_pending_approvals()),
+            compact_review_rx: Some(session.compact_reviews().subscribe()),
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
         };

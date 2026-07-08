@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
 pub mod clipboard;
+pub mod compact_review_modal;
 pub mod completion;
 pub mod highlight;
 pub mod history;
@@ -52,10 +53,22 @@ impl TuiNote {
 pub enum TuiControl {
     CancelFlow,
     ApproveTool(String),
-    DenyTool { tool_use_id: String, reason: String },
+    DenyTool {
+        tool_use_id: String,
+        reason: String,
+    },
     ApproveAllPending,
-    DenyAllPending { reason: String },
+    DenyAllPending {
+        reason: String,
+    },
     CompactNow,
+    CompactReviewAccept {
+        review_id: String,
+        edited: Option<String>,
+    },
+    CompactReviewReject {
+        review_id: String,
+    },
     SwitchSession(String),
 }
 
@@ -90,6 +103,8 @@ pub struct TuiHandle {
     pub plans_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>>,
     pub approvals_rx:
         Option<tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
+    pub compact_review_rx:
+        Option<tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
 }
@@ -113,6 +128,7 @@ impl TuiHandle {
             todos_rx: Some(session.subscribe_todos()),
             plans_rx: Some(session.subscribe_plans()),
             approvals_rx: Some(session.subscribe_pending_approvals()),
+            compact_review_rx: Some(session.compact_reviews().subscribe()),
             flow_names: Vec::new(),
             session: Some(session),
         }
@@ -254,6 +270,32 @@ async fn run_frames(
                     app.pending_approvals = rx.borrow().clone();
                 }
             }
+            _ = wait_compact_review_change(handle.compact_review_rx.as_mut()) => {
+                if let Some(rx) = handle.compact_review_rx.as_mut() {
+                    let latest = rx.borrow().clone();
+                    match (latest, app.compact_review.is_some()) {
+                        (Some(pending), false) => {
+                            app.compact_review = Some(
+                                crate::compact_review_modal::CompactReviewModal::new(pending),
+                            );
+                        }
+                        (Some(pending), true) => {
+                            if app
+                                .compact_review
+                                .as_ref()
+                                .is_some_and(|m| m.pending.review_id != pending.review_id)
+                            {
+                                app.compact_review = Some(
+                                    crate::compact_review_modal::CompactReviewModal::new(pending),
+                                );
+                            }
+                        }
+                        (None, _) => {
+                            app.compact_review = None;
+                        }
+                    }
+                }
+            }
             cmd = recv_cmd(handle.cmd_rx.as_mut()) => {
                 if let Some(cmd) = cmd {
                     match cmd {
@@ -328,6 +370,17 @@ async fn wait_plans_change(
 
 async fn wait_approvals_change(
     rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
+) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_compact_review_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
 ) {
     match rx {
         Some(r) => {
@@ -675,6 +728,53 @@ fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {
     }
 }
 
+fn handle_compact_review_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    let Some(tx) = control_tx else { return };
+    let Some(modal) = app.compact_review.as_mut() else {
+        return;
+    };
+    use crate::compact_review_modal::CompactReviewMode;
+    match modal.mode {
+        CompactReviewMode::Viewing => match action {
+            KeyAction::Submit => {
+                let review_id = modal.pending.review_id.clone();
+                let edited = if modal.summary_is_dirty() {
+                    Some(modal.edited_summary())
+                } else {
+                    None
+                };
+                let _ = tx.send(TuiControl::CompactReviewAccept { review_id, edited });
+                app.compact_review = None;
+            }
+            KeyAction::Char('e') => modal.enter_editing(),
+            KeyAction::Char('r') | KeyAction::Escape => {
+                let review_id = modal.pending.review_id.clone();
+                let _ = tx.send(TuiControl::CompactReviewReject { review_id });
+                app.compact_review = None;
+            }
+            KeyAction::PageUp => modal.scroll_up(),
+            KeyAction::PageDown => modal.scroll_down(),
+            _ => {}
+        },
+        CompactReviewMode::Editing => match action {
+            KeyAction::Escape => modal.leave_editing(),
+            KeyAction::Char(c) => modal.editor.insert_char(*c),
+            KeyAction::Backspace => modal.editor.backspace(),
+            KeyAction::DeleteWordBackward => modal.editor.delete_word_backward(),
+            KeyAction::Newline | KeyAction::Submit => modal.editor.insert_newline(),
+            KeyAction::CursorLeft => modal.editor.move_left(),
+            KeyAction::CursorRight => modal.editor.move_right(),
+            KeyAction::CursorHome => modal.editor.move_home(),
+            KeyAction::CursorEnd => modal.editor.move_end(),
+            _ => {}
+        },
+    }
+}
+
 fn handle_approval_key(
     action: &KeyAction,
     app: &mut AppState,
@@ -739,6 +839,10 @@ fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if app.compact_review.is_some() {
+        handle_compact_review_key(&action, app, control_tx);
+        return;
+    }
     if app.session_switcher.open {
         handle_session_switcher_key(&action, app, control_tx);
         return;
@@ -1076,6 +1180,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.session_switcher.open {
         session_switcher::render(f, area, &app.session_switcher);
+    }
+    if let Some(modal) = app.compact_review.as_ref() {
+        compact_review_modal::render(f, area, modal);
     }
 }
 
