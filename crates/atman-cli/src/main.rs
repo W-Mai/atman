@@ -1208,6 +1208,7 @@ async fn cmd_repl_once(
 
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
+    let is_fresh_session = resume_sid.is_none();
     let session = std::sync::Arc::new(match resume_sid {
         Some(sid) => Session::open_existing_with_redactor(&root, &sid, redactor.clone())
             .with_context(|| format!("resuming session {sid} under {}", root.display()))?,
@@ -1492,11 +1493,41 @@ async fn cmd_repl_once(
     if let Some(ct) = ctrl_task {
         let _ = ct.await;
     }
+    let user_msg_count = session.user_message_count();
+    let session_dir = session.dir().to_path_buf();
+    let session_id = session.id().to_string();
     match std::sync::Arc::try_unwrap(session) {
         Ok(s) => s.shutdown().await,
         Err(_) => eprintln!("[atman] session still had refs at shutdown; skipping graceful close"),
     }
+    if is_fresh_session
+        && user_msg_count == 0
+        && !session_dir.as_os_str().is_empty()
+        && session_dir_is_disposable(&session_dir)
+    {
+        match std::fs::remove_dir_all(&session_dir) {
+            Ok(()) => eprintln!(
+                "[atman] discarded empty session {} ({})",
+                session_id,
+                session_dir.display()
+            ),
+            Err(e) => eprintln!(
+                "[atman] could not discard empty session {}: {e}",
+                session_dir.display()
+            ),
+        }
+    }
     Ok(())
+}
+
+fn session_dir_is_disposable(dir: &std::path::Path) -> bool {
+    const SIDE_EFFECT_FILES: &[&str] = &[
+        "todos.jsonl",
+        "plans.jsonl",
+        "goal.txt",
+        "confessions.jsonl",
+    ];
+    !SIDE_EFFECT_FILES.iter().any(|name| dir.join(name).exists())
 }
 
 fn tui_mode_requested() -> bool {

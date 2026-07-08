@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout as RatatuiLayout, Rect};
 
-pub const SIDEBAR_WIDTH: u16 = 30;
-pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 100;
+pub const SIDEBAR_WIDTH: u16 = 42;
+pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 110;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AppLayout {
@@ -61,11 +61,11 @@ mod tests {
 
     #[test]
     fn wide_area_shows_sidebar() {
-        let area = Rect::new(0, 0, 120, 40);
+        let area = Rect::new(0, 0, 140, 40);
         let l = compute(area, 3, true);
         assert!(l.sidebar.is_some());
         assert_eq!(l.sidebar.unwrap().width, SIDEBAR_WIDTH);
-        assert_eq!(l.transcript.width, 120 - SIDEBAR_WIDTH);
+        assert_eq!(l.transcript.width, 140 - SIDEBAR_WIDTH);
     }
 
     #[test]

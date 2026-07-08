@@ -301,7 +301,10 @@ fn render_workflow_panel_with_regions(
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" · {count} nodes · {elapsed}s · ")),
+        Span::raw(format!(
+            " · {count} nodes · {} · ",
+            crate::humanize::format_secs(elapsed)
+        )),
         Span::styled(status_str, status_style),
     ]);
     let mut lines = vec![header];

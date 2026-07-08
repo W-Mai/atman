@@ -1188,6 +1188,15 @@ impl Session {
         self.messages.lock().unwrap().len()
     }
 
+    pub fn user_message_count(&self) -> usize {
+        self.messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| matches!(m.role, MessageRole::User))
+            .count()
+    }
+
     pub fn push_system_note(&self, text: String) {
         let _ = self.stream_tx.send(crate::stream::StreamFrame::Note(text));
     }

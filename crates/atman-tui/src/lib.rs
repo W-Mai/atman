@@ -17,6 +17,7 @@ pub mod compact_review_modal;
 pub mod completion;
 pub mod highlight;
 pub mod history;
+pub mod humanize;
 pub mod input;
 pub mod keys;
 pub mod layout;

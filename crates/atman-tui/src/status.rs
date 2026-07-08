@@ -61,9 +61,22 @@ fn compact_context_line<'a>(ctx: &ContextSnapshot, attach_count: usize) -> Line<
     } else {
         ctx.model.clone()
     };
+    use crate::humanize::format_count;
+    let window = if ctx.window_budget == 0 {
+        format_count(ctx.window_tokens)
+    } else {
+        format!(
+            "{}/{}",
+            format_count(ctx.window_tokens),
+            format_count(ctx.window_budget)
+        )
+    };
     let text = format!(
-        " {model} · tok {}/{} · attach {attach_count} · mcp {}/{}",
-        ctx.tokens_in, ctx.tokens_out, ctx.mcp_ok, ctx.mcp_total,
+        " {model} · ctx {window} · spent {}/{} · attach {attach_count} · mcp {}/{}",
+        format_count(ctx.tokens_in),
+        format_count(ctx.tokens_out),
+        ctx.mcp_ok,
+        ctx.mcp_total,
     );
     Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
 }

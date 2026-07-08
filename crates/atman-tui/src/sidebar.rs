@@ -186,13 +186,14 @@ fn context_section<'a>(
         ctx.model.clone()
     };
     let stream_style = if streaming { bold } else { plain };
+    use crate::humanize::format_count;
     let window = if ctx.window_budget == 0 {
-        format!("{}", ctx.window_tokens)
+        format_count(ctx.window_tokens)
     } else {
         format!(
             "{} / {} ({}%)",
-            ctx.window_tokens,
-            ctx.window_budget,
+            format_count(ctx.window_tokens),
+            format_count(ctx.window_budget),
             (ctx.window_tokens as f64 / ctx.window_budget as f64 * 100.0) as u64
         )
     };
@@ -202,7 +203,11 @@ fn context_section<'a>(
         kv_line("window", window, stream_style),
         kv_line(
             "spent",
-            format!("in {} · out {}", ctx.tokens_in, ctx.tokens_out),
+            format!(
+                "in {} · out {}",
+                format_count(ctx.tokens_in),
+                format_count(ctx.tokens_out)
+            ),
             plain,
         ),
         kv_line("attach", format!("{attach_count}"), plain),
