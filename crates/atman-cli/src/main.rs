@@ -722,46 +722,58 @@ async fn cmd_session_search(
     } else {
         resolve_session_list_filter(all, project.as_deref())?
     };
-    let mut targets: Vec<PathBuf> = Vec::new();
+    let mut project_dirs: Vec<PathBuf> = Vec::new();
+    let mut session_filter: Option<String> = None;
     if let Some(sid) = session {
         let dir = sessions_root.join(&sid);
         if !dir.is_dir() {
             bail!("session not found: {}", dir.display());
         }
-        targets.push(dir);
+        let meta = atman_runtime::session_meta::SessionMeta::load(&dir);
+        let project_root = meta.as_ref().and_then(|m| m.project_root.clone());
+        let scope = match project_root {
+            Some(pr) => atman_runtime::storage::resolve_project_scope_for(&pr)
+                .with_context(|| format!("resolve scope for {}", pr.display()))?,
+            None => atman_runtime::storage::resolve_current_project_scope()?,
+        };
+        project_dirs.push(scope);
+        session_filter = Some(sid);
     } else {
-        for entry in std::fs::read_dir(&sessions_root)? {
-            let entry = entry?;
-            if !entry.path().is_dir() {
-                continue;
-            }
-            if let SessionListFilter::Project(want) = &filter {
-                let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
-                let fp = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
-                if fp.as_deref() != Some(want.as_str()) {
-                    continue;
+        match &filter {
+            SessionListFilter::Project(fp) => {
+                let scope = root.join("projects").join(fp);
+                if scope.is_dir() {
+                    project_dirs.push(scope);
                 }
             }
-            targets.push(entry.path());
+            SessionListFilter::All => {
+                let projects_root = root.join("projects");
+                if projects_root.is_dir() {
+                    for entry in std::fs::read_dir(&projects_root)? {
+                        let path = entry?.path();
+                        if path.is_dir() {
+                            project_dirs.push(path);
+                        }
+                    }
+                } else {
+                    project_dirs.push(atman_runtime::storage::resolve_current_project_scope()?);
+                }
+            }
         }
     }
     let mut hits: Vec<(String, String, u64, String, String)> = Vec::new();
-    for dir in targets {
-        let sid = dir
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let idx = match atman_runtime::index::AnchorIndex::open_session(&dir) {
+    for scope in project_dirs {
+        let idx = match atman_runtime::index::AnchorIndex::open_project(&scope) {
             Ok(i) => i,
             Err(_) => continue,
         };
-        let rows = match idx.fts_search_events(&query, limit) {
+        let rows = match idx.fts_search_project_events(&query, session_filter.as_deref(), limit) {
             Ok(r) => r,
             Err(_) => continue,
         };
         for row in rows {
             let snippet = extract_snippet(&row.payload, &query);
-            hits.push((row.ts.clone(), sid.clone(), row.seq, row.kind, snippet));
+            hits.push((row.ts, row.session_id, row.seq, row.kind, snippet));
         }
     }
     hits.sort_by(|a, b| b.0.cmp(&a.0));
@@ -3072,39 +3084,23 @@ async fn cmd_rebuild_index() -> Result<()> {
         println!("no sessions directory at {}", sessions_root.display());
         return Ok(());
     }
-    let mut total_rebuilt = 0usize;
-    let mut total_skipped = 0usize;
-    let mut session_count = 0usize;
-    for entry in std::fs::read_dir(&sessions_root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let jsonl = path.join("events.jsonl");
-        if !jsonl.exists() {
-            continue;
-        }
-        match atman_runtime::index::AnchorIndex::open_session(&path) {
-            Ok(idx) => match idx.rebuild_events_from_jsonl(&jsonl) {
-                Ok(stats) => {
-                    println!(
-                        "  session {}: rebuilt {} events (skipped {})",
-                        path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-                        stats.rebuilt,
-                        stats.skipped
-                    );
-                    total_rebuilt += stats.rebuilt;
-                    total_skipped += stats.skipped;
-                    session_count += 1;
-                }
-                Err(e) => eprintln!("  session {}: rebuild failed: {e}", path.display()),
-            },
-            Err(e) => eprintln!("  session {}: open failed: {e}", path.display()),
-        }
-    }
+    let cwd = std::env::current_dir()?;
+    let project_root =
+        atman_runtime::session_meta::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let scope = atman_runtime::storage::resolve_project_scope_for(&project_root)
+        .with_context(|| format!("resolve scope for {}", project_root.display()))?;
+    let fingerprint = atman_runtime::session_meta::fingerprint_from_root(&project_root);
+    let idx = atman_runtime::index::AnchorIndex::open_project(&scope)
+        .with_context(|| format!("open project index at {}", scope.display()))?;
+    let stats = idx
+        .rebuild_events_from_sessions(&sessions_root, &fingerprint)
+        .with_context(|| format!("rebuild events for fingerprint {fingerprint}"))?;
     println!(
-        "rebuilt {total_rebuilt} events across {session_count} sessions (skipped {total_skipped})"
+        "project {} fingerprint={fingerprint}\n  scope: {}\n  rebuilt: {} events (skipped {})",
+        project_root.display(),
+        scope.display(),
+        stats.rebuilt,
+        stats.skipped
     );
     Ok(())
 }

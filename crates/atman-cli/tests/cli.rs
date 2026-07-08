@@ -875,8 +875,11 @@ fn repl_attach_command_rejects_missing_file() {
 }
 
 #[test]
-fn rebuild_index_walks_all_sessions_and_reports_totals() {
+fn rebuild_index_walks_matching_project_sessions_and_reports_totals() {
     let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".atman")).unwrap();
+    let fp_hex = atman_runtime::session_meta::fingerprint_from_root(project.path());
     let sessions = data.path().join("sessions");
     let sid_a = "019f2900-0000-7000-8000-00000000000a";
     let sid_b = "019f2900-0000-7000-8000-00000000000b";
@@ -884,6 +887,12 @@ fn rebuild_index_walks_all_sessions_and_reports_totals() {
     let dir_b = sessions.join(sid_b);
     std::fs::create_dir_all(&dir_a).unwrap();
     std::fs::create_dir_all(&dir_b).unwrap();
+    let meta = serde_json::json!({
+        "project_root": project.path().canonicalize().unwrap(),
+        "project_fingerprint": fp_hex,
+    });
+    std::fs::write(dir_a.join("meta.json"), meta.to_string()).unwrap();
+    std::fs::write(dir_b.join("meta.json"), meta.to_string()).unwrap();
     std::fs::write(
         dir_a.join("events.jsonl"),
         concat!(
@@ -903,6 +912,7 @@ fn rebuild_index_walks_all_sessions_and_reports_totals() {
 
     let out = Command::new(atman_binary())
         .env("ATMAN_DATA_DIR", data.path())
+        .current_dir(project.path())
         .arg("rebuild-index")
         .output()
         .expect("run rebuild-index");
@@ -912,13 +922,10 @@ fn rebuild_index_walks_all_sessions_and_reports_totals() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("rebuilt 3 events across 2 sessions"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("rebuilt: 3 events"), "stdout: {stdout}");
 
-    assert!(dir_a.join("anchors.db").exists());
-    assert!(dir_b.join("anchors.db").exists());
+    let scope_db = data.path().join("projects").join(&fp_hex).join("index.db");
+    assert!(scope_db.exists(), "expected {}", scope_db.display());
 }
 
 #[test]
