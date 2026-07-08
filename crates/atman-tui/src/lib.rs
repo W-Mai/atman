@@ -530,16 +530,16 @@ fn enumerate_session_rows(
                 .and_then(|m| m.project_root.as_ref())
                 .map(|p| p.display().to_string())
         };
-        let updated_at = entry
-            .metadata()
+        let events_path = entry.path().join("events.jsonl");
+        let updated_at = std::fs::metadata(&events_path)
             .and_then(|m| m.modified())
+            .or_else(|_| entry.metadata().and_then(|m| m.modified()))
             .ok()
             .map(|st| {
                 let ts: chrono::DateTime<chrono::Utc> = st.into();
                 ts.to_rfc3339()
             })
             .unwrap_or_default();
-        let events_path = entry.path().join("events.jsonl");
         let (user_count, total_count) = count_message_events(&events_path);
         if user_count == 0 {
             continue;
