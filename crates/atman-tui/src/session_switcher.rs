@@ -28,13 +28,40 @@ impl SessionScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionSortMode {
+    #[default]
+    Recent,
+    Busiest,
+}
+
+impl SessionSortMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            SessionSortMode::Recent => SessionSortMode::Busiest,
+            SessionSortMode::Busiest => SessionSortMode::Recent,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionSortMode::Recent => "recent",
+            SessionSortMode::Busiest => "busiest",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SessionSwitcher {
     pub open: bool,
     pub scope: SessionScope,
+    pub all_rows: Vec<SessionPickerRow>,
     pub rows: Vec<SessionPickerRow>,
     pub selected: usize,
     pub delete_armed: Option<String>,
+    pub sort_mode: SessionSortMode,
+    pub filter: String,
+    pub filter_mode: bool,
 }
 
 impl std::fmt::Debug for SessionSwitcher {
@@ -50,20 +77,81 @@ impl std::fmt::Debug for SessionSwitcher {
 impl SessionSwitcher {
     pub fn open_with(&mut self, rows: Vec<SessionPickerRow>, scope: SessionScope) {
         self.scope = scope;
-        self.rows = rows;
+        self.all_rows = rows;
+        self.filter.clear();
+        self.filter_mode = false;
         self.selected = 0;
         self.open = true;
+        self.rebuild_view();
     }
 
     pub fn set_rows(&mut self, rows: Vec<SessionPickerRow>) {
-        self.rows = rows;
+        self.all_rows = rows;
         self.selected = 0;
+        self.rebuild_view();
     }
 
     pub fn close(&mut self) {
         self.open = false;
         self.rows.clear();
+        self.all_rows.clear();
+        self.filter.clear();
+        self.filter_mode = false;
         self.delete_armed = None;
+    }
+
+    pub fn toggle_sort(&mut self) {
+        self.sort_mode = self.sort_mode.toggle();
+        self.rebuild_view();
+    }
+
+    pub fn enter_filter_mode(&mut self) {
+        self.filter_mode = true;
+    }
+
+    pub fn leave_filter_mode(&mut self) {
+        self.filter_mode = false;
+    }
+
+    pub fn filter_push(&mut self, c: char) {
+        self.filter.push(c);
+        self.rebuild_view();
+    }
+
+    pub fn filter_pop(&mut self) {
+        self.filter.pop();
+        self.rebuild_view();
+    }
+
+    pub fn filter_clear(&mut self) {
+        self.filter.clear();
+        self.rebuild_view();
+    }
+
+    fn rebuild_view(&mut self) {
+        let needle = self.filter.to_lowercase();
+        let mut view: Vec<SessionPickerRow> = self
+            .all_rows
+            .iter()
+            .filter(|r| row_matches_filter(r, &needle))
+            .cloned()
+            .collect();
+        match self.sort_mode {
+            SessionSortMode::Recent => {
+                view.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            }
+            SessionSortMode::Busiest => {
+                view.sort_by(|a, b| {
+                    b.message_count
+                        .cmp(&a.message_count)
+                        .then_with(|| b.updated_at.cmp(&a.updated_at))
+                });
+            }
+        }
+        self.rows = view;
+        if self.selected >= self.rows.len() {
+            self.selected = self.rows.len().saturating_sub(1);
+        }
     }
 
     pub fn remove_selected(&mut self) -> Option<String> {
@@ -71,6 +159,7 @@ impl SessionSwitcher {
             return None;
         }
         let removed = self.rows.remove(self.selected);
+        self.all_rows.retain(|r| r.id != removed.id);
         if self.selected >= self.rows.len() {
             self.selected = self.rows.len().saturating_sub(1);
         }
@@ -110,6 +199,26 @@ impl SessionSwitcher {
     }
 }
 
+fn row_matches_filter(row: &SessionPickerRow, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if row.id.to_lowercase().contains(needle) {
+        return true;
+    }
+    if let Some(g) = row.goal.as_deref()
+        && g.to_lowercase().contains(needle)
+    {
+        return true;
+    }
+    if let Some(p) = row.project.as_deref()
+        && p.to_lowercase().contains(needle)
+    {
+        return true;
+    }
+    false
+}
+
 pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     let w = area.width.saturating_sub(4).clamp(60, 100);
     let desired = 3 + switcher.rows.len().max(1) as u16 + 2;
@@ -128,10 +237,21 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
             " Switch Session · {} · d again to DELETE · any other key cancels ",
             switcher.scope.label()
         )
+    } else if switcher.filter_mode {
+        format!(
+            " Switch Session · filter: {}▏ · Esc/Enter done ",
+            switcher.filter
+        )
     } else {
         format!(
-            " Switch Session · {} · Tab toggle · Enter open · d delete · Esc ",
-            switcher.scope.label()
+            " Switch Session · {} · sort:{} · filter:{} · Tab scope · s sort · f filter · Enter open · d delete · Esc ",
+            switcher.scope.label(),
+            switcher.sort_mode.label(),
+            if switcher.filter.is_empty() {
+                "-".to_string()
+            } else {
+                switcher.filter.clone()
+            },
         )
     };
     let border_color = if switcher.delete_armed.is_some() {
@@ -230,6 +350,64 @@ mod tests {
             updated_at: "2026-07-08T00:00:00Z".into(),
             goal: None,
         }
+    }
+
+    fn row_with(id: &str, msgs: usize, updated: &str, goal: Option<&str>) -> SessionPickerRow {
+        SessionPickerRow {
+            id: id.into(),
+            project: None,
+            message_count: msgs,
+            updated_at: updated.into(),
+            goal: goal.map(|s| s.into()),
+        }
+    }
+
+    #[test]
+    fn recent_sort_default_puts_newest_first() {
+        let mut s = SessionSwitcher::default();
+        s.open_with(
+            vec![
+                row_with("old", 500, "2026-01-01T00:00:00Z", None),
+                row_with("new", 3, "2026-07-08T00:00:00Z", None),
+            ],
+            SessionScope::Project,
+        );
+        assert_eq!(s.rows[0].id, "new");
+    }
+
+    #[test]
+    fn busiest_sort_puts_most_messages_first() {
+        let mut s = SessionSwitcher::default();
+        s.open_with(
+            vec![
+                row_with("recent-small", 3, "2026-07-08T00:00:00Z", None),
+                row_with("old-big", 500, "2026-01-01T00:00:00Z", None),
+            ],
+            SessionScope::Project,
+        );
+        s.toggle_sort();
+        assert_eq!(s.sort_mode, SessionSortMode::Busiest);
+        assert_eq!(s.rows[0].id, "old-big");
+    }
+
+    #[test]
+    fn filter_narrows_visible_rows() {
+        let mut s = SessionSwitcher::default();
+        s.open_with(
+            vec![
+                row_with("aaa11111", 1, "2026-07-01T00:00:00Z", Some("refactor auth")),
+                row_with("bbb22222", 2, "2026-07-02T00:00:00Z", Some("write tests")),
+            ],
+            SessionScope::Project,
+        );
+        s.filter_push('a');
+        s.filter_push('u');
+        s.filter_push('t');
+        s.filter_push('h');
+        assert_eq!(s.rows.len(), 1);
+        assert_eq!(s.rows[0].id, "aaa11111");
+        s.filter_clear();
+        assert_eq!(s.rows.len(), 2);
     }
 
     #[test]

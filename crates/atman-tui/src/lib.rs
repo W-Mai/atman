@@ -552,11 +552,7 @@ fn enumerate_session_rows(
             goal: meta.as_ref().and_then(|m| m.title.clone()),
         });
     }
-    rows.sort_by(|a, b| {
-        b.message_count
-            .cmp(&a.message_count)
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-    });
+    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     rows.truncate(200);
     rows
 }
@@ -716,6 +712,17 @@ fn handle_session_switcher_key(
     app: &mut AppState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if app.session_switcher.filter_mode {
+        match action {
+            KeyAction::Escape | KeyAction::Submit => {
+                app.session_switcher.leave_filter_mode();
+            }
+            KeyAction::Backspace => app.session_switcher.filter_pop(),
+            KeyAction::Char(c) => app.session_switcher.filter_push(*c),
+            _ => {}
+        }
+        return;
+    }
     if let KeyAction::Char('d') | KeyAction::Char('D') = action {
         if app.session_switcher.delete_armed_matches_selected() {
             if let Some(sid) = app.session_switcher.remove_selected() {
@@ -739,6 +746,14 @@ fn handle_session_switcher_key(
     if app.session_switcher.delete_armed.is_some() {
         app.session_switcher.clear_delete_arm();
         app.push_note("delete cancelled", app::NoteLevel::Info);
+    }
+    if let KeyAction::Char('s') | KeyAction::Char('S') = action {
+        app.session_switcher.toggle_sort();
+        return;
+    }
+    if let KeyAction::Char('f') | KeyAction::Char('F') = action {
+        app.session_switcher.enter_filter_mode();
+        return;
     }
     match action {
         KeyAction::Escape => app.session_switcher.close(),
