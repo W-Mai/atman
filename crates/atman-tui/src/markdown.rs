@@ -91,12 +91,22 @@ impl Renderer {
                     return;
                 }
                 if self.in_table {
-                    self.table_row.push(text.into_string());
+                    if let Some(cell) = self.table_row.last_mut() {
+                        cell.push_str(&text);
+                    }
                     return;
                 }
                 self.push_text(&text);
             }
             Event::Code(text) => {
+                if self.in_table {
+                    if let Some(cell) = self.table_row.last_mut() {
+                        cell.push('`');
+                        cell.push_str(&text);
+                        cell.push('`');
+                    }
+                    return;
+                }
                 let style = merge_style(
                     self.active_style(),
                     Style::default()
@@ -107,6 +117,12 @@ impl Renderer {
                 self.fresh_line = false;
             }
             Event::SoftBreak | Event::HardBreak => {
+                if self.in_table {
+                    if let Some(cell) = self.table_row.last_mut() {
+                        cell.push(' ');
+                    }
+                    return;
+                }
                 self.end_line();
                 let indent = self.indent_prefix();
                 if !indent.is_empty() {
@@ -210,6 +226,11 @@ impl Renderer {
             }
             Tag::TableRow => {
                 self.table_row.clear();
+            }
+            Tag::TableCell => {
+                if self.in_table {
+                    self.table_row.push(String::new());
+                }
             }
             _ => {}
         }
@@ -510,6 +531,41 @@ mod tests {
                 .any(|l| l.contains("│") && l.contains(" a ") && l.contains(" b ")),
             "want header row: {flat:?}"
         );
+    }
+
+    #[test]
+    fn table_preserves_inline_code_in_cells() {
+        let lines = render_markdown("| name | code |\n| - | - |\n| foo | `bar()` |\n");
+        let flat = plain(&lines);
+        assert!(
+            flat.iter()
+                .any(|l| l.contains("`bar()`") && l.contains("foo")),
+            "inline code lost from table cell: {flat:?}"
+        );
+    }
+
+    #[test]
+    fn table_preserves_bold_and_italic_text_in_cells() {
+        let lines = render_markdown("| A | B |\n| - | - |\n| **bold** run | plain |\n");
+        let flat = plain(&lines);
+        assert!(
+            flat.iter()
+                .any(|l| l.contains("bold run") && l.contains("plain")),
+            "bold text run split across cells: {flat:?}"
+        );
+    }
+
+    #[test]
+    fn table_keeps_empty_cell_columns_aligned() {
+        let lines = render_markdown("| A | B | C |\n| - | - | - |\n| x |  | z |\n");
+        let flat = plain(&lines);
+        let data_row = flat
+            .iter()
+            .find(|l| l.contains("x") && l.contains("z"))
+            .unwrap_or_else(|| panic!("no data row: {flat:?}"));
+        let x_pos = data_row.find("x").unwrap();
+        let z_pos = data_row.find("z").unwrap();
+        assert!(z_pos - x_pos > 2, "empty column collapsed: {data_row:?}");
     }
 
     #[test]
