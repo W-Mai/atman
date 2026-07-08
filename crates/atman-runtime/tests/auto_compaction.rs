@@ -107,6 +107,151 @@ async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
     assert!(has_system_msg, "expected a paired SystemMsg event");
 }
 
+async fn setup_review_env() -> (
+    tempfile::TempDir,
+    std::sync::Arc<Session>,
+    atman_runtime::provider::ProviderRegistry,
+) {
+    use atman_runtime::provider::ProviderRegistry;
+    use atman_runtime::providers::mock::MockProvider;
+    use atman_runtime::value::Value;
+    use std::sync::Arc;
+    let tmp = tempfile::tempdir().unwrap();
+    let session = Arc::new(Session::open(tmp.path()).unwrap());
+    build_long_history(&session, 60);
+    session.record_llm_call("mock-summary", 0, 0);
+    let mut providers = ProviderRegistry::new();
+    providers
+        .register(Arc::new(MockProvider::new("mock-summary").with_fallback(
+            Value::Str("original LLM summary about compaction".into()),
+        )));
+    (tmp, session, providers)
+}
+
+fn wait_for_pending_and_decide(
+    session: std::sync::Arc<Session>,
+    decision: atman_runtime::CompactReviewDecision,
+) -> tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>> {
+    let sub = session.compact_reviews().subscribe();
+    tokio::spawn(async move {
+        let reviews = session.compact_reviews();
+        for _ in 0..500 {
+            if let Some(pending) = reviews.list_pending() {
+                reviews.decide(&pending.review_id, decision.clone());
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        eprintln!("[test] wait_for_pending_and_decide timed out");
+    });
+    sub
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_accept_as_is_commits_llm_summary() {
+    use atman_runtime::CompactReviewDecision;
+    use atman_runtime::compaction::maybe_auto_compact;
+    use atman_runtime::event::Event;
+    let (_tmp, session, providers) = setup_review_env().await;
+    session.set_compact_review_mode(atman_runtime::CompactReviewMode::Always);
+    let _sub = wait_for_pending_and_decide(session.clone(), CompactReviewDecision::AcceptAsIs);
+    maybe_auto_compact(&session, "mock-summary", &providers).await;
+    let events = session.sink().snapshot();
+    let (summary_text, _) = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ContextCompact {
+                summary_text,
+                replacement_msg_seq,
+                ..
+            } => Some((summary_text.clone(), *replacement_msg_seq)),
+            _ => None,
+        })
+        .expect("expected ContextCompact event");
+    assert!(
+        summary_text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("original LLM summary")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_accept_edited_commits_user_summary() {
+    use atman_runtime::CompactReviewDecision;
+    use atman_runtime::compaction::maybe_auto_compact;
+    use atman_runtime::event::Event;
+    let (_tmp, session, providers) = setup_review_env().await;
+    session.set_compact_review_mode(atman_runtime::CompactReviewMode::Always);
+    let _sub = wait_for_pending_and_decide(
+        session.clone(),
+        CompactReviewDecision::AcceptEdited {
+            summary: "user-crafted replacement summary".into(),
+        },
+    );
+    maybe_auto_compact(&session, "mock-summary", &providers).await;
+    let events = session.sink().snapshot();
+    let (summary_text, _) = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ContextCompact {
+                summary_text,
+                replacement_msg_seq,
+                ..
+            } => Some((summary_text.clone(), *replacement_msg_seq)),
+            _ => None,
+        })
+        .expect("expected ContextCompact event");
+    assert!(
+        summary_text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("user-crafted replacement"),
+        "expected edited summary, got {summary_text:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_reject_skips_commit() {
+    use atman_runtime::CompactReviewDecision;
+    use atman_runtime::compaction::maybe_auto_compact;
+    use atman_runtime::event::Event;
+    let (_tmp, session, providers) = setup_review_env().await;
+    session.set_compact_review_mode(atman_runtime::CompactReviewMode::Always);
+    let before_count = session.message_count();
+    let _sub = wait_for_pending_and_decide(session.clone(), CompactReviewDecision::Reject);
+    maybe_auto_compact(&session, "mock-summary", &providers).await;
+    let events = session.sink().snapshot();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ContextCompact { .. })),
+        "expected no ContextCompact event when rejected"
+    );
+    assert_eq!(
+        session.message_count(),
+        before_count,
+        "transcript must be unchanged on reject"
+    );
+}
+
+#[tokio::test]
+async fn review_manual_only_skips_review_on_auto_path() {
+    use atman_runtime::compaction::maybe_auto_compact;
+    use atman_runtime::event::Event;
+    let (_tmp, session, providers) = setup_review_env().await;
+    session.set_compact_review_mode(atman_runtime::CompactReviewMode::ManualOnly);
+    let _sub = session.compact_reviews().subscribe();
+    maybe_auto_compact(&session, "mock-summary", &providers).await;
+    let events = session.sink().snapshot();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ContextCompact { .. })),
+        "auto path with manual-only mode must commit without review"
+    );
+}
+
 #[tokio::test]
 async fn cooldown_blocks_repeat_compaction_within_window() {
     let tmp = tempfile::tempdir().unwrap();

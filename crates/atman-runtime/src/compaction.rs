@@ -199,7 +199,17 @@ pub async fn maybe_auto_compact(
             )
         }
     };
-    match session.compact_messages(summary) {
+    let final_summary =
+        match request_review_if_enabled(session, forced, slice, &range, current, summary).await {
+            ReviewOutcome::Commit(s) => s,
+            ReviewOutcome::Rejected => {
+                session.push_system_note(
+                    "compaction rejected by user; keeping full transcript".into(),
+                );
+                return;
+            }
+        };
+    match session.compact_messages(final_summary) {
         Some(result) => {
             session.push_system_note(format!(
                 "auto-compacted {}..{} — {} → {} tokens",
@@ -219,6 +229,57 @@ pub async fn maybe_auto_compact(
             );
         }
     }
+}
+
+enum ReviewOutcome {
+    Commit(String),
+    Rejected,
+}
+
+async fn request_review_if_enabled(
+    session: &crate::session::Session,
+    forced: bool,
+    slice: &[Message],
+    range: &CompactRange,
+    tokens_before: u64,
+    summary: String,
+) -> ReviewOutcome {
+    if !session.compact_review_mode().should_review(forced) {
+        return ReviewOutcome::Commit(summary);
+    }
+    let reviews = session.compact_reviews();
+    if reviews.subscriber_count() == 0 {
+        return ReviewOutcome::Commit(summary);
+    }
+    let pending = crate::session::PendingCompactReview {
+        review_id: uuid::Uuid::now_v7().to_string(),
+        summary: summary.clone(),
+        slice_preview: format_slice_for_preview(slice),
+        slice_count: slice.len(),
+        range_start: range.start,
+        range_end: range.end,
+        tokens_before,
+        emitted_at: chrono::Utc::now(),
+    };
+    let rx = reviews.request(pending);
+    match rx.await {
+        Ok(crate::session::CompactReviewDecision::AcceptAsIs) => ReviewOutcome::Commit(summary),
+        Ok(crate::session::CompactReviewDecision::AcceptEdited { summary: edited }) => {
+            ReviewOutcome::Commit(edited)
+        }
+        Ok(crate::session::CompactReviewDecision::Reject) | Err(_) => ReviewOutcome::Rejected,
+    }
+}
+
+fn format_slice_for_preview(slice: &[Message]) -> String {
+    let mut out = String::new();
+    for (i, msg) in slice.iter().enumerate() {
+        let role = msg.role.as_str();
+        let text = msg.text_concat();
+        let truncated: String = text.chars().take(400).collect();
+        out.push_str(&format!("[{i}] {role}: {truncated}\n"));
+    }
+    out.chars().take(16_000).collect()
 }
 
 const SUMMARY_SYSTEM_PROMPT: &str = "You are summarizing a slice of an ongoing conversation so a future model can continue without losing context. Write 200-400 words focused on: key facts and decisions (files touched, tools invoked, verdicts reached); open threads (unfinished tasks, unresolved questions); what the user asked and what the assistant delivered. Rules: no code fences; include file, function, library, package names verbatim; write in past tense first-person from the assistant's perspective (\"I investigated foo.rs, decided to...\"); no speculation, only what actually happened in the transcript.";
