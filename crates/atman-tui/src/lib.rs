@@ -414,7 +414,10 @@ fn yank_selected_text(app: &AppState) -> Option<String> {
     }
 }
 
-fn enumerate_session_rows(app: &AppState) -> Vec<crate::SessionPickerRow> {
+fn enumerate_session_rows(
+    app: &AppState,
+    scope: crate::session_switcher::SessionScope,
+) -> Vec<crate::SessionPickerRow> {
     let Some(session) = &app.session else {
         return Vec::new();
     };
@@ -423,6 +426,7 @@ fn enumerate_session_rows(app: &AppState) -> Vec<crate::SessionPickerRow> {
         return Vec::new();
     };
     let current_fp = session.meta().and_then(|m| m.project_fingerprint);
+    let restrict_to_project = matches!(scope, crate::session_switcher::SessionScope::Project);
     let mut rows = Vec::new();
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
@@ -436,7 +440,7 @@ fn enumerate_session_rows(app: &AppState) -> Vec<crate::SessionPickerRow> {
             continue;
         }
         let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
-        if let Some(current_fp) = current_fp.as_ref() {
+        if restrict_to_project && let Some(current_fp) = current_fp.as_ref() {
             let peer_fp = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
             if peer_fp.as_deref() != Some(current_fp.as_str()) {
                 continue;
@@ -494,6 +498,12 @@ fn handle_session_switcher_key(
         KeyAction::Escape => app.session_switcher.close(),
         KeyAction::HistoryUp | KeyAction::CursorLeft => app.session_switcher.move_up(),
         KeyAction::HistoryDown | KeyAction::CursorRight => app.session_switcher.move_down(),
+        KeyAction::Tab => {
+            let new_scope = app.session_switcher.scope.toggle();
+            let rows = enumerate_session_rows(app, new_scope);
+            app.session_switcher.scope = new_scope;
+            app.session_switcher.set_rows(rows);
+        }
         KeyAction::Submit => {
             if let Some(sid) = app.session_switcher.selected_id() {
                 if let Some(tx) = control_tx {
@@ -557,12 +567,9 @@ fn dispatch_palette_entry(
             }
         }
         PaletteEntryId::SwitchSession => {
-            let rows = enumerate_session_rows(app);
-            if rows.is_empty() {
-                app.push_note("no other sessions to switch into", app::NoteLevel::Warn);
-                return;
-            }
-            app.session_switcher.open_with(rows);
+            let scope = crate::session_switcher::SessionScope::Project;
+            let rows = enumerate_session_rows(app, scope);
+            app.session_switcher.open_with(rows, scope);
         }
         PaletteEntryId::SearchHistory => {
             app.push_note("history search modal not wired yet", app::NoteLevel::Warn);

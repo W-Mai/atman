@@ -5,9 +5,33 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
 use crate::SessionPickerRow;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionScope {
+    #[default]
+    Project,
+    All,
+}
+
+impl SessionScope {
+    pub fn toggle(self) -> Self {
+        match self {
+            SessionScope::Project => SessionScope::All,
+            SessionScope::All => SessionScope::Project,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionScope::Project => "project only",
+            SessionScope::All => "all projects",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct SessionSwitcher {
     pub open: bool,
+    pub scope: SessionScope,
     pub rows: Vec<SessionPickerRow>,
     pub selected: usize,
 }
@@ -23,10 +47,16 @@ impl std::fmt::Debug for SessionSwitcher {
 }
 
 impl SessionSwitcher {
-    pub fn open_with(&mut self, rows: Vec<SessionPickerRow>) {
+    pub fn open_with(&mut self, rows: Vec<SessionPickerRow>, scope: SessionScope) {
+        self.scope = scope;
         self.rows = rows;
         self.selected = 0;
         self.open = true;
+    }
+
+    pub fn set_rows(&mut self, rows: Vec<SessionPickerRow>) {
+        self.rows = rows;
+        self.selected = 0;
     }
 
     pub fn close(&mut self) {
@@ -51,7 +81,7 @@ impl SessionSwitcher {
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     let w = area.width.saturating_sub(4).clamp(60, 100);
-    let desired = 3 + switcher.rows.len() as u16 + 2;
+    let desired = 3 + switcher.rows.len().max(1) as u16 + 2;
     let h = area.height.saturating_sub(4).min(desired).max(8);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
@@ -62,18 +92,38 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         height: h,
     };
     f.render_widget(Clear, rect);
+    let title = format!(
+        " Switch Session · {} · Tab to toggle · Enter/Esc ",
+        switcher.scope.label()
+    );
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
-            " Switch Session (Enter to swap, Esc to cancel) ",
+            title,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
-    if inner.height == 0 || switcher.rows.is_empty() {
+    if inner.height == 0 {
+        return;
+    }
+    if switcher.rows.is_empty() {
+        let hint = match switcher.scope {
+            SessionScope::Project => {
+                "no sessions found in this project · press Tab to see all projects"
+            }
+            SessionScope::All => "no other sessions exist yet",
+        };
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(Color::DarkGray),
+            ))),
+            inner,
+        );
         return;
     }
     let items: Vec<ListItem<'static>> = switcher
@@ -142,16 +192,17 @@ mod tests {
     #[test]
     fn open_with_rows_sets_selection_to_zero() {
         let mut s = SessionSwitcher::default();
-        s.open_with(vec![row("a", 1), row("b", 2)]);
+        s.open_with(vec![row("a", 1), row("b", 2)], SessionScope::Project);
         assert!(s.open);
         assert_eq!(s.selected, 0);
         assert_eq!(s.selected_id().as_deref(), Some("a"));
+        assert_eq!(s.scope, SessionScope::Project);
     }
 
     #[test]
     fn move_down_clamps_at_end() {
         let mut s = SessionSwitcher::default();
-        s.open_with(vec![row("a", 1), row("b", 2)]);
+        s.open_with(vec![row("a", 1), row("b", 2)], SessionScope::Project);
         s.move_down();
         s.move_down();
         s.move_down();
@@ -162,9 +213,15 @@ mod tests {
     #[test]
     fn close_clears_state() {
         let mut s = SessionSwitcher::default();
-        s.open_with(vec![row("a", 1)]);
+        s.open_with(vec![row("a", 1)], SessionScope::All);
         s.close();
         assert!(!s.open);
         assert!(s.rows.is_empty());
+    }
+
+    #[test]
+    fn scope_toggle_flips_between_project_and_all() {
+        assert_eq!(SessionScope::Project.toggle(), SessionScope::All);
+        assert_eq!(SessionScope::All.toggle(), SessionScope::Project);
     }
 }
