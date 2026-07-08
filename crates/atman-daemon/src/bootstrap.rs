@@ -229,33 +229,28 @@ pub fn parse_sandbox_config(text: &str) -> SandboxConfig {
 pub fn attach_memory_stores(
     executor: &mut Executor,
     session_dir: &Path,
-    confession_root: &Path,
-    spec_root: &Path,
+    project_scope_root: &Path,
 ) {
-    attach_memory_stores_with_redactor(
-        executor,
-        session_dir,
-        confession_root,
-        spec_root,
-        None,
-        None,
-    );
+    attach_memory_stores_with_redactor(executor, session_dir, project_scope_root, None, None);
 }
 
 pub fn attach_memory_stores_with_redactor(
     executor: &mut Executor,
     session_dir: &Path,
-    confession_root: &Path,
-    spec_root: &Path,
+    project_scope_root: &Path,
     redactor: Option<Arc<atman_runtime::redact::Redactor>>,
     project_index: Option<Arc<atman_runtime::index::AnchorIndex>>,
 ) {
+    let confession_root = project_scope_root.join("confessions");
+    let spec_root = project_scope_root.join("specs");
+    let _ = std::fs::create_dir_all(&confession_root);
+    let _ = std::fs::create_dir_all(&spec_root);
     let todo_store = Arc::new(atman_runtime::memory::todo::TodoStore::at(session_dir));
     let goal_store = Arc::new(atman_runtime::memory::goal::GoalStore::at(session_dir));
     let plan_store = Arc::new(atman_runtime::memory::plan::PlanStore::at(session_dir));
     let mut confession_store =
-        atman_runtime::memory::confession::ConfessionStore::at(confession_root);
-    let mut spec_store = atman_runtime::memory::spec::SpecStore::new(spec_root.to_path_buf());
+        atman_runtime::memory::confession::ConfessionStore::at(&confession_root);
+    let mut spec_store = atman_runtime::memory::spec::SpecStore::new(spec_root);
     if let Some(idx) = &project_index {
         confession_store = confession_store.with_index(idx.clone());
         spec_store = spec_store.with_index(idx.clone());

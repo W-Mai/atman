@@ -3471,31 +3471,23 @@ fn attach_memory_stores(
     session_dir: &std::path::Path,
     ephemeral: bool,
 ) -> Result<()> {
-    // Ephemeral runs must not touch project on-disk state (confessions.jsonl / .atman/).
-    // Route everything to XDG data ephemeral scratch so `atman run --ephemeral` never pollutes cwd.
-    let (session_scope, confession_root, spec_root) = if ephemeral {
+    let (session_scope, scope_root, project_index) = if ephemeral {
         let scratch = data_dir()?.join("ephemeral");
         std::fs::create_dir_all(&scratch).ok();
-        (scratch.clone(), scratch.clone(), scratch)
+        (scratch.clone(), scratch, None)
     } else {
-        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let confession_root = project_root.join(".atman");
-        std::fs::create_dir_all(&confession_root).ok();
-        let spec_root = data_dir()?.join("specs");
-        std::fs::create_dir_all(&spec_root).ok();
-        (session_dir.to_path_buf(), confession_root, spec_root)
+        let scope = atman_runtime::storage::resolve_current_project_scope()?;
+        (
+            session_dir.to_path_buf(),
+            scope,
+            open_current_project_index()?,
+        )
     };
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
-    let project_index = if ephemeral {
-        None
-    } else {
-        open_current_project_index()?
-    };
     atman_daemon::bootstrap::attach_memory_stores_with_redactor(
         executor,
         &session_scope,
-        &confession_root,
-        &spec_root,
+        &scope_root,
         redactor,
         project_index,
     );

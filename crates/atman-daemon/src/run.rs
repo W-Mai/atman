@@ -143,20 +143,13 @@ async fn run_flow_inner(
         None => atman_runtime::lifecycle::LifecycleRunner::new(),
     };
 
-    let confession_root = project_root.join(".atman");
-    let _ = std::fs::create_dir_all(&confession_root);
-    let spec_root = session
-        .dir()
-        .parent()
-        .unwrap_or(session.dir())
-        .join("specs");
-    let _ = std::fs::create_dir_all(&spec_root);
+    let scope_root = atman_runtime::storage::resolve_project_scope_for(&project_root)
+        .unwrap_or_else(|_| project_root.join(".atman"));
     let redactor = crate::bootstrap::build_redactor(config_dir.as_deref());
     crate::bootstrap::attach_memory_stores_with_redactor(
         &mut executor,
         session.dir(),
-        &confession_root,
-        &spec_root,
+        &scope_root,
         redactor,
         session.project_index(),
     );
