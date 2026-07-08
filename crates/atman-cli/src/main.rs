@@ -3282,6 +3282,54 @@ async fn cmd_doctor() -> Result<()> {
         commands_count
     );
     println!();
+    println!("project storage:");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_root =
+        atman_runtime::session_meta::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let fingerprint = atman_runtime::session_meta::fingerprint_from_root(&project_root);
+    match atman_runtime::storage::resolve_project_scope_for(&project_root) {
+        Ok(scope) => {
+            println!(
+                "  root:        {} (fingerprint={fingerprint})",
+                project_root.display()
+            );
+            println!("  scope:       {}", scope.display());
+            let probe = scope.join(".doctor-write-probe");
+            match std::fs::write(&probe, b"ok").and_then(|_| std::fs::remove_file(&probe)) {
+                Ok(()) => println!("  [✓] writable"),
+                Err(e) => println!("  [✗] not writable: {e}"),
+            }
+            match atman_runtime::index::AnchorIndex::open_project(&scope) {
+                Ok(idx) => {
+                    let conn = idx.conn();
+                    let has_events: bool = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'",
+                            [],
+                            |r| r.get::<_, i64>(0).map(|n| n > 0),
+                        )
+                        .unwrap_or(false);
+                    let has_fts: bool = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events_fts'",
+                            [],
+                            |r| r.get::<_, i64>(0).map(|n| n > 0),
+                        )
+                        .unwrap_or(false);
+                    let event_count: i64 = conn
+                        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                        .unwrap_or(0);
+                    let mark = if has_events && has_fts { "✓" } else { "✗" };
+                    println!(
+                        "  [{mark}] index.db schema (events={has_events} events_fts={has_fts}) — {event_count} row(s)"
+                    );
+                }
+                Err(e) => println!("  [✗] open index.db failed: {e}"),
+            }
+        }
+        Err(e) => println!("  [✗] resolve scope failed: {e}"),
+    }
+    println!();
     println!("providers:");
     let probes = [
         (
@@ -3334,7 +3382,6 @@ async fn cmd_doctor() -> Result<()> {
     println!();
     println!();
     println!("migrated rules:");
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     if let Ok(home) = std::env::var("HOME") {
         let rules =
             atman_runtime::migration::scan_migrated_rules(&cwd, std::path::Path::new(&home));
