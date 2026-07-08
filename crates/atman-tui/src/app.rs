@@ -440,6 +440,7 @@ impl AppState {
             self.last_lag_count = self.last_lag_count.saturating_add(dropped);
             *text = format!("dropped {} stream frames", self.last_lag_count);
             self.last_lag_at = Some(now);
+            self.items_version = self.items_version.wrapping_add(1);
             return;
         }
         self.last_lag_count = dropped;
@@ -447,6 +448,7 @@ impl AppState {
             text: format!("dropped {dropped} stream frames"),
             level: NoteLevel::Warn,
         });
+        self.items_version = self.items_version.wrapping_add(1);
         self.last_lag_note_idx = Some(self.items.len() - 1);
         self.last_lag_at = Some(now);
     }

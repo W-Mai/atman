@@ -92,6 +92,7 @@ pub fn build_lines_with_ranges(
 }
 
 fn wrap_row_offsets(lines: &[Line<'static>], width: u16) -> (u16, Vec<u16>) {
+    use unicode_width::UnicodeWidthStr;
     let mut offsets: Vec<u16> = Vec::with_capacity(lines.len() + 1);
     let mut cursor: u16 = 0;
     offsets.push(0);
@@ -102,10 +103,18 @@ fn wrap_row_offsets(lines: &[Line<'static>], width: u16) -> (u16, Vec<u16>) {
         }
         return (cursor, offsets);
     }
+    let w = width as usize;
     for line in lines {
-        let single = vec![line.clone()];
-        let p = Paragraph::new(single).wrap(Wrap { trim: false });
-        let rows = p.line_count(width) as u16;
+        let total: usize = line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let rows = if total == 0 {
+            1
+        } else {
+            total.div_ceil(w) as u16
+        };
         cursor = cursor.saturating_add(rows.max(1));
         offsets.push(cursor);
     }
