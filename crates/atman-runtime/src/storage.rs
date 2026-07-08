@@ -24,6 +24,29 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(proj.config_dir().to_path_buf())
 }
 
+pub fn load_storage_config(project_root: Option<&Path>) -> StorageConfig {
+    let global = config_dir()
+        .ok()
+        .map(|d| StorageConfig::load_from(&d.join("config.toml")).unwrap_or_default())
+        .unwrap_or_default();
+    let project = project_root
+        .map(|r| StorageConfig::load_from(&r.join(".atman/config.toml")).unwrap_or_default())
+        .unwrap_or_default();
+    StorageConfig::merge(global, project)
+}
+
+pub fn resolve_project_scope_for(project_root: &Path) -> Result<PathBuf> {
+    let cfg = load_storage_config(Some(project_root));
+    let data = data_dir()?;
+    resolve_project_storage_root(project_root, &cfg, &data)
+}
+
+pub fn resolve_current_project_scope() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let project_root = crate::session_meta::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
+    resolve_project_scope_for(&project_root)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageConfig {
     #[serde(default)]

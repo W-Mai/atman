@@ -209,11 +209,15 @@ async fn dispatch_tool_call<'a>(
     let ctx_with_anchors =
         ctx_with_anchors.with_providers(std::sync::Arc::new(ctx.providers.clone()));
     let ctx_with_anchors = if let Some(session) = ctx.session {
-        ctx_with_anchors
+        let mut c = ctx_with_anchors
             .with_stream_tx(session.stream_tx())
             .with_read_files(session.read_files())
             .with_approval(session.approval())
-            .with_session_dir(session.dir().to_path_buf())
+            .with_session_dir(session.dir().to_path_buf());
+        if let Some(idx) = session.project_index() {
+            c = c.with_project_index(idx);
+        }
+        c
     } else {
         ctx_with_anchors
     };

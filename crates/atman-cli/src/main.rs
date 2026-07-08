@@ -501,7 +501,8 @@ async fn cmd_run(
         Session::open_ephemeral()
     } else {
         let root = data_dir()?;
-        Session::open_with_redactor(&root, redactor.clone())
+        let project_index = open_current_project_index()?;
+        Session::open_with_context(&root, redactor.clone(), project_index)
             .with_context(|| format!("opening session under {}", root.display()))?
     };
 
@@ -1208,10 +1209,16 @@ async fn cmd_repl_once(
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
     let is_fresh_session = resume_sid.is_none();
+    let project_index = open_current_project_index()?;
     let session = std::sync::Arc::new(match resume_sid {
-        Some(sid) => Session::open_existing_with_redactor(&root, &sid, redactor.clone())
-            .with_context(|| format!("resuming session {sid} under {}", root.display()))?,
-        None => Session::open_with_redactor(&root, redactor.clone())
+        Some(sid) => Session::open_existing_with_context(
+            &root,
+            &sid,
+            redactor.clone(),
+            project_index.clone(),
+        )
+        .with_context(|| format!("resuming session {sid} under {}", root.display()))?,
+        None => Session::open_with_context(&root, redactor.clone(), project_index.clone())
             .with_context(|| format!("opening session under {}", root.display()))?,
     });
     apply_session_config(&session);
@@ -3400,6 +3407,22 @@ fn bootstrap_opts(
     })
 }
 
+fn open_current_project_index() -> Result<Option<std::sync::Arc<atman_runtime::index::AnchorIndex>>>
+{
+    let scope = atman_runtime::storage::resolve_current_project_scope()
+        .context("resolve project storage scope")?;
+    match atman_runtime::index::AnchorIndex::open_project(&scope) {
+        Ok(idx) => Ok(Some(std::sync::Arc::new(idx))),
+        Err(e) => {
+            eprintln!(
+                "[atman] project index unavailable at {} — history search disabled: {e}",
+                scope.display()
+            );
+            Ok(None)
+        }
+    }
+}
+
 fn attach_memory_stores(
     executor: &mut atman_runtime::Executor,
     session_dir: &std::path::Path,
@@ -3420,12 +3443,18 @@ fn attach_memory_stores(
         (session_dir.to_path_buf(), confession_root, spec_root)
     };
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
+    let project_index = if ephemeral {
+        None
+    } else {
+        open_current_project_index()?
+    };
     atman_daemon::bootstrap::attach_memory_stores_with_redactor(
         executor,
         &session_scope,
         &confession_root,
         &spec_root,
         redactor,
+        project_index,
     );
     Ok(())
 }

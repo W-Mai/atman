@@ -31,8 +31,26 @@ impl RunLauncher {
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
 
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
-        let session = atman_runtime::Session::open_with_redactor(state.data_dir(), redactor)
-            .with_context(|| format!("opening session under {}", state.data_dir().display()))?;
+        let project_index =
+            match atman_runtime::storage::resolve_project_scope_for(&self.project_root) {
+                Ok(scope) => match atman_runtime::index::AnchorIndex::open_project(&scope) {
+                    Ok(idx) => Some(std::sync::Arc::new(idx)),
+                    Err(e) => {
+                        eprintln!(
+                            "[atman-daemon] project index unavailable at {}: {e}",
+                            scope.display()
+                        );
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[atman-daemon] resolve project scope failed: {e}");
+                    None
+                }
+            };
+        let session =
+            atman_runtime::Session::open_with_context(state.data_dir(), redactor, project_index)
+                .with_context(|| format!("opening session under {}", state.data_dir().display()))?;
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
@@ -140,6 +158,7 @@ async fn run_flow_inner(
         &confession_root,
         &spec_root,
         redactor,
+        session.project_index(),
     );
     if let Some(state) = daemon_state {
         executor.tool_ctx.prompt_resolver =

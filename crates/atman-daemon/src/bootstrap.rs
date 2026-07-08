@@ -232,7 +232,14 @@ pub fn attach_memory_stores(
     confession_root: &Path,
     spec_root: &Path,
 ) {
-    attach_memory_stores_with_redactor(executor, session_dir, confession_root, spec_root, None);
+    attach_memory_stores_with_redactor(
+        executor,
+        session_dir,
+        confession_root,
+        spec_root,
+        None,
+        None,
+    );
 }
 
 pub fn attach_memory_stores_with_redactor(
@@ -241,17 +248,8 @@ pub fn attach_memory_stores_with_redactor(
     confession_root: &Path,
     spec_root: &Path,
     redactor: Option<Arc<atman_runtime::redact::Redactor>>,
+    project_index: Option<Arc<atman_runtime::index::AnchorIndex>>,
 ) {
-    let project_index = match atman_runtime::index::AnchorIndex::open_project(confession_root) {
-        Ok(idx) => Some(Arc::new(idx)),
-        Err(e) => {
-            eprintln!(
-                "[atman] project anchor index unavailable at {} — memory dual-write disabled: {e}",
-                confession_root.display()
-            );
-            None
-        }
-    };
     let todo_store = Arc::new(atman_runtime::memory::todo::TodoStore::at(session_dir));
     let goal_store = Arc::new(atman_runtime::memory::goal::GoalStore::at(session_dir));
     let plan_store = Arc::new(atman_runtime::memory::plan::PlanStore::at(session_dir));
