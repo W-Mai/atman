@@ -6,7 +6,11 @@ pub struct ModelInfo {
 }
 
 pub fn model_info(name: &str) -> ModelInfo {
-    let (budget, ratio) = match name {
+    let bare = match name.split_once('/') {
+        Some((_, rest)) => rest,
+        None => name,
+    };
+    let (budget, ratio) = match bare {
         n if n.starts_with("claude-opus") => (200_000, 0.8),
         n if n.starts_with("claude-sonnet") => (200_000, 0.8),
         n if n.starts_with("claude-haiku") => (200_000, 0.8),
@@ -23,7 +27,12 @@ pub fn model_info(name: &str) -> ModelInfo {
         n if n.starts_with("glm-4.5") => (128_000, 0.8),
         n if n.starts_with("glm-4") => (128_000, 0.8),
         n if n.starts_with("glm-") => (128_000, 0.8),
+        n if n.starts_with("deepseek-v4") => (1_000_000, 0.8),
+        n if n.starts_with("deepseek-v3") => (128_000, 0.8),
+        n if n.starts_with("deepseek-r1") => (128_000, 0.8),
         n if n.starts_with("deepseek") => (64_000, 0.8),
+        n if n.starts_with("qwen3") => (128_000, 0.8),
+        n if n.starts_with("qwen-max") => (128_000, 0.8),
         n if n.starts_with("qwen") => (32_000, 0.8),
         n if n.starts_with("llama") => (8_000, 0.8),
         _ => (32_000, 0.8),

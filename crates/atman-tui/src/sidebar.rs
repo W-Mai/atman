@@ -97,7 +97,7 @@ struct SectionHeights {
 }
 
 fn section_heights(inner_h: u16) -> SectionHeights {
-    let context = 8u16;
+    let context = 9u16;
     let session = 4u16;
     let todos = 3u16;
     let plans = 3u16;
@@ -186,13 +186,24 @@ fn context_section<'a>(
         ctx.model.clone()
     };
     let stream_style = if streaming { bold } else { plain };
+    let window = if ctx.window_budget == 0 {
+        format!("{}", ctx.window_tokens)
+    } else {
+        format!(
+            "{} / {} ({}%)",
+            ctx.window_tokens,
+            ctx.window_budget,
+            (ctx.window_tokens as f64 / ctx.window_budget as f64 * 100.0) as u64
+        )
+    };
     let lines = vec![
         Line::from(section_title("▸ Context")),
         kv_line("model", model, plain),
+        kv_line("window", window, stream_style),
         kv_line(
-            "tokens",
-            format!("{} / {}", ctx.tokens_in, ctx.tokens_out),
-            stream_style,
+            "spent",
+            format!("in {} · out {}", ctx.tokens_in, ctx.tokens_out),
+            plain,
         ),
         kv_line("attach", format!("{attach_count}"), plain),
         kv_line("mcp", format!("{}/{}", ctx.mcp_ok, ctx.mcp_total), plain),
@@ -390,8 +401,8 @@ mod tests {
 
     #[test]
     fn section_heights_full_room_keeps_every_section() {
-        let h = section_heights(28);
-        assert_eq!(h.context, 8);
+        let h = section_heights(29);
+        assert_eq!(h.context, 9);
         assert_eq!(h.session, 4);
         assert_eq!(h.todos, 3);
         assert_eq!(h.plans, 3);
@@ -400,8 +411,8 @@ mod tests {
 
     #[test]
     fn section_heights_tight_drops_plans_first() {
-        let h = section_heights(19);
-        assert_eq!(h.context, 8);
+        let h = section_heights(20);
+        assert_eq!(h.context, 9);
         assert_eq!(h.session, 4);
         assert_eq!(h.todos, 3);
         assert_eq!(h.plans, 0);
@@ -410,8 +421,8 @@ mod tests {
 
     #[test]
     fn section_heights_very_tight_drops_session_and_below() {
-        let h = section_heights(11);
-        assert_eq!(h.context, 8);
+        let h = section_heights(12);
+        assert_eq!(h.context, 9);
         assert_eq!(h.todos, 0);
         assert_eq!(h.plans, 0);
         assert_eq!(h.session, 0);

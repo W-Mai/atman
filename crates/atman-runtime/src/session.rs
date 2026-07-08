@@ -328,6 +328,8 @@ pub struct ContextSnapshot {
     pub mcp_ok: u16,
     pub mcp_total: u16,
     pub memory_recent_count: u16,
+    pub window_tokens: u64,
+    pub window_budget: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -752,7 +754,10 @@ impl Session {
         }
         let events_path = dir.join("events.jsonl");
         let messages = replay_messages_from(&events_path)?;
-        let initial_context = replay_context_snapshot_from(&events_path);
+        let mut initial_context = replay_context_snapshot_from(&events_path);
+        initial_context.window_tokens = crate::compaction::estimate_tokens_for_messages(&messages);
+        initial_context.window_budget =
+            crate::model_registry::model_info(&initial_context.model).context_budget;
         let initial_goal = load_goal(&dir);
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(256);
@@ -939,6 +944,16 @@ impl Session {
             snap.model = model.to_string();
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
             snap.tokens_out = snap.tokens_out.saturating_add(tokens_out);
+        });
+        self.refresh_window_snapshot();
+    }
+
+    pub fn refresh_window_snapshot(&self) {
+        let window = crate::compaction::estimate_tokens_for_messages(&self.messages());
+        let budget = crate::model_registry::model_info(&self.last_model()).context_budget;
+        self.context_watch.send_modify(|snap| {
+            snap.window_tokens = window;
+            snap.window_budget = budget;
         });
     }
 
@@ -1252,7 +1267,7 @@ impl Session {
             replacement_msg_seq: Some(replacement_seq),
             ts,
         });
-        self.reset_input_tokens_to(after_tokens);
+        self.refresh_window_snapshot();
         Some(CompactResult {
             before_tokens,
             after_tokens,
