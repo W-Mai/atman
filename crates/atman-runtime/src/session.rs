@@ -51,6 +51,109 @@ pub struct Session {
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     approval: std::sync::Arc<ApprovalRegistry>,
+    compact_reviews: std::sync::Arc<CompactReviewRegistry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingCompactReview {
+    pub review_id: String,
+    pub summary: String,
+    pub slice_preview: String,
+    pub slice_count: usize,
+    pub range_start: usize,
+    pub range_end: usize,
+    pub tokens_before: u64,
+    pub emitted_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CompactReviewDecision {
+    AcceptAsIs,
+    AcceptEdited { summary: String },
+    Reject,
+}
+
+pub struct CompactReviewRegistry {
+    entry: std::sync::Mutex<Option<CompactReviewEntry>>,
+    watch_tx: watch::Sender<Option<PendingCompactReview>>,
+}
+
+struct CompactReviewEntry {
+    pending: PendingCompactReview,
+    responder: tokio::sync::oneshot::Sender<CompactReviewDecision>,
+}
+
+impl Default for CompactReviewRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CompactReviewRegistry {
+    pub fn new() -> Self {
+        let (watch_tx, _) = watch::channel(None);
+        Self {
+            entry: std::sync::Mutex::new(None),
+            watch_tx,
+        }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<Option<PendingCompactReview>> {
+        self.watch_tx.subscribe()
+    }
+
+    pub fn list_pending(&self) -> Option<PendingCompactReview> {
+        self.entry
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| e.pending.clone())
+    }
+
+    pub fn subscriber_count(&self) -> usize {
+        self.watch_tx.receiver_count()
+    }
+
+    pub fn request(
+        &self,
+        pending: PendingCompactReview,
+    ) -> tokio::sync::oneshot::Receiver<CompactReviewDecision> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.watch_tx.receiver_count() == 0 {
+            let _ = tx.send(CompactReviewDecision::AcceptAsIs);
+            return rx;
+        }
+        {
+            let mut slot = self.entry.lock().unwrap();
+            if let Some(prev) = slot.take() {
+                let _ = prev.responder.send(CompactReviewDecision::Reject);
+            }
+            *slot = Some(CompactReviewEntry {
+                pending: pending.clone(),
+                responder: tx,
+            });
+        }
+        let _ = self.watch_tx.send(Some(pending));
+        rx
+    }
+
+    pub fn decide(&self, review_id: &str, decision: CompactReviewDecision) -> bool {
+        let entry = {
+            let mut slot = self.entry.lock().unwrap();
+            match slot.as_ref() {
+                Some(e) if e.pending.review_id == review_id => slot.take(),
+                _ => None,
+            }
+        };
+        match entry {
+            Some(e) => {
+                let _ = e.responder.send(decision);
+                let _ = self.watch_tx.send(None);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -566,6 +669,7 @@ impl Session {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
+            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
         })
     }
 
@@ -626,6 +730,7 @@ impl Session {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
+            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
         })
     }
 
@@ -660,11 +765,16 @@ impl Session {
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
+            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
         }
     }
 
     pub fn approval(&self) -> std::sync::Arc<ApprovalRegistry> {
         self.approval.clone()
+    }
+
+    pub fn compact_reviews(&self) -> std::sync::Arc<CompactReviewRegistry> {
+        self.compact_reviews.clone()
     }
 
     pub fn read_files(
@@ -1338,6 +1448,103 @@ mod tests {
             3
         );
         assert!(reg.list_pending().is_empty());
+    }
+
+    #[test]
+    fn compact_review_registry_auto_accepts_when_no_subscriber() {
+        let reg = CompactReviewRegistry::new();
+        let pending = PendingCompactReview {
+            review_id: "r1".into(),
+            summary: "gist".into(),
+            slice_preview: String::new(),
+            slice_count: 0,
+            range_start: 0,
+            range_end: 0,
+            tokens_before: 0,
+            emitted_at: chrono::Utc::now(),
+        };
+        let rx = reg.request(pending);
+        let got = rx.blocking_recv().unwrap();
+        assert!(matches!(got, CompactReviewDecision::AcceptAsIs));
+        assert!(reg.list_pending().is_none());
+    }
+
+    #[test]
+    fn compact_review_registry_holds_pending_and_decides() {
+        let reg = std::sync::Arc::new(CompactReviewRegistry::new());
+        let _sub = reg.subscribe();
+        let pending = PendingCompactReview {
+            review_id: "r2".into(),
+            summary: "old".into(),
+            slice_preview: "slice".into(),
+            slice_count: 3,
+            range_start: 1,
+            range_end: 4,
+            tokens_before: 500,
+            emitted_at: chrono::Utc::now(),
+        };
+        let mut rx = reg.request(pending);
+        assert!(rx.try_recv().is_err(), "should be queued");
+        assert!(reg.list_pending().is_some());
+        assert!(reg.decide(
+            "r2",
+            CompactReviewDecision::AcceptEdited {
+                summary: "new".into()
+            }
+        ));
+        let got = rx.blocking_recv().unwrap();
+        match got {
+            CompactReviewDecision::AcceptEdited { summary } => assert_eq!(summary, "new"),
+            other => panic!("unexpected decision: {other:?}"),
+        }
+        assert!(reg.list_pending().is_none());
+    }
+
+    #[test]
+    fn compact_review_registry_reject_flushes() {
+        let reg = std::sync::Arc::new(CompactReviewRegistry::new());
+        let _sub = reg.subscribe();
+        let rx = reg.request(PendingCompactReview {
+            review_id: "r3".into(),
+            summary: String::new(),
+            slice_preview: String::new(),
+            slice_count: 0,
+            range_start: 0,
+            range_end: 0,
+            tokens_before: 0,
+            emitted_at: chrono::Utc::now(),
+        });
+        assert!(reg.decide("r3", CompactReviewDecision::Reject));
+        let got = rx.blocking_recv().unwrap();
+        assert!(matches!(got, CompactReviewDecision::Reject));
+    }
+
+    #[test]
+    fn compact_review_registry_new_request_rejects_previous() {
+        let reg = std::sync::Arc::new(CompactReviewRegistry::new());
+        let _sub = reg.subscribe();
+        let rx_a = reg.request(PendingCompactReview {
+            review_id: "rA".into(),
+            summary: String::new(),
+            slice_preview: String::new(),
+            slice_count: 0,
+            range_start: 0,
+            range_end: 0,
+            tokens_before: 0,
+            emitted_at: chrono::Utc::now(),
+        });
+        let _rx_b = reg.request(PendingCompactReview {
+            review_id: "rB".into(),
+            summary: String::new(),
+            slice_preview: String::new(),
+            slice_count: 0,
+            range_start: 0,
+            range_end: 0,
+            tokens_before: 0,
+            emitted_at: chrono::Utc::now(),
+        });
+        let got = rx_a.blocking_recv().unwrap();
+        assert!(matches!(got, CompactReviewDecision::Reject));
     }
 
     #[test]
