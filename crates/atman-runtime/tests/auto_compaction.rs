@@ -252,6 +252,23 @@ async fn review_manual_only_skips_review_on_auto_path() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_always_without_subscriber_auto_accepts_daemon_shape() {
+    use atman_runtime::compaction::maybe_auto_compact;
+    use atman_runtime::event::Event;
+    let (_tmp, session, providers) = setup_review_env().await;
+    session.set_compact_review_mode(atman_runtime::CompactReviewMode::Always);
+    assert_eq!(session.compact_reviews().subscriber_count(), 0);
+    maybe_auto_compact(&session, "mock-summary", &providers).await;
+    let events = session.sink().snapshot();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ContextCompact { .. })),
+        "daemon-shape (always mode, no subscriber) must commit without hanging"
+    );
+}
+
 #[tokio::test]
 async fn cooldown_blocks_repeat_compaction_within_window() {
     let tmp = tempfile::tempdir().unwrap();
