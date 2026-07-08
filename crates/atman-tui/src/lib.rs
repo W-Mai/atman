@@ -151,6 +151,24 @@ async fn run_frames(
         .with_session_dir(handle.session_dir.clone())
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone());
+    if let Some(rx) = handle.context_rx.as_ref() {
+        app.context = rx.borrow().clone();
+    }
+    if let Some(rx) = handle.goal_rx.as_ref() {
+        app.goal = rx.borrow().clone();
+    }
+    if let Some(rx) = handle.attach_rx.as_ref() {
+        app.attach_count = *rx.borrow();
+    }
+    if let Some(rx) = handle.todos_rx.as_ref() {
+        app.todos = rx.borrow().clone();
+    }
+    if let Some(rx) = handle.plans_rx.as_ref() {
+        app.plans = rx.borrow().clone();
+    }
+    if let Some(rx) = handle.approvals_rx.as_ref() {
+        app.pending_approvals = rx.borrow().clone();
+    }
     let mut editor = InputEditor::default();
     let mut key_events = EventStream::new();
     let mut interrupt_prompt = false;
