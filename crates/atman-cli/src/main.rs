@@ -1277,6 +1277,7 @@ async fn cmd_repl_once(
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let session_for_ctrl = std::sync::Arc::clone(&session);
         let switch_target_for_ctrl = switch_target.clone();
+        let providers_for_ctrl = executor.providers.clone();
         let ctrl_task = tokio::spawn(async move {
             while let Some(msg) = ctrl_rx.recv().await {
                 match msg {
@@ -1307,6 +1308,29 @@ async fn cmd_repl_once(
                     }
                     atman_tui::TuiControl::CompactNow => {
                         session_for_ctrl.request_manual_compact();
+                        let session_for_compact = std::sync::Arc::clone(&session_for_ctrl);
+                        let providers_for_compact = providers_for_ctrl.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let rt = match tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                            {
+                                Ok(rt) => rt,
+                                Err(e) => {
+                                    eprintln!("[atman] compact runtime init failed: {e}");
+                                    return;
+                                }
+                            };
+                            rt.block_on(async {
+                                let model = session_for_compact.last_model();
+                                atman_runtime::compaction::maybe_auto_compact(
+                                    &session_for_compact,
+                                    &model,
+                                    &providers_for_compact,
+                                )
+                                .await;
+                            });
+                        });
                     }
                     atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
                         let decision = match edited {
