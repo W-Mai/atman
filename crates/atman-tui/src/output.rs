@@ -149,6 +149,7 @@ pub struct LayoutKey {
     pub items_version: u64,
     pub expanded_version: u64,
     pub width: u16,
+    pub animation_frame: Option<u32>,
 }
 
 #[derive(Default)]

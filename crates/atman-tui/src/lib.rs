@@ -1354,10 +1354,16 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             animation_frame: app.animation_frame,
             panel_width: transcript_area.width,
         };
+        let animation_key = if app.has_running_workflow() {
+            Some(app.animation_frame)
+        } else {
+            None
+        };
         let cache_key = output::LayoutKey {
             items_version: app.items_version,
             expanded_version: app.expanded_version,
             width: transcript_area.width,
+            animation_frame: animation_key,
         };
         let mut cache = std::mem::take(&mut app.layout_cache);
         let (lines, ranges, node_regions, total_rows) =

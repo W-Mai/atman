@@ -199,6 +199,7 @@ fn layout_cache_still_composes_valid_regions() {
         items_version: 0,
         expanded_version: 0,
         width: 200,
+        animation_frame: None,
     };
     let (_lines, ranges, regions, total) = cache.get_or_build(key, &[item], &ctx);
     assert_eq!(ranges.len(), 1);
