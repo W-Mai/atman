@@ -110,6 +110,21 @@ impl AnchorIndex {
         collect(rows)
     }
 
+    pub fn delete_events_for_session(&self, session_id: &str) -> rusqlite::Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM events_fts WHERE rowid IN (SELECT id FROM events WHERE session_id = ?)",
+            rusqlite::params![session_id],
+        )?;
+        let n = tx.execute(
+            "DELETE FROM events WHERE session_id = ?",
+            rusqlite::params![session_id],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    }
+
     pub fn insert_project_event_raw(&self, row: ProjectEventInsert<'_>) -> rusqlite::Result<i64> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

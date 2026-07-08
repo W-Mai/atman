@@ -34,6 +34,7 @@ pub struct SessionSwitcher {
     pub scope: SessionScope,
     pub rows: Vec<SessionPickerRow>,
     pub selected: usize,
+    pub delete_armed: Option<String>,
 }
 
 impl std::fmt::Debug for SessionSwitcher {
@@ -62,6 +63,36 @@ impl SessionSwitcher {
     pub fn close(&mut self) {
         self.open = false;
         self.rows.clear();
+        self.delete_armed = None;
+    }
+
+    pub fn remove_selected(&mut self) -> Option<String> {
+        if self.selected >= self.rows.len() {
+            return None;
+        }
+        let removed = self.rows.remove(self.selected);
+        if self.selected >= self.rows.len() {
+            self.selected = self.rows.len().saturating_sub(1);
+        }
+        self.delete_armed = None;
+        Some(removed.id)
+    }
+
+    pub fn arm_delete(&mut self) -> Option<&str> {
+        let sid = self.rows.get(self.selected)?.id.clone();
+        self.delete_armed = Some(sid);
+        self.delete_armed.as_deref()
+    }
+
+    pub fn delete_armed_matches_selected(&self) -> bool {
+        match (&self.delete_armed, self.rows.get(self.selected)) {
+            (Some(armed), Some(row)) => armed == &row.id,
+            _ => false,
+        }
+    }
+
+    pub fn clear_delete_arm(&mut self) {
+        self.delete_armed = None;
     }
 
     pub fn move_up(&mut self) {
@@ -92,17 +123,29 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         height: h,
     };
     f.render_widget(Clear, rect);
-    let title = format!(
-        " Switch Session · {} · Tab to toggle · Enter/Esc ",
-        switcher.scope.label()
-    );
+    let title = if switcher.delete_armed.is_some() {
+        format!(
+            " Switch Session · {} · d again to DELETE · any other key cancels ",
+            switcher.scope.label()
+        )
+    } else {
+        format!(
+            " Switch Session · {} · Tab toggle · Enter open · d delete · Esc ",
+            switcher.scope.label()
+        )
+    };
+    let border_color = if switcher.delete_armed.is_some() {
+        Color::Red
+    } else {
+        Color::Cyan
+    };
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(border_color)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);

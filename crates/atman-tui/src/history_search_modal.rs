@@ -45,6 +45,7 @@ pub struct HistorySearchModal {
     pub selected: usize,
     pub error: Option<String>,
     pub last_query: String,
+    pub preview_lines: Vec<String>,
 }
 
 impl std::fmt::Debug for HistorySearchModal {
@@ -66,12 +67,18 @@ impl HistorySearchModal {
         self.selected = 0;
         self.error = None;
         self.last_query.clear();
+        self.preview_lines.clear();
     }
 
     pub fn close(&mut self) {
         self.open = false;
         self.results.clear();
         self.error = None;
+        self.preview_lines.clear();
+    }
+
+    pub fn set_preview(&mut self, lines: Vec<String>) {
+        self.preview_lines = lines;
     }
 
     pub fn move_up(&mut self) {
@@ -93,12 +100,14 @@ impl HistorySearchModal {
         self.results = hits;
         self.last_query = query;
         self.error = None;
+        self.preview_lines.clear();
     }
 
     pub fn set_error(&mut self, msg: String) {
         self.error = Some(msg);
         self.results.clear();
         self.selected = 0;
+        self.preview_lines.clear();
     }
 }
 
@@ -232,13 +241,17 @@ fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Preview ");
+        .title(" Context (±3 events) ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
-    let text = modal
-        .selected_hit()
-        .map(|h| h.snippet.clone())
-        .unwrap_or_default();
+    let text = if modal.preview_lines.is_empty() {
+        modal
+            .selected_hit()
+            .map(|h| h.snippet.clone())
+            .unwrap_or_default()
+    } else {
+        modal.preview_lines.join("\n")
+    };
     let para = Paragraph::new(text).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
 }
