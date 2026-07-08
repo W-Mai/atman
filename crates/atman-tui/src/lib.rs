@@ -1367,9 +1367,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         let lines_owned = lines.to_vec();
         app.layout_cache = cache;
         app.resolve_scroll(total_rows, transcript_area.height);
-        let paragraph = ratatui::widgets::Paragraph::new(lines_owned)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .scroll((app.scroll_offset, 0));
+        // No .wrap(): WordWrapper reflows every line 0..scroll.y each frame.
+        // Truncator (no-wrap) skips lazily, trading long-line wrap for speed.
+        let paragraph =
+            ratatui::widgets::Paragraph::new(lines_owned).scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, transcript_area);
     }
     if let Some(area) = l.sidebar {
