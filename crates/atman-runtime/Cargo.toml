@@ -28,6 +28,7 @@ regex.workspace = true
 ignore.workspace = true
 toml.workspace = true
 blake3.workspace = true
+directories.workspace = true
 git2.workspace = true
 
 [dev-dependencies]

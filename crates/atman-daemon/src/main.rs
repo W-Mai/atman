@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use atman_daemon::{
     DaemonState,
     config::{DaemonConfig, default_config_path},
@@ -85,11 +85,7 @@ async fn main() -> Result<()> {
 }
 
 fn default_data_dir() -> Result<std::path::PathBuf> {
-    let base = directories::ProjectDirs::from("com", "atman", "atman")
-        .context("no home dir")?
-        .data_dir()
-        .to_path_buf();
-    Ok(base)
+    atman_runtime::storage::data_dir()
 }
 
 fn default_socket_path() -> Result<std::path::PathBuf> {

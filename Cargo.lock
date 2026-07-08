@@ -242,6 +242,7 @@ dependencies = [
  "base64",
  "blake3",
  "chrono",
+ "directories",
  "eventsource-stream",
  "futures",
  "git2",

@@ -2,7 +2,6 @@ use anyhow::{Context, Result, bail};
 use atman_dsl::parse::parse_file;
 use atman_runtime::{Executor, Session, Value};
 use clap::{Parser, Subcommand};
-use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -4143,21 +4142,11 @@ async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Re
 }
 
 fn data_dir() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("ATMAN_DATA_DIR") {
-        return Ok(PathBuf::from(p));
-    }
-    let proj = ProjectDirs::from("", "", "atman")
-        .context("could not determine XDG data dir; set ATMAN_DATA_DIR to override")?;
-    Ok(proj.data_dir().to_path_buf())
+    atman_runtime::storage::data_dir()
 }
 
 fn config_dir() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("ATMAN_CONFIG_DIR") {
-        return Ok(PathBuf::from(p));
-    }
-    let proj = ProjectDirs::from("", "", "atman")
-        .context("could not determine XDG config dir; set ATMAN_CONFIG_DIR to override")?;
-    Ok(proj.config_dir().to_path_buf())
+    atman_runtime::storage::config_dir()
 }
 
 fn latest_session(root: &std::path::Path) -> Result<Option<String>> {

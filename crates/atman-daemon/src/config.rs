@@ -67,9 +67,5 @@ pub fn default_config_path() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("ATMAN_DAEMON_CONFIG_PATH") {
         return Ok(PathBuf::from(p));
     }
-    let base = directories::ProjectDirs::from("com", "atman", "atman")
-        .context("no home dir")?
-        .config_dir()
-        .to_path_buf();
-    Ok(base.join("daemon.toml"))
+    Ok(atman_runtime::storage::config_dir()?.join("daemon.toml"))
 }

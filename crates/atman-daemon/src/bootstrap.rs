@@ -447,13 +447,9 @@ pub fn parse_preview_config(
 }
 
 pub fn default_config_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("com", "atman", "atman")
-        .context("no home dir for atman config")?;
-    Ok(dirs.config_dir().to_path_buf())
+    atman_runtime::storage::config_dir()
 }
 
 pub fn default_data_dir() -> Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("com", "atman", "atman")
-        .context("no home dir for atman data")?;
-    Ok(dirs.data_dir().to_path_buf())
+    atman_runtime::storage::data_dir()
 }
