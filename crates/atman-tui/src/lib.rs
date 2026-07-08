@@ -73,6 +73,10 @@ pub enum TuiControl {
     },
     SwitchSession(String),
     DeleteSession(String),
+    RenameSession {
+        session_id: String,
+        title: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -712,6 +716,33 @@ fn handle_session_switcher_key(
     app: &mut AppState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if app.session_switcher.rename_mode {
+        match action {
+            KeyAction::Escape => {
+                app.session_switcher.cancel_rename();
+                app.push_note("rename cancelled", app::NoteLevel::Info);
+            }
+            KeyAction::Submit => {
+                if let Some((sid, title)) = app.session_switcher.commit_rename() {
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::RenameSession {
+                            session_id: sid.clone(),
+                            title: title.clone(),
+                        });
+                    }
+                    let msg = match &title {
+                        Some(t) => format!("renamed {sid} → {t}"),
+                        None => format!("cleared title on {sid}"),
+                    };
+                    app.push_note(msg, app::NoteLevel::Info);
+                }
+            }
+            KeyAction::Backspace => app.session_switcher.rename_pop(),
+            KeyAction::Char(c) => app.session_switcher.rename_push(*c),
+            _ => {}
+        }
+        return;
+    }
     if app.session_switcher.filter_mode {
         match action {
             KeyAction::Escape | KeyAction::Submit => {
@@ -753,6 +784,12 @@ fn handle_session_switcher_key(
     }
     if let KeyAction::Char('f') | KeyAction::Char('F') = action {
         app.session_switcher.enter_filter_mode();
+        return;
+    }
+    if let KeyAction::Char('r') | KeyAction::Char('R') = action {
+        if app.session_switcher.begin_rename().is_none() {
+            app.push_note("no session selected", app::NoteLevel::Warn);
+        }
         return;
     }
     match action {

@@ -17,6 +17,8 @@ pub const BUILTINS: &[(&str, &str)] = &[
     (":sessions", "list recent sessions"),
     (":sidebar", "sidebar on / off / auto"),
     (":todo", "list / done <id> / cancel <id> / clear"),
+    (":rename", "set / clear this session's title"),
+    (":compact", "compact transcript now"),
 ];
 
 pub const INTERJECTIONS: &[(&str, &str)] = &[
@@ -130,7 +132,7 @@ pub fn compute_candidates(
                 hint: hint.to_string(),
             })
             .collect(),
-        '!' if streaming => interjections
+        '!' => interjections
             .iter()
             .filter(|(name, _)| {
                 name.trim_start_matches('!')
@@ -139,7 +141,11 @@ pub fn compute_candidates(
             })
             .map(|(name, hint)| CompletionItem {
                 insert: format!("{name} "),
-                hint: hint.to_string(),
+                hint: if streaming {
+                    hint.to_string()
+                } else {
+                    format!("{hint} (no active flow)")
+                },
             })
             .collect(),
         '@' => complete_paths(rest),
@@ -384,11 +390,13 @@ mod tests {
     }
 
     #[test]
-    fn bang_prefix_only_when_streaming() {
+    fn bang_prefix_lists_interjections_and_marks_idle_state() {
         let idle = compute_candidates("!", &flows(), &builtins(), &interjections(), false);
-        assert!(idle.is_empty());
+        assert_eq!(idle.len(), 2);
+        assert!(idle.iter().all(|c| c.hint.contains("no active flow")));
         let streaming = compute_candidates("!", &flows(), &builtins(), &interjections(), true);
         assert_eq!(streaming.len(), 2);
+        assert!(streaming.iter().all(|c| !c.hint.contains("no active flow")));
     }
 
     #[test]

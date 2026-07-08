@@ -62,6 +62,9 @@ pub struct SessionSwitcher {
     pub sort_mode: SessionSortMode,
     pub filter: String,
     pub filter_mode: bool,
+    pub rename_mode: bool,
+    pub rename_buf: String,
+    pub rename_target: Option<String>,
 }
 
 impl std::fmt::Debug for SessionSwitcher {
@@ -184,6 +187,47 @@ impl SessionSwitcher {
         self.delete_armed = None;
     }
 
+    pub fn begin_rename(&mut self) -> Option<&str> {
+        let row = self.rows.get(self.selected)?;
+        self.rename_target = Some(row.id.clone());
+        self.rename_buf = row.goal.clone().unwrap_or_default();
+        self.rename_mode = true;
+        self.rename_target.as_deref()
+    }
+
+    pub fn commit_rename(&mut self) -> Option<(String, Option<String>)> {
+        let sid = self.rename_target.take()?;
+        let title = self.rename_buf.trim();
+        let value = if title.is_empty() {
+            None
+        } else {
+            Some(title.to_string())
+        };
+        if let Some(row) = self.all_rows.iter_mut().find(|r| r.id == sid) {
+            row.goal = value.clone();
+        }
+        if let Some(row) = self.rows.iter_mut().find(|r| r.id == sid) {
+            row.goal = value.clone();
+        }
+        self.rename_mode = false;
+        self.rename_buf.clear();
+        Some((sid, value))
+    }
+
+    pub fn cancel_rename(&mut self) {
+        self.rename_mode = false;
+        self.rename_buf.clear();
+        self.rename_target = None;
+    }
+
+    pub fn rename_push(&mut self, c: char) {
+        self.rename_buf.push(c);
+    }
+
+    pub fn rename_pop(&mut self) {
+        self.rename_buf.pop();
+    }
+
     pub fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
     }
@@ -232,7 +276,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         height: h,
     };
     f.render_widget(Clear, rect);
-    let title = if switcher.delete_armed.is_some() {
+    let title = if switcher.rename_mode {
+        format!(
+            " Rename Session · {}▏ · Enter save · Esc cancel ",
+            switcher.rename_buf
+        )
+    } else if switcher.delete_armed.is_some() {
         format!(
             " Switch Session · {} · d again to DELETE · any other key cancels ",
             switcher.scope.label()
@@ -244,7 +293,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         )
     } else {
         format!(
-            " Switch Session · {} · sort:{} · filter:{} · Tab scope · s sort · f filter · Enter open · d delete · Esc ",
+            " Switch Session · {} · sort:{} · filter:{} · Tab scope · s sort · f filter · r rename · Enter open · d delete · Esc ",
             switcher.scope.label(),
             switcher.sort_mode.label(),
             if switcher.filter.is_empty() {
@@ -254,7 +303,9 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
             },
         )
     };
-    let border_color = if switcher.delete_armed.is_some() {
+    let border_color = if switcher.rename_mode {
+        Color::Yellow
+    } else if switcher.delete_armed.is_some() {
         Color::Red
     } else {
         Color::Cyan

@@ -1383,6 +1383,14 @@ async fn cmd_repl_once(
                             let _ = idx.delete_events_for_session(&sid);
                         }
                     }
+                    atman_tui::TuiControl::RenameSession { session_id, title } => {
+                        let dir = data_root_for_ctrl.join("sessions").join(&session_id);
+                        if let Err(e) =
+                            atman_runtime::session_meta::SessionMeta::set_title(&dir, title)
+                        {
+                            eprintln!("[atman] rename {session_id} failed: {e}");
+                        }
+                    }
                 }
             }
         });
