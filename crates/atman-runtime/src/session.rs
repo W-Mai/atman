@@ -48,6 +48,7 @@ pub struct Session {
     plans_watch: watch::Sender<Vec<crate::memory::plan::Plan>>,
     streamed_this_turn: std::sync::atomic::AtomicBool,
     manual_compact_pending: std::sync::atomic::AtomicBool,
+    compact_review_mode: Mutex<CompactReviewMode>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     approval: std::sync::Arc<ApprovalRegistry>,
@@ -281,6 +282,33 @@ type ImagePart = (usize, String);
 struct LastImageUserMsg {
     message_seq: u64,
     images: Vec<ImagePart>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompactReviewMode {
+    Always,
+    #[default]
+    ManualOnly,
+    Never,
+}
+
+impl CompactReviewMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "always" => Some(Self::Always),
+            "manual-only" | "manual_only" => Some(Self::ManualOnly),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+
+    pub fn should_review(self, forced: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::ManualOnly => forced,
+            Self::Never => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -664,6 +692,7 @@ impl Session {
             plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
+            compact_review_mode: Mutex::new(CompactReviewMode::default()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -725,6 +754,7 @@ impl Session {
             plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
+            compact_review_mode: Mutex::new(CompactReviewMode::default()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -760,6 +790,7 @@ impl Session {
             plans_watch,
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
+            compact_review_mode: Mutex::new(CompactReviewMode::default()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -775,6 +806,14 @@ impl Session {
 
     pub fn compact_reviews(&self) -> std::sync::Arc<CompactReviewRegistry> {
         self.compact_reviews.clone()
+    }
+
+    pub fn compact_review_mode(&self) -> CompactReviewMode {
+        *self.compact_review_mode.lock().unwrap()
+    }
+
+    pub fn set_compact_review_mode(&self, mode: CompactReviewMode) {
+        *self.compact_review_mode.lock().unwrap() = mode;
     }
 
     pub fn read_files(
@@ -1517,6 +1556,37 @@ mod tests {
         assert!(reg.decide("r3", CompactReviewDecision::Reject));
         let got = rx.blocking_recv().unwrap();
         assert!(matches!(got, CompactReviewDecision::Reject));
+    }
+
+    #[test]
+    fn compact_review_mode_parses_all_variants() {
+        assert_eq!(
+            CompactReviewMode::parse("always"),
+            Some(CompactReviewMode::Always)
+        );
+        assert_eq!(
+            CompactReviewMode::parse("manual-only"),
+            Some(CompactReviewMode::ManualOnly)
+        );
+        assert_eq!(
+            CompactReviewMode::parse("manual_only"),
+            Some(CompactReviewMode::ManualOnly)
+        );
+        assert_eq!(
+            CompactReviewMode::parse("never"),
+            Some(CompactReviewMode::Never)
+        );
+        assert_eq!(CompactReviewMode::parse(" bogus "), None);
+    }
+
+    #[test]
+    fn compact_review_mode_should_review_matrix() {
+        assert!(CompactReviewMode::Always.should_review(false));
+        assert!(CompactReviewMode::Always.should_review(true));
+        assert!(!CompactReviewMode::ManualOnly.should_review(false));
+        assert!(CompactReviewMode::ManualOnly.should_review(true));
+        assert!(!CompactReviewMode::Never.should_review(false));
+        assert!(!CompactReviewMode::Never.should_review(true));
     }
 
     #[test]

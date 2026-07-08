@@ -1214,6 +1214,7 @@ async fn cmd_repl_once(
         None => Session::open_with_redactor(&root, redactor.clone())
             .with_context(|| format!("opening session under {}", root.display()))?,
     });
+    apply_session_config(&session);
     if let Some(path) = session.events_path() {
         let count = session.message_count();
         if count > 0 {
@@ -2493,6 +2494,45 @@ async fn handle_suggest(
         ));
     }
     Ok(())
+}
+
+fn apply_session_config(session: &atman_runtime::Session) {
+    let Ok(cfg) = config_dir() else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
+        return;
+    };
+    if let Some(mode) = parse_compact_review_mode(&text) {
+        session.set_compact_review_mode(mode);
+    }
+}
+
+fn parse_compact_review_mode(text: &str) -> Option<atman_runtime::CompactReviewMode> {
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name) = rest.strip_suffix(']')
+        {
+            in_section = name.trim() == "compaction";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == "review" {
+            let raw = v.trim().trim_matches('"');
+            return atman_runtime::CompactReviewMode::parse(raw);
+        }
+    }
+    None
 }
 
 fn load_auto_snapshot() -> bool {
