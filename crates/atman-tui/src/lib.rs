@@ -677,15 +677,20 @@ fn refresh_history_preview(app: &mut AppState) {
     };
     let lines: Vec<String> = rows
         .into_iter()
-        .map(|row| {
-            let marker = if row.seq == seq { "▶" } else { " " };
-            let text = extract_event_text(&row.payload).unwrap_or_default();
+        .filter_map(|row| {
+            let is_hit = row.seq == seq;
+            let text = extract_event_text(&row.payload);
+            if text.is_none() && !is_hit {
+                return None;
+            }
+            let marker = if is_hit { "▶" } else { " " };
             let snippet: String = text
+                .unwrap_or_else(|| format!("<{}>", row.kind))
                 .chars()
                 .take(180)
                 .collect::<String>()
                 .replace('\n', " ");
-            format!("{marker} [{}] {}: {}", row.seq, row.kind, snippet)
+            Some(format!("{marker} [{}] {}: {}", row.seq, row.kind, snippet))
         })
         .collect();
     app.history_search.set_preview(lines);

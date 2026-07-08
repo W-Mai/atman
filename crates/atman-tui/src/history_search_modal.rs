@@ -146,7 +146,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
-            Constraint::Length(5),
+            Constraint::Length(11),
         ])
         .split(inner);
     render_query_row(f, rows[0], modal);
