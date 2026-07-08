@@ -8,12 +8,13 @@ pub struct AppLayout {
     pub status: Rect,
     pub transcript: Rect,
     pub sidebar: Option<Rect>,
+    pub approvals: Option<Rect>,
     pub input: Rect,
     pub hint: Option<Rect>,
 }
 
 pub fn compute(area: Rect, input_height: u16, show_sidebar: bool) -> AppLayout {
-    compute_ex(area, input_height, show_sidebar, 1)
+    compute_ex(area, input_height, show_sidebar, 1, 0)
 }
 
 pub fn compute_ex(
@@ -21,21 +22,29 @@ pub fn compute_ex(
     input_height: u16,
     show_sidebar: bool,
     status_height: u16,
+    approvals_rows: u16,
 ) -> AppLayout {
     let hint_h: u16 = if area.height >= 12 { 1 } else { 0 };
+    let approvals_h = approvals_rows.min(11);
     let vertical = RatatuiLayout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(status_height.max(1)),
             Constraint::Min(3),
+            Constraint::Length(approvals_h),
             Constraint::Length(input_height.max(3)),
             Constraint::Length(hint_h),
         ])
         .split(area);
     let status = vertical[0];
     let mid = vertical[1];
-    let input = vertical[2];
-    let hint = if hint_h > 0 { Some(vertical[3]) } else { None };
+    let approvals = if approvals_h > 0 {
+        Some(vertical[2])
+    } else {
+        None
+    };
+    let input = vertical[3];
+    let hint = if hint_h > 0 { Some(vertical[4]) } else { None };
 
     let (transcript, sidebar) = if show_sidebar && area.width >= SIDEBAR_MIN_TOTAL_WIDTH {
         let cols = RatatuiLayout::default()
@@ -50,6 +59,7 @@ pub fn compute_ex(
         status,
         transcript,
         sidebar,
+        approvals,
         input,
         hint,
     }
@@ -81,5 +91,21 @@ mod tests {
         let area = Rect::new(0, 0, 200, 40);
         let l = compute(area, 3, false);
         assert!(l.sidebar.is_none());
+    }
+
+    #[test]
+    fn approvals_rows_zero_hides_bar() {
+        let area = Rect::new(0, 0, 200, 40);
+        let l = compute_ex(area, 3, true, 1, 0);
+        assert!(l.approvals.is_none());
+    }
+
+    #[test]
+    fn approvals_rows_nonzero_allocates_bar() {
+        let area = Rect::new(0, 0, 200, 40);
+        let l = compute_ex(area, 3, true, 1, 4);
+        let bar = l.approvals.expect("expected approvals bar");
+        assert_eq!(bar.height, 4);
+        assert!(l.transcript.height > 0);
     }
 }

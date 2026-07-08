@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
+pub mod approval_bar;
 pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
@@ -1014,6 +1015,18 @@ fn handle_compact_review_key(
     }
 }
 
+fn is_approval_key(action: &KeyAction) -> bool {
+    matches!(
+        action,
+        KeyAction::Char('1'..='9')
+            | KeyAction::Char('a')
+            | KeyAction::Char('A')
+            | KeyAction::Char('d')
+            | KeyAction::Char('D')
+            | KeyAction::Escape
+    )
+}
+
 fn handle_approval_key(
     action: &KeyAction,
     app: &mut AppState,
@@ -1132,10 +1145,8 @@ fn handle_key(
             }
         }
     }
-    if !app.pending_approvals.is_empty()
-        && editor.buf().is_empty()
-        && handle_approval_key(&action, app, control_tx)
-    {
+    if !app.pending_approvals.is_empty() && is_approval_key(&action) {
+        handle_approval_key(&action, app, control_tx);
         return;
     }
     if app.yank_mode && handle_yank_key(&action, app) {
@@ -1324,7 +1335,19 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let show_sidebar = app.sidebar_mode.resolve(wide_enough);
     let compact_status = !show_sidebar;
     let status_height = if compact_status { 2 } else { 1 };
-    let l = layout::compute_ex(area, input_height, show_sidebar, status_height);
+    let pending_count = app.pending_approvals.len();
+    let approvals_rows: u16 = if pending_count == 0 {
+        0
+    } else {
+        (pending_count.min(9) as u16).saturating_add(1)
+    };
+    let l = layout::compute_ex(
+        area,
+        input_height,
+        show_sidebar,
+        status_height,
+        approvals_rows,
+    );
     f.render_widget(
         status::render_bar(status::StatusInputs {
             session_id: &app.session_id,
@@ -1378,6 +1401,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         let paragraph =
             ratatui::widgets::Paragraph::new(lines_owned).scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, transcript_area);
+    }
+    if let Some(area) = l.approvals {
+        approval_bar::render(f, area, &app.pending_approvals);
     }
     if let Some(area) = l.sidebar {
         sidebar::render(
