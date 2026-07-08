@@ -440,16 +440,22 @@ fn enumerate_session_rows(
             continue;
         }
         let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
-        if restrict_to_project && let Some(current_fp) = current_fp.as_ref() {
-            let peer_fp = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
-            if peer_fp.as_deref() != Some(current_fp.as_str()) {
-                continue;
-            }
+        let peer_fp = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
+        let is_legacy = peer_fp.is_none();
+        if restrict_to_project
+            && let Some(current_fp) = current_fp.as_ref()
+            && !is_legacy
+            && peer_fp.as_deref() != Some(current_fp.as_str())
+        {
+            continue;
         }
-        let project = meta
-            .as_ref()
-            .and_then(|m| m.project_root.as_ref())
-            .map(|p| p.display().to_string());
+        let project = if is_legacy {
+            Some("(legacy)".into())
+        } else {
+            meta.as_ref()
+                .and_then(|m| m.project_root.as_ref())
+                .map(|p| p.display().to_string())
+        };
         let updated_at = entry
             .metadata()
             .and_then(|m| m.modified())
