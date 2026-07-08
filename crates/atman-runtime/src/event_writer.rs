@@ -199,7 +199,7 @@ fn insert_event_row(
     Ok(())
 }
 
-fn extract_ts(event: &Event) -> String {
+pub(crate) fn extract_ts(event: &Event) -> String {
     match event {
         Event::FlowStart { ts, .. }
         | Event::FlowEnd { ts, .. }
@@ -229,7 +229,7 @@ fn extract_ts(event: &Event) -> String {
     }
 }
 
-fn event_kind(event: &Event) -> &'static str {
+pub(crate) fn event_kind(event: &Event) -> &'static str {
     match event {
         Event::FlowStart { .. } => "flow_start",
         Event::FlowEnd { .. } => "flow_end",
@@ -259,7 +259,7 @@ fn event_kind(event: &Event) -> &'static str {
     }
 }
 
-fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
+pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
     match event {
         Event::FlowStart { run_id, .. } | Event::FlowEnd { run_id, .. } => {
             (None, Some(run_id.0.to_string()))
@@ -331,7 +331,7 @@ fn extract_anchors(event: &Event) -> (Option<String>, Option<String>) {
     }
 }
 
-fn extract_text_content(event: &Event) -> Option<String> {
+pub(crate) fn extract_text_content(event: &Event) -> Option<String> {
     match event {
         Event::UserMsg { message, .. }
         | Event::AssistantMsg { message, .. }
