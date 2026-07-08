@@ -53,6 +53,7 @@ pub struct Session {
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     approval: std::sync::Arc<ApprovalRegistry>,
     compact_reviews: std::sync::Arc<CompactReviewRegistry>,
+    project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
 }
 
 #[derive(Debug, Clone)]
@@ -673,6 +674,19 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
     Ok(out)
 }
 
+fn default_project_index(root: &Path) -> Option<std::sync::Arc<crate::index::AnchorIndex>> {
+    match crate::index::AnchorIndex::open_project(root) {
+        Ok(idx) => Some(std::sync::Arc::new(idx)),
+        Err(e) => {
+            eprintln!(
+                "[atman] project index unavailable at {} — history search disabled: {e}",
+                root.display()
+            );
+            None
+        }
+    }
+}
+
 impl Session {
     pub fn open(root: impl AsRef<Path>) -> std::io::Result<Self> {
         Self::open_with_redactor(root, None)
@@ -682,9 +696,24 @@ impl Session {
         root: impl AsRef<Path>,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
     ) -> std::io::Result<Self> {
+        let root_ref = root.as_ref();
+        let project_index = default_project_index(root_ref);
+        Self::open_with_context(root_ref, redactor, project_index)
+    }
+
+    pub fn open_with_context(
+        root: impl AsRef<Path>,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+    ) -> std::io::Result<Self> {
         let id = SessionId::now();
         let dir = root.as_ref().join("sessions").join(id.to_string());
-        let writer = EventWriter::spawn_with(&dir, redactor.clone())?;
+        let writer = EventWriter::spawn_full(
+            &dir,
+            redactor.clone(),
+            project_index.clone(),
+            Some(id.to_string()),
+        )?;
         if let Err(e) = crate::session_meta::SessionMeta::from_cwd().save(&dir) {
             eprintln!("[atman] session meta write failed: {e}");
         }
@@ -724,6 +753,7 @@ impl Session {
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
+            project_index,
         })
     }
 
@@ -736,6 +766,16 @@ impl Session {
         sid: &str,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
     ) -> Result<Self, SessionOpenError> {
+        let project_index = default_project_index(root.as_ref());
+        Self::open_existing_with_context(root, sid, redactor, project_index)
+    }
+
+    pub fn open_existing_with_context(
+        root: impl AsRef<Path>,
+        sid: &str,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+    ) -> Result<Self, SessionOpenError> {
         let id = SessionId::parse(sid).map_err(|_| SessionOpenError::InvalidId {
             sid: sid.to_string(),
         })?;
@@ -746,8 +786,13 @@ impl Session {
                 dir: dir.clone(),
             });
         }
-        let writer = EventWriter::spawn_with(&dir, redactor.clone())
-            .map_err(SessionOpenError::WriterInit)?;
+        let writer = EventWriter::spawn_full(
+            &dir,
+            redactor.clone(),
+            project_index.clone(),
+            Some(id.to_string()),
+        )
+        .map_err(SessionOpenError::WriterInit)?;
         let mut sink = EventSink::new().with_forwarder(writer.sender());
         if let Some(r) = redactor {
             sink = sink.with_redactor(r);
@@ -791,6 +836,7 @@ impl Session {
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
+            project_index,
         })
     }
 
@@ -827,7 +873,12 @@ impl Session {
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
+            project_index: None,
         }
+    }
+
+    pub fn project_index(&self) -> Option<std::sync::Arc<crate::index::AnchorIndex>> {
+        self.project_index.clone()
     }
 
     pub fn approval(&self) -> std::sync::Arc<ApprovalRegistry> {

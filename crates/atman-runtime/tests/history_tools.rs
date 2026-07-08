@@ -20,11 +20,19 @@ async fn build_session_with_messages(tmp: &tempfile::TempDir) -> Session {
     session
 }
 
+fn ctx_from_session(session: &Session) -> ToolCtx {
+    let mut ctx = ToolCtx::new().with_session_dir(session.dir().to_path_buf());
+    if let Some(idx) = session.project_index() {
+        ctx = ctx.with_project_index(idx);
+    }
+    ctx
+}
+
 #[tokio::test]
 async fn history_search_returns_matching_events_in_current_session() {
     let tmp = tempfile::tempdir().unwrap();
     let session = build_session_with_messages(&tmp).await;
-    let ctx = ToolCtx::new().with_session_dir(session.dir().to_path_buf());
+    let ctx = ctx_from_session(&session);
     let args = ToolArgs {
         positional: Vec::new(),
         named: vec![("query".into(), Value::Str("compaction".into()))],

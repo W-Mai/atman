@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::RuntimeError;
@@ -466,50 +465,40 @@ impl Tool for MemoryHistorySearch {
                 Some(Value::Int(n)) if *n > 0 => (*n as usize).min(50),
                 _ => 10,
             };
-            let Some(session_dir) = ctx.session_dir.as_ref() else {
+            let Some(idx) = ctx.project_index.as_ref() else {
                 return Err(RuntimeError::ToolFailed(
-                    "memory.history.search: no session dir on context".into(),
+                    "memory.history.search: no project index on context".into(),
                 ));
             };
-            let dirs = match scope {
-                HistoryScope::Session => vec![session_dir.clone()],
-                HistoryScope::Project => sibling_sessions_for_project(session_dir)
-                    .unwrap_or_else(|| vec![session_dir.clone()]),
+            let session_filter = match scope {
+                HistoryScope::Project => None,
+                HistoryScope::Session => ctx
+                    .session_dir
+                    .as_ref()
+                    .and_then(|d| d.file_name())
+                    .map(|n| n.to_string_lossy().to_string()),
             };
-            let mut hits: Vec<Value> = Vec::new();
-            for dir in dirs {
-                let idx = match crate::index::AnchorIndex::open_session(&dir) {
-                    Ok(i) => i,
-                    Err(_) => continue,
-                };
-                let rows = match idx.fts_search_events(&query, limit) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let sid = dir
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                for row in rows {
+            let rows = idx
+                .fts_search_project_events(&query, session_filter.as_deref(), limit)
+                .map_err(|e| RuntimeError::ToolFailed(format!("memory.history.search: {e}")))?;
+            let hits: Vec<Value> = rows
+                .into_iter()
+                .map(|row| {
                     let snippet: String = row
                         .payload
                         .chars()
                         .take(200)
                         .collect::<String>()
                         .replace('\n', " ");
-                    hits.push(Value::Struct(vec![
-                        ("session_id".into(), Value::Str(sid.clone())),
+                    Value::Struct(vec![
+                        ("session_id".into(), Value::Str(row.session_id)),
                         ("seq".into(), Value::Int(row.seq as i64)),
-                        ("ts".into(), Value::Str(row.ts.clone())),
-                        ("kind".into(), Value::Str(row.kind.clone())),
+                        ("ts".into(), Value::Str(row.ts)),
+                        ("kind".into(), Value::Str(row.kind)),
                         ("snippet".into(), Value::Str(snippet)),
-                    ]));
-                }
-                if hits.len() >= limit {
-                    break;
-                }
-            }
-            hits.truncate(limit);
+                    ])
+                })
+                .collect();
             Ok(Value::List(hits))
         })
     }
@@ -611,27 +600,6 @@ impl Tool for MemoryHistoryRead {
 enum HistoryScope {
     Session,
     Project,
-}
-
-fn sibling_sessions_for_project(session_dir: &std::path::Path) -> Option<Vec<PathBuf>> {
-    let meta = crate::session_meta::SessionMeta::load(session_dir)?;
-    let want = meta.project_fingerprint.as_deref()?;
-    let sessions_parent = session_dir.parent()?;
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(sessions_parent).ok()? {
-        let entry = entry.ok()?;
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let peer_meta = crate::session_meta::SessionMeta::load(&entry.path());
-        let fp = peer_meta
-            .as_ref()
-            .and_then(|m| m.project_fingerprint.clone());
-        if fp.as_deref() == Some(want) {
-            out.push(entry.path());
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
 }
 
 fn load_session_messages(

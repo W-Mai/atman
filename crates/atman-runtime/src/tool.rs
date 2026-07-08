@@ -85,6 +85,7 @@ pub struct ToolCtx {
     pub providers: Option<std::sync::Arc<crate::provider::ProviderRegistry>>,
     pub session_dir: Option<std::path::PathBuf>,
     pub data_root: Option<std::path::PathBuf>,
+    pub project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
 }
 
 impl ToolCtx {
@@ -184,6 +185,11 @@ impl ToolCtx {
             .as_ref()
             .and_then(|set| set.lock().ok().map(|lock| lock.contains(path)))
             .unwrap_or(false)
+    }
+
+    pub fn with_project_index(mut self, idx: std::sync::Arc<crate::index::AnchorIndex>) -> Self {
+        self.project_index = Some(idx);
+        self
     }
 
     pub fn with_stream_tx(

@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::event::Event;
-use crate::index::AnchorIndex;
+use crate::index::{AnchorIndex, ProjectEventInsert};
 use crate::redact::Redactor;
 
 const BATCH_SIZE: usize = 100;
@@ -22,33 +22,31 @@ pub struct EventWriter {
 
 impl EventWriter {
     pub fn spawn(session_dir: impl AsRef<Path>) -> std::io::Result<Self> {
-        Self::spawn_with(session_dir, None)
+        Self::spawn_full(session_dir, None, None, None)
     }
 
     pub fn spawn_with(
         session_dir: impl AsRef<Path>,
         redactor: Option<Arc<Redactor>>,
     ) -> std::io::Result<Self> {
+        Self::spawn_full(session_dir, redactor, None, None)
+    }
+
+    pub fn spawn_full(
+        session_dir: impl AsRef<Path>,
+        redactor: Option<Arc<Redactor>>,
+        project_index: Option<Arc<AnchorIndex>>,
+        session_id: Option<String>,
+    ) -> std::io::Result<Self> {
         let session_dir = session_dir.as_ref().to_path_buf();
         let events_path = session_dir.join("events.jsonl");
         std::fs::create_dir_all(&session_dir)?;
-        let index = match AnchorIndex::open_session(&session_dir) {
-            Ok(idx) => Some(Arc::new(idx)),
-            Err(e) => {
-                eprintln!(
-                    "[atman] anchor index unavailable at {} — dual-write disabled: {e}",
-                    session_dir.display()
-                );
-                None
-            }
-        };
         let (tx, rx) = mpsc::unbounded_channel::<Event>();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let file_path = events_path.clone();
-        let index_clone = index.clone();
-        let redactor_clone = redactor.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = writer_loop(rx, stop_rx, &file_path, index_clone, redactor_clone).await
+            if let Err(e) =
+                writer_loop(rx, stop_rx, &file_path, project_index, session_id, redactor).await
             {
                 eprintln!("[atman] event writer failed: {e}");
             }
@@ -83,7 +81,8 @@ async fn writer_loop(
     mut rx: mpsc::UnboundedReceiver<Event>,
     mut stop_rx: oneshot::Receiver<()>,
     path: &Path,
-    index: Option<Arc<AnchorIndex>>,
+    project_index: Option<Arc<AnchorIndex>>,
+    session_id: Option<String>,
     redactor: Option<Arc<Redactor>>,
 ) -> std::io::Result<()> {
     let file = tokio::fs::OpenOptions::new()
@@ -94,20 +93,21 @@ async fn writer_loop(
     let mut buf = tokio::io::BufWriter::new(file);
     let mut since_flush: usize = 0;
     let mut flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
+    let indexer = project_index.zip(session_id);
 
     loop {
         tokio::select! {
             biased;
             _ = &mut stop_rx => {
                 while let Ok(event) = rx.try_recv() {
-                    write_event(&mut buf, &event, index.as_deref(), redactor.as_deref()).await?;
+                    write_event(&mut buf, &event, indexer.as_ref(), redactor.as_deref()).await?;
                 }
                 break;
             }
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Some(event) => {
-                        write_event(&mut buf, &event, index.as_deref(), redactor.as_deref()).await?;
+                        write_event(&mut buf, &event, indexer.as_ref(), redactor.as_deref()).await?;
                         since_flush += 1;
                         if since_flush >= BATCH_SIZE {
                             buf.flush().await?;
@@ -132,17 +132,17 @@ async fn writer_loop(
 async fn write_event(
     buf: &mut tokio::io::BufWriter<tokio::fs::File>,
     event: &Event,
-    index: Option<&AnchorIndex>,
+    indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
 ) -> std::io::Result<()> {
     let line = serialize_event(event, redactor);
     buf.write_all(line.as_bytes()).await?;
     buf.write_all(b"\n").await?;
-    if let Some(idx) = index
-        && let Err(e) = insert_event_row(idx, event, &line)
+    if let Some((idx, sid)) = indexer
+        && let Err(e) = insert_project_row(idx, sid, event, &line)
     {
         eprintln!(
-            "[atman] index event insert failed (seq={}): {e}",
+            "[atman] project index insert failed (seq={}): {e}",
             event.seq()
         );
     }
@@ -176,26 +176,26 @@ fn serialize_event(event: &Event, redactor: Option<&Redactor>) -> String {
     })
 }
 
-fn insert_event_row(
+fn insert_project_row(
     index: &AnchorIndex,
+    session_id: &str,
     event: &Event,
     payload_json: &str,
 ) -> rusqlite::Result<()> {
-    let seq = event.seq() as i64;
     let ts = extract_ts(event);
     let kind = event_kind(event);
     let (turn_id, flow_run_id) = extract_anchors(event);
-    let text_content = extract_text_content(event);
-    let conn = index.conn();
-    conn.execute(
-        "INSERT OR REPLACE INTO events (seq, ts, kind, turn_id, flow_run_id, payload) \
-         VALUES (?, ?, ?, ?, ?, ?)",
-        rusqlite::params![seq, ts, kind, turn_id, flow_run_id, payload_json,],
-    )?;
-    conn.execute(
-        "INSERT OR REPLACE INTO events_fts (rowid, text_content) VALUES (?, ?)",
-        rusqlite::params![seq, text_content.unwrap_or_default()],
-    )?;
+    let text = extract_text_content(event).unwrap_or_default();
+    index.insert_project_event_raw(ProjectEventInsert {
+        session_id,
+        seq: event.seq() as i64,
+        ts: &ts,
+        kind,
+        turn_id: turn_id.as_deref(),
+        flow_run_id: flow_run_id.as_deref(),
+        text_content: &text,
+        payload_json,
+    })?;
     Ok(())
 }
 
@@ -384,9 +384,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_dual_writes_to_session_anchor_index() {
-        let dir = TempDir::new().unwrap();
-        let writer = EventWriter::spawn(dir.path()).unwrap();
+    async fn writer_writes_to_project_index_with_session_id() {
+        let session_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let idx = Arc::new(AnchorIndex::open_project(project_dir.path()).unwrap());
+        let writer = EventWriter::spawn_full(
+            session_dir.path(),
+            None,
+            Some(idx.clone()),
+            Some("sess-x".into()),
+        )
+        .unwrap();
         let tx = writer.sender();
         for i in 0..3 {
             tx.send(Event::FlowStart {
@@ -402,39 +410,39 @@ mod tests {
         drop(tx);
         writer.shutdown().await;
 
-        let jsonl_lines = tokio::fs::read_to_string(dir.path().join("events.jsonl"))
+        let jsonl_lines = tokio::fs::read_to_string(session_dir.path().join("events.jsonl"))
             .await
             .unwrap()
             .lines()
             .count();
         assert_eq!(jsonl_lines, 3);
 
-        let idx = crate::index::AnchorIndex::open_session(dir.path()).unwrap();
         let conn = idx.conn();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events", rusqlite::params![], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE session_id = ?",
+                rusqlite::params!["sess-x"],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(count, 3, "sqlite events row count must match jsonl");
-
-        let kinds: Vec<String> = conn
-            .prepare("SELECT kind FROM events ORDER BY seq")
-            .unwrap()
-            .query_map(rusqlite::params![], |r| r.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
-        assert_eq!(kinds, vec!["flow_start"; 3]);
+        assert_eq!(count, 3);
     }
 
     #[tokio::test]
-    async fn writer_indexes_user_msg_text_for_fts() {
+    async fn writer_indexes_user_msg_text_for_project_fts() {
         use crate::event::TurnId;
         use crate::message::Message;
 
-        let dir = TempDir::new().unwrap();
-        let writer = EventWriter::spawn(dir.path()).unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let idx = Arc::new(AnchorIndex::open_project(project_dir.path()).unwrap());
+        let writer = EventWriter::spawn_full(
+            session_dir.path(),
+            None,
+            Some(idx.clone()),
+            Some("sess-x".into()),
+        )
+        .unwrap();
         let tid = TurnId::now();
         writer
             .sender()
@@ -447,16 +455,12 @@ mod tests {
             .unwrap();
         writer.shutdown().await;
 
-        let idx = crate::index::AnchorIndex::open_session(dir.path()).unwrap();
-        let conn = idx.conn();
-        let matches: Vec<i64> = conn
-            .prepare("SELECT rowid FROM events_fts WHERE events_fts MATCH ?")
-            .unwrap()
-            .query_map(rusqlite::params!["sqlite"], |r| r.get(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
-        assert_eq!(matches, vec![1], "fts should find seq=1 for `sqlite`");
+        let hits = idx
+            .fts_search_project_events("sqlite", Some("sess-x"), 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "sess-x");
+        assert_eq!(hits[0].seq, 1);
     }
 
     #[tokio::test]
