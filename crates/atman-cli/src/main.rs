@@ -1298,6 +1298,7 @@ async fn cmd_repl_once(
         let session_for_ctrl = std::sync::Arc::clone(&session);
         let switch_target_for_ctrl = switch_target.clone();
         let providers_for_ctrl = executor.providers.clone();
+        let data_root_for_ctrl = root.clone();
         let ctrl_task = tokio::spawn(async move {
             while let Some(msg) = ctrl_rx.recv().await {
                 match msg {
@@ -1375,6 +1376,12 @@ async fn cmd_repl_once(
                             let _ = tx.send(());
                         }
                         break;
+                    }
+                    atman_tui::TuiControl::DeleteSession(sid) => {
+                        delete_session_dir(&data_root_for_ctrl, &sid);
+                        if let Some(idx) = session_for_ctrl.project_index() {
+                            let _ = idx.delete_events_for_session(&sid);
+                        }
                     }
                 }
             }
@@ -1460,6 +1467,11 @@ async fn cmd_repl_once(
                 handle_todo_builtin(arg, &session, &reporter).await;
                 continue;
             }
+            if trimmed == "rename" || trimmed.starts_with("rename ") || trimmed == "rename clear" {
+                let arg = trimmed.strip_prefix("rename").unwrap_or("").trim();
+                handle_rename_builtin(arg, &session, &reporter);
+                continue;
+            }
             if !handle_builtin(trimmed, sid.as_str(), &mut pending, &session, &reporter) {
                 break;
             }
@@ -1536,6 +1548,16 @@ async fn cmd_repl_once(
         }
     }
     Ok(())
+}
+
+fn delete_session_dir(data_root: &std::path::Path, sid: &str) {
+    let dir = data_root.join("sessions").join(sid);
+    if !dir.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        eprintln!("[atman] failed to delete session {}: {e}", dir.display());
+    }
 }
 
 fn session_dir_is_disposable(dir: &std::path::Path) -> bool {
@@ -2125,6 +2147,34 @@ fn discover_flow_names() -> Vec<(String, String)> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+fn handle_rename_builtin(arg: &str, session: &Session, reporter: &Reporter) {
+    let dir = session.dir();
+    if dir.as_os_str().is_empty() {
+        reporter.info("[atman] :rename only works on a persisted session");
+        return;
+    }
+    let title = match arg {
+        "" => {
+            let current = atman_runtime::session_meta::SessionMeta::load(dir)
+                .and_then(|m| m.title)
+                .unwrap_or_else(|| "(none)".into());
+            reporter.info(format!(
+                "[atman] session title: {current}  (:rename <text> to set, :rename clear to remove)"
+            ));
+            return;
+        }
+        "clear" => None,
+        s => Some(s.to_string()),
+    };
+    match atman_runtime::session_meta::SessionMeta::set_title(dir, title.clone()) {
+        Ok(()) => match title {
+            Some(t) => reporter.info(format!("[atman] renamed session → {t}")),
+            None => reporter.info("[atman] session title cleared"),
+        },
+        Err(e) => reporter.error(format!("[atman] :rename failed: {e}")),
+    }
 }
 
 fn handle_sidebar_builtin(

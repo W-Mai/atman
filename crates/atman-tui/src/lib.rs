@@ -72,6 +72,7 @@ pub enum TuiControl {
         review_id: String,
     },
     SwitchSession(String),
+    DeleteSession(String),
 }
 
 #[derive(Debug, Clone)]
@@ -539,41 +540,60 @@ fn enumerate_session_rows(
             })
             .unwrap_or_default();
         let events_path = entry.path().join("events.jsonl");
-        let message_count = count_message_events(&events_path);
+        let (user_count, total_count) = count_message_events(&events_path);
+        if user_count == 0 {
+            continue;
+        }
         rows.push(crate::SessionPickerRow {
             id: sid,
             project,
-            message_count,
+            message_count: total_count,
             updated_at,
-            goal: None,
+            goal: meta.as_ref().and_then(|m| m.title.clone()),
         });
     }
-    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    rows.truncate(30);
+    rows.sort_by(|a, b| {
+        b.message_count
+            .cmp(&a.message_count)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    rows.truncate(200);
     rows
 }
 
-fn count_message_events(path: &std::path::Path) -> usize {
+fn count_message_events(path: &std::path::Path) -> (usize, usize) {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return 0,
+        Err(_) => return (0, 0),
     };
-    contents
-        .lines()
-        .filter(|l| {
-            l.contains("\"type\":\"user_msg\"")
-                || l.contains("\"type\":\"assistant_msg\"")
-                || l.contains("\"type\":\"tool_result_msg\"")
-        })
-        .count()
+    let mut user = 0usize;
+    let mut total = 0usize;
+    for l in contents.lines() {
+        let is_user = l.contains("\"type\":\"user_msg\"");
+        let is_assistant = l.contains("\"type\":\"assistant_msg\"");
+        let is_tool = l.contains("\"type\":\"tool_result_msg\"");
+        if is_user {
+            user += 1;
+        }
+        if is_user || is_assistant || is_tool {
+            total += 1;
+        }
+    }
+    (user, total)
 }
 
 fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
     use crate::history_search_modal::{HistoryHit, HistorySearchScope};
     match action {
         KeyAction::Escape => app.history_search.close(),
-        KeyAction::HistoryUp | KeyAction::CursorLeft => app.history_search.move_up(),
-        KeyAction::HistoryDown | KeyAction::CursorRight => app.history_search.move_down(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => {
+            app.history_search.move_up();
+            refresh_history_preview(app);
+        }
+        KeyAction::HistoryDown | KeyAction::CursorRight => {
+            app.history_search.move_down();
+            refresh_history_preview(app);
+        }
         KeyAction::Tab => {
             app.history_search.scope = app.history_search.scope.toggle();
         }
@@ -622,6 +642,7 @@ fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
                 })
                 .collect();
             app.history_search.set_results(hits, query);
+            refresh_history_preview(app);
         }
         KeyAction::Char(c) => {
             app.history_search.editor.insert_char(*c);
@@ -633,11 +654,87 @@ fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
     }
 }
 
+fn refresh_history_preview(app: &mut AppState) {
+    let (session_id, seq) = match app.history_search.selected_hit() {
+        Some(hit) => (hit.session_id.clone(), hit.seq),
+        None => {
+            app.history_search.set_preview(Vec::new());
+            return;
+        }
+    };
+    let Some(session) = app.session.as_ref() else {
+        return;
+    };
+    let Some(idx) = session.project_index() else {
+        return;
+    };
+    let rows = match idx.find_project_events_around(&session_id, seq, 3) {
+        Ok(r) => r,
+        Err(_) => {
+            app.history_search.set_preview(Vec::new());
+            return;
+        }
+    };
+    let lines: Vec<String> = rows
+        .into_iter()
+        .map(|row| {
+            let marker = if row.seq == seq { "▶" } else { " " };
+            let text = extract_event_text(&row.payload).unwrap_or_default();
+            let snippet: String = text
+                .chars()
+                .take(180)
+                .collect::<String>()
+                .replace('\n', " ");
+            format!("{marker} [{}] {}: {}", row.seq, row.kind, snippet)
+        })
+        .collect();
+    app.history_search.set_preview(lines);
+}
+
+fn extract_event_text(payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let parts = v.get("message")?.get("parts")?.as_array()?;
+    let joined = parts
+        .iter()
+        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 fn handle_session_switcher_key(
     action: &KeyAction,
     app: &mut AppState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if let KeyAction::Char('d') | KeyAction::Char('D') = action {
+        if app.session_switcher.delete_armed_matches_selected() {
+            if let Some(sid) = app.session_switcher.remove_selected() {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::DeleteSession(sid.clone()));
+                }
+                app.push_note(format!("deleted session {sid}"), app::NoteLevel::Info);
+            }
+        } else {
+            let armed = app.session_switcher.arm_delete().map(str::to_owned);
+            match armed {
+                Some(sid) => app.push_note(
+                    format!("press d again to confirm delete {sid}"),
+                    app::NoteLevel::Warn,
+                ),
+                None => app.push_note("no session selected", app::NoteLevel::Warn),
+            }
+        }
+        return;
+    }
+    if app.session_switcher.delete_armed.is_some() {
+        app.session_switcher.clear_delete_arm();
+        app.push_note("delete cancelled", app::NoteLevel::Info);
+    }
     match action {
         KeyAction::Escape => app.session_switcher.close(),
         KeyAction::HistoryUp | KeyAction::CursorLeft => app.session_switcher.move_up(),

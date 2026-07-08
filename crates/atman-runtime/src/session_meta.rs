@@ -13,6 +13,8 @@ pub struct SessionMeta {
     pub project_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 }
@@ -43,8 +45,15 @@ impl SessionMeta {
             project_root,
             project_fingerprint,
             created_at: Some(Utc::now()),
+            title: None,
             tags: Vec::new(),
         }
+    }
+
+    pub fn set_title(session_dir: &Path, title: Option<String>) -> std::io::Result<()> {
+        let mut meta = Self::load(session_dir).unwrap_or_default();
+        meta.title = title;
+        meta.save(session_dir)
     }
 }
 
@@ -127,6 +136,7 @@ mod tests {
             project_root: Some(PathBuf::from("/tmp/foo")),
             project_fingerprint: Some("deadbeef".repeat(2)),
             created_at: Some(Utc::now()),
+            title: Some("nice title".into()),
             tags: vec!["x".into()],
         };
         meta.save(tmp.path()).unwrap();
