@@ -17,6 +17,7 @@ pub mod approval_bar;
 pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
+pub mod form_modal;
 pub mod highlight;
 pub mod history;
 pub mod history_search_modal;
@@ -80,6 +81,10 @@ pub enum TuiControl {
         session_id: String,
         title: Option<String>,
     },
+    FormSubmit {
+        form_id: String,
+        answer: atman_runtime::form::FormAnswer,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +120,7 @@ pub struct TuiHandle {
         Option<tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
     pub compact_review_rx:
         Option<tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
+    pub form_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
 }
@@ -139,6 +145,7 @@ impl TuiHandle {
             plans_rx: Some(session.subscribe_plans()),
             approvals_rx: Some(session.subscribe_pending_approvals()),
             compact_review_rx: Some(session.compact_reviews().subscribe()),
+            form_rx: Some(session.forms().subscribe()),
             flow_names: Vec::new(),
             session: Some(session),
         }
@@ -397,6 +404,29 @@ async fn run_frames(
                     }
                 }
             }
+            _ = wait_form_change(handle.form_rx.as_mut()) => {
+                if let Some(rx) = handle.form_rx.as_mut() {
+                    let latest = rx.borrow().clone();
+                    let front = latest.first().cloned();
+                    match (front, app.form_modal.active_form_id().is_some()) {
+                        (Some(pending), false) => {
+                            app.form_modal.attach(pending);
+                        }
+                        (Some(pending), true) => {
+                            if app
+                                .form_modal
+                                .active_form_id()
+                                .is_some_and(|id| id != pending.form_id)
+                            {
+                                app.form_modal.attach(pending);
+                            }
+                        }
+                        (None, _) => {
+                            app.form_modal.close();
+                        }
+                    }
+                }
+            }
             cmd = recv_cmd(handle.cmd_rx.as_mut()) => {
                 if let Some(cmd) = cmd {
                     match cmd {
@@ -482,6 +512,17 @@ async fn wait_approvals_change(
 
 async fn wait_compact_review_change(
     rx: Option<&mut tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
+) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_form_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
 ) {
     match rx {
         Some(r) => {
@@ -1107,6 +1148,78 @@ fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {
     }
 }
 
+fn handle_form_key(
+    action: &keys::KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    use atman_runtime::form::FormKind;
+    let Some(form_id) = app.form_modal.active_form_id().map(String::from) else {
+        return;
+    };
+    let is_text = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::Text { .. })
+    );
+    let is_confirm = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::Confirm { .. })
+    );
+    let is_multi = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::MultiSelect { .. })
+    );
+    match action {
+        KeyAction::Escape => {
+            if let Some(answer) = app.form_modal.cancel()
+                && let Some(tx) = control_tx
+            {
+                let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
+            }
+        }
+        KeyAction::Submit => {
+            if let Some(answer) = app.form_modal.submit()
+                && let Some(tx) = control_tx
+            {
+                let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
+            }
+        }
+        KeyAction::Char('y') | KeyAction::Char('Y') if is_confirm => {
+            if let Some(answer) = app.form_modal.submit()
+                && let Some(tx) = control_tx
+            {
+                let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
+            }
+        }
+        KeyAction::Char('n') | KeyAction::Char('N') if is_confirm => {
+            if let Some(answer) = app.form_modal.confirm_no()
+                && let Some(tx) = control_tx
+            {
+                let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
+            }
+        }
+        KeyAction::Char(' ') if is_multi => {
+            app.form_modal.toggle_current();
+        }
+        KeyAction::HistoryUp | KeyAction::CursorLeft | KeyAction::Char('k') if !is_text => {
+            app.form_modal.move_cursor(-1);
+        }
+        KeyAction::HistoryDown | KeyAction::CursorRight | KeyAction::Char('j') if !is_text => {
+            app.form_modal.move_cursor(1);
+        }
+        KeyAction::Char(c) if is_text => {
+            app.form_modal.text_editor.insert_char(*c);
+        }
+        KeyAction::Backspace if is_text => {
+            app.form_modal.text_editor.backspace();
+        }
+        KeyAction::Newline if is_text => {
+            app.form_modal.text_editor.insert_newline();
+        }
+        _ => {}
+    }
+}
+
 fn handle_compact_review_key(
     action: &KeyAction,
     app: &mut AppState,
@@ -1230,6 +1343,10 @@ fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if app.form_modal.open {
+        handle_form_key(&action, app, control_tx);
+        return;
+    }
     if app.compact_review.is_some() {
         handle_compact_review_key(&action, app, control_tx);
         return;
@@ -1632,5 +1749,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.workflow_viewer.open {
         workflow_viewer_modal::render(f, area, app);
+    }
+    if app.form_modal.open {
+        form_modal::render(f, area, &app.form_modal);
     }
 }

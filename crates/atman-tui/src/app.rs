@@ -90,6 +90,7 @@ pub struct AppState {
     pub last_node_regions: Vec<crate::output::NodeRegion>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub input_rect: Option<ratatui::layout::Rect>,
+    pub form_modal: crate::form_modal::FormModal,
     pub animation_frame: u32,
     pub items_version: u64,
     pub expanded_version: u64,

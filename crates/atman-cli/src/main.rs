@@ -1432,6 +1432,9 @@ async fn cmd_repl_once(
                             eprintln!("[atman] rename {session_id} failed: {e}");
                         }
                     }
+                    atman_tui::TuiControl::FormSubmit { form_id, answer } => {
+                        let _ = session_for_ctrl.forms().submit(&form_id, answer);
+                    }
                 }
             }
         });
@@ -1453,6 +1456,7 @@ async fn cmd_repl_once(
             plans_rx: Some(session.subscribe_plans()),
             approvals_rx: Some(session.subscribe_pending_approvals()),
             compact_review_rx: Some(session.compact_reviews().subscribe()),
+            form_rx: Some(session.forms().subscribe()),
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
         };
