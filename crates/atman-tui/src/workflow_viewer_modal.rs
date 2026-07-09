@@ -67,7 +67,17 @@ impl WorkflowViewerModal {
 const VIEWER_PANEL_WIDTH: u16 = 300;
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState) {
-    f.render_widget(Clear, area);
+    let modal_w = area.width.saturating_sub(8).clamp(60, 160);
+    let modal_h = area.height.saturating_sub(4).clamp(15, 40);
+    let x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect {
+        x,
+        y,
+        width: modal_w,
+        height: modal_h,
+    };
+    f.render_widget(Clear, modal_area);
     let title = format!(
         " Workflow · Esc close · h/l or Shift+←/→ · j/k up/down · offset {},{} ",
         app.workflow_viewer.h_offset, app.workflow_viewer.v_offset
@@ -81,19 +91,18 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
     if inner.height < 2 || inner.width < 8 {
         return;
     }
     let idx = app.workflow_viewer.panel_item_index;
-    let (graph, expanded_nodes, panel_expanded) = match app.items.get(idx) {
+    let (graph, expanded_nodes) = match app.items.get(idx) {
         Some(crate::app::OutputItem::WorkflowPanel {
             graph,
             expanded_nodes,
-            panel_expanded,
             ..
-        }) => (graph.clone(), expanded_nodes.clone(), *panel_expanded),
+        }) => (graph.clone(), expanded_nodes.clone()),
         _ => {
             let msg = Paragraph::new("workflow panel is no longer available")
                 .style(Style::default().fg(Color::DarkGray));
@@ -104,7 +113,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
     let (lines, node_regions) = crate::output::render_workflow_panel_with_regions(
         &graph,
         &expanded_nodes,
-        panel_expanded,
+        true,
         app.animation_frame,
         VIEWER_PANEL_WIDTH,
     );
