@@ -738,6 +738,7 @@ fn render_collapsed_workflow_card(
             &mut pending_counter,
         );
     }
+    apply_lens_fade(&mut body_lines);
     let card_body_start_row = lines.len() as u16;
     for r in regions.iter_mut() {
         r.start_row = r.start_row.saturating_add(card_body_start_row);
@@ -768,6 +769,35 @@ fn render_collapsed_workflow_card(
         col_end: outer_width,
     });
     (lines, regions)
+}
+
+fn apply_lens_fade(body_lines: &mut [Line<'static>]) {
+    let n = body_lines.len();
+    if n == 0 {
+        return;
+    }
+    for (i, line) in body_lines.iter_mut().enumerate() {
+        let progress = if n <= 1 {
+            1.0_f32
+        } else {
+            i as f32 / (n - 1) as f32
+        };
+        let shade = if progress >= 0.66 {
+            None
+        } else if progress >= 0.33 {
+            Some(Color::Gray)
+        } else {
+            Some(Color::DarkGray)
+        };
+        let Some(shade) = shade else {
+            continue;
+        };
+        for span in line.spans.iter_mut() {
+            if span.style.fg.is_some() {
+                span.style.fg = Some(shade);
+            }
+        }
+    }
 }
 
 fn workflow_overall_status(
@@ -1972,8 +2002,14 @@ mod tests {
         let lines = render_item(&panel, &RenderCtx::empty());
         let flat = flatten_lines(&lines);
         assert!(flat.contains("workflow"));
-        assert!(flat.contains("[⛶]"), "collapsed card should expose fullscreen button: {flat}");
-        assert!(flat.contains("hidden-child"), "collapsed lens should surface leaf: {flat}");
+        assert!(
+            flat.contains("[⛶]"),
+            "collapsed card should expose fullscreen button: {flat}"
+        );
+        assert!(
+            flat.contains("hidden-child"),
+            "collapsed lens should surface leaf: {flat}"
+        );
     }
 
     #[test]
