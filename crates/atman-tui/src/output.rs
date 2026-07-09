@@ -437,7 +437,7 @@ fn render_workflow_panel(
     .0
 }
 
-fn render_workflow_panel_with_regions(
+pub fn render_workflow_panel_with_regions(
     graph: &atman_runtime::workflow::WorkflowGraph,
     expanded_nodes: &std::collections::HashSet<String>,
     panel_expanded: bool,

@@ -66,6 +66,8 @@ pub struct AppState {
     pub session_switcher: crate::session_switcher::SessionSwitcher,
     pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
     pub history_search: crate::history_search_modal::HistorySearchModal,
+    pub workflow_viewer: crate::workflow_viewer_modal::WorkflowViewerModal,
+    pub last_workflow_click: Option<(u16, u16, std::time::Instant)>,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,
@@ -139,6 +141,55 @@ impl AppState {
 
     pub fn toggle_last_tool_expansion(&mut self) -> bool {
         self.toggle_last_workflow_tool_node()
+    }
+
+    pub fn open_workflow_viewer(&mut self, panel_item_index: usize) {
+        self.workflow_viewer.open(panel_item_index);
+    }
+
+    pub fn close_workflow_viewer(&mut self) {
+        self.workflow_viewer.close();
+    }
+
+    pub fn is_workflow_double_click(&self, col: u16, row: u16) -> bool {
+        match self.last_workflow_click {
+            Some((pc, pr, pt)) => {
+                pc == col && pr == row && pt.elapsed() < std::time::Duration::from_millis(300)
+            }
+            None => false,
+        }
+    }
+
+    pub fn remember_workflow_click(&mut self, col: u16, row: u16) {
+        self.last_workflow_click = Some((col, row, std::time::Instant::now()));
+    }
+
+    pub fn clear_workflow_click_memory(&mut self) {
+        self.last_workflow_click = None;
+    }
+
+    pub fn workflow_viewer_hit_test(&self, col: u16, row: u16) -> Option<(usize, String)> {
+        let inner = self.workflow_viewer.last_inner_rect?;
+        if col < inner.x
+            || col >= inner.x.saturating_add(inner.width)
+            || row < inner.y
+            || row >= inner.y.saturating_add(inner.height)
+        {
+            return None;
+        }
+        let rel_col = col
+            .saturating_sub(inner.x)
+            .saturating_add(self.workflow_viewer.h_offset);
+        let rel_row = row
+            .saturating_sub(inner.y)
+            .saturating_add(self.workflow_viewer.v_offset);
+        self.workflow_viewer
+            .last_node_regions
+            .iter()
+            .filter(|r| rel_row >= r.start_row && rel_row < r.end_row)
+            .filter(|r| rel_col >= r.col_start && rel_col < r.col_end)
+            .max_by_key(|r| r.path_key.len())
+            .map(|r| (self.workflow_viewer.panel_item_index, r.path_key.clone()))
     }
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {

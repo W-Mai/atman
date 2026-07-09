@@ -31,6 +31,7 @@ pub mod session_switcher;
 pub mod sidebar;
 pub mod status;
 pub mod terminal_guard;
+pub mod workflow_viewer_modal;
 
 use app::{AppState, NoteLevel};
 use atman_runtime::stream::StreamFrame;
@@ -218,6 +219,25 @@ async fn run_frames(
                 loop {
                     match current {
                         Some(Ok(CtEvent::Mouse(me)))
+                            if app.workflow_viewer.open =>
+                        {
+                            match me.kind {
+                                MouseEventKind::ScrollUp => app.workflow_viewer.scroll_up(3),
+                                MouseEventKind::ScrollDown => app.workflow_viewer.scroll_down(3),
+                                MouseEventKind::ScrollLeft => app.workflow_viewer.scroll_left(3),
+                                MouseEventKind::ScrollRight => app.workflow_viewer.scroll_right(3),
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    if let Some((panel_idx, path)) =
+                                        app.workflow_viewer_hit_test(me.column, me.row)
+                                    {
+                                        app.toggle_workflow_node(panel_idx, &path);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            interrupt_prompt = false;
+                        }
+                        Some(Ok(CtEvent::Mouse(me)))
                             if matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
                         {
                             if matches!(me.kind, MouseEventKind::ScrollUp) {
@@ -247,12 +267,22 @@ async fn run_frames(
                                 if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
+                                    app.clear_workflow_click_memory();
                                     app.toggle_workflow_node(panel_idx, &node_id);
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
                                         app.items.get(idx)
                                 {
-                                    app.toggle_workflow_panel_expansion(idx);
+                                    let dbl =
+                                        app.is_workflow_double_click(me.column, me.row);
+                                    app.remember_workflow_click(me.column, me.row);
+                                    if dbl {
+                                        app.open_workflow_viewer(idx);
+                                    } else {
+                                        app.toggle_workflow_panel_expansion(idx);
+                                    }
+                                } else {
+                                    app.clear_workflow_click_memory();
                                 }
                             }
                             interrupt_prompt = false;
@@ -652,6 +682,27 @@ fn count_message_events(path: &std::path::Path) -> (usize, usize) {
         }
     }
     (user, total)
+}
+
+fn handle_workflow_viewer_key(action: &KeyAction, app: &mut AppState) {
+    let step: u16 = 3;
+    let page: u16 = 20;
+    match action {
+        KeyAction::Escape | KeyAction::Quit => app.close_workflow_viewer(),
+        KeyAction::CursorLeft | KeyAction::Char('h') => app.workflow_viewer.scroll_left(step),
+        KeyAction::CursorRight | KeyAction::Char('l') => app.workflow_viewer.scroll_right(step),
+        KeyAction::HistoryUp | KeyAction::ScrollUp | KeyAction::Char('k') => {
+            app.workflow_viewer.scroll_up(step)
+        }
+        KeyAction::HistoryDown | KeyAction::ScrollDown | KeyAction::Char('j') => {
+            app.workflow_viewer.scroll_down(step)
+        }
+        KeyAction::PageUp => app.workflow_viewer.scroll_up(page),
+        KeyAction::PageDown => app.workflow_viewer.scroll_down(page),
+        KeyAction::CursorHome | KeyAction::Home => app.workflow_viewer.home(),
+        KeyAction::CursorEnd | KeyAction::End => app.workflow_viewer.end(),
+        _ => {}
+    }
 }
 
 fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
@@ -1166,6 +1217,10 @@ fn handle_key(
         handle_compact_review_key(&action, app, control_tx);
         return;
     }
+    if app.workflow_viewer.open {
+        handle_workflow_viewer_key(&action, app);
+        return;
+    }
     if app.session_switcher.open {
         handle_session_switcher_key(&action, app, control_tx);
         return;
@@ -1527,6 +1582,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.history_search.open {
         history_search_modal::render(f, area, &app.history_search);
+    }
+    if app.workflow_viewer.open {
+        workflow_viewer_modal::render(f, area, app);
     }
 }
 
