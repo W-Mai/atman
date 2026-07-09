@@ -1359,6 +1359,80 @@ mod tests {
     }
 
     #[test]
+    fn append_box_at_min_width_still_renders_all_borders() {
+        let mut out = Vec::new();
+        let rect = append_box(
+            &mut out,
+            spec(6, Vec::new(), "○", "🔧", "very-long-label", None),
+        );
+        assert_eq!(rect.outer_width, 6, "min viable outer_width should render");
+        assert_eq!(rect.rows, 2, "empty inner should emit top + bottom only");
+        let top = plain_line(&out[0]);
+        let bot = plain_line(out.last().unwrap());
+        assert!(top.starts_with("╭─"), "top-left border missing: {top:?}");
+        assert!(top.ends_with("─╮"), "top-right border missing: {top:?}");
+        assert!(bot.starts_with("╰"), "bottom-left: {bot:?}");
+        assert!(bot.ends_with("╯"), "bottom-right: {bot:?}");
+    }
+
+    #[test]
+    fn append_box_below_min_width_emits_no_lines() {
+        let mut out = Vec::new();
+        let rect = append_box(&mut out, spec(4, Vec::new(), "○", "🔧", "x", None));
+        assert_eq!(rect.rows, 0, "sub-minimum width must not emit rows");
+        assert!(out.is_empty(), "sub-minimum width leaked lines: {out:?}");
+    }
+
+    #[test]
+    fn append_box_truncates_mixed_ascii_cjk_at_exact_width() {
+        let mut out = Vec::new();
+        append_box(
+            &mut out,
+            spec(24, Vec::new(), "○", "🔧", "read_文件_data_读取", None),
+        );
+        let top = plain_line(&out[0]);
+        let width = unicode_width::UnicodeWidthStr::width(top.as_str());
+        assert_eq!(
+            width, 24,
+            "mixed ASCII+CJK truncation should still hit exact outer_width: {top:?}"
+        );
+        assert!(top.contains("…"), "expected truncation ellipsis: {top:?}");
+    }
+
+    #[test]
+    fn append_box_truncates_very_long_cjk_label() {
+        let mut out = Vec::new();
+        let long_cjk = "读取文件内容并做分析的一个非常长的中文标题名称";
+        append_box(&mut out, spec(20, Vec::new(), "○", "🔧", long_cjk, None));
+        let top = plain_line(&out[0]);
+        let width = unicode_width::UnicodeWidthStr::width(top.as_str());
+        assert_eq!(
+            width, 20,
+            "CJK truncation must respect display width: {top:?}"
+        );
+        assert!(top.contains("…"), "expected ellipsis: {top:?}");
+        assert!(
+            !top.contains(long_cjk),
+            "full long CJK should have been truncated: {top:?}"
+        );
+    }
+
+    #[test]
+    fn append_box_handles_emoji_dense_label() {
+        let mut out = Vec::new();
+        append_box(
+            &mut out,
+            spec(24, Vec::new(), "○", "🔧", "🚀🚀🚀 launch 🚀🚀", None),
+        );
+        let top = plain_line(&out[0]);
+        let width = unicode_width::UnicodeWidthStr::width(top.as_str());
+        assert_eq!(
+            width, 24,
+            "emoji width accounting must land on outer_width: {top:?}"
+        );
+    }
+
+    #[test]
     fn every_variant_ends_with_reset_empty_line() {
         for item in [
             OutputItem::UserTurn { text: "hi".into() },
