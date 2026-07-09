@@ -353,17 +353,44 @@ impl std::fmt::Debug for LayoutCache {
     }
 }
 
+// Subtle stripe behind user messages so they visually separate from
+// assistant markdown without a heavy border or gutter glyph.
+fn user_message_bg() -> Color {
+    Color::Rgb(38, 42, 54)
+}
+
+fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let bg = user_message_bg();
+    let prompt_style = Style::default()
+        .fg(Color::Cyan)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().bg(bg);
+    // Cap the stripe at 80 cols on wide terminals so long paragraphs don't
+    // stretch the block all the way to the sidebar.
+    let target = (panel_width.min(80)).max(20) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, row) in text.split('\n').enumerate() {
+        let prompt = if i == 0 { "❯ " } else { "  " };
+        let row_owned = row.to_string();
+        let used = UnicodeWidthStr::width(prompt) + UnicodeWidthStr::width(row);
+        let pad = target.saturating_sub(used);
+        let mut spans = vec![
+            Span::styled(prompt.to_string(), prompt_style),
+            Span::styled(row_owned, body_style),
+        ];
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), body_style));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
     let mut lines = match item {
-        OutputItem::UserTurn { text } => vec![Line::from(vec![
-            Span::styled(
-                "❯ ".to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(text.clone()),
-        ])],
+        OutputItem::UserTurn { text } => render_user_turn(text, ctx.panel_width),
         OutputItem::AssistantMd { md, streaming } => {
             let mut lines = crate::markdown::render_markdown(md);
             if *streaming {
