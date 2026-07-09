@@ -214,9 +214,36 @@ enum SessionAction {
     },
 }
 
+// Any failure is logged to stderr and startup continues — a broken
+// migration must never block launching atman.
+fn run_startup_config_migration() {
+    let (Ok(cfg), Ok(data)) = (config_dir(), data_dir()) else {
+        return;
+    };
+    match atman_runtime::config_migration::migrate_legacy_config_if_needed(&cfg, &data) {
+        Ok(Some(rep)) => {
+            eprintln!(
+                "[atman] moved {} config item(s) from {} to {}",
+                rep.moved.len(),
+                rep.from.display(),
+                rep.to.display(),
+            );
+            for name in &rep.moved {
+                eprintln!("  moved: {name}");
+            }
+            for name in &rep.skipped_conflicts {
+                eprintln!("  skipped (already at destination): {name}");
+            }
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("[atman] config migration skipped: {e:#}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    run_startup_config_migration();
     match cli.cmd {
         None => cmd_repl(cli.r#continue).await,
         Some(Cmd::Version) => {

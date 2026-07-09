@@ -1,5 +1,6 @@
 pub mod approval;
 pub mod compaction;
+pub mod config_migration;
 pub mod cost;
 pub mod env;
 pub mod error;
