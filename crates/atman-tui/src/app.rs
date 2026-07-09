@@ -438,8 +438,8 @@ impl AppState {
                 turn_index,
                 graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
                 expanded_nodes: HashSet::new(),
-                panel_expanded: true,
-                started_at: Instant::now(),
+                panel_expanded: false,
+                started_at: std::time::Instant::now(),
                 ended_at: None,
             });
         }

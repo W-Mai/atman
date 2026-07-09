@@ -581,6 +581,65 @@ fn collect_stats(nodes: &[atman_runtime::workflow::WorkflowNode], acc: &mut Work
 
 pub const COLLAPSED_CARD_FULLSCREEN_KEY: &str = "__collapsed_card_fullscreen__";
 
+fn collect_all_leaves(
+    nodes: &[atman_runtime::workflow::WorkflowNode],
+    out: &mut Vec<Vec<usize>>,
+    path: &mut Vec<usize>,
+) {
+    use atman_runtime::workflow::WorkflowNodeKind;
+    for (i, n) in nodes.iter().enumerate() {
+        path.push(i);
+        if n.children.is_empty()
+            && matches!(
+                n.kind,
+                WorkflowNodeKind::ToolCall { .. }
+                    | WorkflowNodeKind::Stmt { .. }
+                    | WorkflowNodeKind::FanoutBranch { .. }
+            )
+        {
+            out.push(path.clone());
+        }
+        collect_all_leaves(&n.children, out, path);
+        path.pop();
+    }
+}
+
+fn leaf_is_running(nodes: &[atman_runtime::workflow::WorkflowNode], path: &[usize]) -> bool {
+    use atman_runtime::workflow::NodeStatus;
+    let mut cur = nodes;
+    let mut node = None;
+    for &i in path {
+        node = cur.get(i);
+        if let Some(n) = node {
+            cur = &n.children;
+        } else {
+            return false;
+        }
+    }
+    matches!(
+        node.map(|n| n.status),
+        Some(NodeStatus::Running | NodeStatus::Pending)
+    )
+}
+
+fn filter_tree_for_lens(
+    nodes: &[atman_runtime::workflow::WorkflowNode],
+    visible: &std::collections::HashSet<Vec<usize>>,
+    path: &mut Vec<usize>,
+) -> Vec<atman_runtime::workflow::WorkflowNode> {
+    let mut out = Vec::new();
+    for (i, n) in nodes.iter().enumerate() {
+        path.push(i);
+        if visible.contains(path) {
+            let mut clone = n.clone();
+            clone.children = filter_tree_for_lens(&n.children, visible, path);
+            out.push(clone);
+        }
+        path.pop();
+    }
+    out
+}
+
 fn render_collapsed_workflow_card(
     graph: &atman_runtime::workflow::WorkflowGraph,
     animation_frame: u32,
@@ -589,15 +648,14 @@ fn render_collapsed_workflow_card(
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     use unicode_width::UnicodeWidthStr;
     let outer_width = panel_width.clamp(40, MAX_BOX_WIDTH);
-    let inner_w = outer_width.saturating_sub(4) as usize;
     let border_style = Style::default().fg(Color::Cyan);
     let mut stats = WorkflowStats::default();
     collect_stats(&graph.root, &mut stats);
-    let mut leaves: Vec<&atman_runtime::workflow::WorkflowNode> = Vec::new();
-    collect_running_leaves(&graph.root, &mut leaves);
-    let recent: Vec<_> = leaves.into_iter().rev().take(3).collect();
-    let spinner = spinner_char(animation_frame);
-    let flow_glyph = if running { spinner } else { "⚡" };
+    let flow_glyph = if running {
+        spinner_char(animation_frame)
+    } else {
+        "⚡"
+    };
     let title = format!("{flow_glyph} workflow");
     let stats_text = format!(
         "{} nodes · {} agents · {} tools · {} edits",
@@ -637,38 +695,61 @@ fn render_collapsed_workflow_card(
     ));
     top_spans.push(Span::styled("─╮".to_string(), border_style));
     let mut lines: Vec<Line<'static>> = vec![Line::from(top_spans)];
-    let shades = [Color::White, Color::Gray, Color::DarkGray];
-    for slot in 0..3usize {
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::styled("│ ".to_string(), border_style));
-        let (body_text, style) = if slot < recent.len() {
-            let node = recent[slot];
-            let label = leaf_label(node);
-            let color = shades[slot];
-            let prefix = if slot == 0 {
-                format!("{spinner} ")
-            } else {
-                "  ".to_string()
-            };
-            let text = format!("{prefix}{label}");
-            let trimmed = middle_truncate(&text, inner_w);
-            (trimmed, Style::default().fg(color))
-        } else {
-            (String::new(), Style::default())
-        };
-        let used = UnicodeWidthStr::width(body_text.as_str());
-        spans.push(Span::styled(body_text, style));
-        if inner_w > used {
-            spans.push(Span::raw(" ".repeat(inner_w - used)));
+
+    let mut all_leaf_paths: Vec<Vec<usize>> = Vec::new();
+    collect_all_leaves(&graph.root, &mut all_leaf_paths, &mut Vec::new());
+    let running_paths: Vec<Vec<usize>> = all_leaf_paths
+        .iter()
+        .filter(|p| leaf_is_running(&graph.root, p))
+        .cloned()
+        .collect();
+    let selected_paths: Vec<Vec<usize>> = if running_paths.is_empty() {
+        all_leaf_paths.iter().rev().take(3).rev().cloned().collect()
+    } else if running_paths.len() > 3 {
+        running_paths.iter().rev().take(3).rev().cloned().collect()
+    } else {
+        running_paths
+    };
+    let mut visible: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+    for path in &selected_paths {
+        for i in 1..=path.len() {
+            visible.insert(path[..i].to_vec());
         }
-        spans.push(Span::styled(" │".to_string(), border_style));
-        lines.push(Line::from(spans));
     }
+    let filtered = filter_tree_for_lens(&graph.root, &visible, &mut Vec::new());
+    let mut body_lines: Vec<Line<'static>> = Vec::new();
+    let mut regions: Vec<NodeRegion> = Vec::new();
+    let mut pending_counter: u8 = 0;
+    let child_count = filtered.len();
+    for (i, node) in filtered.iter().enumerate() {
+        let path = format!("{i}");
+        let is_last = i + 1 == child_count;
+        append_workflow_node_boxed(
+            &mut body_lines,
+            &mut regions,
+            node,
+            &std::collections::HashSet::new(),
+            &[],
+            is_last,
+            outer_width,
+            &path,
+            animation_frame,
+            running,
+            &mut pending_counter,
+        );
+    }
+    let card_body_start_row = lines.len() as u16;
+    for r in regions.iter_mut() {
+        r.start_row = r.start_row.saturating_add(card_body_start_row);
+        r.end_row = r.end_row.saturating_add(card_body_start_row);
+    }
+    lines.extend(body_lines);
     let bottom = format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)));
     lines.push(Line::from(Span::styled(bottom, border_style)));
     lines.push(Line::raw(""));
     let card_rows = lines.len() as u16;
-    let regions_vec = vec![
+    regions.insert(
+        0,
         NodeRegion {
             panel_item_index: 0,
             path_key: COLLAPSED_CARD_FULLSCREEN_KEY.to_string(),
@@ -677,58 +758,16 @@ fn render_collapsed_workflow_card(
             col_start: button_col_start,
             col_end: button_col_end,
         },
-        NodeRegion {
-            panel_item_index: 0,
-            path_key: String::new(),
-            start_row: 0,
-            end_row: card_rows,
-            col_start: 0,
-            col_end: outer_width,
-        },
-    ];
-    (lines, regions_vec)
-}
-
-fn leaf_label(node: &atman_runtime::workflow::WorkflowNode) -> String {
-    use atman_runtime::workflow::WorkflowNodeKind;
-    match &node.kind {
-        WorkflowNodeKind::ToolCall {
-            tool, args_preview, ..
-        } => format!("🔧 {tool}({})", truncate_preview(args_preview, 40)),
-        WorkflowNodeKind::FanoutBranch { branch_index } => {
-            format!("⇉ branch[{branch_index}] · {}", node.label)
-        }
-        WorkflowNodeKind::Flow { flow_name, .. } | WorkflowNodeKind::Subflow { flow_name, .. } => {
-            format!("↳ {flow_name}")
-        }
-        WorkflowNodeKind::Stmt { .. } => node.label.clone(),
-    }
-}
-
-fn collect_running_leaves<'a>(
-    nodes: &'a [atman_runtime::workflow::WorkflowNode],
-    out: &mut Vec<&'a atman_runtime::workflow::WorkflowNode>,
-) {
-    use atman_runtime::workflow::{NodeStatus, WorkflowNodeKind};
-    for n in nodes {
-        let running = matches!(n.status, NodeStatus::Running | NodeStatus::Pending);
-        let child_running = n
-            .children
-            .iter()
-            .any(|c| matches!(c.status, NodeStatus::Running | NodeStatus::Pending));
-        if running
-            && !child_running
-            && matches!(
-                n.kind,
-                WorkflowNodeKind::ToolCall { .. }
-                    | WorkflowNodeKind::Stmt { .. }
-                    | WorkflowNodeKind::FanoutBranch { .. }
-            )
-        {
-            out.push(n);
-        }
-        collect_running_leaves(&n.children, out);
-    }
+    );
+    regions.push(NodeRegion {
+        panel_item_index: 0,
+        path_key: String::new(),
+        start_row: 0,
+        end_row: card_rows,
+        col_start: 0,
+        col_end: outer_width,
+    });
+    (lines, regions)
 }
 
 fn workflow_overall_status(
@@ -1933,7 +1972,8 @@ mod tests {
         let lines = render_item(&panel, &RenderCtx::empty());
         let flat = flatten_lines(&lines);
         assert!(flat.contains("workflow"));
-        assert!(!flat.contains("hidden-child"), "collapsed leaks: {flat}");
+        assert!(flat.contains("[⛶]"), "collapsed card should expose fullscreen button: {flat}");
+        assert!(flat.contains("hidden-child"), "collapsed lens should surface leaf: {flat}");
     }
 
     #[test]
