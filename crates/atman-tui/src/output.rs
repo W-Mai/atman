@@ -704,8 +704,8 @@ fn append_workflow_node(
         path_key: path.to_string(),
         start_row,
         end_row: start_row.saturating_add(1),
-        col_start: None,
-        col_end: None,
+        col_start: Some(0),
+        col_end: Some(panel_width),
     });
     let vertical = if is_last { "   " } else { "│  " };
     let child_prefix = format!("{ancestor_prefix}{vertical}");

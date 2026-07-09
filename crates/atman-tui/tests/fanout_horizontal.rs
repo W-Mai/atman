@@ -118,10 +118,16 @@ fn narrow_terminal_falls_back_to_vertical_fanout() {
     let (regions, lines) = build_panel(root, 80);
     let has_fork = lines.iter().any(|l| l.contains('┬'));
     assert!(!has_fork, "narrow width must not emit fork glyph");
-    let with_col = regions.iter().filter(|r| r.col_start.is_some()).count();
+    let narrow_cols = regions
+        .iter()
+        .filter(|r| match (r.col_start, r.col_end) {
+            (Some(s), Some(e)) => e.saturating_sub(s) < 80,
+            _ => false,
+        })
+        .count();
     assert_eq!(
-        with_col, 0,
-        "no col-ranged regions expected in vertical layout"
+        narrow_cols, 0,
+        "vertical layout should not produce sub-width regions"
     );
 }
 

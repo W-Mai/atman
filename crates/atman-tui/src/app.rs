@@ -237,7 +237,7 @@ impl AppState {
                 (Some(s), Some(e)) => rel_col >= s && rel_col < e,
                 _ => true,
             })
-            .max_by_key(|r| (r.col_start.is_some() as u8, r.path_key.len()))
+            .max_by_key(|r| r.path_key.len())
             .map(|r| (r.panel_item_index, r.path_key.clone()))
     }
 
