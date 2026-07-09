@@ -267,7 +267,15 @@ async fn run_frames(
                                 if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
-                                    app.toggle_workflow_node(panel_idx, &node_id);
+                                    if node_id
+                                        == crate::output::COLLAPSED_CARD_FULLSCREEN_KEY
+                                    {
+                                        app.open_workflow_viewer(panel_idx);
+                                    } else if node_id.is_empty() {
+                                        app.toggle_workflow_panel_expansion(panel_idx);
+                                    } else {
+                                        app.toggle_workflow_node(panel_idx, &node_id);
+                                    }
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
                                         app.items.get(idx)
