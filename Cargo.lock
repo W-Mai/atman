@@ -280,6 +280,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "unicode-width",
+ "uuid",
 ]
 
 [[package]]
