@@ -58,6 +58,174 @@ pub struct NodeRegion {
     pub col_end: Option<u16>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoxRect {
+    pub row0: u16,
+    pub col0: u16,
+    pub outer_width: u16,
+    pub rows: u16,
+}
+
+impl BoxRect {
+    pub fn col_end(self) -> u16 {
+        self.col0.saturating_add(self.outer_width)
+    }
+
+    pub fn end_row(self) -> u16 {
+        self.row0.saturating_add(self.rows)
+    }
+}
+
+pub struct BoxSpec<'a> {
+    pub row0: u16,
+    pub col0: u16,
+    pub outer_width: u16,
+    pub inner_lines: Vec<Line<'static>>,
+    pub border_style: Style,
+    pub status_glyph: &'a str,
+    pub kind_glyph: &'a str,
+    pub label: &'a str,
+    pub approval_hotkey: Option<u8>,
+}
+
+pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
+    let BoxSpec {
+        row0,
+        col0,
+        outer_width,
+        inner_lines,
+        border_style,
+        status_glyph,
+        kind_glyph,
+        label,
+        approval_hotkey,
+    } = spec;
+    use unicode_width::UnicodeWidthStr;
+    let min_outer: u16 = 6;
+    if outer_width < min_outer {
+        return BoxRect {
+            row0,
+            col0,
+            outer_width,
+            rows: 0,
+        };
+    }
+    let approval_text = approval_hotkey.map(|n| format!("─[{n}]─"));
+    let approval_w = approval_text.as_deref().map_or(0, UnicodeWidthStr::width);
+    let status_w = UnicodeWidthStr::width(status_glyph);
+    let kind_w = UnicodeWidthStr::width(kind_glyph);
+    let leading_w = 2usize + 1; // `╭─` + leading space
+    let trailing_w = 2usize; // `─╮`
+    let status_seg = if status_w > 0 { status_w + 1 } else { 0 };
+    let kind_seg = if kind_w > 0 { kind_w + 1 } else { 0 };
+    let fixed = leading_w + status_seg + kind_seg + approval_w + trailing_w;
+    let label_budget = (outer_width as usize).saturating_sub(fixed).max(1);
+    let label_display = middle_truncate(label, label_budget);
+    let label_w = UnicodeWidthStr::width(label_display.as_str());
+    let content_total = fixed.saturating_add(label_w);
+    let fill_w = (outer_width as usize).saturating_sub(content_total);
+    let inner_w = (outer_width as usize).saturating_sub(4);
+    let mut top_spans: Vec<Span<'static>> = Vec::with_capacity(8);
+    top_spans.push(Span::styled("╭─".to_string(), border_style));
+    top_spans.push(Span::raw(" "));
+    if status_w > 0 {
+        top_spans.push(Span::raw(status_glyph.to_string()));
+        top_spans.push(Span::raw(" "));
+    }
+    if kind_w > 0 {
+        top_spans.push(Span::raw(kind_glyph.to_string()));
+        top_spans.push(Span::raw(" "));
+    }
+    top_spans.push(Span::raw(label_display));
+    if fill_w > 0 {
+        top_spans.push(Span::styled(" ".repeat(fill_w), border_style));
+    }
+    if let Some(text) = approval_text {
+        top_spans.push(Span::styled(
+            text,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    top_spans.push(Span::styled("─╮".to_string(), border_style));
+    out.push(Line::from(top_spans));
+    let inner_count = inner_lines.len() as u16;
+    for line in inner_lines {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+        spans.push(Span::styled("│ ".to_string(), border_style));
+        let inner_used: usize = line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        for s in line.spans {
+            spans.push(s);
+        }
+        let pad_w = inner_w.saturating_sub(inner_used);
+        if pad_w > 0 {
+            spans.push(Span::raw(" ".repeat(pad_w)));
+        }
+        spans.push(Span::styled(" │".to_string(), border_style));
+        out.push(Line::from(spans));
+    }
+    let bottom = format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)));
+    out.push(Line::from(Span::styled(bottom, border_style)));
+    BoxRect {
+        row0,
+        col0,
+        outer_width,
+        rows: 2u16.saturating_add(inner_count),
+    }
+}
+
+fn middle_truncate(s: &str, max_display: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if UnicodeWidthStr::width(s) <= max_display {
+        return s.to_string();
+    }
+    if max_display <= 1 {
+        return "…".into();
+    }
+    let ell = 1;
+    let side_budget = max_display.saturating_sub(ell) / 2;
+    let (prefix, prefix_w) = take_display_prefix(s, side_budget);
+    let remaining = max_display.saturating_sub(prefix_w + ell);
+    let suffix = take_display_suffix(s, remaining);
+    format!("{prefix}…{suffix}")
+}
+
+fn take_display_prefix(s: &str, max_w: usize) -> (String, usize) {
+    use unicode_width::UnicodeWidthChar;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > max_w {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    (out, used)
+}
+
+fn take_display_suffix(s: &str, max_w: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let mut chars: Vec<char> = Vec::new();
+    let mut used = 0usize;
+    for c in s.chars().rev() {
+        let w = c.width().unwrap_or(0);
+        if used + w > max_w {
+            break;
+        }
+        chars.push(c);
+        used += w;
+    }
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
 pub fn build_lines_with_ranges(
     items: &[OutputItem],
     width: u16,
@@ -839,6 +1007,122 @@ pub fn empty_hint<'a>() -> Paragraph<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain_line(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn spec<'a>(
+        outer_width: u16,
+        inner: Vec<Line<'static>>,
+        status: &'a str,
+        kind: &'a str,
+        label: &'a str,
+        approval: Option<u8>,
+    ) -> BoxSpec<'a> {
+        BoxSpec {
+            row0: 0,
+            col0: 0,
+            outer_width,
+            inner_lines: inner,
+            border_style: Style::default(),
+            status_glyph: status,
+            kind_glyph: kind,
+            label,
+            approval_hotkey: approval,
+        }
+    }
+
+    #[test]
+    fn append_box_produces_rounded_border_and_correct_rect() {
+        let mut out = Vec::new();
+        let mut s = spec(
+            30,
+            vec![Line::from(Span::raw("hello"))],
+            "○",
+            "🔧",
+            "read_file",
+            None,
+        );
+        s.row0 = 5;
+        s.col0 = 2;
+        let rect = append_box(&mut out, s);
+        assert_eq!(rect.row0, 5);
+        assert_eq!(rect.col0, 2);
+        assert_eq!(rect.outer_width, 30);
+        assert_eq!(rect.rows, 3);
+        assert_eq!(out.len(), 3);
+        let top = plain_line(&out[0]);
+        let mid = plain_line(&out[1]);
+        let bot = plain_line(&out[2]);
+        assert!(top.starts_with("╭─"), "top: {top:?}");
+        assert!(top.ends_with("─╮"), "top: {top:?}");
+        assert!(top.contains("○"), "status glyph missing: {top:?}");
+        assert!(top.contains("🔧"), "kind glyph missing: {top:?}");
+        assert!(top.contains("read_file"), "label missing: {top:?}");
+        assert!(
+            mid.starts_with("│ "),
+            "mid should have left border: {mid:?}"
+        );
+        assert!(mid.ends_with(" │"), "mid should have right border: {mid:?}");
+        assert!(mid.contains("hello"));
+        assert!(bot.starts_with("╰"), "bot: {bot:?}");
+        assert!(bot.ends_with("╯"), "bot: {bot:?}");
+    }
+
+    #[test]
+    fn append_box_adds_approval_hotkey_in_top_right() {
+        let mut out = Vec::new();
+        let rect = append_box(
+            &mut out,
+            spec(40, Vec::new(), "⏸", "🔧", "shell.exec", Some(3)),
+        );
+        assert_eq!(rect.rows, 2);
+        let top = plain_line(&out[0]);
+        assert!(top.contains("─[3]─"), "approval tag missing: {top:?}");
+        let idx_approval = top.find("─[3]─").unwrap();
+        let idx_label = top.find("shell.exec").unwrap();
+        assert!(
+            idx_label < idx_approval,
+            "approval must appear after label: {top:?}"
+        );
+    }
+
+    #[test]
+    fn append_box_truncates_long_label_middle() {
+        let mut out = Vec::new();
+        let long_label = "a".repeat(80);
+        append_box(&mut out, spec(20, Vec::new(), "○", "🔧", &long_label, None));
+        let top = plain_line(&out[0]);
+        assert!(top.contains("…"), "truncation ellipsis missing: {top:?}");
+        assert!(!top.contains(&"a".repeat(20)));
+    }
+
+    #[test]
+    fn append_box_pads_short_content_to_full_inner_width() {
+        let mut out = Vec::new();
+        let inner = vec![Line::from(Span::raw("x"))];
+        append_box(&mut out, spec(20, inner, "", "", "lbl", None));
+        let mid = plain_line(&out[1]);
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(mid.as_str()),
+            20,
+            "middle line should fill outer_width: {mid:?}"
+        );
+    }
+
+    #[test]
+    fn append_box_handles_cjk_label_display_width() {
+        let mut out = Vec::new();
+        append_box(&mut out, spec(30, Vec::new(), "○", "🔧", "读取文件", None));
+        let top = plain_line(&out[0]);
+        assert!(top.contains("读取文件"), "CJK label missing: {top:?}");
+        let width = unicode_width::UnicodeWidthStr::width(top.as_str());
+        assert_eq!(width, 30, "top border must be exactly outer_width: {width}");
+    }
 
     #[test]
     fn every_variant_ends_with_reset_empty_line() {
