@@ -875,10 +875,33 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 Value::Str(s) => s.clone(),
                 other => other.kind_name().to_string(),
             };
-            // Headless / boot / test paths have no TUI attached — keep the
-            // historical auto-approve behavior so those runs don't get
-            // stuck. When a subscriber is present, route through the
-            // FormRegistry so the user sees a Yes/No modal.
+            let confirm_kind = crate::form::FormKind::Confirm {
+                prompt: prompt.clone(),
+            };
+            // Daemon clients drive the confirm through the prompt resolver
+            // over RPC; in-process TUI subscribes to FormRegistry. Boot /
+            // headless / unit tests without either wired keep the historical
+            // auto-approve so they don't deadlock.
+            if let Some(resolver) = ctx.tool_ctx.prompt_resolver.clone() {
+                let id = crate::rendezvous::PromptId::now();
+                let payload =
+                    serde_json::to_value(&confirm_kind).unwrap_or(serde_json::Value::Null);
+                let timeout = std::time::Duration::from_secs(300);
+                let result = crate::rendezvous::await_prompt_with_payload(
+                    &resolver, id, "form_ask", payload, timeout,
+                )
+                .await;
+                let answer: crate::form::FormAnswer = match result {
+                    Ok(v) => {
+                        serde_json::from_value(v).unwrap_or(crate::form::FormAnswer::Cancelled)
+                    }
+                    Err(_) => crate::form::FormAnswer::Cancelled,
+                };
+                return Value::Bool(matches!(
+                    answer,
+                    crate::form::FormAnswer::Confirmed { value: true }
+                ));
+            }
             let Some(session) = ctx.session else {
                 return Value::Bool(true);
             };
@@ -893,7 +916,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 form_id: uuid::Uuid::now_v7().to_string(),
                 run_id,
                 tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
-                kind: crate::form::FormKind::Confirm { prompt },
+                kind: confirm_kind,
                 emitted_at: chrono::Utc::now(),
             };
             let rx = forms.request(pending);

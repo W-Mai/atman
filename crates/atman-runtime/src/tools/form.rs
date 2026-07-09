@@ -52,9 +52,25 @@ impl Tool for FormAsk {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let kind = parse_form_kind(&args)?;
+            // Daemon clients drive the modal over RPC via the prompt
+            // resolver; the in-process TUI subscribes to FormRegistry.
+            // Pick whichever the runtime host wired up, prefer the
+            // resolver so daemon overrides an accidental fallback.
+            if let Some(resolver) = ctx.prompt_resolver.clone() {
+                let id = crate::rendezvous::PromptId::now();
+                let payload = serde_json::to_value(&kind).unwrap_or(serde_json::Value::Null);
+                let timeout = std::time::Duration::from_secs(300);
+                let answer_json = crate::rendezvous::await_prompt_with_payload(
+                    &resolver, id, "form_ask", payload, timeout,
+                )
+                .await?;
+                let answer: FormAnswer =
+                    serde_json::from_value(answer_json.clone()).unwrap_or(FormAnswer::Cancelled);
+                return Ok(answer_to_value(&answer));
+            }
             let forms = ctx.forms.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed(
-                    "form.ask: no FormRegistry attached (headless run?)".into(),
+                    "form.ask: no FormRegistry or PromptResolver attached".into(),
                 )
             })?;
             let run_id = ctx.flow_run_id.clone().ok_or_else(|| {
