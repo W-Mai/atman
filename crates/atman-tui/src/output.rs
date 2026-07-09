@@ -476,7 +476,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             // (code fences, list markers) isn't shifted by a first-line
             // prefix.
             lines.push(Line::from(Span::styled(
-                "✦ assistant".to_string(),
+                "✦ ATMAN".to_string(),
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),

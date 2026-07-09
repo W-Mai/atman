@@ -213,7 +213,7 @@ async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.has_running_workflow() => {
+            _ = animation_tick.tick(), if app.has_running_workflow() || app.startup_slide_started.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
             key = key_events.recv() => {
@@ -1387,10 +1387,13 @@ fn handle_key(
             }
         }
         // Any other keystroke dismisses the card so the user can start
-        // typing a brand-new prompt without a residual splash.
+        // typing a brand-new prompt without a residual splash. Kicks off
+        // the input-slide animation so the panel eases from center to
+        // bottom instead of teleporting.
         if matches!(action, KeyAction::Char(_) | KeyAction::Submit) {
             app.items.remove(0);
             app.items_version = app.items_version.wrapping_add(1);
+            app.startup_slide_started = Some(std::time::Instant::now());
         }
     }
     if app.cheatsheet_open {
@@ -1610,6 +1613,25 @@ fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
+// Startup input slides from vertical center to bottom over this window.
+// 250 ms feels like a "settling" motion rather than an animation.
+const STARTUP_SLIDE_MS: u128 = 250;
+
+fn compute_slide_progress(started: Option<std::time::Instant>) -> f32 {
+    match started {
+        Some(t) => {
+            let elapsed = t.elapsed().as_millis().min(STARTUP_SLIDE_MS) as f32;
+            (elapsed / STARTUP_SLIDE_MS as f32).clamp(0.0, 1.0)
+        }
+        None => 1.0,
+    }
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
+}
+
 fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {
     let area = f.area();
     if area.width < 40 || area.height < 8 {
@@ -1631,13 +1653,28 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
+    let startup_visible = matches!(
+        app.items.first(),
+        Some(crate::app::OutputItem::StartupCard { .. })
+    );
+    let slide_progress = compute_slide_progress(app.startup_slide_started);
+    if slide_progress >= 1.0 {
+        app.startup_slide_started = None;
+    }
     // Breathing room on the transcript's left and right edges so message
     // content isn't flush with the terminal border or the sidebar. Input
     // + approvals still center themselves off the un-padded transcript
     // rect so the floating panel width doesn't shrink.
     let transcript_content = layout::apply_horizontal_padding(l.transcript, 2);
     let input_buf_lines = editor.buf().split('\n').count().min(6) as u16;
-    let input_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
+    let input_rect = if startup_visible {
+        layout::compute_input_rect_centered(l.transcript, input_buf_lines)
+    } else if slide_progress < 1.0 {
+        let eased = ease_out_cubic(slide_progress);
+        layout::compute_input_rect_lerped(l.transcript, input_buf_lines, eased)
+    } else {
+        layout::compute_input_rect(l.transcript, input_buf_lines)
+    };
     let approvals_rect = layout::compute_approvals_rect(l.transcript, input_rect, approvals_rows);
     app.input_rect = Some(input_rect);
     f.render_widget(

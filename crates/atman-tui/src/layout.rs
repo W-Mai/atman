@@ -56,6 +56,34 @@ pub fn compute_sidebar_rect(area: Rect, show: bool) -> Option<Rect> {
 }
 
 pub fn compute_input_rect(transcript: Rect, buf_lines: u16) -> Rect {
+    input_rect_at(transcript, buf_lines, InputYAnchor::Bottom)
+}
+
+pub fn compute_input_rect_centered(transcript: Rect, buf_lines: u16) -> Rect {
+    input_rect_at(transcript, buf_lines, InputYAnchor::Center)
+}
+
+// t=0 → centered, t=1 → bottom. Used for the startup-splash slide.
+pub fn compute_input_rect_lerped(transcript: Rect, buf_lines: u16, t: f32) -> Rect {
+    let center = input_rect_at(transcript, buf_lines, InputYAnchor::Center);
+    let bottom = input_rect_at(transcript, buf_lines, InputYAnchor::Bottom);
+    let clamped = t.clamp(0.0, 1.0);
+    let y_f = center.y as f32 + (bottom.y as f32 - center.y as f32) * clamped;
+    Rect {
+        x: bottom.x,
+        y: y_f.round() as u16,
+        width: bottom.width,
+        height: bottom.height,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InputYAnchor {
+    Bottom,
+    Center,
+}
+
+fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect {
     let outer_width = (transcript.width * 3 / 4)
         .clamp(50, 120)
         .min(transcript.width);
@@ -66,11 +94,14 @@ pub fn compute_input_rect(transcript: Rect, buf_lines: u16) -> Rect {
     let bottom_margin: u16 = 1;
     let outer_h = outer_h.min(transcript.height.saturating_sub(bottom_margin).max(3));
     let x = transcript.x + (transcript.width.saturating_sub(outer_width)) / 2;
-    let y = transcript
-        .y
-        .saturating_add(transcript.height)
-        .saturating_sub(outer_h)
-        .saturating_sub(bottom_margin);
+    let y = match anchor {
+        InputYAnchor::Bottom => transcript
+            .y
+            .saturating_add(transcript.height)
+            .saturating_sub(outer_h)
+            .saturating_sub(bottom_margin),
+        InputYAnchor::Center => transcript.y + (transcript.height.saturating_sub(outer_h)) / 2,
+    };
     Rect {
         x,
         y,
@@ -192,6 +223,41 @@ mod tests {
     fn horizontal_padding_leaves_narrow_rects_alone() {
         let rect = Rect::new(0, 0, 3, 5);
         assert_eq!(apply_horizontal_padding(rect, 2), rect);
+    }
+
+    #[test]
+    fn input_rect_centered_sits_at_vertical_middle() {
+        let transcript = Rect::new(0, 1, 100, 30);
+        let rect = compute_input_rect_centered(transcript, 1);
+        let bottom = compute_input_rect(transcript, 1);
+        assert!(rect.y < bottom.y);
+        assert_eq!(rect.width, bottom.width);
+    }
+
+    #[test]
+    fn input_rect_lerp_t0_matches_centered() {
+        let transcript = Rect::new(0, 1, 100, 30);
+        let lerped = compute_input_rect_lerped(transcript, 1, 0.0);
+        let centered = compute_input_rect_centered(transcript, 1);
+        assert_eq!(lerped.y, centered.y);
+    }
+
+    #[test]
+    fn input_rect_lerp_t1_matches_bottom() {
+        let transcript = Rect::new(0, 1, 100, 30);
+        let lerped = compute_input_rect_lerped(transcript, 1, 1.0);
+        let bottom = compute_input_rect(transcript, 1);
+        assert_eq!(lerped.y, bottom.y);
+    }
+
+    #[test]
+    fn input_rect_lerp_mid_sits_between() {
+        let transcript = Rect::new(0, 1, 100, 30);
+        let centered = compute_input_rect_centered(transcript, 1);
+        let bottom = compute_input_rect(transcript, 1);
+        let mid = compute_input_rect_lerped(transcript, 1, 0.5);
+        assert!(mid.y > centered.y);
+        assert!(mid.y < bottom.y);
     }
 
     #[test]
