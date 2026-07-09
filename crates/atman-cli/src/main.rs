@@ -49,7 +49,10 @@ enum Cmd {
         #[arg(long, conflicts_with = "session_id")]
         all: bool,
     },
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        fix: bool,
+    },
     Init,
     RebuildIndex,
     TuiPreview,
@@ -300,7 +303,7 @@ async fn main() -> Result<()> {
                 },
         }) => cmd_session_sanitize(session_id, dry_run).await,
         Some(Cmd::Cost { session_id, all }) => cmd_cost(session_id, all).await,
-        Some(Cmd::Doctor) => cmd_doctor().await,
+        Some(Cmd::Doctor { fix }) => cmd_doctor(fix).await,
         Some(Cmd::Init) => cmd_init().await,
         Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
         Some(Cmd::TuiPreview) => cmd_tui_preview().await,
@@ -3371,11 +3374,51 @@ async fn cmd_tui_preview() -> Result<()> {
     result
 }
 
-async fn cmd_doctor() -> Result<()> {
+async fn cmd_doctor(fix: bool) -> Result<()> {
     let data = data_dir()?;
     let cfg = config_dir()?;
     let sessions = data.join("sessions");
     let commands = cfg.join("commands");
+
+    let mut fixes_applied = 0usize;
+    let mut fixes_hinted = 0usize;
+
+    if !cfg.exists() {
+        if fix {
+            match std::fs::create_dir_all(&cfg) {
+                Ok(()) => {
+                    println!("  [fixed] created config dir {}", cfg.display());
+                    fixes_applied += 1;
+                }
+                Err(e) => println!("  [fail]  create {}: {}", cfg.display(), e),
+            }
+        } else {
+            println!(
+                "  [hint]  config dir {} missing — run `atman doctor --fix` or `atman init`",
+                cfg.display()
+            );
+            fixes_hinted += 1;
+        }
+    }
+
+    let cfg_file = cfg.join("config.toml");
+    if cfg.exists() && !cfg_file.exists() {
+        if fix {
+            match std::fs::write(&cfg_file, init::CONFIG_TOML) {
+                Ok(()) => {
+                    println!("  [fixed] wrote default {}", cfg_file.display());
+                    fixes_applied += 1;
+                }
+                Err(e) => println!("  [fail]  write {}: {}", cfg_file.display(), e),
+            }
+        } else {
+            println!(
+                "  [hint]  {} missing — run `atman doctor --fix` or `atman init`",
+                cfg_file.display()
+            );
+            fixes_hinted += 1;
+        }
+    }
 
     let session_count = if sessions.exists() {
         std::fs::read_dir(&sessions)
@@ -3564,6 +3607,14 @@ async fn cmd_doctor() -> Result<()> {
                 Err(e) => println!("  [✗] {:<20} {} · {}", cfg.name, e.error, source),
             }
         }
+    }
+    println!();
+    if fix {
+        println!(
+            "Applied {fixes_applied} fix(es). Re-run `atman doctor` to verify remaining items."
+        );
+    } else if fixes_hinted > 0 {
+        println!("{fixes_hinted} item(s) can be auto-repaired. Run `atman doctor --fix` to apply.");
     }
     Ok(())
 }
