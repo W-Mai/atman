@@ -871,7 +871,37 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             if v.is_err() {
                 return v;
             }
-            Value::Bool(true)
+            let prompt = match &v {
+                Value::Str(s) => s.clone(),
+                other => other.kind_name().to_string(),
+            };
+            // Headless / boot / test paths have no TUI attached — keep the
+            // historical auto-approve behavior so those runs don't get
+            // stuck. When a subscriber is present, route through the
+            // FormRegistry so the user sees a Yes/No modal.
+            let Some(session) = ctx.session else {
+                return Value::Bool(true);
+            };
+            let forms = session.forms();
+            if forms.subscriber_count() == 0 {
+                return Value::Bool(true);
+            }
+            let Some(run_id) = ctx.flow_run_id.clone() else {
+                return Value::Bool(true);
+            };
+            let pending = crate::form::PendingForm {
+                form_id: uuid::Uuid::now_v7().to_string(),
+                run_id,
+                tool_use_id: ctx.current_node_id.clone().unwrap_or_default(),
+                kind: crate::form::FormKind::Confirm { prompt },
+                emitted_at: chrono::Utc::now(),
+            };
+            let rx = forms.request(pending);
+            let answer = rx.await.unwrap_or(crate::form::FormAnswer::Cancelled);
+            Value::Bool(matches!(
+                answer,
+                crate::form::FormAnswer::Confirmed { value: true }
+            ))
         }
         Node::FixUntilTestPasses { kwargs } => eval_fix_until_test_passes(kwargs, env, ctx).await,
         Node::Message { role, args } => eval_message_node(*role, args, env, ctx).await,
