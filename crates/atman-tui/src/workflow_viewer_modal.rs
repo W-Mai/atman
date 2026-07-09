@@ -67,6 +67,7 @@ impl WorkflowViewerModal {
 const VIEWER_PANEL_WIDTH: u16 = 300;
 
 fn dim_background_outside(buf: &mut ratatui::buffer::Buffer, full: Rect, modal: Rect) {
+    use ratatui::style::Modifier;
     let dim = Color::Rgb(70, 70, 70);
     for y in full.y..full.y.saturating_add(full.height) {
         for x in full.x..full.x.saturating_add(full.width) {
@@ -78,10 +79,10 @@ fn dim_background_outside(buf: &mut ratatui::buffer::Buffer, full: Rect, modal: 
                 continue;
             }
             let cell = &mut buf[(x, y)];
-            if cell.fg != Color::Reset {
-                cell.fg = dim;
-            }
-            cell.bg = Color::Reset;
+            cell.fg = dim;
+            cell.modifier.remove(Modifier::BOLD);
+            cell.modifier.remove(Modifier::REVERSED);
+            cell.modifier.insert(Modifier::DIM);
         }
     }
 }
