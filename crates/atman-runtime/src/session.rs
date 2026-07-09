@@ -54,6 +54,7 @@ pub struct Session {
     approval: std::sync::Arc<ApprovalRegistry>,
     compact_reviews: std::sync::Arc<CompactReviewRegistry>,
     forms: std::sync::Arc<FormRegistry>,
+    fs_access_mode: Mutex<Option<crate::fs_access::FsAccessMode>>,
     project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
 }
 
@@ -858,6 +859,7 @@ impl Session {
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
             forms: std::sync::Arc::new(FormRegistry::new()),
+            fs_access_mode: Mutex::new(None),
             project_index,
         })
     }
@@ -942,6 +944,7 @@ impl Session {
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
             forms: std::sync::Arc::new(FormRegistry::new()),
+            fs_access_mode: Mutex::new(None),
             project_index,
         })
     }
@@ -980,6 +983,7 @@ impl Session {
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
             forms: std::sync::Arc::new(FormRegistry::new()),
+            fs_access_mode: Mutex::new(None),
             project_index: None,
         }
     }
@@ -998,6 +1002,14 @@ impl Session {
 
     pub fn forms(&self) -> std::sync::Arc<FormRegistry> {
         self.forms.clone()
+    }
+
+    pub fn fs_access_mode(&self) -> Option<crate::fs_access::FsAccessMode> {
+        *self.fs_access_mode.lock().unwrap()
+    }
+
+    pub fn set_fs_access_mode(&self, mode: crate::fs_access::FsAccessMode) {
+        *self.fs_access_mode.lock().unwrap() = Some(mode);
     }
 
     pub fn compact_review_mode(&self) -> CompactReviewMode {

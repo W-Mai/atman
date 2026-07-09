@@ -53,7 +53,10 @@ enum Cmd {
         #[arg(long)]
         fix: bool,
     },
-    Init,
+    Init {
+        #[arg(long, value_name = "MODE")]
+        sandbox: Option<String>,
+    },
     RebuildIndex,
     TuiPreview,
     Version,
@@ -304,7 +307,7 @@ async fn main() -> Result<()> {
         }) => cmd_session_sanitize(session_id, dry_run).await,
         Some(Cmd::Cost { session_id, all }) => cmd_cost(session_id, all).await,
         Some(Cmd::Doctor { fix }) => cmd_doctor(fix).await,
-        Some(Cmd::Init) => cmd_init().await,
+        Some(Cmd::Init { sandbox }) => cmd_init(sandbox).await,
         Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
         Some(Cmd::TuiPreview) => cmd_tui_preview().await,
         Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
@@ -2738,6 +2741,46 @@ fn apply_session_config(session: &atman_runtime::Session) {
     if let Some(mode) = parse_compact_review_mode(&text) {
         session.set_compact_review_mode(mode);
     }
+    // ATMAN_FS_ACCESS wins over the [fs_access] section so users can flip
+    // policies for a single run without editing config.toml.
+    let env_mode = std::env::var("ATMAN_FS_ACCESS")
+        .ok()
+        .and_then(|s| s.parse::<atman_runtime::fs_access::FsAccessMode>().ok());
+    let cfg_mode = parse_fs_access_mode(&text);
+    if let Some(mode) = env_mode.or(cfg_mode) {
+        session.set_fs_access_mode(mode);
+    }
+}
+
+// Reads [fs_access] mode = "..." out of the same config.toml we already
+// scan for other tiny settings. Kept as a hand-rolled section walk so
+// unrelated syntax errors elsewhere in the file don't kill boot.
+pub fn parse_fs_access_mode(text: &str) -> Option<atman_runtime::fs_access::FsAccessMode> {
+    use std::str::FromStr;
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name) = rest.strip_suffix(']')
+        {
+            in_section = name.trim() == "fs_access";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == "mode" {
+            let raw = v.trim().trim_matches('"');
+            return atman_runtime::fs_access::FsAccessMode::from_str(raw).ok();
+        }
+    }
+    None
 }
 
 fn parse_compact_review_mode(text: &str) -> Option<atman_runtime::CompactReviewMode> {
@@ -3274,9 +3317,17 @@ async fn probe_provider(base_url: &str, timeout_ms: u64) -> ProviderHealth {
     }
 }
 
-async fn cmd_init() -> Result<()> {
+async fn cmd_init(sandbox: Option<String>) -> Result<()> {
+    use std::str::FromStr;
     let cfg = config_dir()?;
-    let rep = init::init_config_dir(&cfg)?;
+    let fs_access = match sandbox.as_deref() {
+        Some(raw) => Some(
+            atman_runtime::fs_access::FsAccessMode::from_str(raw)
+                .map_err(|e| anyhow::anyhow!("invalid --sandbox value: {e}"))?,
+        ),
+        None => None,
+    };
+    let rep = init::init_config_dir_with_mode(&cfg, fs_access)?;
     if rep.written.is_empty() {
         println!(
             "[atman] init: {} already fully populated ({} file(s) preserved)",
@@ -3316,10 +3367,17 @@ async fn cmd_init() -> Result<()> {
     println!("     docs/context-strategy.md for how goal / todos / recent_turns compose.");
     println!();
     println!("fs access policy:");
-    println!("  default is workspace-write — atman may create / edit files inside");
-    println!("  this repo and the system tempdir, but writes outside are blocked.");
-    println!("  Override per-invocation later once the config surface for");
-    println!("  FsAccessMode is wired in (tracked in fs_access.rs).");
+    match fs_access {
+        Some(mode) => println!(
+            "  [fs_access] mode = \"{}\" persisted to config.toml.",
+            mode.as_str()
+        ),
+        None => println!("  default is workspace-write — atman may create / edit files inside",),
+    }
+    println!("  this repo and the system tempdir, writes outside are blocked.");
+    println!(
+        "  Override per run with ATMAN_FS_ACCESS=read-only|workspace-write|danger-full-access."
+    );
     Ok(())
 }
 

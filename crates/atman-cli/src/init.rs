@@ -8,19 +8,39 @@ pub struct InitReport {
     pub skipped: Vec<PathBuf>,
 }
 
+#[cfg(test)]
 pub fn init_config_dir(config_dir: &Path) -> Result<InitReport> {
+    init_config_dir_with_mode(config_dir, None)
+}
+
+pub fn init_config_dir_with_mode(
+    config_dir: &Path,
+    fs_access: Option<atman_runtime::fs_access::FsAccessMode>,
+) -> Result<InitReport> {
     std::fs::create_dir_all(config_dir)
         .with_context(|| format!("mkdir {}", config_dir.display()))?;
     let commands_dir = config_dir.join("commands");
     std::fs::create_dir_all(&commands_dir)
         .with_context(|| format!("mkdir {}", commands_dir.display()))?;
 
-    let templates: [(PathBuf, &str); 5] = [
-        (config_dir.join("config.toml"), CONFIG_TOML),
-        (config_dir.join("routes.at"), ROUTES_AT),
-        (config_dir.join("on_session_start.at"), ON_SESSION_START_AT),
-        (commands_dir.join("agent.at"), AGENT_AT),
-        (commands_dir.join("hello.at"), HELLO_AT),
+    let config_toml_body: String = match fs_access {
+        Some(mode) => CONFIG_TOML.replace(
+            "# [fs_access]\n# mode = \"workspace-write\"",
+            &format!("[fs_access]\nmode = \"{}\"", mode.as_str()),
+        ),
+        None => CONFIG_TOML.to_string(),
+    };
+
+    let config_path = config_dir.join("config.toml");
+    let templates: [(PathBuf, String); 5] = [
+        (config_path.clone(), config_toml_body),
+        (config_dir.join("routes.at"), ROUTES_AT.into()),
+        (
+            config_dir.join("on_session_start.at"),
+            ON_SESSION_START_AT.into(),
+        ),
+        (commands_dir.join("agent.at"), AGENT_AT.into()),
+        (commands_dir.join("hello.at"), HELLO_AT.into()),
     ];
 
     let mut written = Vec::new();
@@ -65,6 +85,13 @@ pub const CONFIG_TOML: &str = r#"# atman configuration
 [sandbox]
 # enabled = true
 # strict = false
+
+# Filesystem access policy for fs.write / fs.edit. Defaults to
+# workspace-write: writes are allowed inside the current project + the
+# system tempdir, everything else is refused. Set to "read-only" to
+# block every write, "danger-full-access" to skip the check entirely.
+# [fs_access]
+# mode = "workspace-write"
 
 # preview daemon (agent audit UI at http://localhost:65097/). Optional.
 [preview]
@@ -142,6 +169,30 @@ mod tests {
         assert!(cfg.join("on_session_start.at").exists());
         assert!(cfg.join("commands/agent.at").exists());
         assert!(cfg.join("commands/hello.at").exists());
+    }
+
+    #[test]
+    fn init_with_explicit_mode_persists_uncommented_section() {
+        use atman_runtime::fs_access::FsAccessMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("atman");
+        init_config_dir_with_mode(&cfg, Some(FsAccessMode::ReadOnly)).unwrap();
+        let body = std::fs::read_to_string(cfg.join("config.toml")).unwrap();
+        assert!(body.contains("[fs_access]"));
+        assert!(body.contains("mode = \"read-only\""));
+        assert!(
+            !body.contains("# [fs_access]"),
+            "explicit mode must uncomment the block"
+        );
+    }
+
+    #[test]
+    fn init_without_mode_leaves_section_commented() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("atman");
+        init_config_dir(&cfg).unwrap();
+        let body = std::fs::read_to_string(cfg.join("config.toml")).unwrap();
+        assert!(body.contains("# [fs_access]"));
     }
 
     #[test]

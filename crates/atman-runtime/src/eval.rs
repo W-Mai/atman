@@ -1007,10 +1007,10 @@ fn session_fs_access_policy(session: &crate::session::Session) -> crate::fs_acce
         .meta()
         .and_then(|m| m.project_root)
         .or_else(|| std::env::current_dir().ok());
-    crate::fs_access::FsAccessPolicy {
-        mode: crate::fs_access::FsAccessMode::WorkspaceWrite,
-        workspace,
-    }
+    let mode = session
+        .fs_access_mode()
+        .unwrap_or(crate::fs_access::FsAccessMode::WorkspaceWrite);
+    crate::fs_access::FsAccessPolicy { mode, workspace }
 }
 
 fn tool_name(path: &[atman_dsl::ast::Ident]) -> String {
