@@ -18,13 +18,25 @@ pub struct BootstrapOptions {
     pub home_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SandboxConfig {
     pub enabled: bool,
     pub strict: bool,
     pub extra_read: Vec<PathBuf>,
     pub extra_write: Vec<PathBuf>,
     pub template_path: Option<PathBuf>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            strict: false,
+            extra_read: Vec::new(),
+            extra_write: Vec::new(),
+            template_path: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -188,7 +200,7 @@ pub fn parse_sandbox_config(text: &str) -> SandboxConfig {
     #[derive(Debug, Deserialize, Default)]
     struct RawSandbox {
         #[serde(default)]
-        enabled: bool,
+        enabled: Option<bool>,
         #[serde(default)]
         strict: bool,
         #[serde(default)]
@@ -208,7 +220,7 @@ pub fn parse_sandbox_config(text: &str) -> SandboxConfig {
         Err(_) => return SandboxConfig::default(),
     };
     SandboxConfig {
-        enabled: file.sandbox.enabled,
+        enabled: file.sandbox.enabled.unwrap_or(true),
         strict: file.sandbox.strict,
         extra_read: file
             .sandbox
@@ -445,4 +457,36 @@ pub fn default_config_dir() -> Result<PathBuf> {
 
 pub fn default_data_dir() -> Result<PathBuf> {
     atman_runtime::storage::data_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_config_defaults_to_enabled() {
+        let cfg = SandboxConfig::default();
+        assert!(cfg.enabled);
+        assert!(!cfg.strict);
+    }
+
+    #[test]
+    fn parse_sandbox_config_defaults_missing_enabled_to_true() {
+        let cfg = parse_sandbox_config("[sandbox]\nstrict = true\n");
+        assert!(cfg.enabled);
+        assert!(cfg.strict);
+    }
+
+    #[test]
+    fn parse_sandbox_config_defaults_missing_section_to_enabled() {
+        let cfg = parse_sandbox_config("[preview]\ntimeout_ms = 1000\n");
+        assert!(cfg.enabled);
+        assert!(!cfg.strict);
+    }
+
+    #[test]
+    fn parse_sandbox_config_allows_explicit_opt_out() {
+        let cfg = parse_sandbox_config("[sandbox]\nenabled = false\n");
+        assert!(!cfg.enabled);
+    }
 }

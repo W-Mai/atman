@@ -60,10 +60,10 @@ pub const CONFIG_TOML: &str = r#"# atman configuration
 [interjection]
 # classifier = "rule"
 
-# Sandbox for Tier 4 (shell.exec) on macOS. Off by default; flip on when
-# you want defense-in-depth. strict = true refuses to run without sandbox-exec.
+# Sandbox for Tier 4 (shell.exec) on macOS. Enabled by default when
+# sandbox-exec is available; set enabled = false to opt out.
 [sandbox]
-# enabled = false
+# enabled = true
 # strict = false
 
 # preview daemon (agent audit UI at http://localhost:65097/). Optional.
