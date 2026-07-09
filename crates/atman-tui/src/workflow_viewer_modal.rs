@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 #[derive(Default, Debug)]
 pub struct WorkflowViewerModal {
@@ -66,9 +66,29 @@ impl WorkflowViewerModal {
 
 const VIEWER_PANEL_WIDTH: u16 = 300;
 
+fn dim_background_outside(buf: &mut ratatui::buffer::Buffer, full: Rect, modal: Rect) {
+    let dim = Color::Rgb(70, 70, 70);
+    for y in full.y..full.y.saturating_add(full.height) {
+        for x in full.x..full.x.saturating_add(full.width) {
+            let inside = x >= modal.x
+                && x < modal.x.saturating_add(modal.width)
+                && y >= modal.y
+                && y < modal.y.saturating_add(modal.height);
+            if inside {
+                continue;
+            }
+            let cell = &mut buf[(x, y)];
+            if cell.fg != Color::Reset {
+                cell.fg = dim;
+            }
+            cell.bg = Color::Reset;
+        }
+    }
+}
+
 pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState) {
-    let modal_w = area.width.saturating_sub(8).clamp(60, 160);
-    let modal_h = area.height.saturating_sub(4).clamp(15, 40);
+    let modal_w = (area.width * 9 / 10).clamp(80, area.width.saturating_sub(4).max(80));
+    let modal_h = (area.height * 9 / 10).clamp(20, area.height.saturating_sub(2).max(20));
     let x = area.x + area.width.saturating_sub(modal_w) / 2;
     let y = area.y + area.height.saturating_sub(modal_h) / 2;
     let modal_area = Rect {
@@ -77,6 +97,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
         width: modal_w,
         height: modal_h,
     };
+    dim_background_outside(f.buffer_mut(), area, modal_area);
     f.render_widget(Clear, modal_area);
     let title = format!(
         " Workflow · Esc close · h/l or Shift+←/→ · j/k up/down · offset {},{} ",
@@ -84,6 +105,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
     );
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
             title,
