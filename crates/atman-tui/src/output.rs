@@ -762,14 +762,17 @@ fn append_workflow_node_boxed(
     regions: &mut Vec<NodeRegion>,
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
-    col0: u16,
-    outer_width: u16,
+    depth: u16,
+    panel_width: u16,
     path: &str,
     animation_frame: u32,
     flow_running: bool,
     pending_counter: &mut u8,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
+    let rail_w = depth.saturating_mul(3);
+    let outer_width = panel_width.saturating_sub(rail_w);
+    let col0 = rail_w;
     if outer_width < 8 {
         return;
     }
@@ -821,29 +824,10 @@ fn append_workflow_node_boxed(
     } else if matches!(&node.approval, Some(ApprovalState::Denied { .. })) {
         border_style = Style::default().fg(Color::Red);
     }
-    let has_children = !node.children.is_empty();
-    let is_expanded = auto_expand || expanded_nodes.contains(path) || has_children;
-    let inner_col0 = col0.saturating_add(2);
-    let inner_outer = outer_width.saturating_sub(4);
+    let is_expanded = auto_expand || expanded_nodes.contains(path);
     let mut inner_lines: Vec<Line<'static>> = Vec::new();
-    let mut child_regions: Vec<NodeRegion> = Vec::new();
     if is_expanded {
         collect_boxed_details(node, &mut inner_lines);
-        for (i, child) in node.children.iter().enumerate() {
-            let child_path = format!("{path}/{i}");
-            append_workflow_node_boxed(
-                &mut inner_lines,
-                &mut child_regions,
-                child,
-                expanded_nodes,
-                inner_col0,
-                inner_outer,
-                &child_path,
-                animation_frame,
-                flow_running,
-                pending_counter,
-            );
-        }
     }
     let start_row = out.len() as u16;
     let rect = append_box(
@@ -860,12 +844,6 @@ fn append_workflow_node_boxed(
             approval_hotkey,
         },
     );
-    let offset = rect.row0.saturating_add(1);
-    for mut r in child_regions {
-        r.start_row = r.start_row.saturating_add(offset);
-        r.end_row = r.end_row.saturating_add(offset);
-        regions.push(r);
-    }
     regions.push(NodeRegion {
         panel_item_index: 0,
         path_key: path.to_string(),
@@ -874,6 +852,21 @@ fn append_workflow_node_boxed(
         col_start: Some(rect.col0),
         col_end: Some(rect.col_end()),
     });
+    for (i, child) in node.children.iter().enumerate() {
+        let child_path = format!("{path}/{i}");
+        append_workflow_node_boxed(
+            out,
+            regions,
+            child,
+            expanded_nodes,
+            depth.saturating_add(1),
+            panel_width,
+            &child_path,
+            animation_frame,
+            flow_running,
+            pending_counter,
+        );
+    }
 }
 
 fn collect_boxed_details(
