@@ -3302,7 +3302,7 @@ async fn cmd_init() -> Result<()> {
     println!();
     println!("next steps:");
     println!("  1. export an api key:  export ANTHROPIC_API_KEY=...");
-    println!("  2. sanity check:       atman doctor");
+    println!("  2. sanity check:       atman doctor          (add --fix to auto-repair)");
     println!("  3. start REPL:         atman");
     println!("     · plain text goes to the code agent (see commands/agent.at)");
     println!("     · /hello runs commands/hello.at");
@@ -3310,6 +3310,12 @@ async fn cmd_init() -> Result<()> {
     println!("     · the agent auto-tracks todos + the last 10 turns of history");
     println!("  4. see docs/quickstart.md for a walkthrough,");
     println!("     docs/context-strategy.md for how goal / todos / recent_turns compose.");
+    println!();
+    println!("fs access policy:");
+    println!("  default is workspace-write — atman may create / edit files inside");
+    println!("  this repo and the system tempdir, but writes outside are blocked.");
+    println!("  Override per-invocation later once the config surface for");
+    println!("  FsAccessMode is wired in (tracked in fs_access.rs).");
     Ok(())
 }
 
