@@ -53,6 +53,7 @@ pub struct Session {
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     approval: std::sync::Arc<ApprovalRegistry>,
     compact_reviews: std::sync::Arc<CompactReviewRegistry>,
+    forms: std::sync::Arc<FormRegistry>,
     project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
 }
 
@@ -173,6 +174,109 @@ pub struct PendingApproval {
 pub enum ApprovalDecision {
     Approve,
     Deny { reason: String },
+}
+
+pub struct FormRegistry {
+    entries: std::sync::Mutex<Vec<FormEntry>>,
+    watch_tx: watch::Sender<Vec<crate::form::PendingForm>>,
+}
+
+struct FormEntry {
+    pending: crate::form::PendingForm,
+    responder: tokio::sync::oneshot::Sender<crate::form::FormAnswer>,
+}
+
+impl Default for FormRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FormRegistry {
+    pub fn new() -> Self {
+        let (watch_tx, _) = watch::channel(Vec::new());
+        Self {
+            entries: std::sync::Mutex::new(Vec::new()),
+            watch_tx,
+        }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<Vec<crate::form::PendingForm>> {
+        self.watch_tx.subscribe()
+    }
+
+    pub fn list_pending(&self) -> Vec<crate::form::PendingForm> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.pending.clone())
+            .collect()
+    }
+
+    pub fn subscriber_count(&self) -> usize {
+        self.watch_tx.receiver_count()
+    }
+
+    // No TUI attached → auto-cancel so flows don't hang forever. Otherwise
+    // enqueue and hand a receiver back to the caller.
+    pub fn request(
+        &self,
+        pending: crate::form::PendingForm,
+    ) -> tokio::sync::oneshot::Receiver<crate::form::FormAnswer> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.watch_tx.receiver_count() == 0 {
+            let _ = tx.send(crate::form::FormAnswer::Cancelled);
+            return rx;
+        }
+        {
+            let mut entries = self.entries.lock().unwrap();
+            entries.push(FormEntry {
+                pending: pending.clone(),
+                responder: tx,
+            });
+        }
+        self.broadcast_snapshot();
+        rx
+    }
+
+    pub fn submit(&self, form_id: &str, answer: crate::form::FormAnswer) -> bool {
+        let entry = {
+            let mut entries = self.entries.lock().unwrap();
+            let pos = entries.iter().position(|e| e.pending.form_id == form_id);
+            pos.map(|p| entries.remove(p))
+        };
+        match entry {
+            Some(e) => {
+                let _ = e.responder.send(answer);
+                self.broadcast_snapshot();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn cancel_all(&self) {
+        let drained: Vec<FormEntry> = {
+            let mut entries = self.entries.lock().unwrap();
+            std::mem::take(&mut *entries)
+        };
+        for e in drained {
+            let _ = e.responder.send(crate::form::FormAnswer::Cancelled);
+        }
+        self.broadcast_snapshot();
+    }
+
+    fn broadcast_snapshot(&self) {
+        let snap = self
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.pending.clone())
+            .collect();
+        let _ = self.watch_tx.send(snap);
+    }
 }
 
 pub struct ApprovalRegistry {
@@ -753,6 +857,7 @@ impl Session {
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
+            forms: std::sync::Arc::new(FormRegistry::new()),
             project_index,
         })
     }
@@ -836,6 +941,7 @@ impl Session {
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
+            forms: std::sync::Arc::new(FormRegistry::new()),
             project_index,
         })
     }
@@ -873,6 +979,7 @@ impl Session {
             ),
             approval: std::sync::Arc::new(ApprovalRegistry::new()),
             compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
+            forms: std::sync::Arc::new(FormRegistry::new()),
             project_index: None,
         }
     }
@@ -887,6 +994,10 @@ impl Session {
 
     pub fn compact_reviews(&self) -> std::sync::Arc<CompactReviewRegistry> {
         self.compact_reviews.clone()
+    }
+
+    pub fn forms(&self) -> std::sync::Arc<FormRegistry> {
+        self.forms.clone()
     }
 
     pub fn compact_review_mode(&self) -> CompactReviewMode {
@@ -1730,6 +1841,79 @@ mod tests {
         });
         let got = rx_a.blocking_recv().unwrap();
         assert!(matches!(got, CompactReviewDecision::Reject));
+    }
+
+    fn mk_form(form_id: &str, prompt: &str) -> crate::form::PendingForm {
+        crate::form::PendingForm {
+            form_id: form_id.into(),
+            run_id: crate::event::FlowRunId::now(),
+            tool_use_id: "tu".into(),
+            kind: crate::form::FormKind::Confirm {
+                prompt: prompt.into(),
+            },
+            emitted_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn form_registry_auto_cancels_without_subscriber() {
+        let reg = FormRegistry::new();
+        let rx = reg.request(mk_form("f1", "sure?"));
+        let got = rx.blocking_recv().unwrap();
+        assert_eq!(got, crate::form::FormAnswer::Cancelled);
+        assert!(reg.list_pending().is_empty());
+    }
+
+    #[test]
+    fn form_registry_delivers_answer_by_form_id() {
+        let reg = std::sync::Arc::new(FormRegistry::new());
+        let _sub = reg.subscribe();
+        let rx = reg.request(mk_form("fA", "?"));
+        assert_eq!(reg.list_pending().len(), 1);
+        let ok = reg.submit("fA", crate::form::FormAnswer::Confirmed { value: true });
+        assert!(ok);
+        let got = rx.blocking_recv().unwrap();
+        assert_eq!(got, crate::form::FormAnswer::Confirmed { value: true });
+        assert!(reg.list_pending().is_empty());
+    }
+
+    #[test]
+    fn form_registry_submit_unknown_id_is_noop() {
+        let reg = std::sync::Arc::new(FormRegistry::new());
+        let _sub = reg.subscribe();
+        let _rx = reg.request(mk_form("real", "?"));
+        assert!(!reg.submit("ghost", crate::form::FormAnswer::Cancelled));
+        assert_eq!(reg.list_pending().len(), 1);
+    }
+
+    #[test]
+    fn form_registry_cancel_all_flushes_pending() {
+        let reg = std::sync::Arc::new(FormRegistry::new());
+        let _sub = reg.subscribe();
+        let rx_a = reg.request(mk_form("a", "?"));
+        let rx_b = reg.request(mk_form("b", "?"));
+        reg.cancel_all();
+        assert_eq!(
+            rx_a.blocking_recv().unwrap(),
+            crate::form::FormAnswer::Cancelled
+        );
+        assert_eq!(
+            rx_b.blocking_recv().unwrap(),
+            crate::form::FormAnswer::Cancelled
+        );
+        assert!(reg.list_pending().is_empty());
+    }
+
+    #[test]
+    fn form_registry_queues_multiple_pending() {
+        let reg = std::sync::Arc::new(FormRegistry::new());
+        let _sub = reg.subscribe();
+        let _rx1 = reg.request(mk_form("1", "?"));
+        let _rx2 = reg.request(mk_form("2", "?"));
+        let pending = reg.list_pending();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].form_id, "1");
+        assert_eq!(pending[1].form_id, "2");
     }
 
     #[test]
