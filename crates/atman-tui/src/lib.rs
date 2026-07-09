@@ -212,27 +212,38 @@ async fn run_frames(
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     eprintln!("[atman] event: {key:?}");
                 }
-                match key {
-                    Some(Ok(CtEvent::Key(ke))) => {
-                        handle_key(
-                            map_key(ke),
-                            &mut app,
-                            &mut editor,
-                            &mut interrupt_prompt,
-                            handle.submit_tx.as_ref(),
-                            handle.control_tx.as_ref(),
-                        );
-                    }
-                    Some(Ok(CtEvent::Paste(s))) => {
-                        editor.insert_str(&s);
-                        interrupt_prompt = false;
-                        app.refresh_popup(editor.buf());
-                    }
-                    Some(Ok(CtEvent::Mouse(me))) => {
-                        match me.kind {
-                            MouseEventKind::ScrollUp => app.scroll_up(3),
-                            MouseEventKind::ScrollDown => app.scroll_down(3),
-                            MouseEventKind::Down(MouseButton::Left) => {
+                let mut current = key;
+                let mut scroll_delta: i32 = 0;
+                let mut drained: u32 = 0;
+                loop {
+                    match current {
+                        Some(Ok(CtEvent::Mouse(me)))
+                            if matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
+                        {
+                            if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                scroll_delta = scroll_delta.saturating_sub(3);
+                            } else {
+                                scroll_delta = scroll_delta.saturating_add(3);
+                            }
+                            interrupt_prompt = false;
+                        }
+                        Some(Ok(CtEvent::Key(ke))) => {
+                            handle_key(
+                                map_key(ke),
+                                &mut app,
+                                &mut editor,
+                                &mut interrupt_prompt,
+                                handle.submit_tx.as_ref(),
+                                handle.control_tx.as_ref(),
+                            );
+                        }
+                        Some(Ok(CtEvent::Paste(s))) => {
+                            editor.insert_str(&s);
+                            interrupt_prompt = false;
+                            app.refresh_popup(editor.buf());
+                        }
+                        Some(Ok(CtEvent::Mouse(me))) => {
+                            if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
@@ -244,12 +255,24 @@ async fn run_frames(
                                     app.toggle_workflow_panel_expansion(idx);
                                 }
                             }
-                            _ => {}
+                            interrupt_prompt = false;
                         }
-                        interrupt_prompt = false;
+                        Some(Ok(CtEvent::Resize(_, _))) => {}
+                        _ => {}
                     }
-                    Some(Ok(CtEvent::Resize(_, _))) => {}
-                    _ => {}
+                    drained = drained.saturating_add(1);
+                    if drained >= 100 {
+                        break;
+                    }
+                    match key_events.try_recv() {
+                        Ok(next) => current = Some(next),
+                        Err(_) => break,
+                    }
+                }
+                if scroll_delta < 0 {
+                    app.scroll_up((-scroll_delta) as u16);
+                } else if scroll_delta > 0 {
+                    app.scroll_down(scroll_delta as u16);
                 }
             }
             frame = handle.stream_rx.recv() => {
