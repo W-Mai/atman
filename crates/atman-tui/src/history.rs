@@ -23,7 +23,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             turn_index,
             graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
             expanded_nodes: HashSet::new(),
-            panel_expanded: true,
+            panel_expanded: false,
             started_at: Instant::now(),
             ended_at: None,
         });

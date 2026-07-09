@@ -773,25 +773,17 @@ fn render_collapsed_workflow_card(
 
 fn apply_lens_fade(body_lines: &mut [Line<'static>]) {
     let n = body_lines.len();
-    if n == 0 {
+    if n <= 1 {
         return;
     }
+    let n_f = (n - 1) as f32;
     for (i, line) in body_lines.iter_mut().enumerate() {
-        let progress = if n <= 1 {
-            1.0_f32
-        } else {
-            i as f32 / (n - 1) as f32
-        };
-        let shade = if progress >= 0.66 {
-            None
-        } else if progress >= 0.33 {
-            Some(Color::Gray)
-        } else {
-            Some(Color::DarkGray)
-        };
-        let Some(shade) = shade else {
+        let bottom_distance = (n - 1 - i) as f32 / n_f;
+        if bottom_distance < 0.001 {
             continue;
-        };
+        }
+        let target = (200.0 - bottom_distance * 130.0).round() as u8;
+        let shade = Color::Rgb(target, target, target);
         for span in line.spans.iter_mut() {
             if span.style.fg.is_some() {
                 span.style.fg = Some(shade);
