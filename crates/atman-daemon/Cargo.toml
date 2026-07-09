@@ -28,7 +28,6 @@ tower-http.workspace = true
 utoipa.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-directories.workspace = true
 toml.workspace = true
 libc = "0.2"
 urlencoding = "2"

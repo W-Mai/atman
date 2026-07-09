@@ -27,7 +27,6 @@ serde_json = { version = "1", features = ["preserve_order"] }
 uuid       = { version = "1", features = ["v4", "v7", "serde"] }
 chrono     = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap       = { version = "4", features = ["derive"] }
-directories = "6"
 rustyline  = { version = "17", default-features = false, features = ["custom-bindings"] }
 base64     = "0.22"
 similar    = "2"
