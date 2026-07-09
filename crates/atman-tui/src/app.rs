@@ -233,10 +233,7 @@ impl AppState {
         self.last_node_regions
             .iter()
             .filter(|r| rel >= r.start_row && rel < r.end_row)
-            .filter(|r| match (r.col_start, r.col_end) {
-                (Some(s), Some(e)) => rel_col >= s && rel_col < e,
-                _ => true,
-            })
+            .filter(|r| rel_col >= r.col_start && rel_col < r.col_end)
             .max_by_key(|r| r.path_key.len())
             .map(|r| (r.panel_item_index, r.path_key.clone()))
     }
@@ -598,16 +595,16 @@ mod tests {
                 path_key: "0".into(),
                 start_row: 1,
                 end_row: 2,
-                col_start: None,
-                col_end: None,
+                col_start: 0,
+                col_end: 80,
             },
             NodeRegion {
                 panel_item_index: 3,
                 path_key: "0/0".into(),
                 start_row: 2,
                 end_row: 3,
-                col_start: None,
-                col_end: None,
+                col_start: 0,
+                col_end: 80,
             },
         ];
         app.scroll_offset = 0;

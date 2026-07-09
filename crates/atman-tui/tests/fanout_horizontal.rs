@@ -99,11 +99,14 @@ fn wide_terminal_lays_fanout_branches_horizontally() {
     let has_merge = lines.iter().any(|l| l.contains('┴'));
     assert!(has_fork, "expected fork line, lines={lines:?}");
     assert!(has_merge, "expected merge line, lines={lines:?}");
-    let with_col = regions.iter().filter(|r| r.col_start.is_some()).count();
+    let narrow = regions
+        .iter()
+        .filter(|r| r.col_end.saturating_sub(r.col_start) < 200)
+        .count();
     assert!(
-        with_col >= 2,
-        "expected col-ranged regions, got {} of {}",
-        with_col,
+        narrow >= 2,
+        "expected narrow (fanout) regions, got {} of {}",
+        narrow,
         regions.len()
     );
 }
@@ -120,10 +123,7 @@ fn narrow_terminal_falls_back_to_vertical_fanout() {
     assert!(!has_fork, "narrow width must not emit fork glyph");
     let narrow_cols = regions
         .iter()
-        .filter(|r| match (r.col_start, r.col_end) {
-            (Some(s), Some(e)) => e.saturating_sub(s) < 80,
-            _ => false,
-        })
+        .filter(|r| r.col_end.saturating_sub(r.col_start) < 80)
         .count();
     assert_eq!(
         narrow_cols, 0,
@@ -154,7 +154,10 @@ fn horizontal_hit_test_targets_the_right_branch() {
     let mut app = AppState::new("s".into(), None);
     app.last_transcript_rect = Some(Rect::new(0, 0, 200, 30));
     app.last_node_regions = regions.clone();
-    let branch_regions: Vec<_> = regions.iter().filter(|r| r.col_start.is_some()).collect();
+    let branch_regions: Vec<_> = regions
+        .iter()
+        .filter(|r| r.col_end.saturating_sub(r.col_start) < 200)
+        .collect();
     assert!(
         branch_regions.len() >= 4,
         "expected regions from each branch, got {branch_regions:?}"
@@ -166,10 +169,10 @@ fn horizontal_hit_test_targets_the_right_branch() {
         .find(|r| r.col_start != left.col_start)
         .expect("distinct branch on the right");
     let hit_left = app
-        .hit_test_node(left.col_start.unwrap() + 2, left.start_row)
+        .hit_test_node(left.col_start + 2, left.start_row)
         .expect("expected hit on left branch");
     let hit_right = app
-        .hit_test_node(right.col_start.unwrap() + 2, right.start_row)
+        .hit_test_node(right.col_start + 2, right.start_row)
         .expect("expected hit on right branch");
     assert_ne!(
         hit_left.1, hit_right.1,
@@ -210,5 +213,9 @@ fn layout_cache_still_composes_valid_regions() {
     let (_lines, ranges, regions, total) = cache.get_or_build(key, &[item], &ctx);
     assert_eq!(ranges.len(), 1);
     assert!(total > 0);
-    assert!(regions.iter().any(|r| r.col_start.is_some()));
+    assert!(
+        regions
+            .iter()
+            .any(|r| r.col_end.saturating_sub(r.col_start) < 200)
+    );
 }

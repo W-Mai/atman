@@ -54,8 +54,8 @@ pub struct NodeRegion {
     pub path_key: String,
     pub start_row: u16,
     pub end_row: u16,
-    pub col_start: Option<u16>,
-    pub col_end: Option<u16>,
+    pub col_start: u16,
+    pub col_end: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -737,8 +737,8 @@ fn append_fanout_horizontal(
         for mut r in branch_regions {
             r.start_row = body_start_row.saturating_add(r.start_row);
             r.end_row = body_start_row.saturating_add(r.end_row);
-            r.col_start = Some(col_start);
-            r.col_end = Some(col_end);
+            r.col_start = col_start;
+            r.col_end = col_end;
             regions.push(r);
         }
     }
@@ -905,8 +905,8 @@ fn append_workflow_node_boxed(
         path_key: path.to_string(),
         start_row: rect.row0,
         end_row: rect.row0.saturating_add(rect.rows),
-        col_start: Some(rect.col0),
-        col_end: Some(rect.col_end()),
+        col_start: rect.col0,
+        col_end: rect.col_end(),
     });
     let mut child_ancestor_last: Vec<bool> = ancestor_last.to_vec();
     child_ancestor_last.push(is_last);
@@ -1106,8 +1106,8 @@ fn append_workflow_node(
         path_key: path.to_string(),
         start_row,
         end_row: start_row.saturating_add(1),
-        col_start: Some(0),
-        col_end: Some(panel_width),
+        col_start: 0,
+        col_end: panel_width,
     });
     let vertical = if is_last { "   " } else { "│  " };
     let child_prefix = format!("{ancestor_prefix}{vertical}");
