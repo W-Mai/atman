@@ -239,10 +239,18 @@ async fn dispatch_child_tools(
     registry: &crate::tool::ToolRegistry,
     ctx: &ToolCtx,
 ) -> Vec<MessagePart> {
-    let mut out = Vec::with_capacity(uses.len());
-    for (id, name, input) in uses {
+    struct Ready {
+        idx: usize,
+        id: String,
+        name: String,
+        tool: std::sync::Arc<dyn crate::tool::Tool>,
+        call_args: ToolArgs,
+    }
+    let mut out: Vec<Option<MessagePart>> = vec![None; uses.len()];
+    let mut ready: Vec<Ready> = Vec::new();
+    for (idx, (id, name, input)) in uses.iter().enumerate() {
         let Some(tool) = registry.get(name) else {
-            out.push(MessagePart::ToolResult {
+            out[idx] = Some(MessagePart::ToolResult {
                 tool_use_id: id.clone(),
                 content: format!("sub-agent: unknown tool `{name}`"),
                 is_error: true,
@@ -254,35 +262,53 @@ async fn dispatch_child_tools(
             Value::Unit => Vec::new(),
             _ => Vec::new(),
         };
-        let call_args = ToolArgs {
-            positional: Vec::new(),
-            named,
-        };
-        let level = tool.approval_level();
-        let gate = request_approval(ctx, id, name, &call_args, level, Some(tool.as_ref())).await;
-        match gate {
-            ApprovalOutcome::Deny { reason } => {
-                out.push(MessagePart::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: format!("sub-agent: tool `{name}` denied — {reason}"),
-                    is_error: true,
-                });
-            }
-            ApprovalOutcome::Approve => match tool.call(call_args, ctx).await {
-                Ok(v) => out.push(MessagePart::ToolResult {
-                    tool_use_id: id.clone(),
+        ready.push(Ready {
+            idx,
+            id: id.clone(),
+            name: name.clone(),
+            tool,
+            call_args: ToolArgs {
+                positional: Vec::new(),
+                named,
+            },
+        });
+    }
+    // Parallel: serial awaits hid all but the first pending node from the UI.
+    let gates = ready.iter().map(|r| {
+        let level = r.tool.approval_level();
+        request_approval(
+            ctx,
+            &r.id,
+            &r.name,
+            &r.call_args,
+            level,
+            Some(r.tool.as_ref()),
+        )
+    });
+    let outcomes = futures::future::join_all(gates).await;
+    for (r, gate) in ready.into_iter().zip(outcomes) {
+        let part = match gate {
+            ApprovalOutcome::Deny { reason } => MessagePart::ToolResult {
+                tool_use_id: r.id.clone(),
+                content: format!("sub-agent: tool `{}` denied — {reason}", r.name),
+                is_error: true,
+            },
+            ApprovalOutcome::Approve => match r.tool.call(r.call_args, ctx).await {
+                Ok(v) => MessagePart::ToolResult {
+                    tool_use_id: r.id.clone(),
                     content: format_value(&v),
                     is_error: false,
-                }),
-                Err(e) => out.push(MessagePart::ToolResult {
-                    tool_use_id: id.clone(),
+                },
+                Err(e) => MessagePart::ToolResult {
+                    tool_use_id: r.id.clone(),
                     content: format!("{e}"),
                     is_error: true,
-                }),
+                },
             },
-        }
+        };
+        out[r.idx] = Some(part);
     }
-    out
+    out.into_iter().flatten().collect()
 }
 
 fn format_value(v: &Value) -> String {

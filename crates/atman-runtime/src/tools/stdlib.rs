@@ -848,8 +848,14 @@ async fn partition_and_gate(
 ) -> (Vec<Approved>, Vec<Approved>, Vec<Option<Value>>) {
     let total = prepared.len();
     let mut out_slots: Vec<Option<Value>> = vec![None; total];
-    let mut auto_batch = Vec::new();
-    let mut serial_batch = Vec::new();
+    struct ReadyEntry {
+        index: usize,
+        id: String,
+        name: String,
+        tool: std::sync::Arc<dyn Tool>,
+        call_args: ToolArgs,
+    }
+    let mut ready: Vec<ReadyEntry> = Vec::new();
     for entry in prepared {
         match entry {
             PreparedEntry::Failed { index, msg } => {
@@ -863,33 +869,55 @@ async fn partition_and_gate(
                 tool,
                 call_args,
             } => {
-                let level = tool.approval_level();
-                let approved =
-                    request_approval(ctx, &id, &name, &call_args, level, Some(tool.as_ref())).await;
-                match approved {
-                    ApprovalOutcome::Approve => {
-                        let a = Approved {
-                            index,
-                            id,
-                            tool,
-                            call_args,
-                        };
-                        if level == crate::tool::ApprovalLevel::Auto {
-                            auto_batch.push(a);
-                        } else {
-                            serial_batch.push(a);
-                        }
-                    }
-                    ApprovalOutcome::Deny { reason } => {
-                        let msg = build_error_result(
-                            ctx,
-                            &id,
-                            &format!("tool `{name}` denied by user: {reason}"),
-                        );
-                        emit_tool_result(ctx, &msg);
-                        out_slots[index] = Some(Value::Message(msg));
-                    }
+                ready.push(ReadyEntry {
+                    index,
+                    id,
+                    name,
+                    tool,
+                    call_args,
+                });
+            }
+        }
+    }
+    // Parallel: serial awaits hid all but the first pending node from the UI.
+    let gates = ready.iter().map(|r| {
+        let level = r.tool.approval_level();
+        request_approval(
+            ctx,
+            &r.id,
+            &r.name,
+            &r.call_args,
+            level,
+            Some(r.tool.as_ref()),
+        )
+    });
+    let outcomes = futures::future::join_all(gates).await;
+    let mut auto_batch = Vec::new();
+    let mut serial_batch = Vec::new();
+    for (r, outcome) in ready.into_iter().zip(outcomes) {
+        let level = r.tool.approval_level();
+        match outcome {
+            ApprovalOutcome::Approve => {
+                let a = Approved {
+                    index: r.index,
+                    id: r.id,
+                    tool: r.tool,
+                    call_args: r.call_args,
+                };
+                if level == crate::tool::ApprovalLevel::Auto {
+                    auto_batch.push(a);
+                } else {
+                    serial_batch.push(a);
                 }
+            }
+            ApprovalOutcome::Deny { reason } => {
+                let msg = build_error_result(
+                    ctx,
+                    &r.id,
+                    &format!("tool `{}` denied by user: {reason}", r.name),
+                );
+                emit_tool_result(ctx, &msg);
+                out_slots[r.index] = Some(Value::Message(msg));
             }
         }
     }
