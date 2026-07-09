@@ -192,6 +192,7 @@ async fn run_frames(
     let mut shutdown = handle.shutdown_rx.take();
     let mut sigterm = build_sigterm_stream();
     let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut slide_tick = tokio::time::interval(std::time::Duration::from_millis(ANIMATION_TICK_MS));
     animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let _reader_guard = ReaderGuard(reader_shutdown);
@@ -213,7 +214,10 @@ async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.has_running_workflow() || app.startup_slide_started.is_some() => {
+            _ = animation_tick.tick(), if app.has_running_workflow() => {
+                app.animation_frame = app.animation_frame.wrapping_add(1);
+            }
+            _ = slide_tick.tick(), if app.startup_slide_started.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
             key = key_events.recv() => {
@@ -1386,13 +1390,13 @@ fn handle_key(
                 return;
             }
         }
-        // Any other keystroke dismisses the card so the user can start
-        // typing a brand-new prompt without a residual splash. Kicks off
-        // the input-slide animation so the panel eases from center to
-        // bottom instead of teleporting.
-        if matches!(action, KeyAction::Char(_) | KeyAction::Submit) {
-            app.items.remove(0);
-            app.items_version = app.items_version.wrapping_add(1);
+        // Any non-digit key kicks off the slide. The card itself stays
+        // in items while the animation runs; render_frame drops it the
+        // frame after the slide reaches t=1 so the container is
+        // continuously present across every animation frame.
+        if matches!(action, KeyAction::Char(_) | KeyAction::Submit)
+            && app.startup_slide_started.is_none()
+        {
             app.startup_slide_started = Some(std::time::Instant::now());
         }
     }
@@ -1613,9 +1617,14 @@ fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-// Startup input slides from vertical center to bottom over this window.
-// 250 ms feels like a "settling" motion rather than an animation.
-const STARTUP_SLIDE_MS: u128 = 250;
+// Startup input eases from the overlay's centered slot to the normal
+// bottom position. 300 ms sits inside the 200–400 ms band that feels
+// like a real transition rather than a snap or a lag.
+const STARTUP_SLIDE_MS: u128 = 300;
+// Animation frame cadence while a slide is in flight. 60 fps so the
+// panel's x / y / width interpolation looks continuous instead of
+// two-or-three discrete jumps.
+const ANIMATION_TICK_MS: u64 = 16;
 
 fn compute_slide_progress(started: Option<std::time::Instant>) -> f32 {
     match started {
@@ -1632,6 +1641,19 @@ fn ease_out_cubic(t: f32) -> f32 {
     1.0 - inv * inv * inv
 }
 
+fn lerp_rect(a: ratatui::layout::Rect, b: ratatui::layout::Rect, t: f32) -> ratatui::layout::Rect {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |from: u16, to: u16| -> u16 {
+        (from as f32 + (to as f32 - from as f32) * t).round() as u16
+    };
+    ratatui::layout::Rect {
+        x: mix(a.x, b.x),
+        y: mix(a.y, b.y),
+        width: mix(a.width, b.width),
+        height: mix(a.height, b.height),
+    }
+}
+
 fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {
     let area = f.area();
     if area.width < 40 || area.height < 8 {
@@ -1641,10 +1663,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         f.render_widget(msg, area);
         return;
     }
-    // Startup overlay owns the full transcript rect. Sidebar and normal
-    // transcript rendering are suppressed while it's on-screen so the
-    // composition reads as one centered card, not a card cohabiting a
-    // busy dashboard.
+    // Startup overlay owns the whole transcript rect while the splash
+    // is up and while it's animating away. Sidebar is hidden for both
+    // phases so the container can freely lerp its rect from centered
+    // splash → docked bottom input without a sibling widget fighting
+    // for the same space.
     let startup_active = matches!(
         app.items.first(),
         Some(crate::app::OutputItem::StartupCard { .. })
@@ -1738,10 +1761,22 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     app.last_transcript_rect = Some(transcript_area);
     let effective_viewport = input_rect.y.saturating_sub(transcript_area.y).max(1);
     if startup_active {
-        // Overlay owns the whole transcript area. Skip the message
-        // paragraph entirely so no residual turn peeks around the card.
         if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
-            output::render_startup_overlay(f, l.transcript, version, recent, startup_animating);
+            // Overlay always renders while the card is active — the
+            // outer rect lerps every frame toward the input's docked
+            // position, so banner + sessions ride along and clip out
+            // as the card shrinks. That way the composition reads as
+            // one unified widget morphing to its new size + position,
+            // not "input escapes a frozen background".
+            let base = output::compute_startup_overlay(l.transcript, recent).area;
+            let overlay_area = if startup_animating {
+                let eased = ease_out_cubic(slide_progress);
+                lerp_rect(base, input_rect, eased)
+            } else {
+                base
+            };
+            f.render_widget(ratatui::widgets::Clear, l.transcript);
+            output::render_startup_overlay(f, overlay_area, version, recent, startup_animating);
         }
         app.resolve_scroll(0, effective_viewport);
         app.last_item_ranges.clear();
