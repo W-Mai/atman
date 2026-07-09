@@ -911,6 +911,26 @@ fn append_workflow_node_boxed(
     let mut child_ancestor_last: Vec<bool> = ancestor_last.to_vec();
     child_ancestor_last.push(is_last);
     let child_count = node.children.len();
+    let child_prefix_w = child_ancestor_last.len() as u16 * INDENT_PER_DEPTH;
+    if is_fanout_group(node)
+        && (2..=FANOUT_MAX_BRANCHES).contains(&child_count)
+        && panel_width >= FANOUT_MIN_WIDTH
+        && panel_width.saturating_sub(child_prefix_w) / child_count as u16 >= FANOUT_MIN_COL_WIDTH
+    {
+        append_fanout_horizontal_boxed(
+            out,
+            regions,
+            &node.children,
+            expanded_nodes,
+            &child_ancestor_last,
+            path,
+            panel_width,
+            animation_frame,
+            flow_running,
+            pending_counter,
+        );
+        return;
+    }
     for (i, child) in node.children.iter().enumerate() {
         let child_path = format!("{path}/{i}");
         let child_is_last = i + 1 == child_count;
@@ -927,6 +947,94 @@ fn append_workflow_node_boxed(
             flow_running,
             pending_counter,
         );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_fanout_horizontal_boxed(
+    out: &mut Vec<Line<'static>>,
+    regions: &mut Vec<NodeRegion>,
+    branches: &[atman_runtime::workflow::WorkflowNode],
+    expanded_nodes: &std::collections::HashSet<String>,
+    ancestor_last: &[bool],
+    parent_path: &str,
+    panel_width: u16,
+    animation_frame: u32,
+    flow_running: bool,
+    pending_counter: &mut u8,
+) {
+    let branch_count = branches.len();
+    let prefix_w = ancestor_last.len() as u16 * INDENT_PER_DEPTH;
+    let col_width = panel_width
+        .saturating_sub(prefix_w)
+        .saturating_div(branch_count as u16);
+    let start_row_before = out.len() as u16;
+    let mut per_branch_lines: Vec<Vec<Line<'static>>> = Vec::with_capacity(branch_count);
+    let mut per_branch_regions: Vec<Vec<NodeRegion>> = Vec::with_capacity(branch_count);
+    for (i, branch) in branches.iter().enumerate() {
+        let branch_path = format!("{parent_path}/{i}");
+        let is_last = i + 1 == branch_count;
+        let mut b_lines: Vec<Line<'static>> = Vec::new();
+        let mut b_regions: Vec<NodeRegion> = Vec::new();
+        append_workflow_node_boxed(
+            &mut b_lines,
+            &mut b_regions,
+            branch,
+            expanded_nodes,
+            &[],
+            is_last,
+            col_width,
+            &branch_path,
+            animation_frame,
+            flow_running,
+            pending_counter,
+        );
+        per_branch_lines.push(b_lines);
+        per_branch_regions.push(b_regions);
+    }
+    let max_height = per_branch_lines.iter().map(|b| b.len()).max().unwrap_or(0);
+    for row_i in 0..max_height {
+        let mut spans: Vec<Span<'static>> = tree_continuation_spans(ancestor_last, true);
+        for branch_lines in per_branch_lines.iter() {
+            let mut written: u16 = 0;
+            if let Some(line) = branch_lines.get(row_i) {
+                for span in line.spans.iter() {
+                    let content = span.content.as_ref();
+                    let mut used: u16 = 0;
+                    let mut taken = String::new();
+                    for ch in content.chars() {
+                        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                        if used + w > col_width.saturating_sub(written) {
+                            break;
+                        }
+                        taken.push(ch);
+                        used += w;
+                    }
+                    if !taken.is_empty() {
+                        spans.push(Span::styled(taken, span.style));
+                        written = written.saturating_add(used);
+                    }
+                    if written >= col_width {
+                        break;
+                    }
+                }
+            }
+            while written < col_width {
+                spans.push(Span::raw(" ".to_string()));
+                written += 1;
+            }
+        }
+        out.push(Line::from(spans));
+    }
+    for (i, branch_regions) in per_branch_regions.into_iter().enumerate() {
+        let col_shift = prefix_w + (i as u16) * col_width;
+        for mut r in branch_regions {
+            r.start_row = start_row_before.saturating_add(r.start_row);
+            r.end_row = start_row_before.saturating_add(r.end_row);
+            r.col_start = col_shift.saturating_add(r.col_start);
+            r.col_end = col_shift.saturating_add(r.col_end.min(col_width));
+            regions.push(r);
+        }
     }
 }
 

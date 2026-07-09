@@ -95,6 +95,93 @@ fn build_panel(
 }
 
 #[test]
+fn boxed_wide_terminal_lays_fanout_branches_horizontally() {
+    let branches = vec![
+        fanout_branch(0, vec![stmt_node("a", "leaf-a")]),
+        fanout_branch(1, vec![stmt_node("b", "leaf-b")]),
+        fanout_branch(2, vec![stmt_node("c", "leaf-c")]),
+    ];
+    let root = root_flow(branches);
+    let mut graph = WorkflowGraph::new(TurnId::now());
+    graph.root.push(root);
+    let expanded_nodes: HashSet<String> = HashSet::new();
+    let item = OutputItem::WorkflowPanel {
+        turn_index: 0,
+        graph,
+        expanded_nodes,
+        panel_expanded: true,
+        started_at: std::time::Instant::now(),
+        ended_at: None,
+    };
+    let ctx = RenderCtx {
+        expanded_tools: &Default::default(),
+        messages: &[],
+        animation_frame: 0,
+        panel_width: 200,
+    };
+    let (lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], 200, &ctx);
+    let flat: Vec<String> = lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    let joined = flat.join("\n");
+    let horizontal_row = flat.iter().any(|l| {
+        l.matches("branch[").count() >= 2 || (l.contains("branch[0]") && l.contains("branch[2]"))
+    });
+    assert!(
+        horizontal_row,
+        "expected 2+ branches on the same row, got:\n{joined}"
+    );
+    let branch_regions: Vec<_> = regions
+        .iter()
+        .filter(|r| r.path_key.contains('/'))
+        .collect();
+    let unique_col_starts: std::collections::HashSet<u16> =
+        branch_regions.iter().map(|r| r.col_start).collect();
+    assert!(
+        unique_col_starts.len() >= 3,
+        "expected at least 3 distinct column offsets for branch regions, got {}: {branch_regions:?}",
+        unique_col_starts.len()
+    );
+}
+
+#[test]
+fn boxed_narrow_terminal_keeps_fanout_vertical() {
+    let branches = vec![
+        fanout_branch(0, vec![stmt_node("a", "leaf-a")]),
+        fanout_branch(1, vec![stmt_node("b", "leaf-b")]),
+    ];
+    let root = root_flow(branches);
+    let mut graph = WorkflowGraph::new(TurnId::now());
+    graph.root.push(root);
+    let item = OutputItem::WorkflowPanel {
+        turn_index: 0,
+        graph,
+        expanded_nodes: HashSet::new(),
+        panel_expanded: true,
+        started_at: std::time::Instant::now(),
+        ended_at: None,
+    };
+    let ctx = RenderCtx {
+        expanded_tools: &Default::default(),
+        messages: &[],
+        animation_frame: 0,
+        panel_width: 80,
+    };
+    let (lines, _ranges, _regions, _rows) = build_lines_with_ranges(&[item], 80, &ctx);
+    let flat: Vec<String> = lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    for l in &flat {
+        assert!(
+            l.matches("branch[").count() <= 1,
+            "narrow panel should not put 2+ branches on the same row: {l:?}"
+        );
+    }
+}
+
+#[test]
 fn wide_terminal_lays_fanout_branches_horizontally() {
     let branches = vec![
         fanout_branch(0, vec![stmt_node("a", "leaf-a")]),
