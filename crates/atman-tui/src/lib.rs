@@ -258,7 +258,7 @@ async fn run_frames(
                             );
                         }
                         Some(Ok(CtEvent::Paste(s))) => {
-                            editor.insert_str(&s);
+                            editor.ingest_paste(&s);
                             interrupt_prompt = false;
                             app.refresh_popup(editor.buf());
                         }

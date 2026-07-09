@@ -99,6 +99,17 @@ pub fn display_width(input: &str) -> usize {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone)]
+pub struct PastedEntry {
+    pub placeholder: String,
+    pub content: String,
+}
+
+// Paste larger than these gets folded into a placeholder so the editor
+// doesn't drown in a hundred-line dump. Numbers match Gemini CLI.
+const PASTE_FOLD_LINE_THRESHOLD: usize = 5;
+const PASTE_FOLD_CHAR_THRESHOLD: usize = 500;
+
 #[derive(Default)]
 pub struct InputEditor {
     buf: String,
@@ -106,6 +117,8 @@ pub struct InputEditor {
     history: Vec<String>,
     history_idx: Option<usize>,
     stashed: Option<String>,
+    pending_pastes: Vec<PastedEntry>,
+    next_paste_index: u32,
 }
 
 impl InputEditor {
@@ -247,10 +260,20 @@ impl InputEditor {
     }
 
     pub fn submit(&mut self) -> Option<String> {
-        let line = std::mem::take(&mut self.buf);
+        let raw = std::mem::take(&mut self.buf);
         self.cursor = 0;
         self.history_idx = None;
         self.stashed = None;
+        let pending = std::mem::take(&mut self.pending_pastes);
+        self.next_paste_index = 0;
+        let mut line = raw;
+        for PastedEntry {
+            placeholder,
+            content,
+        } in &pending
+        {
+            line = line.replacen(placeholder, content, 1);
+        }
         if line.trim().is_empty() {
             return None;
         }
@@ -258,6 +281,37 @@ impl InputEditor {
             self.history.push(line.clone());
         }
         Some(line)
+    }
+
+    pub fn ingest_paste(&mut self, raw: &str) {
+        let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+        let line_count = normalized.matches('\n').count() + 1;
+        let char_count = normalized.chars().count();
+        if line_count > PASTE_FOLD_LINE_THRESHOLD || char_count > PASTE_FOLD_CHAR_THRESHOLD {
+            let placeholder = self.next_paste_placeholder(line_count, char_count);
+            self.insert_str(&placeholder);
+            self.pending_pastes.push(PastedEntry {
+                placeholder,
+                content: normalized,
+            });
+        } else {
+            self.insert_str(&normalized);
+        }
+    }
+
+    fn next_paste_placeholder(&mut self, lines: usize, chars: usize) -> String {
+        self.next_paste_index += 1;
+        let idx = self.next_paste_index;
+        let suffix = if idx == 1 {
+            String::new()
+        } else {
+            format!(" #{idx}")
+        };
+        format!("[Pasted Text: {lines} lines, {chars} chars{suffix}]")
+    }
+
+    pub fn pending_pastes(&self) -> &[PastedEntry] {
+        &self.pending_pastes
     }
 
     pub fn history_up(&mut self) {
@@ -449,6 +503,75 @@ mod tests {
         ed.insert_str("only\nline");
         ed.set_cursor_by_display(5, 0);
         assert_eq!(ed.cursor(), ed.buf().len());
+    }
+
+    #[test]
+    fn short_paste_is_inserted_verbatim() {
+        let mut ed = InputEditor::default();
+        ed.ingest_paste("just one line");
+        assert_eq!(ed.buf(), "just one line");
+        assert!(ed.pending_pastes().is_empty());
+    }
+
+    #[test]
+    fn multiline_paste_at_threshold_stays_inline() {
+        let mut ed = InputEditor::default();
+        ed.ingest_paste("a\nb\nc\nd\ne");
+        assert_eq!(ed.buf(), "a\nb\nc\nd\ne");
+        assert!(ed.pending_pastes().is_empty());
+    }
+
+    #[test]
+    fn long_paste_folds_into_placeholder() {
+        let mut ed = InputEditor::default();
+        let big = (0..10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ed.ingest_paste(&big);
+        assert!(ed.buf().starts_with("[Pasted Text: 10 lines"));
+        assert_eq!(ed.pending_pastes().len(), 1);
+        assert_eq!(ed.pending_pastes()[0].content, big);
+    }
+
+    #[test]
+    fn wide_paste_over_500_chars_folds() {
+        let mut ed = InputEditor::default();
+        let big = "x".repeat(600);
+        ed.ingest_paste(&big);
+        assert!(ed.buf().starts_with("[Pasted Text: 1 lines, 600 chars"));
+        assert_eq!(ed.pending_pastes()[0].content, big);
+    }
+
+    #[test]
+    fn submit_expands_placeholder_back_into_content() {
+        let mut ed = InputEditor::default();
+        ed.insert_str("before\n");
+        ed.ingest_paste("A\nB\nC\nD\nE\nF");
+        ed.insert_str("\nafter");
+        let out = ed.submit().unwrap();
+        assert!(out.starts_with("before\n"));
+        assert!(out.contains("A\nB\nC\nD\nE\nF"));
+        assert!(out.ends_with("\nafter"));
+        assert!(!out.contains("Pasted Text"));
+    }
+
+    #[test]
+    fn multiple_pastes_get_indexed_placeholders() {
+        let mut ed = InputEditor::default();
+        ed.ingest_paste("aaa\nbbb\nccc\nddd\neee\nfff");
+        ed.ingest_paste("111\n222\n333\n444\n555\n666");
+        assert_eq!(ed.pending_pastes().len(), 2);
+        assert!(ed.pending_pastes()[0].placeholder.contains("6 lines"));
+        assert!(ed.pending_pastes()[1].placeholder.contains("#2"));
+    }
+
+    #[test]
+    fn paste_normalizes_crlf() {
+        let mut ed = InputEditor::default();
+        ed.ingest_paste("a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        let out = ed.submit().unwrap();
+        assert_eq!(out, "a\nb\nc\nd\ne\nf");
     }
 
     #[test]
