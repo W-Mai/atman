@@ -67,7 +67,6 @@ pub struct AppState {
     pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
     pub history_search: crate::history_search_modal::HistorySearchModal,
     pub workflow_viewer: crate::workflow_viewer_modal::WorkflowViewerModal,
-    pub last_workflow_click: Option<(u16, u16, std::time::Instant)>,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,
@@ -149,23 +148,6 @@ impl AppState {
 
     pub fn close_workflow_viewer(&mut self) {
         self.workflow_viewer.close();
-    }
-
-    pub fn is_workflow_double_click(&self, col: u16, row: u16) -> bool {
-        match self.last_workflow_click {
-            Some((pc, pr, pt)) => {
-                pc == col && pr == row && pt.elapsed() < std::time::Duration::from_millis(300)
-            }
-            None => false,
-        }
-    }
-
-    pub fn remember_workflow_click(&mut self, col: u16, row: u16) {
-        self.last_workflow_click = Some((col, row, std::time::Instant::now()));
-    }
-
-    pub fn clear_workflow_click_memory(&mut self) {
-        self.last_workflow_click = None;
     }
 
     pub fn workflow_viewer_hit_test(&self, col: u16, row: u16) -> Option<(usize, String)> {

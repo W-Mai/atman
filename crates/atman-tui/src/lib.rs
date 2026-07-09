@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use crossterm::event::{Event as CtEvent, MouseButton, MouseEventKind};
+use crossterm::event::{Event as CtEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Alignment;
@@ -267,22 +267,16 @@ async fn run_frames(
                                 if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
-                                    app.clear_workflow_click_memory();
                                     app.toggle_workflow_node(panel_idx, &node_id);
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
                                         app.items.get(idx)
                                 {
-                                    let dbl =
-                                        app.is_workflow_double_click(me.column, me.row);
-                                    app.remember_workflow_click(me.column, me.row);
-                                    if dbl {
+                                    if me.modifiers.contains(KeyModifiers::SHIFT) {
                                         app.open_workflow_viewer(idx);
                                     } else {
                                         app.toggle_workflow_panel_expansion(idx);
                                     }
-                                } else {
-                                    app.clear_workflow_click_memory();
                                 }
                             }
                             interrupt_prompt = false;

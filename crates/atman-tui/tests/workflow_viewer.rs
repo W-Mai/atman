@@ -50,31 +50,12 @@ fn make_panel_item() -> OutputItem {
 }
 
 #[test]
-fn double_click_within_300ms_opens_viewer() {
+fn open_workflow_viewer_flips_flag_and_records_index() {
     let mut app = AppState::new("s".into(), None);
     app.items.push(make_panel_item());
-    assert!(!app.is_workflow_double_click(10, 5));
-    app.remember_workflow_click(10, 5);
-    assert!(app.is_workflow_double_click(10, 5));
     app.open_workflow_viewer(0);
     assert!(app.workflow_viewer.open);
     assert_eq!(app.workflow_viewer.panel_item_index, 0);
-}
-
-#[test]
-fn double_click_requires_same_cell() {
-    let mut app = AppState::new("s".into(), None);
-    app.remember_workflow_click(10, 5);
-    assert!(!app.is_workflow_double_click(11, 5));
-    assert!(!app.is_workflow_double_click(10, 6));
-}
-
-#[test]
-fn double_click_memory_cleared_when_needed() {
-    let mut app = AppState::new("s".into(), None);
-    app.remember_workflow_click(10, 5);
-    app.clear_workflow_click_memory();
-    assert!(!app.is_workflow_double_click(10, 5));
 }
 
 #[test]
