@@ -2223,15 +2223,14 @@ fn handle_sidebar_builtin(
     };
     let mode = match arg {
         "" | "toggle" => {
-            reporter.info("[atman] :sidebar toggle | on | off | auto");
+            reporter.info("[atman] :sidebar toggle | on | off");
             return;
         }
-        "on" => atman_tui::sidebar::SidebarMode::Force(true),
-        "off" => atman_tui::sidebar::SidebarMode::Force(false),
-        "auto" => atman_tui::sidebar::SidebarMode::Auto,
+        "on" | "open" => atman_tui::sidebar::SidebarMode::Open,
+        "off" | "close" | "closed" => atman_tui::sidebar::SidebarMode::Closed,
         other => {
             reporter.error(format!(
-                "[atman] :sidebar: unknown arg `{other}` (try on/off/auto)"
+                "[atman] :sidebar: unknown arg `{other}` (try on/off)"
             ));
             return;
         }

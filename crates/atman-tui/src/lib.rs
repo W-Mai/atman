@@ -1490,7 +1490,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     } else {
         (pending_count.min(9) as u16).saturating_add(1)
     };
-    let l = layout::compute_ex(area, show_sidebar, status_height);
+    let l = layout::compute_ex(area, status_height);
+    let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
     // Breathing room on the transcript's left and right edges so message
     // content isn't flush with the terminal border or the sidebar. Input
     // + approvals still center themselves off the un-padded transcript
@@ -1559,7 +1560,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             ratatui::widgets::Paragraph::new(lines_owned).scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, transcript_area);
     }
-    if let Some(area) = l.sidebar {
+    if let Some(area) = sidebar_rect {
         sidebar::render(
             f,
             area,

@@ -1,44 +1,58 @@
 use ratatui::layout::{Constraint, Direction, Layout as RatatuiLayout, Rect};
 
-pub const SIDEBAR_WIDTH: u16 = 42;
-pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 110;
+// Kept as public constants so the palette / status bar helpers can still
+// query "will the sidebar be visible?" without duplicating the width math.
+pub const SIDEBAR_WIDTH: u16 = 48;
+pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 80;
 
-// AppLayout no longer carves out fixed slots for input / approvals: those
-// draw as floating overlays on top of the transcript so the user still
-// sees message content "underneath" the input as they scroll.
+// AppLayout only reserves status + transcript. Input, approvals, and the
+// sidebar all draw as floating overlays on top of the transcript so
+// message content still visually flows underneath them.
 #[derive(Debug, Clone, Copy)]
 pub struct AppLayout {
     pub status: Rect,
     pub transcript: Rect,
-    pub sidebar: Option<Rect>,
 }
 
-pub fn compute(area: Rect, show_sidebar: bool) -> AppLayout {
-    compute_ex(area, show_sidebar, 1)
+pub fn compute(area: Rect) -> AppLayout {
+    compute_ex(area, 1)
 }
 
-pub fn compute_ex(area: Rect, show_sidebar: bool, status_height: u16) -> AppLayout {
+pub fn compute_ex(area: Rect, status_height: u16) -> AppLayout {
     let vertical = RatatuiLayout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(status_height.max(1)), Constraint::Min(1)])
         .split(area);
-    let status = vertical[0];
-    let mid = vertical[1];
-
-    let (transcript, sidebar) = if show_sidebar && area.width >= SIDEBAR_MIN_TOTAL_WIDTH {
-        let cols = RatatuiLayout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(1), Constraint::Length(SIDEBAR_WIDTH)])
-            .split(mid);
-        (cols[0], Some(cols[1]))
-    } else {
-        (mid, None)
-    };
     AppLayout {
-        status,
-        transcript,
-        sidebar,
+        status: vertical[0],
+        transcript: vertical[1],
     }
+}
+
+pub fn compute_sidebar_rect(area: Rect, show: bool) -> Option<Rect> {
+    if !show {
+        return None;
+    }
+    if area.width < SIDEBAR_MIN_TOTAL_WIDTH {
+        return None;
+    }
+    let width = SIDEBAR_WIDTH;
+    let height = 24u16.min(area.height.saturating_sub(4));
+    if height == 0 {
+        return None;
+    }
+    let x = area
+        .x
+        .saturating_add(area.width)
+        .saturating_sub(width)
+        .saturating_sub(1);
+    let y = area.y.saturating_add(2);
+    Some(Rect {
+        x,
+        y,
+        width,
+        height,
+    })
 }
 
 pub fn compute_input_rect(transcript: Rect, buf_lines: u16) -> Rect {
@@ -101,35 +115,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wide_area_shows_sidebar() {
-        let area = Rect::new(0, 0, 140, 40);
-        let l = compute(area, true);
-        assert!(l.sidebar.is_some());
-        assert_eq!(l.sidebar.unwrap().width, SIDEBAR_WIDTH);
-        assert_eq!(l.transcript.width, 140 - SIDEBAR_WIDTH);
-    }
-
-    #[test]
-    fn narrow_area_hides_sidebar() {
-        let area = Rect::new(0, 0, 80, 40);
-        let l = compute(area, true);
-        assert!(l.sidebar.is_none());
-        assert_eq!(l.transcript.width, 80);
-    }
-
-    #[test]
-    fn show_sidebar_false_forces_hide() {
-        let area = Rect::new(0, 0, 200, 40);
-        let l = compute(area, false);
-        assert!(l.sidebar.is_none());
-    }
-
-    #[test]
     fn transcript_extends_full_height_below_status() {
         let area = Rect::new(0, 0, 80, 40);
-        let l = compute_ex(area, false, 1);
+        let l = compute_ex(area, 1);
         assert_eq!(l.transcript.y, 1);
         assert_eq!(l.transcript.height, 39);
+    }
+
+    #[test]
+    fn sidebar_hidden_when_closed() {
+        let area = Rect::new(0, 0, 200, 40);
+        assert!(compute_sidebar_rect(area, false).is_none());
+    }
+
+    #[test]
+    fn sidebar_hidden_on_narrow_terminals() {
+        let area = Rect::new(0, 0, 60, 40);
+        assert!(compute_sidebar_rect(area, true).is_none());
+    }
+
+    #[test]
+    fn sidebar_floats_in_top_right_when_open() {
+        let area = Rect::new(0, 1, 140, 40);
+        let rect = compute_sidebar_rect(area, true).unwrap();
+        assert_eq!(rect.width, SIDEBAR_WIDTH);
+        assert_eq!(rect.x + rect.width, area.x + area.width - 1);
+        assert_eq!(rect.y, area.y + 2);
     }
 
     #[test]

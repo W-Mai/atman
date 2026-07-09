@@ -20,31 +20,36 @@ pub struct SidebarInputs<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SidebarMode {
     #[default]
-    Auto,
-    Force(bool),
+    Open,
+    Closed,
 }
 
 impl SidebarMode {
     pub fn toggle(self) -> Self {
         match self {
-            Self::Auto => Self::Force(false),
-            Self::Force(false) => Self::Force(true),
-            Self::Force(true) => Self::Auto,
+            Self::Open => Self::Closed,
+            Self::Closed => Self::Open,
         }
     }
 
-    pub fn resolve(self, wide_enough: bool) -> bool {
-        match self {
-            Self::Auto => wide_enough,
-            Self::Force(v) => v,
-        }
+    // The old `resolve(wide_enough)` API let width auto-hide the sidebar;
+    // now the mode is the single source of truth and the layout code
+    // separately guards against tiny terminals.
+    pub fn resolve(self, _wide_enough: bool) -> bool {
+        matches!(self, Self::Open)
     }
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
+    // Clear underneath so the transcript rows behind the card don't
+    // bleed through when messages scroll past the sidebar's y range.
+    f.render_widget(ratatui::widgets::Clear, area);
     let outer = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" atman ")
+        .padding(ratatui::widgets::Padding::horizontal(1));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
@@ -382,26 +387,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sidebar_mode_toggle_cycles_through_states() {
-        let m = SidebarMode::Auto;
-        let m = m.toggle();
-        assert_eq!(m, SidebarMode::Force(false));
-        let m = m.toggle();
-        assert_eq!(m, SidebarMode::Force(true));
-        let m = m.toggle();
-        assert_eq!(m, SidebarMode::Auto);
+    fn sidebar_mode_toggle_flips_open_and_closed() {
+        assert_eq!(SidebarMode::Open.toggle(), SidebarMode::Closed);
+        assert_eq!(SidebarMode::Closed.toggle(), SidebarMode::Open);
     }
 
     #[test]
-    fn sidebar_mode_auto_follows_width() {
-        assert!(!SidebarMode::Auto.resolve(false));
-        assert!(SidebarMode::Auto.resolve(true));
+    fn sidebar_mode_open_resolves_regardless_of_width() {
+        assert!(SidebarMode::Open.resolve(false));
+        assert!(SidebarMode::Open.resolve(true));
     }
 
     #[test]
-    fn sidebar_mode_force_ignores_width() {
-        assert!(!SidebarMode::Force(false).resolve(true));
-        assert!(SidebarMode::Force(true).resolve(false));
+    fn sidebar_mode_closed_always_hides() {
+        assert!(!SidebarMode::Closed.resolve(true));
+        assert!(!SidebarMode::Closed.resolve(false));
+    }
+
+    #[test]
+    fn sidebar_mode_default_is_open() {
+        assert_eq!(SidebarMode::default(), SidebarMode::Open);
     }
 
     #[test]
