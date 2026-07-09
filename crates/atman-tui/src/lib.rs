@@ -263,7 +263,22 @@ async fn run_frames(
                             app.refresh_popup(editor.buf());
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
-                            if let MouseEventKind::Down(MouseButton::Left) = me.kind {
+                            if let MouseEventKind::Down(MouseButton::Left) = me.kind
+                                && let Some(rect) = app.input_rect
+                                && rect_contains(rect, me.column, me.row)
+                            {
+                                let inner_x = me.column.saturating_sub(rect.x + 1);
+                                let inner_y = me.row.saturating_sub(rect.y + 1);
+                                // Strip the prompt "❯ " when clicking on the
+                                // first row so column 0 lands on the first
+                                // char, not on the arrow itself.
+                                let display_col = if inner_y == 0 {
+                                    inner_x.saturating_sub(2)
+                                } else {
+                                    inner_x
+                                };
+                                editor.set_cursor_by_display(inner_y as usize, display_col);
+                            } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
@@ -1447,6 +1462,13 @@ fn handle_key(
     if edited {
         app.refresh_popup(editor.buf());
     }
+}
+
+fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
 }
 
 fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {

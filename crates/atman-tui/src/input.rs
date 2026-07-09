@@ -189,6 +189,42 @@ impl InputEditor {
         self.cursor = self.buf.len();
     }
 
+    // Walks by char width, not char count, so double-wide CJK chars occupy
+    // the two display columns they visually take.
+    pub fn set_cursor_by_display(&mut self, line: usize, display_col: u16) {
+        use unicode_width::UnicodeWidthChar;
+        self.consume_history_view();
+        let mut line_start = 0usize;
+        for _ in 0..line {
+            match self.buf[line_start..].find('\n') {
+                Some(nl) => line_start += nl + 1,
+                None => {
+                    self.cursor = self.buf.len();
+                    return;
+                }
+            }
+        }
+        let line_end = self.buf[line_start..]
+            .find('\n')
+            .map(|n| line_start + n)
+            .unwrap_or(self.buf.len());
+        let slice = &self.buf[line_start..line_end];
+        let mut used: u16 = 0;
+        let mut byte_offset = line_start;
+        for c in slice.chars() {
+            let w = UnicodeWidthChar::width(c).unwrap_or(0) as u16;
+            if used.saturating_add(w) > display_col {
+                break;
+            }
+            used = used.saturating_add(w);
+            byte_offset += c.len_utf8();
+            if used >= display_col {
+                break;
+            }
+        }
+        self.cursor = byte_offset;
+    }
+
     pub fn clear(&mut self) -> String {
         self.consume_history_view();
         self.cursor = 0;
@@ -381,6 +417,47 @@ mod tests {
         assert_eq!(ed.buf(), "one");
         ed.history_down();
         assert_eq!(ed.buf(), "wip");
+    }
+
+    #[test]
+    fn set_cursor_by_display_ascii_first_line() {
+        let mut ed = InputEditor::default();
+        ed.insert_str("hello world");
+        ed.set_cursor_by_display(0, 6);
+        assert_eq!(&ed.buf()[..ed.cursor()], "hello ");
+    }
+
+    #[test]
+    fn set_cursor_by_display_second_line() {
+        let mut ed = InputEditor::default();
+        ed.insert_str("first\nsecond");
+        ed.set_cursor_by_display(1, 3);
+        assert_eq!(&ed.buf()[..ed.cursor()], "first\nsec");
+    }
+
+    #[test]
+    fn set_cursor_by_display_past_end_of_line_clamps_to_line_end() {
+        let mut ed = InputEditor::default();
+        ed.insert_str("short\nlonger line");
+        ed.set_cursor_by_display(0, 99);
+        assert_eq!(&ed.buf()[..ed.cursor()], "short");
+    }
+
+    #[test]
+    fn set_cursor_by_display_past_last_line_clamps_to_buf_end() {
+        let mut ed = InputEditor::default();
+        ed.insert_str("only\nline");
+        ed.set_cursor_by_display(5, 0);
+        assert_eq!(ed.cursor(), ed.buf().len());
+    }
+
+    #[test]
+    fn set_cursor_by_display_cjk_double_width() {
+        let mut ed = InputEditor::default();
+        ed.insert_str("你好world");
+        // 你(2) 好(2) w(1) → display col 5 lands right before 'o'.
+        ed.set_cursor_by_display(0, 5);
+        assert_eq!(&ed.buf()[..ed.cursor()], "你好w");
     }
 
     #[test]
