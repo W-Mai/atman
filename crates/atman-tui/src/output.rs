@@ -498,11 +498,11 @@ fn render_workflow_panel_with_regions(
                     node,
                     expanded_nodes,
                     0,
+                    panel_width,
                     &path,
                     animation_frame,
                     running,
                     &mut pending_counter,
-                    panel_width,
                 );
             }
             lines.push(Line::raw(""));
@@ -762,36 +762,35 @@ fn append_workflow_node_boxed(
     regions: &mut Vec<NodeRegion>,
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
-    depth: u16,
+    col0: u16,
+    outer_width: u16,
     path: &str,
     animation_frame: u32,
     flow_running: bool,
     pending_counter: &mut u8,
-    panel_width: u16,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
-    let indent = boxed_indent(depth, panel_width);
-    let outer_width = panel_width.saturating_sub(indent.saturating_mul(2));
     if outer_width < 8 {
         return;
     }
-    let (status_glyph, border_style, spinner) = match node.status {
-        NodeStatus::Ok => ("✓", Style::default().fg(Color::Green), None),
-        NodeStatus::Err => ("✗", Style::default().fg(Color::Red), None),
-        NodeStatus::Cancelled => ("⊘", Style::default().fg(Color::DarkGray), None),
+    let mut border_style = match node.status {
+        NodeStatus::Ok => Style::default().fg(Color::Green),
+        NodeStatus::Err => Style::default().fg(Color::Red),
+        NodeStatus::Cancelled => Style::default().fg(Color::DarkGray),
+        NodeStatus::Running | NodeStatus::Pending => Style::default().fg(Color::Cyan),
+    };
+    let status_glyph = match node.status {
+        NodeStatus::Ok => "✓",
+        NodeStatus::Err => "✗",
+        NodeStatus::Cancelled => "⊘",
         NodeStatus::Running | NodeStatus::Pending => {
             if flow_running {
-                (
-                    spinner_char(animation_frame),
-                    Style::default().fg(Color::Cyan),
-                    Some(()),
-                )
+                spinner_char(animation_frame)
             } else {
-                ("○", Style::default().fg(Color::DarkGray), None)
+                "○"
             }
         }
     };
-    let _ = spinner;
     let (kind_glyph, _kind_color) = match &node.kind {
         WorkflowNodeKind::Flow { .. } => ("⚡", Color::Cyan),
         WorkflowNodeKind::Subflow { .. } => ("↳", Color::Cyan),
@@ -809,7 +808,6 @@ fn append_workflow_node_boxed(
         _ => node.label.clone(),
     };
     let mut approval_hotkey: Option<u8> = None;
-    let mut border_style = border_style;
     let mut auto_expand = false;
     if let Some(ApprovalState::Pending { .. }) = &node.approval {
         *pending_counter = pending_counter.saturating_add(1);
@@ -823,17 +821,36 @@ fn append_workflow_node_boxed(
     } else if matches!(&node.approval, Some(ApprovalState::Denied { .. })) {
         border_style = Style::default().fg(Color::Red);
     }
-    let is_expanded = auto_expand || expanded_nodes.contains(path);
+    let has_children = !node.children.is_empty();
+    let is_expanded = auto_expand || expanded_nodes.contains(path) || has_children;
+    let inner_col0 = col0.saturating_add(2);
+    let inner_outer = outer_width.saturating_sub(4);
     let mut inner_lines: Vec<Line<'static>> = Vec::new();
+    let mut child_regions: Vec<NodeRegion> = Vec::new();
     if is_expanded {
         collect_boxed_details(node, &mut inner_lines);
+        for (i, child) in node.children.iter().enumerate() {
+            let child_path = format!("{path}/{i}");
+            append_workflow_node_boxed(
+                &mut inner_lines,
+                &mut child_regions,
+                child,
+                expanded_nodes,
+                inner_col0,
+                inner_outer,
+                &child_path,
+                animation_frame,
+                flow_running,
+                pending_counter,
+            );
+        }
     }
     let start_row = out.len() as u16;
     let rect = append_box(
         out,
         BoxSpec {
             row0: start_row,
-            col0: indent,
+            col0,
             outer_width,
             inner_lines,
             border_style,
@@ -843,6 +860,12 @@ fn append_workflow_node_boxed(
             approval_hotkey,
         },
     );
+    let offset = rect.row0.saturating_add(1);
+    for mut r in child_regions {
+        r.start_row = r.start_row.saturating_add(offset);
+        r.end_row = r.end_row.saturating_add(offset);
+        regions.push(r);
+    }
     regions.push(NodeRegion {
         panel_item_index: 0,
         path_key: path.to_string(),
@@ -851,27 +874,6 @@ fn append_workflow_node_boxed(
         col_start: Some(rect.col0),
         col_end: Some(rect.col_end()),
     });
-    for (i, child) in node.children.iter().enumerate() {
-        let child_path = format!("{path}/{i}");
-        append_workflow_node_boxed(
-            out,
-            regions,
-            child,
-            expanded_nodes,
-            depth.saturating_add(1),
-            &child_path,
-            animation_frame,
-            flow_running,
-            pending_counter,
-            panel_width,
-        );
-    }
-}
-
-fn boxed_indent(depth: u16, panel_width: u16) -> u16 {
-    let target = depth.saturating_mul(2);
-    let cap = panel_width.saturating_sub(40) / 2;
-    target.min(cap)
 }
 
 fn collect_boxed_details(
