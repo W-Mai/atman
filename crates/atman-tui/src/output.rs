@@ -359,61 +359,163 @@ fn user_message_bg() -> Color {
     Color::Rgb(38, 42, 54)
 }
 
-// Rows the startup card reserves for the floating input to slot into
-// (1 top border + 3 content + 1 bottom border, matching the default
-// input_rect height). Two extra blank rows top+bottom pad the slot.
-pub const STARTUP_INPUT_SLOT_ROWS: u16 = 5;
-pub const STARTUP_INPUT_SLOT_PAD: u16 = 1;
+// The overlay is a self-contained composition rendered on top of the
+// transcript area. Content is laid out as:
+//   banner (8 rows)
+//   1 pad row
+//   [input slot: 5 rows]
+//   1 pad row
+//   sessions header + rows
+//   1 pad row
+//   hint line
+const STARTUP_INPUT_SLOT_ROWS: u16 = 5;
+const STARTUP_INPUT_SLOT_PAD: u16 = 1;
+const STARTUP_BANNER: &[&str] = &[
+    " █████╗ ████████╗███╗   ███╗ █████╗ ███╗   ██╗",
+    "██╔══██╗╚══██╔══╝████╗ ████║██╔══██╗████╗  ██║",
+    "███████║   ██║   ██╔████╔██║███████║██╔██╗ ██║",
+    "██╔══██║   ██║   ██║╚██╔╝██║██╔══██║██║╚██╗██║",
+    "██║  ██║   ██║   ██║ ╚═╝ ██║██║  ██║██║ ╚████║",
+    "╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝",
+];
 
-fn startup_banner_lines(version: &str) -> Vec<Line<'static>> {
-    let logo_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "       █████╗ ████████╗███╗   ███╗ █████╗ ███╗   ██╗",
-            logo_style,
-        )),
-        Line::from(Span::styled(
-            "      ██╔══██╗╚══██╔══╝████╗ ████║██╔══██╗████╗  ██║",
-            logo_style,
-        )),
-        Line::from(Span::styled(
-            "      ███████║   ██║   ██╔████╔██║███████║██╔██╗ ██║",
-            logo_style,
-        )),
-        Line::from(Span::styled(
-            "      ██╔══██║   ██║   ██║╚██╔╝██║██╔══██║██║╚██╗██║",
-            logo_style,
-        )),
-        Line::from(Span::styled(
-            "      ██║  ██║   ██║   ██║ ╚═╝ ██║██║  ██║██║ ╚████║",
-            logo_style,
-        )),
-        Line::from(Span::styled(
-            "      ╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝",
-            logo_style,
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("             agentic coding in your terminal · v{version}"),
-            Style::default().fg(Color::DarkGray),
-        )),
-    ]
+fn startup_banner_width() -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    STARTUP_BANNER
+        .iter()
+        .map(|r| r.width() as u16)
+        .max()
+        .unwrap_or(0)
 }
 
-pub fn startup_input_slot_top_row(version: &str) -> u16 {
-    startup_banner_lines(version).len() as u16 + STARTUP_INPUT_SLOT_PAD
+pub struct StartupOverlayLayout {
+    pub area: ratatui::layout::Rect,
+    pub input_slot: ratatui::layout::Rect,
+    pub overlay_width: u16,
 }
 
-fn render_startup_card(
+// The banner is the narrowest sensible width; the sessions list may push
+// wider. Cap so we never spill past the transcript.
+fn overlay_width(recent: &[crate::app::StartupSessionEntry], area_width: u16) -> u16 {
+    let banner = startup_banner_width();
+    let sessions_w: u16 = recent.iter().map(session_row_width).max().unwrap_or(0);
+    let hint_w = "Type 1-9 to resume · start typing to begin a new session"
+        .chars()
+        .count() as u16;
+    banner
+        .max(sessions_w)
+        .max(hint_w)
+        .saturating_add(4)
+        .min(area_width)
+}
+
+fn session_row_width(entry: &crate::app::StartupSessionEntry) -> u16 {
+    let title = entry
+        .goal
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&entry.short_id);
+    // "  N  title(32)  age(10) N events"
+    (2 + 3 + title.chars().count().max(32) + 12 + 12) as u16
+}
+
+pub fn compute_startup_overlay(
+    area: ratatui::layout::Rect,
+    recent: &[crate::app::StartupSessionEntry],
+) -> StartupOverlayLayout {
+    let banner_h = STARTUP_BANNER.len() as u16 + 2;
+    let sessions_h: u16 = if recent.is_empty() {
+        3
+    } else {
+        (2 + recent.len() as u16 + 2).min(15)
+    };
+    let hint_h: u16 = 2;
+    let total_h = banner_h
+        + STARTUP_INPUT_SLOT_PAD
+        + STARTUP_INPUT_SLOT_ROWS
+        + STARTUP_INPUT_SLOT_PAD
+        + sessions_h
+        + hint_h;
+    let width = overlay_width(recent, area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(total_h) / 2;
+    let overlay = ratatui::layout::Rect {
+        x,
+        y,
+        width,
+        height: total_h.min(area.height),
+    };
+    let slot_y = overlay.y + banner_h + STARTUP_INPUT_SLOT_PAD;
+    let input_slot = ratatui::layout::Rect {
+        x: overlay.x,
+        y: slot_y,
+        width: overlay.width,
+        height: STARTUP_INPUT_SLOT_ROWS,
+    };
+    StartupOverlayLayout {
+        area: overlay,
+        input_slot,
+        overlay_width: width,
+    }
+}
+
+pub fn render_startup_overlay(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
     version: &str,
     recent: &[crate::app::StartupSessionEntry],
-) -> Vec<Line<'static>> {
-    let mut lines = startup_banner_lines(version);
-    // Reserved gap where the floating input will render. Padding above +
-    // below keeps a hairline of transcript around the panel edge.
+    dim: bool,
+) -> StartupOverlayLayout {
+    let layout = compute_startup_overlay(area, recent);
+    // Repaint the entire transcript area first so any prior turn behind
+    // the overlay stops bleeding through.
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let logo_style = {
+        let mut s = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        if dim {
+            s = s.add_modifier(Modifier::DIM);
+        }
+        s
+    };
+    let subtle = {
+        let mut s = Style::default().fg(Color::DarkGray);
+        if dim {
+            s = s.add_modifier(Modifier::DIM);
+        }
+        s
+    };
+    let bold_plain = {
+        let mut s = Style::default().add_modifier(Modifier::BOLD);
+        if dim {
+            s = s.add_modifier(Modifier::DIM);
+        }
+        s
+    };
+    let cyan_plain = {
+        let mut s = Style::default().fg(Color::Cyan);
+        if dim {
+            s = s.add_modifier(Modifier::DIM);
+        }
+        s
+    };
+
+    lines.push(Line::from(""));
+    for row in STARTUP_BANNER {
+        lines.push(Line::from(Span::styled((*row).to_string(), logo_style)).centered());
+    }
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(Span::styled(
+            format!("agentic coding in your terminal · v{version}"),
+            subtle,
+        ))
+        .centered(),
+    );
+
     for _ in 0..STARTUP_INPUT_SLOT_PAD {
         lines.push(Line::from(""));
     }
@@ -423,42 +525,67 @@ fn render_startup_card(
     for _ in 0..STARTUP_INPUT_SLOT_PAD {
         lines.push(Line::from(""));
     }
+
     if recent.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "    No previous sessions in this project yet.",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(
+            Line::from(Span::styled(
+                "No previous sessions in this project yet.".to_string(),
+                subtle,
+            ))
+            .centered(),
+        );
     } else {
-        lines.push(Line::from(Span::styled(
-            "    Recent sessions in this project:",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
+        lines.push(
+            Line::from(Span::styled(
+                "Recent sessions in this project".to_string(),
+                bold_plain,
+            ))
+            .centered(),
+        );
         lines.push(Line::from(""));
         for (i, entry) in recent.iter().enumerate() {
-            let idx = format!("    {}  ", i + 1);
             let title = entry
                 .goal
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&entry.short_id);
-            let title_col = format!("{title:<32}");
-            let age = format!(" {:<10}", entry.age_label);
+            let title_col = format!("{:<32}", clamp_len(title, 32));
+            let age_col = format!("{:<10}", entry.age_label);
             let events = format!("{} events", entry.event_count);
-            lines.push(Line::from(vec![
-                Span::styled(idx, Style::default().fg(Color::Cyan)),
-                Span::styled(title_col, Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(age, Style::default().fg(Color::DarkGray)),
-                Span::styled(events, Style::default().fg(Color::DarkGray)),
-            ]));
+            lines.push(
+                Line::from(vec![
+                    Span::styled(format!(" {}  ", i + 1), cyan_plain),
+                    Span::styled(title_col, bold_plain),
+                    Span::styled(format!(" {age_col}"), subtle),
+                    Span::styled(events, subtle),
+                ])
+                .centered(),
+            );
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "    Type 1-9 to resume · start typing to begin a new session",
-        Style::default().fg(Color::DarkGray),
-    )));
-    lines.push(Line::from(""));
-    lines
+    lines.push(
+        Line::from(Span::styled(
+            "Type 1-9 to resume · start typing to begin a new session".to_string(),
+            subtle,
+        ))
+        .centered(),
+    );
+
+    let para =
+        ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(para, layout.area);
+    layout
+}
+
+fn clamp_len(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
@@ -493,7 +620,11 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
     let mut lines = match item {
         OutputItem::UserTurn { text } => render_user_turn(text, ctx.panel_width),
-        OutputItem::StartupCard { version, recent } => render_startup_card(version, recent),
+        // StartupCard is drawn as a full-frame overlay (see
+        // render_startup_overlay in lib.rs), never as a transcript row.
+        // We keep the variant in items so keyboard dismiss + slide
+        // animation can drive it, but layout-wise it contributes nothing.
+        OutputItem::StartupCard { .. } => Vec::new(),
         OutputItem::AssistantMd { md, streaming } => {
             let mut lines: Vec<Line<'static>> = Vec::new();
             // Gutter row sits above the body so markdown line indentation
