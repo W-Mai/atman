@@ -487,7 +487,27 @@ fn render_workflow_panel_with_regions(
     let mut lines = vec![header];
     let mut regions: Vec<NodeRegion> = Vec::new();
     let mut pending_counter: u8 = 0;
+    let boxed = std::env::var_os("ATMAN_BOXED_WORKFLOW").is_some();
     if panel_expanded {
+        if boxed {
+            for (i, node) in graph.root.iter().enumerate() {
+                let path = format!("{i}");
+                append_workflow_node_boxed(
+                    &mut lines,
+                    &mut regions,
+                    node,
+                    expanded_nodes,
+                    0,
+                    &path,
+                    animation_frame,
+                    running,
+                    &mut pending_counter,
+                    panel_width,
+                );
+            }
+            lines.push(Line::raw(""));
+            return (lines, regions);
+        }
         let child_count = graph.root.len();
         for (i, node) in graph.root.iter().enumerate() {
             let is_last = i + 1 == child_count;
@@ -734,6 +754,164 @@ fn append_fanout_horizontal(
         }
     }
     let _ = (fork_row, merge_row);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_workflow_node_boxed(
+    out: &mut Vec<Line<'static>>,
+    regions: &mut Vec<NodeRegion>,
+    node: &atman_runtime::workflow::WorkflowNode,
+    expanded_nodes: &std::collections::HashSet<String>,
+    depth: u16,
+    path: &str,
+    animation_frame: u32,
+    flow_running: bool,
+    pending_counter: &mut u8,
+    panel_width: u16,
+) {
+    use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
+    let indent = boxed_indent(depth, panel_width);
+    let outer_width = panel_width.saturating_sub(indent.saturating_mul(2));
+    if outer_width < 8 {
+        return;
+    }
+    let (status_glyph, border_style, spinner) = match node.status {
+        NodeStatus::Ok => ("✓", Style::default().fg(Color::Green), None),
+        NodeStatus::Err => ("✗", Style::default().fg(Color::Red), None),
+        NodeStatus::Cancelled => ("⊘", Style::default().fg(Color::DarkGray), None),
+        NodeStatus::Running | NodeStatus::Pending => {
+            if flow_running {
+                (
+                    spinner_char(animation_frame),
+                    Style::default().fg(Color::Cyan),
+                    Some(()),
+                )
+            } else {
+                ("○", Style::default().fg(Color::DarkGray), None)
+            }
+        }
+    };
+    let _ = spinner;
+    let (kind_glyph, _kind_color) = match &node.kind {
+        WorkflowNodeKind::Flow { .. } => ("⚡", Color::Cyan),
+        WorkflowNodeKind::Subflow { .. } => ("↳", Color::Cyan),
+        WorkflowNodeKind::Stmt { node_kind } => stmt_kind_glyph(node_kind),
+        WorkflowNodeKind::ToolCall { .. } => ("🔧", Color::Blue),
+        WorkflowNodeKind::FanoutBranch { .. } => ("⇉", Color::Magenta),
+    };
+    let label = match &node.kind {
+        WorkflowNodeKind::ToolCall {
+            tool, args_preview, ..
+        } => format!("{tool}({})", truncate_preview(args_preview, 60)),
+        WorkflowNodeKind::FanoutBranch { branch_index } => {
+            format!("branch[{branch_index}]  {}", node.label)
+        }
+        _ => node.label.clone(),
+    };
+    let mut approval_hotkey: Option<u8> = None;
+    let mut border_style = border_style;
+    let mut auto_expand = false;
+    if let Some(ApprovalState::Pending { .. }) = &node.approval {
+        *pending_counter = pending_counter.saturating_add(1);
+        if *pending_counter <= 9 {
+            approval_hotkey = Some(*pending_counter);
+        }
+        border_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        auto_expand = true;
+    } else if matches!(&node.approval, Some(ApprovalState::Denied { .. })) {
+        border_style = Style::default().fg(Color::Red);
+    }
+    let is_expanded = auto_expand || expanded_nodes.contains(path);
+    let mut inner_lines: Vec<Line<'static>> = Vec::new();
+    if is_expanded {
+        collect_boxed_details(node, &mut inner_lines);
+    }
+    let start_row = out.len() as u16;
+    let rect = append_box(
+        out,
+        BoxSpec {
+            row0: start_row,
+            col0: indent,
+            outer_width,
+            inner_lines,
+            border_style,
+            status_glyph,
+            kind_glyph,
+            label: &label,
+            approval_hotkey,
+        },
+    );
+    regions.push(NodeRegion {
+        panel_item_index: 0,
+        path_key: path.to_string(),
+        start_row: rect.row0,
+        end_row: rect.row0.saturating_add(rect.rows),
+        col_start: Some(rect.col0),
+        col_end: Some(rect.col_end()),
+    });
+    for (i, child) in node.children.iter().enumerate() {
+        let child_path = format!("{path}/{i}");
+        append_workflow_node_boxed(
+            out,
+            regions,
+            child,
+            expanded_nodes,
+            depth.saturating_add(1),
+            &child_path,
+            animation_frame,
+            flow_running,
+            pending_counter,
+            panel_width,
+        );
+    }
+}
+
+fn boxed_indent(depth: u16, panel_width: u16) -> u16 {
+    let target = depth.saturating_mul(2);
+    let cap = panel_width.saturating_sub(40) / 2;
+    target.min(cap)
+}
+
+fn collect_boxed_details(
+    node: &atman_runtime::workflow::WorkflowNode,
+    out: &mut Vec<Line<'static>>,
+) {
+    use atman_runtime::workflow::{ApprovalState, WorkflowNodeKind};
+    if let WorkflowNodeKind::ToolCall {
+        args_preview,
+        result_preview,
+        ..
+    } = &node.kind
+    {
+        if !args_preview.is_empty() {
+            push_detail_section(out, "args", args_preview);
+        }
+        if let Some(r) = result_preview {
+            push_detail_section(out, "result", r);
+        }
+    }
+    if let Some(p) = &node.output_preview {
+        push_detail_section(out, "output", p);
+    }
+    if let Some(ApprovalState::Pending {
+        level,
+        preview: Some(p),
+    }) = &node.approval
+    {
+        push_detail_section(out, &format!("approval ({level})"), p);
+    }
+}
+
+fn push_detail_section(out: &mut Vec<Line<'static>>, header: &str, body: &str) {
+    out.push(Line::from(Span::styled(
+        format!("{header}:"),
+        Style::default().fg(Color::DarkGray),
+    )));
+    for line in body.lines().take(20) {
+        out.push(Line::from(Span::raw(line.to_string())));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
