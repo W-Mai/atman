@@ -63,6 +63,20 @@ pub fn compute_input_rect_centered(transcript: Rect, buf_lines: u16) -> Rect {
     input_rect_at(transcript, buf_lines, InputYAnchor::Center)
 }
 
+pub fn compute_input_rect_at_row(transcript: Rect, buf_lines: u16, target_y: u16) -> Rect {
+    let base = input_rect_at(transcript, buf_lines, InputYAnchor::Bottom);
+    let max_y = transcript
+        .y
+        .saturating_add(transcript.height)
+        .saturating_sub(base.height);
+    Rect {
+        x: base.x,
+        y: target_y.min(max_y).max(transcript.y),
+        width: base.width,
+        height: base.height,
+    }
+}
+
 // t=0 → centered, t=1 → bottom. Used for the startup-splash slide.
 pub fn compute_input_rect_lerped(transcript: Rect, buf_lines: u16, t: f32) -> Rect {
     let center = input_rect_at(transcript, buf_lines, InputYAnchor::Center);
@@ -87,7 +101,9 @@ fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect
     let outer_width = (transcript.width * 3 / 4)
         .clamp(50, 120)
         .min(transcript.width);
-    let content_h = buf_lines.clamp(1, 6);
+    // Default height fits three content rows even when the buffer is empty,
+    // so the panel never looks like a single squished line.
+    let content_h = buf_lines.clamp(3, 6);
     let outer_h = content_h.saturating_add(2);
     // One row of transcript peeks under the panel so users feel the
     // messages continue behind the floating input.

@@ -1653,13 +1653,25 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
-    let startup_visible = matches!(
-        app.items.first(),
-        Some(crate::app::OutputItem::StartupCard { .. })
-    );
+    let (startup_slot_row, startup_animating) = match app.items.first() {
+        Some(crate::app::OutputItem::StartupCard { version, .. }) => (
+            Some(output::startup_input_slot_top_row(version)),
+            app.startup_slide_started.is_some(),
+        ),
+        _ => (None, false),
+    };
     let slide_progress = compute_slide_progress(app.startup_slide_started);
-    if slide_progress >= 1.0 {
+    if slide_progress >= 1.0 && app.startup_slide_started.is_some() {
         app.startup_slide_started = None;
+        // Animation just finished; drop the card so the transcript
+        // reflows normally on the next frame.
+        if matches!(
+            app.items.first(),
+            Some(crate::app::OutputItem::StartupCard { .. })
+        ) {
+            app.items.remove(0);
+            app.items_version = app.items_version.wrapping_add(1);
+        }
     }
     // Breathing room on the transcript's left and right edges so message
     // content isn't flush with the terminal border or the sidebar. Input
@@ -1667,13 +1679,29 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     // rect so the floating panel width doesn't shrink.
     let transcript_content = layout::apply_horizontal_padding(l.transcript, 2);
     let input_buf_lines = editor.buf().split('\n').count().min(6) as u16;
-    let input_rect = if startup_visible {
-        layout::compute_input_rect_centered(l.transcript, input_buf_lines)
-    } else if slide_progress < 1.0 {
-        let eased = ease_out_cubic(slide_progress);
-        layout::compute_input_rect_lerped(l.transcript, input_buf_lines, eased)
-    } else {
-        layout::compute_input_rect(l.transcript, input_buf_lines)
+    let input_rect = match (startup_slot_row, startup_animating) {
+        (Some(slot_row), false) => layout::compute_input_rect_at_row(
+            l.transcript,
+            input_buf_lines,
+            transcript_content.y.saturating_add(slot_row),
+        ),
+        (Some(slot_row), true) => {
+            let eased = ease_out_cubic(slide_progress);
+            let start = layout::compute_input_rect_at_row(
+                l.transcript,
+                input_buf_lines,
+                transcript_content.y.saturating_add(slot_row),
+            );
+            let end = layout::compute_input_rect(l.transcript, input_buf_lines);
+            let y_f = start.y as f32 + (end.y as f32 - start.y as f32) * eased;
+            ratatui::layout::Rect {
+                x: end.x,
+                y: y_f.round() as u16,
+                width: end.width,
+                height: end.height,
+            }
+        }
+        (None, _) => layout::compute_input_rect(l.transcript, input_buf_lines),
     };
     let approvals_rect = layout::compute_approvals_rect(l.transcript, input_rect, approvals_rows);
     app.input_rect = Some(input_rect);

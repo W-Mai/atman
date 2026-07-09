@@ -359,14 +359,17 @@ fn user_message_bg() -> Color {
     Color::Rgb(38, 42, 54)
 }
 
-fn render_startup_card(
-    version: &str,
-    recent: &[crate::app::StartupSessionEntry],
-) -> Vec<Line<'static>> {
+// Rows the startup card reserves for the floating input to slot into
+// (1 top border + 3 content + 1 bottom border, matching the default
+// input_rect height). Two extra blank rows top+bottom pad the slot.
+pub const STARTUP_INPUT_SLOT_ROWS: u16 = 5;
+pub const STARTUP_INPUT_SLOT_PAD: u16 = 1;
+
+fn startup_banner_lines(version: &str) -> Vec<Line<'static>> {
     let logo_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    let mut lines = vec![
+    vec![
         Line::from(""),
         Line::from(Span::styled(
             "       █████╗ ████████╗███╗   ███╗ █████╗ ███╗   ██╗",
@@ -397,8 +400,29 @@ fn render_startup_card(
             format!("             agentic coding in your terminal · v{version}"),
             Style::default().fg(Color::DarkGray),
         )),
-        Line::from(""),
-    ];
+    ]
+}
+
+pub fn startup_input_slot_top_row(version: &str) -> u16 {
+    startup_banner_lines(version).len() as u16 + STARTUP_INPUT_SLOT_PAD
+}
+
+fn render_startup_card(
+    version: &str,
+    recent: &[crate::app::StartupSessionEntry],
+) -> Vec<Line<'static>> {
+    let mut lines = startup_banner_lines(version);
+    // Reserved gap where the floating input will render. Padding above +
+    // below keeps a hairline of transcript around the panel edge.
+    for _ in 0..STARTUP_INPUT_SLOT_PAD {
+        lines.push(Line::from(""));
+    }
+    for _ in 0..STARTUP_INPUT_SLOT_ROWS {
+        lines.push(Line::from(""));
+    }
+    for _ in 0..STARTUP_INPUT_SLOT_PAD {
+        lines.push(Line::from(""));
+    }
     if recent.is_empty() {
         lines.push(Line::from(Span::styled(
             "    No previous sessions in this project yet.",
