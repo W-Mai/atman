@@ -76,6 +76,7 @@ pub struct AppState {
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_node_regions: Vec<crate::output::NodeRegion>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
+    pub input_rect: Option<ratatui::layout::Rect>,
     pub animation_frame: u32,
     pub items_version: u64,
     pub expanded_version: u64,

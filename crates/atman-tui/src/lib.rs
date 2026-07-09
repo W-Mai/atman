@@ -1458,7 +1458,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         f.render_widget(msg, area);
         return;
     }
-    let input_height = compute_input_height(editor.buf(), area.width);
     let wide_enough = area.width >= layout::SIDEBAR_MIN_TOTAL_WIDTH;
     let show_sidebar = app.sidebar_mode.resolve(wide_enough);
     let compact_status = !show_sidebar;
@@ -1469,13 +1468,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     } else {
         (pending_count.min(9) as u16).saturating_add(1)
     };
-    let l = layout::compute_ex(
-        area,
-        input_height,
-        show_sidebar,
-        status_height,
-        approvals_rows,
-    );
+    let l = layout::compute_ex(area, show_sidebar, status_height);
+    let input_buf_lines = editor.buf().split('\n').count().min(6) as u16;
+    let input_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
+    let approvals_rect = layout::compute_approvals_rect(l.transcript, input_rect, approvals_rows);
+    app.input_rect = Some(input_rect);
     f.render_widget(
         status::render_bar(status::StatusInputs {
             session_id: &app.session_id,
@@ -1489,8 +1486,13 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     );
     let transcript_area = l.transcript;
     app.last_transcript_rect = Some(transcript_area);
+    // The floating input covers the bottom slice of transcript_area, so
+    // "follow_tail" must clip to the rows actually visible above the panel,
+    // not the whole transcript height. Otherwise the last messages hide
+    // behind the input.
+    let effective_viewport = input_rect.y.saturating_sub(transcript_area.y).max(1);
     if app.items.is_empty() {
-        app.resolve_scroll(0, transcript_area.height);
+        app.resolve_scroll(0, effective_viewport);
         app.last_item_ranges.clear();
         f.render_widget(output::empty_hint(), transcript_area);
     } else {
@@ -1523,15 +1525,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_node_regions = node_regions.to_vec();
         let lines_owned = lines.to_vec();
         app.layout_cache = cache;
-        app.resolve_scroll(total_rows, transcript_area.height);
+        app.resolve_scroll(total_rows, effective_viewport);
         // No .wrap(): WordWrapper reflows every line 0..scroll.y each frame.
         // Truncator (no-wrap) skips lazily, trading long-line wrap for speed.
         let paragraph =
             ratatui::widgets::Paragraph::new(lines_owned).scroll((app.scroll_offset, 0));
         f.render_widget(paragraph, transcript_area);
-    }
-    if let Some(area) = l.approvals {
-        approval_bar::render(f, area, &app.pending_approvals);
     }
     if let Some(area) = l.sidebar {
         sidebar::render(
@@ -1549,6 +1548,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             },
         );
     }
+    if let Some(area) = approvals_rect {
+        f.render_widget(ratatui::widgets::Clear, area);
+        approval_bar::render(f, area, &app.pending_approvals);
+    }
+    f.render_widget(ratatui::widgets::Clear, input_rect);
     f.render_widget(
         input_paragraph(
             editor.buf(),
@@ -1556,19 +1560,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             app.streaming,
             app.pending_below_rows(),
         ),
-        l.input,
+        input_rect,
     );
-    if let Some(hint_area) = l.hint {
-        completion::render_hint_strip(
-            f,
-            hint_area,
-            hint_area.width < 60,
-            app.mouse_captured,
-            app.yank_mode,
-        );
-    }
     if app.popup.is_open() {
-        completion::render_popup(f, l.input, &app.popup);
+        completion::render_popup(f, input_rect, &app.popup);
     }
     if app.cheatsheet_open {
         completion::render_cheatsheet(f, area);
@@ -1588,18 +1583,4 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.workflow_viewer.open {
         workflow_viewer_modal::render(f, area, app);
     }
-}
-
-fn compute_input_height(buf: &str, width: u16) -> u16 {
-    use unicode_width::UnicodeWidthStr;
-    let border_padding: u16 = 2;
-    let prompt_len: u16 = 2;
-    let usable = width.saturating_sub(border_padding + prompt_len).max(1) as usize;
-    let mut wrapped_rows: usize = 0;
-    for logical_line in buf.split('\n') {
-        let w = logical_line.width().max(1);
-        wrapped_rows += w.div_ceil(usable);
-    }
-    let content = wrapped_rows.max(1) as u16;
-    (content + border_padding).clamp(3, 9)
 }

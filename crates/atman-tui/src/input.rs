@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 pub fn input_paragraph<'a>(
@@ -24,10 +24,17 @@ pub fn input_paragraph<'a>(
     } else {
         " atman ".to_string()
     };
+    let hint_line = Line::from(Span::styled(
+        " shift+enter · newline · enter · send ",
+        Style::default().fg(Color::DarkGray),
+    ))
+    .right_aligned();
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(title);
+        .title(title)
+        .title_bottom(hint_line);
 
     let (before, after) = split_at_cursor(input, cursor);
     let mut lines: Vec<Line<'a>> = Vec::new();
