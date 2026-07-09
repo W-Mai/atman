@@ -1319,7 +1319,18 @@ async fn cmd_repl_once(
             std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(Some(sh_tx)));
         let sh_tx_for_ctrl = sh_tx_shared.clone();
-        let initial_items = atman_tui::history::flatten_transcript(&session.transcript_replay());
+        let mut initial_items =
+            atman_tui::history::flatten_transcript(&session.transcript_replay());
+        if is_fresh_session {
+            let recent = build_startup_recent(&root, &session.id().to_string(), 5);
+            initial_items.insert(
+                0,
+                atman_tui::app::OutputItem::StartupCard {
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    recent,
+                },
+            );
+        }
         let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<atman_tui::TuiControl>();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let session_for_ctrl = std::sync::Arc::clone(&session);
@@ -2088,6 +2099,45 @@ struct SessionRow {
     mtime: std::time::SystemTime,
     events_bytes: u64,
     goal: Option<String>,
+}
+
+fn build_startup_recent(
+    root: &Path,
+    exclude_sid: &str,
+    cap: usize,
+) -> Vec<atman_tui::app::StartupSessionEntry> {
+    let Ok(rows) = list_recent_sessions(root, cap.saturating_add(1)) else {
+        return Vec::new();
+    };
+    let now = std::time::SystemTime::now();
+    rows.into_iter()
+        .filter(|r| r.sid != exclude_sid)
+        .take(cap)
+        .map(|r| {
+            let age_secs = now
+                .duration_since(r.mtime)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let event_count = count_events_lines(root, &r.sid);
+            let short_id: String = r.sid.chars().take(8).collect();
+            atman_tui::app::StartupSessionEntry {
+                session_id: r.sid,
+                short_id,
+                goal: r.goal,
+                age_label: format_age(age_secs),
+                event_count,
+            }
+        })
+        .collect()
+}
+
+fn count_events_lines(root: &Path, sid: &str) -> u64 {
+    let path = root.join("sessions").join(sid).join("events.jsonl");
+    let Ok(file) = std::fs::File::open(&path) else {
+        return 0;
+    };
+    use std::io::BufRead;
+    std::io::BufReader::new(file).lines().count() as u64
 }
 
 fn list_recent_sessions(root: &Path, cap: usize) -> Result<Vec<SessionRow>> {

@@ -28,6 +28,19 @@ pub enum OutputItem {
         started_at: Instant,
         ended_at: Option<Instant>,
     },
+    StartupCard {
+        version: String,
+        recent: Vec<StartupSessionEntry>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct StartupSessionEntry {
+    pub session_id: String,
+    pub short_id: String,
+    pub goal: Option<String>,
+    pub age_label: String,
+    pub event_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

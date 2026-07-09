@@ -1254,6 +1254,28 @@ fn handle_key(
         app.palette.open();
         return;
     }
+    if let Some(crate::app::OutputItem::StartupCard { recent, .. }) = app.items.first() {
+        if let KeyAction::Char(c) = &action
+            && let Some(digit) = c.to_digit(10)
+            && (1..=9).contains(&digit)
+        {
+            let idx = (digit as usize) - 1;
+            if let Some(entry) = recent.get(idx)
+                && let Some(tx) = control_tx
+            {
+                let _ = tx.send(TuiControl::SwitchSession(entry.session_id.clone()));
+                app.items.remove(0);
+                app.items_version = app.items_version.wrapping_add(1);
+                return;
+            }
+        }
+        // Any other keystroke dismisses the card so the user can start
+        // typing a brand-new prompt without a residual splash.
+        if matches!(action, KeyAction::Char(_) | KeyAction::Submit) {
+            app.items.remove(0);
+            app.items_version = app.items_version.wrapping_add(1);
+        }
+    }
     if app.cheatsheet_open {
         match action {
             KeyAction::Escape | KeyAction::HelpModal => app.cheatsheet_open = false,

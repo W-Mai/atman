@@ -359,6 +359,84 @@ fn user_message_bg() -> Color {
     Color::Rgb(38, 42, 54)
 }
 
+fn render_startup_card(
+    version: &str,
+    recent: &[crate::app::StartupSessionEntry],
+) -> Vec<Line<'static>> {
+    let logo_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "       █████╗ ████████╗███╗   ███╗ █████╗ ███╗   ██╗",
+            logo_style,
+        )),
+        Line::from(Span::styled(
+            "      ██╔══██╗╚══██╔══╝████╗ ████║██╔══██╗████╗  ██║",
+            logo_style,
+        )),
+        Line::from(Span::styled(
+            "      ███████║   ██║   ██╔████╔██║███████║██╔██╗ ██║",
+            logo_style,
+        )),
+        Line::from(Span::styled(
+            "      ██╔══██║   ██║   ██║╚██╔╝██║██╔══██║██║╚██╗██║",
+            logo_style,
+        )),
+        Line::from(Span::styled(
+            "      ██║  ██║   ██║   ██║ ╚═╝ ██║██║  ██║██║ ╚████║",
+            logo_style,
+        )),
+        Line::from(Span::styled(
+            "      ╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝",
+            logo_style,
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("             agentic coding in your terminal · v{version}"),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+    ];
+    if recent.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "    No previous sessions in this project yet.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "    Recent sessions in this project:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        for (i, entry) in recent.iter().enumerate() {
+            let idx = format!("    {}  ", i + 1);
+            let title = entry
+                .goal
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&entry.short_id);
+            let title_col = format!("{title:<32}");
+            let age = format!(" {:<10}", entry.age_label);
+            let events = format!("{} events", entry.event_count);
+            lines.push(Line::from(vec![
+                Span::styled(idx, Style::default().fg(Color::Cyan)),
+                Span::styled(title_col, Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(age, Style::default().fg(Color::DarkGray)),
+                Span::styled(events, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "    Type 1-9 to resume · start typing to begin a new session",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    lines
+}
+
 fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let bg = user_message_bg();
@@ -391,6 +469,7 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
     let mut lines = match item {
         OutputItem::UserTurn { text } => render_user_turn(text, ctx.panel_width),
+        OutputItem::StartupCard { version, recent } => render_startup_card(version, recent),
         OutputItem::AssistantMd { md, streaming } => {
             let mut lines = crate::markdown::render_markdown(md);
             if *streaming {
