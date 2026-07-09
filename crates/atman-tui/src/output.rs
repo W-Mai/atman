@@ -471,7 +471,17 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         OutputItem::UserTurn { text } => render_user_turn(text, ctx.panel_width),
         OutputItem::StartupCard { version, recent } => render_startup_card(version, recent),
         OutputItem::AssistantMd { md, streaming } => {
-            let mut lines = crate::markdown::render_markdown(md);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            // Gutter row sits above the body so markdown line indentation
+            // (code fences, list markers) isn't shifted by a first-line
+            // prefix.
+            lines.push(Line::from(Span::styled(
+                "✦ assistant".to_string(),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(crate::markdown::render_markdown(md));
             if *streaming {
                 lines.push(Line::from(Span::styled(
                     "▏".to_string(),
