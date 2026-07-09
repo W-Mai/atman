@@ -185,6 +185,9 @@ impl Tool for FsWrite {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
             let content = extract_string(&args, "content", 1)?;
+            ctx.fs_access.check_write(&path).map_err(|e| {
+                RuntimeError::ToolFailed(format!("fs.write({}): {e}", path.display()))
+            })?;
             tokio::fs::write(&path, content.as_bytes())
                 .await
                 .map_err(|e| {
@@ -278,6 +281,9 @@ impl Tool for FsEdit {
             let old_string = extract_string(&args, "old_string", 1)?;
             let new_string = extract_string(&args, "new_string", 2)?;
             let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
+            ctx.fs_access.check_write(&path).map_err(|e| {
+                RuntimeError::ToolFailed(format!("fs.edit({}): {e}", path.display()))
+            })?;
             let canonical = canonicalize_or_owned(&path);
             if ctx.read_files.is_some() && !ctx.has_read(&canonical) {
                 return Err(RuntimeError::ToolFailed(format!(
@@ -1042,6 +1048,63 @@ mod tests {
             _ => 0,
         };
         assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn fs_write_blocked_outside_workspace() {
+        let workspace = TempDir::new().unwrap();
+        let policy = crate::fs_access::FsAccessPolicy::workspace_write(workspace.path().into());
+        let ctx = ToolCtx::new().with_fs_access(policy);
+        // /etc sits outside every workspace and the tempdir whitelist on
+        // all supported platforms. The boundary check must reject before
+        // tokio::fs::write is ever invoked, so the file is never touched
+        // even if the test happened to run as root.
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(PathBuf::from("/etc/atman-evil"))),
+                ("content".into(), Value::Str("pwned".into())),
+            ],
+        };
+        let err = FsWrite.call(args, &ctx).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("outside workspace"), "got: {msg}");
+        assert!(!std::path::Path::new("/etc/atman-evil").exists());
+    }
+
+    #[tokio::test]
+    async fn fs_write_permitted_inside_workspace() {
+        let workspace = TempDir::new().unwrap();
+        let policy = crate::fs_access::FsAccessPolicy::workspace_write(workspace.path().into());
+        let ctx = ToolCtx::new().with_fs_access(policy);
+        let target = workspace.path().join("nested/deeper/note.txt");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(target.clone())),
+                ("content".into(), Value::Str("ok".into())),
+            ],
+        };
+        FsWrite.call(args, &ctx).await.unwrap();
+        assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn fs_write_permitted_under_danger_full_access() {
+        let outside = TempDir::new().unwrap();
+        let ctx =
+            ToolCtx::new().with_fs_access(crate::fs_access::FsAccessPolicy::danger_full_access());
+        let target = outside.path().join("wide.txt");
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(target.clone())),
+                ("content".into(), Value::Str("go".into())),
+            ],
+        };
+        FsWrite.call(args, &ctx).await.unwrap();
+        assert!(target.exists());
     }
 
     #[tokio::test]

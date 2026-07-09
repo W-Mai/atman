@@ -86,6 +86,7 @@ pub struct ToolCtx {
     pub session_dir: Option<std::path::PathBuf>,
     pub data_root: Option<std::path::PathBuf>,
     pub project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+    pub fs_access: crate::fs_access::FsAccessPolicy,
 }
 
 impl ToolCtx {
@@ -169,6 +170,11 @@ impl ToolCtx {
         approval: std::sync::Arc<crate::session::ApprovalRegistry>,
     ) -> Self {
         self.approval = Some(approval);
+        self
+    }
+
+    pub fn with_fs_access(mut self, policy: crate::fs_access::FsAccessPolicy) -> Self {
+        self.fs_access = policy;
         self
     }
 

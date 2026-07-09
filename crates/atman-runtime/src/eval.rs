@@ -217,6 +217,7 @@ async fn dispatch_tool_call<'a>(
         if let Some(idx) = session.project_index() {
             c = c.with_project_index(idx);
         }
+        c = c.with_fs_access(session_fs_access_policy(session));
         c
     } else {
         ctx_with_anchors
@@ -967,6 +968,17 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             }
             result
         }
+    }
+}
+
+fn session_fs_access_policy(session: &crate::session::Session) -> crate::fs_access::FsAccessPolicy {
+    let workspace = session
+        .meta()
+        .and_then(|m| m.project_root)
+        .or_else(|| std::env::current_dir().ok());
+    crate::fs_access::FsAccessPolicy {
+        mode: crate::fs_access::FsAccessMode::WorkspaceWrite,
+        workspace,
     }
 }
 

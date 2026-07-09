@@ -42,6 +42,35 @@ impl std::str::FromStr for FsAccessMode {
     }
 }
 
+// Bundle mode + workspace so ToolCtx carries one thing, not two. Default
+// is workspace-write with no workspace — writes will fall back to
+// tempdir-only, which is the safe posture when running without a project.
+#[derive(Debug, Clone, Default)]
+pub struct FsAccessPolicy {
+    pub mode: FsAccessMode,
+    pub workspace: Option<PathBuf>,
+}
+
+impl FsAccessPolicy {
+    pub fn danger_full_access() -> Self {
+        Self {
+            mode: FsAccessMode::DangerFullAccess,
+            workspace: None,
+        }
+    }
+
+    pub fn workspace_write(workspace: PathBuf) -> Self {
+        Self {
+            mode: FsAccessMode::WorkspaceWrite,
+            workspace: Some(workspace),
+        }
+    }
+
+    pub fn check_write(&self, target: &Path) -> Result<(), FsAccessError> {
+        check_write(target, self.workspace.as_deref(), self.mode)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum FsAccessError {
     #[error("read-only fs access: refusing to write {}", path.display())]
