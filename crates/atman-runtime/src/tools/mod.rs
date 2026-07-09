@@ -4,6 +4,7 @@ use crate::tool::ToolRegistry;
 
 pub mod agent_ctrl;
 pub mod bash;
+pub mod form;
 pub mod fs;
 pub mod git;
 pub mod hunk;
@@ -56,6 +57,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(hunk::HunkApply));
     reg.register(Arc::new(hunk::HunkReview));
     reg.register(Arc::new(agent_ctrl::AgentSpawn));
+    reg.register(Arc::new(form::FormAsk));
 }
 
 pub fn register_shell(reg: &mut ToolRegistry) {

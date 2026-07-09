@@ -218,6 +218,7 @@ async fn dispatch_tool_call<'a>(
             c = c.with_project_index(idx);
         }
         c = c.with_fs_access(session_fs_access_policy(session));
+        c = c.with_forms(session.forms());
         c
     } else {
         ctx_with_anchors

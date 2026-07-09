@@ -82,6 +82,7 @@ pub struct ToolCtx {
     pub read_files:
         Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>>,
     pub approval: Option<std::sync::Arc<crate::session::ApprovalRegistry>>,
+    pub forms: Option<std::sync::Arc<crate::session::FormRegistry>>,
     pub providers: Option<std::sync::Arc<crate::provider::ProviderRegistry>>,
     pub session_dir: Option<std::path::PathBuf>,
     pub data_root: Option<std::path::PathBuf>,
@@ -175,6 +176,11 @@ impl ToolCtx {
 
     pub fn with_fs_access(mut self, policy: crate::fs_access::FsAccessPolicy) -> Self {
         self.fs_access = policy;
+        self
+    }
+
+    pub fn with_forms(mut self, forms: std::sync::Arc<crate::session::FormRegistry>) -> Self {
+        self.forms = Some(forms);
         self
     }
 
