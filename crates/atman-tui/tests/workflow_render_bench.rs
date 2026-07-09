@@ -140,3 +140,18 @@ fn baseline_100_500_1000_nodes() {
         println!("{n:>5} nodes -> {lines:>6} lines -> {ms:>8.3} ms / frame");
     }
 }
+
+#[test]
+fn boxed_1000_nodes_stays_under_budget() {
+    // SAFETY: cargo test defaults to a single-threaded runner per binary
+    // in this workspace, and this test never spawns threads; env-var
+    // mutation is limited to its own scope.
+    unsafe { std::env::set_var("ATMAN_BOXED_WORKFLOW", "1") };
+    let (ms, _lines) = run_bench(1000, 5);
+    unsafe { std::env::remove_var("ATMAN_BOXED_WORKFLOW") };
+    let budget_ms = 20.0;
+    assert!(
+        ms < budget_ms,
+        "boxed rendering regressed: {ms:.3} ms/frame (budget {budget_ms})"
+    );
+}
