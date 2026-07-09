@@ -65,6 +65,19 @@ pub fn compute_input_rect(transcript: Rect, buf_lines: u16) -> Rect {
     }
 }
 
+pub fn apply_horizontal_padding(rect: Rect, pad: u16) -> Rect {
+    let two_pad = pad.saturating_mul(2);
+    if rect.width <= two_pad {
+        return rect;
+    }
+    Rect {
+        x: rect.x.saturating_add(pad),
+        y: rect.y,
+        width: rect.width.saturating_sub(two_pad),
+        height: rect.height,
+    }
+}
+
 pub fn compute_approvals_rect(transcript: Rect, input_rect: Rect, rows: u16) -> Option<Rect> {
     if rows == 0 {
         return None;
@@ -152,6 +165,22 @@ mod tests {
         assert_eq!(rect.x, input.x);
         assert_eq!(rect.width, input.width);
         assert_eq!(rect.y + rect.height, input.y);
+    }
+
+    #[test]
+    fn horizontal_padding_shrinks_both_sides() {
+        let rect = Rect::new(10, 5, 60, 20);
+        let padded = apply_horizontal_padding(rect, 2);
+        assert_eq!(padded.x, 12);
+        assert_eq!(padded.width, 56);
+        assert_eq!(padded.y, rect.y);
+        assert_eq!(padded.height, rect.height);
+    }
+
+    #[test]
+    fn horizontal_padding_leaves_narrow_rects_alone() {
+        let rect = Rect::new(0, 0, 3, 5);
+        assert_eq!(apply_horizontal_padding(rect, 2), rect);
     }
 
     #[test]

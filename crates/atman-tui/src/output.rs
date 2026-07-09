@@ -369,7 +369,7 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
     let body_style = Style::default().bg(bg);
     // Cap the stripe at 80 cols on wide terminals so long paragraphs don't
     // stretch the block all the way to the sidebar.
-    let target = (panel_width.min(80)).max(20) as usize;
+    let target = panel_width.clamp(20, 80) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, row) in text.split('\n').enumerate() {
         let prompt = if i == 0 { "❯ " } else { "  " };

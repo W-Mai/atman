@@ -1491,6 +1491,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         (pending_count.min(9) as u16).saturating_add(1)
     };
     let l = layout::compute_ex(area, show_sidebar, status_height);
+    // Breathing room on the transcript's left and right edges so message
+    // content isn't flush with the terminal border or the sidebar. Input
+    // + approvals still center themselves off the un-padded transcript
+    // rect so the floating panel width doesn't shrink.
+    let transcript_content = layout::apply_horizontal_padding(l.transcript, 2);
     let input_buf_lines = editor.buf().split('\n').count().min(6) as u16;
     let input_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
     let approvals_rect = layout::compute_approvals_rect(l.transcript, input_rect, approvals_rows);
@@ -1506,7 +1511,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         }),
         l.status,
     );
-    let transcript_area = l.transcript;
+    let transcript_area = transcript_content;
     app.last_transcript_rect = Some(transcript_area);
     // The floating input covers the bottom slice of transcript_area, so
     // "follow_tail" must clip to the rows actually visible above the panel,
