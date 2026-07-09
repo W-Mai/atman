@@ -121,6 +121,73 @@ fn approved_or_finished_does_not_auto_expand() {
 }
 
 #[test]
+fn expanded_box_renders_duration_when_start_and_end_are_set() {
+    let mut node = tool_with_approval(
+        "a",
+        "shell.exec",
+        "sleep 1",
+        Some(ApprovalState::Pending {
+            level: "high".into(),
+            preview: None,
+        }),
+    );
+    let start = chrono::Utc::now();
+    node.started_at = Some(start);
+    node.ended_at = Some(start + chrono::Duration::milliseconds(1234));
+    let rendered = render_boxed(root_flow(vec![node]), 80);
+    let joined = rendered.join("\n");
+    assert!(
+        joined.contains("duration:"),
+        "duration section missing: {joined}"
+    );
+    assert!(
+        joined.contains("1.234s"),
+        "expected 1.234s in duration body: {joined}"
+    );
+}
+
+#[test]
+fn expanded_box_renders_millisecond_duration_below_one_second() {
+    let mut node = tool_with_approval(
+        "a",
+        "shell.exec",
+        "fast",
+        Some(ApprovalState::Pending {
+            level: "medium".into(),
+            preview: None,
+        }),
+    );
+    let start = chrono::Utc::now();
+    node.started_at = Some(start);
+    node.ended_at = Some(start + chrono::Duration::milliseconds(42));
+    let rendered = render_boxed(root_flow(vec![node]), 80);
+    let joined = rendered.join("\n");
+    assert!(
+        joined.contains("42ms"),
+        "expected sub-second duration in ms: {joined}"
+    );
+}
+
+#[test]
+fn expanded_box_omits_duration_when_timestamps_missing() {
+    let node = tool_with_approval(
+        "a",
+        "shell.exec",
+        "still-pending",
+        Some(ApprovalState::Pending {
+            level: "high".into(),
+            preview: None,
+        }),
+    );
+    let rendered = render_boxed(root_flow(vec![node]), 80);
+    let joined = rendered.join("\n");
+    assert!(
+        !joined.contains("duration:"),
+        "duration should not appear without start+end: {joined}"
+    );
+}
+
+#[test]
 fn pending_approval_gets_sequential_hotkey_up_to_nine() {
     let mut children: Vec<WorkflowNode> = (0..3)
         .map(|i| {

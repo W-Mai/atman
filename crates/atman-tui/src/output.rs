@@ -958,6 +958,15 @@ fn collect_boxed_details(
     {
         push_detail_section(out, &format!("approval ({level})"), p);
     }
+    if let (Some(start), Some(end)) = (node.started_at, node.ended_at) {
+        let ms = (end - start).num_milliseconds().max(0);
+        let text = if ms < 1000 {
+            format!("{ms}ms")
+        } else {
+            format!("{:.3}s", ms as f64 / 1000.0)
+        };
+        push_detail_section(out, "duration", &text);
+    }
 }
 
 fn push_detail_section(out: &mut Vec<Line<'static>>, header: &str, body: &str) {
