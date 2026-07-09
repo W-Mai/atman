@@ -259,31 +259,17 @@ pub fn build_lines_with_ranges(
     (all_lines, ranges, node_regions, cursor)
 }
 
-fn wrap_row_offsets(lines: &[Line<'static>], width: u16) -> (u16, Vec<u16>) {
-    use unicode_width::UnicodeWidthStr;
+fn wrap_row_offsets(lines: &[Line<'static>], _width: u16) -> (u16, Vec<u16>) {
+    // Paragraph is rendered with .scroll() but no .wrap(), so ratatui uses
+    // LineTruncator: one Line always renders as one row (long lines get
+    // truncated at panel width, not wrapped). Anything else here would over-
+    // estimate total_rows, put follow_tail scroll past real content, and
+    // produce the "session opens on blank space, scroll up to find text" bug.
     let mut offsets: Vec<u16> = Vec::with_capacity(lines.len() + 1);
     let mut cursor: u16 = 0;
     offsets.push(0);
-    if width == 0 {
-        for _ in lines {
-            cursor = cursor.saturating_add(1);
-            offsets.push(cursor);
-        }
-        return (cursor, offsets);
-    }
-    let w = width as usize;
-    for line in lines {
-        let total: usize = line
-            .spans
-            .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
-        let rows = if total == 0 {
-            1
-        } else {
-            total.div_ceil(w) as u16
-        };
-        cursor = cursor.saturating_add(rows.max(1));
+    for _ in lines {
+        cursor = cursor.saturating_add(1);
         offsets.push(cursor);
     }
     (cursor, offsets)
@@ -490,14 +476,17 @@ fn render_workflow_panel_with_regions(
     let boxed = std::env::var_os("ATMAN_BOXED_WORKFLOW").is_some();
     if panel_expanded {
         if boxed {
+            let child_count = graph.root.len();
             for (i, node) in graph.root.iter().enumerate() {
                 let path = format!("{i}");
+                let is_last = i + 1 == child_count;
                 append_workflow_node_boxed(
                     &mut lines,
                     &mut regions,
                     node,
                     expanded_nodes,
-                    0,
+                    &[],
+                    is_last,
                     panel_width,
                     &path,
                     animation_frame,
@@ -756,13 +745,51 @@ fn append_fanout_horizontal(
     let _ = (fork_row, merge_row);
 }
 
+const MAX_BOX_WIDTH: u16 = 100;
+const INDENT_PER_DEPTH: u16 = 4;
+
+fn tree_prefix_spans(ancestor_last: &[bool], is_last: Option<bool>) -> Vec<Span<'static>> {
+    let style = Style::default().fg(Color::DarkGray);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(ancestor_last.len() + 1);
+    for &last in ancestor_last {
+        spans.push(Span::styled(
+            if last { "    " } else { "┊   " }.to_string(),
+            style,
+        ));
+    }
+    if let Some(is_last) = is_last {
+        spans.push(Span::styled(
+            if is_last { "└┈┈ " } else { "├┈┈ " }.to_string(),
+            style,
+        ));
+    }
+    spans
+}
+
+fn tree_continuation_spans(ancestor_last: &[bool], is_last: bool) -> Vec<Span<'static>> {
+    let style = Style::default().fg(Color::DarkGray);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(ancestor_last.len() + 1);
+    for &last in ancestor_last {
+        spans.push(Span::styled(
+            if last { "    " } else { "┊   " }.to_string(),
+            style,
+        ));
+    }
+    spans.push(Span::styled(
+        if is_last { "    " } else { "┊   " }.to_string(),
+        style,
+    ));
+    spans
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_workflow_node_boxed(
     out: &mut Vec<Line<'static>>,
     regions: &mut Vec<NodeRegion>,
     node: &atman_runtime::workflow::WorkflowNode,
     expanded_nodes: &std::collections::HashSet<String>,
-    depth: u16,
+    ancestor_last: &[bool],
+    is_last: bool,
     panel_width: u16,
     path: &str,
     animation_frame: u32,
@@ -770,10 +797,11 @@ fn append_workflow_node_boxed(
     pending_counter: &mut u8,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
-    let rail_w = depth.saturating_mul(3);
-    let outer_width = panel_width.saturating_sub(rail_w);
-    let col0 = rail_w;
-    if outer_width < 8 {
+    let depth = ancestor_last.len() as u16;
+    let prefix_w = depth.saturating_mul(INDENT_PER_DEPTH);
+    let col0 = prefix_w;
+    let budget = panel_width.saturating_sub(prefix_w).min(MAX_BOX_WIDTH);
+    if budget < 8 {
         return;
     }
     let mut border_style = match node.status {
@@ -829,9 +857,26 @@ fn append_workflow_node_boxed(
     if is_expanded {
         collect_boxed_details(node, &mut inner_lines);
     }
+    use unicode_width::UnicodeWidthStr;
+    let approval_seg = if approval_hotkey.is_some() { 5 } else { 0 };
+    let status_seg = if UnicodeWidthStr::width(status_glyph) > 0 {
+        UnicodeWidthStr::width(status_glyph) + 1
+    } else {
+        0
+    };
+    let kind_seg = if UnicodeWidthStr::width(kind_glyph) > 0 {
+        UnicodeWidthStr::width(kind_glyph) + 1
+    } else {
+        0
+    };
+    let compact_content =
+        3 + status_seg + kind_seg + UnicodeWidthStr::width(label.as_str()) + approval_seg + 2;
+    let compact_w = compact_content.min(budget as usize) as u16;
+    let outer_width = if is_expanded { budget } else { compact_w };
+    let mut scratch: Vec<Line<'static>> = Vec::new();
     let start_row = out.len() as u16;
     let rect = append_box(
-        out,
+        &mut scratch,
         BoxSpec {
             row0: start_row,
             col0,
@@ -844,6 +889,17 @@ fn append_workflow_node_boxed(
             approval_hotkey,
         },
     );
+    for (row_idx, line) in scratch.into_iter().enumerate() {
+        let is_top = row_idx == 0;
+        let prefix = if is_top {
+            tree_prefix_spans(ancestor_last, Some(is_last))
+        } else {
+            tree_continuation_spans(ancestor_last, is_last)
+        };
+        let mut spans = prefix;
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
     regions.push(NodeRegion {
         panel_item_index: 0,
         path_key: path.to_string(),
@@ -852,14 +908,19 @@ fn append_workflow_node_boxed(
         col_start: Some(rect.col0),
         col_end: Some(rect.col_end()),
     });
+    let mut child_ancestor_last: Vec<bool> = ancestor_last.to_vec();
+    child_ancestor_last.push(is_last);
+    let child_count = node.children.len();
     for (i, child) in node.children.iter().enumerate() {
         let child_path = format!("{path}/{i}");
+        let child_is_last = i + 1 == child_count;
         append_workflow_node_boxed(
             out,
             regions,
             child,
             expanded_nodes,
-            depth.saturating_add(1),
+            &child_ancestor_last,
+            child_is_last,
             panel_width,
             &child_path,
             animation_frame,
