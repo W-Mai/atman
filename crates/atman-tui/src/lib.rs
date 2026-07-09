@@ -194,6 +194,11 @@ async fn run_frames(
     let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     let mut slide_tick = tokio::time::interval(std::time::Duration::from_millis(ANIMATION_TICK_MS));
     animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Without Skip the interval bursts every missed tick when it wakes,
+    // so an idle timer that sat unpolled for 3 s while the user read
+    // the splash would fire ~180 times in a row and the whole slide
+    // would blow past in one frame.
+    slide_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let _reader_guard = ReaderGuard(reader_shutdown);
     loop {
@@ -1620,7 +1625,7 @@ fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
 // Startup input eases from the overlay's centered slot to the normal
 // bottom position. 300 ms sits inside the 200–400 ms band that feels
 // like a real transition rather than a snap or a lag.
-const STARTUP_SLIDE_MS: u128 = 300;
+const STARTUP_SLIDE_MS: u128 = 400;
 // Animation frame cadence while a slide is in flight. 60 fps so the
 // panel's x / y / width interpolation looks continuous instead of
 // two-or-three discrete jumps.
@@ -1636,9 +1641,13 @@ fn compute_slide_progress(started: Option<std::time::Instant>) -> f32 {
     }
 }
 
-fn ease_out_cubic(t: f32) -> f32 {
-    let inv = 1.0 - t.clamp(0.0, 1.0);
-    1.0 - inv * inv * inv
+// ease-out-quad — motion is immediately visible from the first frame
+// and gently decelerates into the end. ease-in-out was the wrong pick:
+// its slow start hides the animation in the crucial "did anything just
+// happen?" first 100 ms.
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t)
 }
 
 fn lerp_rect(a: ratatui::layout::Rect, b: ratatui::layout::Rect, t: f32) -> ratatui::layout::Rect {
@@ -1725,7 +1734,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             height: bottom_rect.height,
         },
         (Some(slot), true) => {
-            let eased = ease_out_cubic(slide_progress);
+            let eased = ease_out(slide_progress);
             let start_x = slot.x as f32;
             let start_y = slot.y as f32;
             let start_w = slot.width as f32;
@@ -1770,7 +1779,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             // not "input escapes a frozen background".
             let base = output::compute_startup_overlay(l.transcript, recent).area;
             let overlay_area = if startup_animating {
-                let eased = ease_out_cubic(slide_progress);
+                let eased = ease_out(slide_progress);
                 lerp_rect(base, input_rect, eased)
             } else {
                 base
