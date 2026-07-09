@@ -58,10 +58,14 @@ fn root_flow(children: Vec<WorkflowNode>) -> WorkflowNode {
     }
 }
 
+use std::sync::Mutex;
+static LEGACY_LOCK: Mutex<()> = Mutex::new(());
+
 fn build_panel(
     root: WorkflowNode,
     width: u16,
 ) -> (Vec<atman_tui::output::NodeRegion>, Vec<String>) {
+    let _guard = LEGACY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut graph = WorkflowGraph::new(TurnId::now());
     graph.root.push(root);
     let expanded_nodes: HashSet<String> = HashSet::new();
@@ -79,7 +83,10 @@ fn build_panel(
         animation_frame: 0,
         panel_width: width,
     };
+    // SAFETY: env-var mutation guarded by LEGACY_LOCK across parallel tests.
+    unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
     let (lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], width, &ctx);
+    unsafe { std::env::remove_var("ATMAN_LEGACY_WORKFLOW") };
     let flat: Vec<String> = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())

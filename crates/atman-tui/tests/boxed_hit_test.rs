@@ -62,11 +62,7 @@ fn build_boxed(root: WorkflowNode, width: u16) -> Vec<NodeRegion> {
         animation_frame: 0,
         panel_width: width,
     };
-    // SAFETY: cargo test binaries are single-threaded here; env var is
-    // only read during build_lines_with_ranges below.
-    unsafe { std::env::set_var("ATMAN_BOXED_WORKFLOW", "1") };
     let (_lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], width, &ctx);
-    unsafe { std::env::remove_var("ATMAN_BOXED_WORKFLOW") };
     regions
 }
 

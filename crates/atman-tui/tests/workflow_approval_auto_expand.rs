@@ -5,9 +5,6 @@ use atman_runtime::workflow::{
 use atman_tui::app::OutputItem;
 use atman_tui::output::{RenderCtx, build_lines_with_ranges};
 use std::collections::HashSet;
-use std::sync::Mutex;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn tool_with_approval(
     id: &str,
@@ -53,7 +50,6 @@ fn root_flow(children: Vec<WorkflowNode>) -> WorkflowNode {
 }
 
 fn render_boxed(root: WorkflowNode, width: u16) -> Vec<String> {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut graph = WorkflowGraph::new(TurnId::now());
     graph.root.push(root);
     let item = OutputItem::WorkflowPanel {
@@ -70,12 +66,7 @@ fn render_boxed(root: WorkflowNode, width: u16) -> Vec<String> {
         animation_frame: 0,
         panel_width: width,
     };
-    // SAFETY: env is guarded by ENV_LOCK; cargo test uses OS threads for
-    // parallel tests but ENV_LOCK serialises anything that reads / writes
-    // ATMAN_BOXED_WORKFLOW.
-    unsafe { std::env::set_var("ATMAN_BOXED_WORKFLOW", "1") };
     let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx);
-    unsafe { std::env::remove_var("ATMAN_BOXED_WORKFLOW") };
     lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())

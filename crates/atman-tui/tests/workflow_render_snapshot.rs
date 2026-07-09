@@ -70,14 +70,13 @@ fn snapshot(width: u16, height: u16, boxed: bool) -> Buffer {
         animation_frame: 0,
         panel_width: width,
     };
-    // SAFETY: cargo test binary is single-threaded here; env-var mutation is
-    // scoped to this call and reset before returning.
-    if boxed {
-        unsafe { std::env::set_var("ATMAN_BOXED_WORKFLOW", "1") };
+    // SAFETY: env-var mutation guarded by ENV_LOCK.
+    if !boxed {
+        unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
     }
     let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx);
-    if boxed {
-        unsafe { std::env::remove_var("ATMAN_BOXED_WORKFLOW") };
+    if !boxed {
+        unsafe { std::env::remove_var("ATMAN_LEGACY_WORKFLOW") };
     }
 
     let backend = TestBackend::new(width, height);

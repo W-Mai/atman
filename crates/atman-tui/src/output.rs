@@ -473,48 +473,48 @@ fn render_workflow_panel_with_regions(
     let mut lines = vec![header];
     let mut regions: Vec<NodeRegion> = Vec::new();
     let mut pending_counter: u8 = 0;
-    let boxed = std::env::var_os("ATMAN_BOXED_WORKFLOW").is_some();
+    let legacy = std::env::var_os("ATMAN_LEGACY_WORKFLOW").is_some();
     if panel_expanded {
-        if boxed {
+        if legacy {
             let child_count = graph.root.len();
             for (i, node) in graph.root.iter().enumerate() {
-                let path = format!("{i}");
                 let is_last = i + 1 == child_count;
-                append_workflow_node_boxed(
+                let path = format!("{i}");
+                append_workflow_node(
                     &mut lines,
                     &mut regions,
                     node,
                     expanded_nodes,
-                    &[],
-                    is_last,
-                    panel_width,
+                    "",
                     &path,
+                    is_last,
                     animation_frame,
                     running,
                     &mut pending_counter,
+                    panel_width,
                 );
             }
-            lines.push(Line::raw(""));
             return (lines, regions);
         }
         let child_count = graph.root.len();
         for (i, node) in graph.root.iter().enumerate() {
-            let is_last = i + 1 == child_count;
             let path = format!("{i}");
-            append_workflow_node(
+            let is_last = i + 1 == child_count;
+            append_workflow_node_boxed(
                 &mut lines,
                 &mut regions,
                 node,
                 expanded_nodes,
-                "",
-                &path,
+                &[],
                 is_last,
+                panel_width,
+                &path,
                 animation_frame,
                 running,
                 &mut pending_counter,
-                panel_width,
             );
         }
+        lines.push(Line::raw(""));
     }
     (lines, regions)
 }
@@ -1510,11 +1510,22 @@ mod tests {
             .join("\n")
     }
 
+    struct LegacyEnvGuard;
+    impl Drop for LegacyEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: test-only, restores env after this scope.
+            unsafe { std::env::remove_var("ATMAN_LEGACY_WORKFLOW") };
+        }
+    }
+
     #[test]
     fn workflow_panel_renders_linear_chain_with_tree_glyphs() {
         use atman_runtime::workflow::{
             NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
         };
+        // SAFETY: same rationale as the guard's Drop.
+        unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
+        let _legacy = LegacyEnvGuard;
         let mut graph = WorkflowGraph::new(atman_runtime::event::TurnId::now());
         graph.root.push(WorkflowNode {
             id: "r".into(),
