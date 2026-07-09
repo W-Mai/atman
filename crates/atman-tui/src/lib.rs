@@ -1,8 +1,9 @@
 use std::io::{Stdout, stdout};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use crossterm::event::{Event as CtEvent, EventStream, MouseButton, MouseEventKind};
-use futures::StreamExt;
+use crossterm::event::{Event as CtEvent, MouseButton, MouseEventKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Alignment;
@@ -178,13 +179,14 @@ async fn run_frames(
         app.pending_approvals = rx.borrow().clone();
     }
     let mut editor = InputEditor::default();
-    let mut key_events = EventStream::new();
+    let (mut key_events, reader_shutdown) = spawn_event_reader();
     let mut interrupt_prompt = false;
     let mut shutdown = handle.shutdown_rx.take();
     let mut sigterm = build_sigterm_stream();
     let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let _reader_guard = ReaderGuard(reader_shutdown);
     loop {
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
 
@@ -206,7 +208,10 @@ async fn run_frames(
             _ = animation_tick.tick(), if app.has_running_workflow() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
-            key = key_events.next() => {
+            key = key_events.recv() => {
+                if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
+                    eprintln!("[atman] event: {key:?}");
+                }
                 match key {
                     Some(Ok(CtEvent::Key(ke))) => {
                         handle_key(
@@ -446,6 +451,49 @@ async fn recv_note(rx: Option<&mut mpsc::UnboundedReceiver<TuiNote>>) -> Option<
         Some(r) => r.recv().await,
         None => std::future::pending().await,
     }
+}
+
+struct ReaderGuard(Arc<AtomicBool>);
+
+impl Drop for ReaderGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+fn spawn_event_reader() -> (
+    tokio::sync::mpsc::UnboundedReceiver<std::io::Result<CtEvent>>,
+    Arc<AtomicBool>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_for_thread = shutdown.clone();
+    std::thread::Builder::new()
+        .name("atman-tui-input".into())
+        .spawn(move || {
+            loop {
+                if shutdown_for_thread.load(Ordering::SeqCst) {
+                    break;
+                }
+                match crossterm::event::poll(std::time::Duration::from_millis(50)) {
+                    Ok(true) => match crossterm::event::read() {
+                        Ok(ev) => {
+                            if tx.send(Ok(ev)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                            break;
+                        }
+                    },
+                    Ok(false) => {}
+                    Err(_) => {}
+                }
+            }
+        })
+        .expect("spawn tui input thread");
+    (rx, shutdown)
 }
 
 async fn wait_shutdown(rx: Option<&mut tokio::sync::oneshot::Receiver<()>>) {
