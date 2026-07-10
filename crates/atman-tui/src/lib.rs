@@ -461,7 +461,11 @@ async fn run_frames(
                 if let Some(rx) = handle.form_rx.as_mut() {
                     let latest = rx.borrow().clone();
                     if latest.is_empty() {
-                        app.form_modal.end_batch();
+                        if !app.form_modal.try_show_confirm(true)
+                            && app.form_modal.confirm_form.is_none()
+                        {
+                            app.form_modal.end_batch();
+                        }
                     } else {
                         let ids: Vec<String> =
                             latest.iter().map(|p| p.form_id.clone()).collect();
@@ -1232,34 +1236,61 @@ fn handle_form_key(
         app.form_modal.pending.as_ref().map(|p| &p.kind),
         Some(FormKind::MultiSelect { .. })
     );
+    let dispatch_outcome = |app: &mut AppState,
+                            control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+                            outcome: crate::form_modal::SubmitOutcome| {
+        use crate::form_modal::SubmitOutcome;
+        match outcome {
+            SubmitOutcome::Single { form_id, answer } => {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
+                }
+            }
+            SubmitOutcome::BatchConfirmed => {
+                for (i, answer) in app.form_modal.batch_answers.iter().enumerate() {
+                    if let Some(a) = answer
+                        && let Some(tx) = control_tx
+                    {
+                        let id = app.form_modal.batch_ids.get(i).cloned().unwrap_or_default();
+                        let _ = tx.send(TuiControl::FormSubmit {
+                            form_id: id,
+                            answer: a.clone(),
+                        });
+                    }
+                }
+            }
+            SubmitOutcome::BatchCancelled => {
+                for id in &app.form_modal.batch_ids {
+                    if id == "__batch_confirm" {
+                        continue;
+                    }
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::FormSubmit {
+                            form_id: id.clone(),
+                            answer: atman_runtime::form::FormAnswer::Cancelled,
+                        });
+                    }
+                }
+            }
+            SubmitOutcome::None => {}
+        }
+    };
     match action {
         KeyAction::Escape => {
-            if let Some(answer) = app.form_modal.cancel()
-                && let Some(tx) = control_tx
-            {
-                let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
-            }
+            let outcome = app.form_modal.cancel();
+            dispatch_outcome(app, control_tx, outcome);
         }
         KeyAction::Submit => {
-            if let Some(answer) = app.form_modal.submit()
-                && let Some(tx) = control_tx
-            {
-                let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
-            }
+            let outcome = app.form_modal.submit();
+            dispatch_outcome(app, control_tx, outcome);
         }
         KeyAction::Char('y') | KeyAction::Char('Y') if is_confirm => {
-            if let Some(answer) = app.form_modal.submit()
-                && let Some(tx) = control_tx
-            {
-                let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
-            }
+            let outcome = app.form_modal.submit();
+            dispatch_outcome(app, control_tx, outcome);
         }
         KeyAction::Char('n') | KeyAction::Char('N') if is_confirm => {
-            if let Some(answer) = app.form_modal.confirm_no()
-                && let Some(tx) = control_tx
-            {
-                let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
-            }
+            let outcome = app.form_modal.confirm_no();
+            dispatch_outcome(app, control_tx, outcome);
         }
         KeyAction::Char(' ') if is_multi => {
             app.form_modal.toggle_current();

@@ -13,6 +13,14 @@ pub enum BatchStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone)]
+pub enum SubmitOutcome {
+    Single { form_id: String, answer: FormAnswer },
+    BatchConfirmed,
+    BatchCancelled,
+    None,
+}
+
 #[derive(Default)]
 pub struct FormModal {
     pub open: bool,
@@ -24,6 +32,8 @@ pub struct FormModal {
     pub batch_ids: Vec<String>,
     pub batch_statuses: Vec<BatchStatus>,
     pub batch_index: usize,
+    pub batch_answers: Vec<Option<FormAnswer>>,
+    pub confirm_form: Option<PendingForm>,
     pub pending_switch: Option<String>,
 }
 
@@ -41,6 +51,7 @@ impl FormModal {
             if !self.batch_ids.contains(id) {
                 self.batch_ids.push(id.clone());
                 self.batch_statuses.push(BatchStatus::Pending);
+                self.batch_answers.push(None);
             }
         }
         if let Some(idx) = self.batch_ids.iter().position(|id| id == &form.form_id) {
@@ -48,6 +59,52 @@ impl FormModal {
         }
         self.open = true;
         self.pending = Some(form);
+    }
+
+    fn build_confirm_form(&self) -> PendingForm {
+        use atman_runtime::event::FlowRunId;
+        PendingForm {
+            form_id: "__batch_confirm".into(),
+            run_id: FlowRunId::now(),
+            tool_use_id: "__batch_confirm".into(),
+            kind: FormKind::Confirm {
+                prompt: "Confirm and submit all answers?".into(),
+            },
+            emitted_at: chrono::Utc::now(),
+        }
+    }
+
+    pub fn try_show_confirm(&mut self, registry_empty: bool) -> bool {
+        if self.batch_ids.is_empty() {
+            return false;
+        }
+        if !registry_empty {
+            return false;
+        }
+        let all = self
+            .batch_statuses
+            .iter()
+            .all(|s| matches!(s, BatchStatus::Answered));
+        if all {
+            let form = self.build_confirm_form();
+            if !self.batch_ids.contains(&form.form_id) {
+                self.batch_ids.push(form.form_id.clone());
+                self.batch_statuses.push(BatchStatus::Pending);
+                self.batch_answers.push(None);
+            }
+            if let Some(idx) = self.batch_ids.iter().position(|id| id == &form.form_id) {
+                self.batch_index = idx;
+            }
+            self.pending = Some(form);
+            self.cursor = 0;
+            self.multi_selected.clear();
+            self.text_editor = InputEditor::default();
+            self.error = None;
+            self.confirm_form = self.pending.clone();
+            self.open = true;
+            return true;
+        }
+        false
     }
 
     pub fn mark_current(&mut self, status: BatchStatus) {
@@ -100,7 +157,10 @@ impl FormModal {
         self.close();
         self.batch_ids.clear();
         self.batch_statuses.clear();
+        self.batch_answers.clear();
         self.batch_index = 0;
+        self.confirm_form = None;
+        self.pending_switch = None;
     }
 
     pub fn batch_total(&self) -> usize {
@@ -137,14 +197,18 @@ impl FormModal {
         }
     }
 
-    // Returns the answer to send + closes the modal, or None if validation
-    // rejected the submit (in which case `error` is set for the render pass).
-    pub fn submit(&mut self) -> Option<FormAnswer> {
-        let kind = self.pending.as_ref().map(|p| p.kind.clone())?;
+    pub fn submit(&mut self) -> SubmitOutcome {
+        let kind = match self.pending.as_ref().map(|p| p.kind.clone()) {
+            Some(k) => k,
+            None => return SubmitOutcome::None,
+        };
+        let is_confirm_form = self.is_confirm_form();
         let answer = match kind {
             FormKind::Confirm { .. } => FormAnswer::Confirmed { value: true },
             FormKind::SingleSelect { options, .. } => {
-                let label = options.get(self.cursor)?.clone();
+                let Some(label) = options.get(self.cursor).cloned() else {
+                    return SubmitOutcome::None;
+                };
                 FormAnswer::Selected {
                     index: self.cursor,
                     label,
@@ -158,13 +222,13 @@ impl FormModal {
                     && count < m
                 {
                     self.error = Some(format!("Select at least {m}"));
-                    return None;
+                    return SubmitOutcome::None;
                 }
                 if let Some(m) = max
                     && count > m
                 {
                     self.error = Some(format!("Select at most {m}"));
-                    return None;
+                    return SubmitOutcome::None;
                 }
                 let indices: Vec<usize> = self
                     .multi_selected
@@ -182,41 +246,67 @@ impl FormModal {
                 text: self.text_editor.buf().to_string(),
             },
         };
-        self.mark_current(BatchStatus::Answered);
-        if let Some(next) = self.switch_to(1) {
-            self.pending_switch = Some(next);
-        }
-        self.close();
-        Some(answer)
-    }
 
-    pub fn confirm_no(&mut self) -> Option<FormAnswer> {
-        if matches!(
-            self.pending.as_ref().map(|p| &p.kind),
-            Some(FormKind::Confirm { .. })
-        ) {
+        if is_confirm_form {
             self.mark_current(BatchStatus::Answered);
-            if let Some(next) = self.switch_to(1) {
-                self.pending_switch = Some(next);
-            }
-            self.close();
-            Some(FormAnswer::Confirmed { value: false })
-        } else {
-            None
+            self.end_batch();
+            return SubmitOutcome::BatchConfirmed;
         }
+
+        let form_id = self
+            .pending
+            .as_ref()
+            .map(|p| p.form_id.clone())
+            .unwrap_or_default();
+        if let Some(idx) = self.batch_ids.iter().position(|id| id == &form_id) {
+            self.batch_answers[idx] = Some(answer.clone());
+        }
+        self.mark_current(BatchStatus::Answered);
+        self.close_form_state();
+        SubmitOutcome::Single { form_id, answer }
     }
 
-    pub fn cancel(&mut self) -> Option<FormAnswer> {
-        if !self.open {
-            return None;
+    pub fn confirm_no(&mut self) -> SubmitOutcome {
+        if !self.is_confirm_form() {
+            return SubmitOutcome::None;
         }
-        self.pending.as_ref()?;
         self.mark_current(BatchStatus::Cancelled);
-        self.close();
-        if let Some(next) = self.switch_to(1) {
-            self.pending_switch = Some(next);
+        self.end_batch();
+        SubmitOutcome::BatchCancelled
+    }
+
+    pub fn cancel(&mut self) -> SubmitOutcome {
+        if !self.open {
+            return SubmitOutcome::None;
         }
-        Some(FormAnswer::Cancelled)
+        if self.pending.is_none() {
+            return SubmitOutcome::None;
+        }
+        let is_confirm_form = self.is_confirm_form();
+        self.mark_current(BatchStatus::Cancelled);
+        if is_confirm_form {
+            self.end_batch();
+            return SubmitOutcome::BatchCancelled;
+        }
+        self.close_form_state();
+        if self.batch_statuses.iter().all(|s| !matches!(s, BatchStatus::Pending)) {
+            self.end_batch();
+        }
+        SubmitOutcome::None
+    }
+
+    fn is_confirm_form(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.form_id == "__batch_confirm")
+    }
+
+    fn close_form_state(&mut self) {
+        self.pending = None;
+        self.error = None;
+        self.multi_selected.clear();
+        self.cursor = 0;
+        self.text_editor = InputEditor::default();
     }
 
     #[cfg(test)]
@@ -249,7 +339,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
-        .style(Style::default().bg(t.code_bg))
+        .style(Style::default().bg(t.modal_bg))
         .title(Line::from(title_spans))
         .title_bottom(
             Line::from(Span::styled(
@@ -266,6 +356,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
         .fg(t.tinted_fg)
         .add_modifier(Modifier::BOLD);
     let dim_style = Style::default().fg(t.subtle_fg);
+    let idle_row_style = Style::default().fg(t.tinted_fg).bg(t.panel_bg);
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         form.kind.prompt().to_string(),
@@ -275,35 +366,17 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
 
     match &form.kind {
         FormKind::Confirm { .. } => {
-            let yes_selected = matches!(
-                modal.batch_statuses.get(modal.batch_index),
-                Some(BatchStatus::Answered)
-            );
-            let no_selected = matches!(
-                modal.batch_statuses.get(modal.batch_index),
-                Some(BatchStatus::Cancelled)
-            );
-            let yes_style = if yes_selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            };
-            let no_style = if no_selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Red)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Red)
-            };
-            lines.push(render_pill(inner_w, "  Yes  ", yes_style, dim_style));
+            let yes_style = Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD);
+            let no_style = Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD);
+            lines.push(render_full_row(inner_w, "  ▸ Yes  ", yes_style, t.modal_bg));
             lines.push(Line::from(""));
-            lines.push(render_pill(inner_w, "  No  ", no_style, dim_style));
+            lines.push(render_full_row(inner_w, "    No   ", no_style, t.modal_bg));
         }
         FormKind::SingleSelect { options, .. } => {
             for (i, label) in options.iter().enumerate() {
@@ -314,11 +387,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                         .bg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(t.tinted_fg)
+                    idle_row_style
                 };
                 let prefix = if is_cursor { "▶ " } else { "  " };
                 let text = format!("{prefix}{label}");
-                lines.push(render_row_bg(inner_w, &text, row_style, t.code_bg));
+                lines.push(render_full_row(inner_w, &text, row_style, t.modal_bg));
             }
         }
         FormKind::MultiSelect {
@@ -340,14 +413,15 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                         .add_modifier(Modifier::BOLD)
                 } else if checked {
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(Color::Black)
+                        .bg(Color::Green)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(t.tinted_fg)
+                    idle_row_style
                 };
                 let prefix = if is_cursor { "▶ " } else { "  " };
                 let text = format!("{prefix}[{check_glyph}] {label}");
-                lines.push(render_row_bg(inner_w, &text, row_style, t.code_bg));
+                lines.push(render_full_row(inner_w, &text, row_style, t.modal_bg));
             }
             let count = modal.multi_selected.iter().filter(|&&b| b).count();
             let bounds = match (min, max) {
@@ -378,8 +452,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
             } else {
                 prompt_style
             };
+            let row_style = Style::default()
+                .fg(text_style.fg.unwrap_or(t.tinted_fg))
+                .bg(t.panel_bg);
             for row in display.split('\n') {
-                lines.push(Line::from(Span::styled(format!("  {row}"), text_style)));
+                let text = format!("  {row}");
+                lines.push(render_full_row(inner_w, &text, row_style, t.modal_bg));
             }
             if buf.is_empty() {
                 lines.push(Line::from(Span::styled(
@@ -408,25 +486,16 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
     f.render_widget(para, inner);
 }
 
-fn render_row_bg<'a>(width: usize, text: &str, style: Style, bg: Color) -> Line<'a> {
+fn render_full_row<'a>(width: usize, text: &str, style: Style, fallback_bg: Color) -> Line<'a> {
     let text_w = unicode_width::UnicodeWidthStr::width(text);
     let pad = width.saturating_sub(text_w);
+    let bg = style.bg.unwrap_or(fallback_bg);
     let mut spans: Vec<Span<'a>> = Vec::new();
     spans.push(Span::styled(text.to_string(), style));
     if pad > 0 {
-        let bg_fill_style = Style::default().bg(style.bg.unwrap_or(bg));
-        spans.push(Span::styled(" ".repeat(pad), bg_fill_style));
+        spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
     }
     Line::from(spans)
-}
-
-fn render_pill<'a>(width: usize, label: &str, style: Style, _dim: Style) -> Line<'a> {
-    let label_w = unicode_width::UnicodeWidthStr::width(label);
-    let _ = width;
-    Line::from(vec![
-        Span::styled(label.to_string(), style),
-        Span::raw(" ".repeat(label_w.min(2))),
-    ])
 }
 
 fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
@@ -539,24 +608,13 @@ mod tests {
     }
 
     #[test]
-    fn confirm_submit_yields_true() {
+    fn confirm_submit_yields_single() {
         let mut m = FormModal::default();
         m.attach_test(mk(FormKind::Confirm {
             prompt: "sure?".into(),
         }));
-        let a = m.submit().unwrap();
-        assert!(matches!(a, FormAnswer::Confirmed { value: true }));
-        assert!(!m.open);
-    }
-
-    #[test]
-    fn confirm_no_yields_false() {
-        let mut m = FormModal::default();
-        m.attach_test(mk(FormKind::Confirm {
-            prompt: "sure?".into(),
-        }));
-        let a = m.confirm_no().unwrap();
-        assert!(matches!(a, FormAnswer::Confirmed { value: false }));
+        let outcome = m.submit();
+        assert!(matches!(outcome, SubmitOutcome::Single { .. }));
     }
 
     #[test]
@@ -568,7 +626,7 @@ mod tests {
             min: Some(1),
             max: None,
         }));
-        assert!(m.submit().is_none());
+        assert!(matches!(m.submit(), SubmitOutcome::None));
         assert!(m.error.is_some());
         assert!(m.open, "modal stays open after failed submit");
     }
@@ -586,7 +644,7 @@ mod tests {
         m.toggle_current();
         m.cursor = 1;
         m.toggle_current();
-        assert!(m.submit().is_none());
+        assert!(matches!(m.submit(), SubmitOutcome::None));
         assert!(m.error.is_some());
     }
 
@@ -603,13 +661,15 @@ mod tests {
         m.toggle_current();
         m.cursor = 2;
         m.toggle_current();
-        let a = m.submit().unwrap();
-        match a {
-            FormAnswer::MultiSelected { indices, labels } => {
+        match m.submit() {
+            SubmitOutcome::Single {
+                answer: FormAnswer::MultiSelected { indices, labels },
+                ..
+            } => {
                 assert_eq!(indices, vec![0, 2]);
                 assert_eq!(labels, vec!["a", "c"]);
             }
-            _ => panic!("expected multi selected"),
+            other => panic!("expected Single MultiSelected, got {other:?}"),
         }
     }
 
@@ -622,16 +682,21 @@ mod tests {
             multiline: false,
         }));
         m.text_editor.insert_str("hi there");
-        let a = m.submit().unwrap();
-        assert!(matches!(a, FormAnswer::TextEntered { text } if text == "hi there"));
+        match m.submit() {
+            SubmitOutcome::Single {
+                answer: FormAnswer::TextEntered { text },
+                ..
+            } => assert_eq!(text, "hi there"),
+            other => panic!("expected Single TextEntered, got {other:?}"),
+        }
     }
 
     #[test]
-    fn cancel_from_open_returns_cancelled() {
+    fn cancel_from_open_returns_none_outcome() {
         let mut m = FormModal::default();
         m.attach_test(mk(FormKind::Confirm { prompt: "?".into() }));
-        let a = m.cancel().unwrap();
-        assert!(matches!(a, FormAnswer::Cancelled));
+        let outcome = m.cancel();
+        assert!(matches!(outcome, SubmitOutcome::None));
         assert!(!m.open);
     }
 }

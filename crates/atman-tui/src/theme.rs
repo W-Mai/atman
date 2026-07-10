@@ -18,6 +18,8 @@ pub struct Theme {
     pub note_error_bg: Color,
     pub tinted_fg: Color,
     pub subtle_fg: Color,
+    pub modal_bg: Color,
+    pub panel_bg: Color,
 }
 
 impl Theme {
@@ -31,6 +33,8 @@ impl Theme {
             note_error_bg: Color::Rgb(40, 20, 22),
             tinted_fg: Color::Gray,
             subtle_fg: Color::DarkGray,
+            modal_bg: Color::Rgb(12, 14, 18),
+            panel_bg: Color::Rgb(28, 30, 36),
         }
     }
 
@@ -44,6 +48,8 @@ impl Theme {
             note_error_bg: Color::Rgb(250, 220, 220),
             tinted_fg: Color::Rgb(30, 30, 30),
             subtle_fg: Color::Rgb(96, 96, 96),
+            modal_bg: Color::Rgb(250, 250, 250),
+            panel_bg: Color::Rgb(232, 232, 236),
         }
     }
 }
