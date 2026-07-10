@@ -170,72 +170,6 @@ pub async fn run_tui(handle: TuiHandle) -> Result<()> {
     run_frames(&mut terminal, handle).await
 }
 
-#[derive(PartialEq, Eq)]
-struct FrameSignature {
-    area: Option<ratatui::layout::Size>,
-    items_len: usize,
-    scroll_offset: u16,
-    pending_approvals: usize,
-    sidebar_mode: sidebar::SidebarMode,
-    modals: u16,
-    yank_mode: bool,
-    intro_active: bool,
-}
-
-impl FrameSignature {
-    fn capture(app: &AppState, area: Option<ratatui::layout::Size>) -> Self {
-        let mut modals: u16 = 0;
-        if app.cheatsheet_open {
-            modals |= 1 << 0;
-        }
-        if app.palette.open {
-            modals |= 1 << 1;
-        }
-        if app.session_switcher.open {
-            modals |= 1 << 2;
-        }
-        if app.compact_review.is_some() {
-            modals |= 1 << 3;
-        }
-        if app.history_search.open {
-            modals |= 1 << 4;
-        }
-        if app.workflow_viewer.open {
-            modals |= 1 << 5;
-        }
-        if app.form_modal.open {
-            modals |= 1 << 6;
-        }
-        if app.popup.is_open() {
-            modals |= 1 << 7;
-        }
-        Self {
-            area,
-            items_len: app.items.len(),
-            scroll_offset: app.scroll_offset,
-            pending_approvals: app.pending_approvals.len(),
-            sidebar_mode: app.sidebar_mode,
-            modals,
-            yank_mode: app.yank_mode,
-            intro_active: app.startup_intro.is_some(),
-        }
-    }
-
-    // Any layout-shifting delta needs a full clear because ratatui's
-    // diff leaves wide-glyph continuation cells stale when content
-    // moves or shrinks. Streaming append does not — new bytes overwrite.
-    fn needs_clear_vs(&self, next: &FrameSignature) -> bool {
-        self.area != next.area
-            || self.scroll_offset != next.scroll_offset
-            || next.items_len < self.items_len
-            || self.pending_approvals != next.pending_approvals
-            || self.sidebar_mode != next.sidebar_mode
-            || self.modals != next.modals
-            || self.yank_mode != next.yank_mode
-            || self.intro_active != next.intro_active
-    }
-}
-
 async fn run_frames(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     mut handle: TuiHandle,
@@ -279,16 +213,7 @@ async fn run_frames(
     intro_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let _reader_guard = ReaderGuard(reader_shutdown);
-    let mut prev_sig: Option<FrameSignature> = None;
     loop {
-        let sig = FrameSignature::capture(&app, terminal.size().ok());
-        let needs_clear =
-            app.needs_full_clear || prev_sig.as_ref().is_some_and(|p| p.needs_clear_vs(&sig));
-        if needs_clear {
-            terminal.clear()?;
-            app.needs_full_clear = false;
-        }
-        prev_sig = Some(sig);
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
 
         if app.should_quit {
@@ -1763,6 +1688,60 @@ fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t)
 }
 
+// Replace wide-glyph halves straddling a floating widget's edges with
+// spaces so CJK / emoji from lower layers can't bleed through the
+// overlay's border. Call before each Clear + render pass on a modal.
+pub fn sanitize_widget_edges(f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    use ratatui::buffer::CellDiffOption;
+    use unicode_width::UnicodeWidthStr;
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let buf = f.buffer_mut();
+    let buf_area = *buf.area();
+    let inside_left = area.x;
+    let inside_right = area.x + area.width - 1;
+    let outside_left = area.x.checked_sub(1);
+    let outside_right = if area.x + area.width < buf_area.x + buf_area.width {
+        Some(area.x + area.width)
+    } else {
+        None
+    };
+    let clear_wide = |cell: &mut ratatui::buffer::Cell| {
+        cell.set_symbol(" ");
+        cell.set_diff_option(CellDiffOption::None);
+    };
+    for y in area.y..area.y + area.height {
+        if y < buf_area.y || y >= buf_area.y + buf_area.height {
+            continue;
+        }
+        if let Some(ox) = outside_left {
+            let cell = &mut buf[(ox, y)];
+            if UnicodeWidthStr::width(cell.symbol()) > 1 {
+                clear_wide(cell);
+            }
+        }
+        {
+            let cell = &mut buf[(inside_left, y)];
+            if cell.symbol().is_empty() {
+                clear_wide(cell);
+            }
+        }
+        if inside_right != inside_left {
+            let cell = &mut buf[(inside_right, y)];
+            if UnicodeWidthStr::width(cell.symbol()) > 1 {
+                clear_wide(cell);
+            }
+        }
+        if let Some(rx) = outside_right {
+            let cell = &mut buf[(rx, y)];
+            if cell.symbol().is_empty() {
+                clear_wide(cell);
+            }
+        }
+    }
+}
+
 fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {
     let area = f.area();
     if area.width < 40 || area.height < 8 {
@@ -1772,10 +1751,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         f.render_widget(msg, area);
         return;
     }
-    // Ratatui recycles buffers across frames, so wide-glyph continuation
-    // cells keep their skip flag from prior paints and slip through the
-    // diff. Clearing the whole area every frame resets every cell's skip.
-    f.render_widget(ratatui::widgets::Clear, area);
     let startup_active = matches!(
         app.items.first(),
         Some(crate::app::OutputItem::StartupCard { .. })
@@ -1947,9 +1922,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         );
     }
     if let Some(area) = approvals_rect {
+        sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
         approval_bar::render(f, area, &app.pending_approvals);
     }
+    sanitize_widget_edges(f, input_rect);
     f.render_widget(ratatui::widgets::Clear, input_rect);
     f.render_widget(
         input_paragraph(

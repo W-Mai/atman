@@ -99,6 +99,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
         height: modal_h,
     };
     dim_background_outside(f.buffer_mut(), area, modal_area);
+    crate::sanitize_widget_edges(f, modal_area);
     f.render_widget(Clear, modal_area);
     let title = format!(
         " Workflow · Esc close · h/l or Shift+←/→ · j/k up/down · offset {},{} ",

@@ -153,6 +153,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
         width: outer_width,
         height: outer_height,
     };
+    crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)

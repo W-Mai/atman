@@ -122,6 +122,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
         width: w,
         height: h,
     };
+    crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
     let title = format!(
         " Search History · scope: {} · Tab to toggle · Enter to search · Esc to close ",

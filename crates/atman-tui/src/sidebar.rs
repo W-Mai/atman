@@ -44,6 +44,7 @@ impl SidebarMode {
 pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
     // Clear underneath so the transcript rows behind the card don't
     // bleed through when messages scroll past the sidebar's y range.
+    crate::sanitize_widget_edges(f, area);
     f.render_widget(ratatui::widgets::Clear, area);
     let outer = Block::default()
         .borders(Borders::ALL)

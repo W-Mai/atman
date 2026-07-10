@@ -213,6 +213,7 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
         width,
         height: popup_h,
     };
+    crate::sanitize_widget_edges(f, popup_rect);
     f.render_widget(Clear, popup_rect);
     let list_items: Vec<ListItem<'_>> = items
         .iter()
@@ -292,6 +293,7 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
         width: w,
         height: h,
     };
+    crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)

@@ -275,6 +275,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         width: w,
         height: h,
     };
+    crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
     let title = if switcher.rename_mode {
         format!(

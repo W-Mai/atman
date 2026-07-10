@@ -2296,11 +2296,9 @@ mod tests {
     #[test]
     fn divider_produces_dashed_line() {
         let lines = render_item(&OutputItem::Divider, &RenderCtx::empty());
-        let has_dash = lines.iter().any(|l| {
-            l.spans
-                .iter()
-                .any(|s| s.content.as_ref().contains("╌"))
-        });
+        let has_dash = lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.as_ref().contains("╌")));
         assert!(has_dash, "no dashed line in {lines:?}");
     }
 

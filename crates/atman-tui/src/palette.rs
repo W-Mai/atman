@@ -157,6 +157,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
         width: w,
         height: h,
     };
+    crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
     let outer = Block::default()
         .borders(Borders::ALL)
