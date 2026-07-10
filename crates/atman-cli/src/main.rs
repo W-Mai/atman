@@ -1235,7 +1235,22 @@ struct PrebuiltSession {
 async fn prebuild_session(
     resume_sid: Option<String>,
     intro: Option<atman_tui::app::StartupIntro>,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<atman_tui::boot_animation::BootProgress>>,
 ) -> Result<PrebuiltSession> {
+    use atman_runtime::workflow::NodeStatus;
+    use atman_tui::boot_animation::{BootProgress, BootStepId};
+    let emit = |step: BootStepId, start: bool, ok: bool| {
+        if let Some(tx) = progress.as_ref() {
+            let msg = if start {
+                BootProgress::Start(step)
+            } else {
+                BootProgress::Finish(step, if ok { NodeStatus::Ok } else { NodeStatus::Err })
+            };
+            let _ = tx.send(msg);
+        }
+    };
+
+    emit(BootStepId::OpenSession, true, false);
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
     let is_fresh = resume_sid.is_none();
@@ -1252,14 +1267,35 @@ async fn prebuild_session(
             .with_context(|| format!("opening session under {}", root.display()))?,
     });
     apply_session_config(&session);
+    emit(BootStepId::OpenSession, false, true);
+
+    emit(BootStepId::BuildExecutor, true, false);
     let atman_daemon::bootstrap::BootstrapOutcome {
         mut executor,
         mcp_status,
     } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
         .await?;
+    emit(BootStepId::BuildExecutor, false, true);
+
+    emit(BootStepId::RegisterProviders, true, false);
+    emit(BootStepId::RegisterProviders, false, true);
+
+    emit(BootStepId::AttachMcp, true, false);
+    let mcp_ok = mcp_status.iter().all(|r| r.is_ok());
+    emit(BootStepId::AttachMcp, false, mcp_ok);
+
+    emit(BootStepId::AttachMemory, true, false);
     attach_memory_stores(&mut executor, session.dir(), false)?;
+    emit(BootStepId::AttachMemory, false, true);
+
+    emit(BootStepId::LoadTodos, true, false);
     session.refresh_todos_from_store_async().await;
     session.refresh_plans_from_store_async().await;
+    emit(BootStepId::LoadTodos, false, true);
+
+    emit(BootStepId::Ready, true, false);
+    emit(BootStepId::Ready, false, true);
+
     Ok(PrebuiltSession {
         session,
         executor,
@@ -1272,6 +1308,30 @@ async fn prebuild_session(
 
 type PrebuildHandle = tokio::task::JoinHandle<Result<PrebuiltSession>>;
 
+async fn boot_first_session(resume_sid: Option<String>) -> Result<PrebuiltSession> {
+    if !tui_mode_requested() {
+        return prebuild_session(resume_sid, None, None).await;
+    }
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let recent = build_startup_recent(&data_dir()?, "", 5);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let prebuild = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("boot animation prebuild runtime init")?;
+        rt.block_on(prebuild_session(resume_sid, None, Some(tx)))
+    });
+    let animation = atman_tui::boot_animation::run_boot_animation(rx, version, recent);
+    let (anim_result, prebuild_result) = tokio::join!(animation, prebuild);
+    anim_result?;
+    match prebuild_result {
+        Ok(Ok(session)) => Ok(session),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow::anyhow!("prebuild join failed: {e}")),
+    }
+}
+
 async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     // Hold the terminal guard across every session switch so the
     // alternate screen stays alive between one cmd_repl_once and the
@@ -1282,7 +1342,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     } else {
         None
     };
-    let mut current = prebuild_session(resume_sid, None).await?;
+    let mut current = boot_first_session(resume_sid).await?;
     loop {
         let switch_target: std::sync::Arc<std::sync::Mutex<Option<PrebuildHandle>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -1446,7 +1506,7 @@ async fn cmd_repl_once(
                                 .enable_all()
                                 .build()
                                 .context("prebuild runtime init")?;
-                            rt.block_on(prebuild_session(Some(sid), intro))
+                            rt.block_on(prebuild_session(Some(sid), intro, None))
                         });
                         *switch_target_for_ctrl.lock().unwrap() = Some(handle);
                         session_for_ctrl.cancel_flow();

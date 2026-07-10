@@ -14,6 +14,7 @@ use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
 pub mod approval_bar;
+pub mod boot_animation;
 pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
@@ -1856,7 +1857,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
             let base = output::compute_startup_overlay(l.transcript, recent).area;
             f.render_widget(ratatui::widgets::Clear, l.transcript);
-            output::render_startup_overlay(f, base, version, recent, false);
+            output::render_startup_overlay(f, base, version, recent, false, recent.len());
         }
         app.resolve_scroll(0, effective_viewport);
         app.last_item_ranges.clear();

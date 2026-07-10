@@ -428,6 +428,7 @@ pub struct StartupOverlayLayout {
     pub area: ratatui::layout::Rect,
     pub input_slot: ratatui::layout::Rect,
     pub overlay_width: u16,
+    pub banner_rect: ratatui::layout::Rect,
 }
 
 const SESSION_CARD_TITLE_MAX: usize = 48;
@@ -470,10 +471,17 @@ pub fn compute_startup_overlay(
         width: overlay.width,
         height: STARTUP_INPUT_SLOT_ROWS,
     };
+    let banner_rect = ratatui::layout::Rect {
+        x: overlay.x,
+        y: overlay.y + 1,
+        width: overlay.width,
+        height: STARTUP_BANNER.len() as u16 + 2,
+    };
     StartupOverlayLayout {
         area: overlay,
         input_slot,
         overlay_width: overlay.width,
+        banner_rect,
     }
 }
 
@@ -587,7 +595,9 @@ pub fn render_startup_overlay(
     version: &str,
     recent: &[crate::app::StartupSessionEntry],
     dim: bool,
+    reveal_count: usize,
 ) -> StartupOverlayLayout {
+    let recent = &recent[..reveal_count.min(recent.len())];
     let layout = compute_startup_overlay(area, recent);
     f.render_widget(ratatui::widgets::Clear, area);
     let inner_area = area;
