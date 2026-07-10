@@ -98,6 +98,7 @@ pub struct AppState {
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub input_rect: Option<ratatui::layout::Rect>,
     pub startup_intro: Option<StartupIntro>,
+    pub needs_full_clear: bool,
     pub form_modal: crate::form_modal::FormModal,
     pub animation_frame: u32,
     pub items_version: u64,
@@ -119,6 +120,7 @@ impl AppState {
             goal,
             follow_tail: true,
             mouse_captured: true,
+            needs_full_clear: true,
             ..Default::default()
         }
     }
