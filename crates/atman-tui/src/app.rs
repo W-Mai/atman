@@ -35,6 +35,13 @@ pub enum OutputItem {
 }
 
 #[derive(Debug, Clone)]
+pub struct StartupIntro {
+    pub started_at: Instant,
+    pub version: String,
+    pub recent: Vec<StartupSessionEntry>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StartupSessionEntry {
     pub session_id: String,
     pub short_id: String,
@@ -90,7 +97,7 @@ pub struct AppState {
     pub last_node_regions: Vec<crate::output::NodeRegion>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub input_rect: Option<ratatui::layout::Rect>,
-    pub startup_slide_started: Option<Instant>,
+    pub startup_intro: Option<StartupIntro>,
     pub form_modal: crate::form_modal::FormModal,
     pub animation_frame: u32,
     pub items_version: u64,

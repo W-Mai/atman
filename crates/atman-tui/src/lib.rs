@@ -75,7 +75,10 @@ pub enum TuiControl {
     CompactReviewReject {
         review_id: String,
     },
-    SwitchSession(String),
+    SwitchSession {
+        sid: String,
+        intro: Option<app::StartupIntro>,
+    },
     DeleteSession(String),
     RenameSession {
         session_id: String,
@@ -123,6 +126,7 @@ pub struct TuiHandle {
     pub form_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
+    pub startup_intro: Option<app::StartupIntro>,
 }
 
 impl TuiHandle {
@@ -148,6 +152,7 @@ impl TuiHandle {
             form_rx: Some(session.forms().subscribe()),
             flow_names: Vec::new(),
             session: Some(session),
+            startup_intro: None,
         }
     }
 }
@@ -156,6 +161,12 @@ pub async fn run_tui(handle: TuiHandle) -> Result<()> {
     let _guard = TerminalGuard::install()?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
+    // ratatui builds an empty previous_buffer for a fresh Terminal, so
+    // the first draw diffs from blank and paints every cell — no
+    // manual .clear() needed. A clear() here would blank the alternate
+    // screen for the ~tens of ms between run_tui entry and the first
+    // frame, giving the user a visible black flash during a session
+    // switch. Removed.
     run_frames(&mut terminal, handle).await
 }
 
@@ -168,6 +179,7 @@ async fn run_frames(
         .with_session_dir(handle.session_dir.clone())
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone());
+    app.startup_intro = handle.startup_intro.take();
     if let Some(rx) = handle.context_rx.as_ref() {
         app.context = rx.borrow().clone();
     }
@@ -192,13 +204,13 @@ async fn run_frames(
     let mut shutdown = handle.shutdown_rx.take();
     let mut sigterm = build_sigterm_stream();
     let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(100));
-    let mut slide_tick = tokio::time::interval(std::time::Duration::from_millis(ANIMATION_TICK_MS));
+    let mut intro_tick = tokio::time::interval(std::time::Duration::from_millis(ANIMATION_TICK_MS));
     animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Without Skip the interval bursts every missed tick when it wakes,
     // so an idle timer that sat unpolled for 3 s while the user read
     // the splash would fire ~180 times in a row and the whole slide
     // would blow past in one frame.
-    slide_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    intro_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let _reader_guard = ReaderGuard(reader_shutdown);
     loop {
@@ -222,7 +234,7 @@ async fn run_frames(
             _ = animation_tick.tick(), if app.has_running_workflow() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
-            _ = slide_tick.tick(), if app.startup_slide_started.is_some() => {
+            _ = intro_tick.tick(), if app.startup_intro.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
             key = key_events.recv() => {
@@ -994,11 +1006,8 @@ fn handle_session_switcher_key(
         }
         KeyAction::Submit => {
             if let Some(sid) = app.session_switcher.selected_id() {
-                if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::SwitchSession(sid.clone()));
-                    app.push_note(format!("switching to session {sid}…"), app::NoteLevel::Info);
-                }
                 app.session_switcher.close();
+                request_session_switch(app, control_tx, sid.clone());
             }
         }
         _ => {}
@@ -1381,28 +1390,40 @@ fn handle_key(
         return;
     }
     if let Some(crate::app::OutputItem::StartupCard { recent, .. }) = app.items.first() {
+        // The overlay only animates away when the user actually starts
+        // a session:
+        //   * a digit 1-9 → resume that recent session
+        //   * Enter (Submit) with input in the editor → begin a new
+        //     session interaction
+        // Plain char keys just type into the editor and the overlay
+        // stays put with the growing text visible in its input slot.
         if let KeyAction::Char(c) = &action
             && let Some(digit) = c.to_digit(10)
             && (1..=9).contains(&digit)
         {
             let idx = (digit as usize) - 1;
-            if let Some(entry) = recent.get(idx)
-                && let Some(tx) = control_tx
-            {
-                let _ = tx.send(TuiControl::SwitchSession(entry.session_id.clone()));
-                app.items.remove(0);
-                app.items_version = app.items_version.wrapping_add(1);
+            if let Some(entry) = recent.get(idx) {
+                request_session_switch(app, control_tx, entry.session_id.clone());
                 return;
             }
         }
-        // Any non-digit key kicks off the slide. The card itself stays
-        // in items while the animation runs; render_frame drops it the
-        // frame after the slide reaches t=1 so the container is
-        // continuously present across every animation frame.
-        if matches!(action, KeyAction::Char(_) | KeyAction::Submit)
-            && app.startup_slide_started.is_none()
+        if matches!(action, KeyAction::Submit)
+            && !editor.buf().trim().is_empty()
+            && app.startup_intro.is_none()
         {
-            app.startup_slide_started = Some(std::time::Instant::now());
+            let (version, recent) = match app.items.first() {
+                Some(crate::app::OutputItem::StartupCard { version, recent }) => {
+                    (version.clone(), recent.clone())
+                }
+                _ => (String::new(), Vec::new()),
+            };
+            app.items.remove(0);
+            app.items_version = app.items_version.wrapping_add(1);
+            app.startup_intro = Some(crate::app::StartupIntro {
+                started_at: std::time::Instant::now(),
+                version,
+                recent,
+            });
         }
     }
     if app.cheatsheet_open {
@@ -1615,6 +1636,33 @@ fn handle_key(
     }
 }
 
+// The outgoing tui exits fast; the incoming tui plays the fade+slide
+// intro on top of the freshly rendered new session so content appears
+// first, then the banner/sessions fade out and input docks bottom.
+fn request_session_switch(
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    sid: String,
+) {
+    let intro = match app.items.first() {
+        Some(crate::app::OutputItem::StartupCard { version, recent }) => {
+            Some(crate::app::StartupIntro {
+                started_at: std::time::Instant::now(),
+                version: version.clone(),
+                recent: recent.clone(),
+            })
+        }
+        _ => None,
+    };
+    if let Some(tx) = control_tx {
+        let _ = tx.send(TuiControl::SwitchSession {
+            sid,
+            intro: intro.clone(),
+        });
+    }
+    app.should_quit = true;
+}
+
 fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
     col >= rect.x
         && col < rect.x.saturating_add(rect.width)
@@ -1625,21 +1673,11 @@ fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
 // Startup input eases from the overlay's centered slot to the normal
 // bottom position. 300 ms sits inside the 200–400 ms band that feels
 // like a real transition rather than a snap or a lag.
-const STARTUP_SLIDE_MS: u128 = 400;
+const STARTUP_SLIDE_MS: u128 = 300;
 // Animation frame cadence while a slide is in flight. 60 fps so the
 // panel's x / y / width interpolation looks continuous instead of
 // two-or-three discrete jumps.
 const ANIMATION_TICK_MS: u64 = 16;
-
-fn compute_slide_progress(started: Option<std::time::Instant>) -> f32 {
-    match started {
-        Some(t) => {
-            let elapsed = t.elapsed().as_millis().min(STARTUP_SLIDE_MS) as f32;
-            (elapsed / STARTUP_SLIDE_MS as f32).clamp(0.0, 1.0)
-        }
-        None => 1.0,
-    }
-}
 
 // ease-out-quad — motion is immediately visible from the first frame
 // and gently decelerates into the end. ease-in-out was the wrong pick:
@@ -1648,19 +1686,6 @@ fn compute_slide_progress(started: Option<std::time::Instant>) -> f32 {
 fn ease_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t) * (1.0 - t)
-}
-
-fn lerp_rect(a: ratatui::layout::Rect, b: ratatui::layout::Rect, t: f32) -> ratatui::layout::Rect {
-    let t = t.clamp(0.0, 1.0);
-    let mix = |from: u16, to: u16| -> u16 {
-        (from as f32 + (to as f32 - from as f32) * t).round() as u16
-    };
-    ratatui::layout::Rect {
-        x: mix(a.x, b.x),
-        y: mix(a.y, b.y),
-        width: mix(a.width, b.width),
-        height: mix(a.height, b.height),
-    }
 }
 
 fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {
@@ -1672,17 +1697,25 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         f.render_widget(msg, area);
         return;
     }
-    // Startup overlay owns the whole transcript rect while the splash
-    // is up and while it's animating away. Sidebar is hidden for both
-    // phases so the container can freely lerp its rect from centered
-    // splash → docked bottom input without a sibling widget fighting
-    // for the same space.
+    // Ratatui recycles buffers across frames, so wide-glyph continuation
+    // cells keep their skip flag from prior paints and slip through the
+    // diff. Clearing the whole area every frame resets every cell's skip.
+    f.render_widget(ratatui::widgets::Clear, area);
     let startup_active = matches!(
         app.items.first(),
         Some(crate::app::OutputItem::StartupCard { .. })
     );
+    let intro_progress = app
+        .startup_intro
+        .as_ref()
+        .map(|i| {
+            (i.started_at.elapsed().as_millis().min(STARTUP_SLIDE_MS) as f32)
+                / STARTUP_SLIDE_MS as f32
+        })
+        .unwrap_or(1.0);
+    let intro_active = app.startup_intro.is_some() && intro_progress < 1.0;
     let wide_enough = area.width >= layout::SIDEBAR_MIN_TOTAL_WIDTH;
-    let show_sidebar = if startup_active {
+    let show_sidebar = if startup_active || intro_active {
         false
     } else {
         app.sidebar_mode.resolve(wide_enough)
@@ -1697,24 +1730,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
-    let startup_animating = app.startup_slide_started.is_some();
-    let slide_progress = compute_slide_progress(app.startup_slide_started);
-    if slide_progress >= 1.0 && app.startup_slide_started.is_some() {
-        app.startup_slide_started = None;
-        // Drop the card the frame after the slide reaches t=1 so the
-        // transcript reflows normally next paint.
-        if matches!(
-            app.items.first(),
-            Some(crate::app::OutputItem::StartupCard { .. })
-        ) {
-            app.items.remove(0);
-            app.items_version = app.items_version.wrapping_add(1);
-        }
-    }
-    // Pre-compute overlay slot so the input rect can dock into (and
-    // slide out of) the reserved centered position at the exact same
-    // width as the banner and sessions list.
-    let overlay_slot = if startup_active {
+    let transcript_content = layout::apply_horizontal_padding(l.transcript, 2);
+    let input_buf_lines = editor.buf().split('\n').count().min(6) as u16;
+    let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
+    let startup_slot = if startup_active {
         let recent = match app.items.first() {
             Some(crate::app::OutputItem::StartupCard { recent, .. }) => recent.clone(),
             _ => Vec::new(),
@@ -1723,35 +1742,31 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     } else {
         None
     };
-    let transcript_content = layout::apply_horizontal_padding(l.transcript, 2);
-    let input_buf_lines = editor.buf().split('\n').count().min(6) as u16;
-    let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
-    let input_rect = match (overlay_slot, startup_animating) {
-        (Some(slot), false) => ratatui::layout::Rect {
+    let intro_slot = if intro_active {
+        app.startup_intro
+            .as_ref()
+            .map(|i| output::compute_startup_overlay(l.transcript, &i.recent).input_slot)
+    } else {
+        None
+    };
+    let input_rect = if let Some(slot) = startup_slot {
+        ratatui::layout::Rect {
             x: slot.x,
             y: slot.y,
             width: slot.width,
             height: bottom_rect.height,
-        },
-        (Some(slot), true) => {
-            let eased = ease_out(slide_progress);
-            let start_x = slot.x as f32;
-            let start_y = slot.y as f32;
-            let start_w = slot.width as f32;
-            let end_x = bottom_rect.x as f32;
-            let end_y = bottom_rect.y as f32;
-            let end_w = bottom_rect.width as f32;
-            let x = start_x + (end_x - start_x) * eased;
-            let y = start_y + (end_y - start_y) * eased;
-            let w = start_w + (end_w - start_w) * eased;
-            ratatui::layout::Rect {
-                x: x.round() as u16,
-                y: y.round() as u16,
-                width: w.round() as u16,
-                height: bottom_rect.height,
-            }
         }
-        (None, _) => bottom_rect,
+    } else if let Some(slot) = intro_slot {
+        let eased = ease_out(intro_progress);
+        let mix = |a: u16, b: u16| ((a as f32) + (b as f32 - a as f32) * eased).round() as u16;
+        ratatui::layout::Rect {
+            x: mix(slot.x, bottom_rect.x),
+            y: mix(slot.y, bottom_rect.y),
+            width: mix(slot.width, bottom_rect.width),
+            height: bottom_rect.height,
+        }
+    } else {
+        bottom_rect
     };
     let approvals_rect = layout::compute_approvals_rect(l.transcript, input_rect, approvals_rows);
     app.input_rect = Some(input_rect);
@@ -1771,27 +1786,21 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let effective_viewport = input_rect.y.saturating_sub(transcript_area.y).max(1);
     if startup_active {
         if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
-            // Overlay always renders while the card is active — the
-            // outer rect lerps every frame toward the input's docked
-            // position, so banner + sessions ride along and clip out
-            // as the card shrinks. That way the composition reads as
-            // one unified widget morphing to its new size + position,
-            // not "input escapes a frozen background".
             let base = output::compute_startup_overlay(l.transcript, recent).area;
-            let overlay_area = if startup_animating {
-                let eased = ease_out(slide_progress);
-                lerp_rect(base, input_rect, eased)
-            } else {
-                base
-            };
             f.render_widget(ratatui::widgets::Clear, l.transcript);
-            output::render_startup_overlay(f, overlay_area, version, recent, startup_animating);
+            output::render_startup_overlay(f, base, version, recent, false);
         }
         app.resolve_scroll(0, effective_viewport);
         app.last_item_ranges.clear();
     } else if app.items.is_empty() {
         app.resolve_scroll(0, effective_viewport);
         app.last_item_ranges.clear();
+        // Clear the full unpadded transcript rect first — otherwise the
+        // 2-col padding strip on each side of transcript_area keeps
+        // whatever the previous frame's overlay painted there, and the
+        // startup card's animated edges leak through for one frame
+        // after the slide completes.
+        f.render_widget(ratatui::widgets::Clear, l.transcript);
         f.render_widget(output::empty_hint(), transcript_area);
     } else {
         let messages = app
@@ -1846,6 +1855,15 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             },
         );
     }
+    if intro_active && let Some(intro) = app.startup_intro.as_ref() {
+        output::render_startup_intro_fade(
+            f,
+            l.transcript,
+            &intro.version,
+            &intro.recent,
+            intro_progress,
+        );
+    }
     if let Some(area) = approvals_rect {
         f.render_widget(ratatui::widgets::Clear, area);
         approval_bar::render(f, area, &app.pending_approvals);
@@ -1883,5 +1901,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.form_modal.open {
         form_modal::render(f, area, &app.form_modal);
+    }
+    if intro_progress >= 1.0 && app.startup_intro.is_some() {
+        app.startup_intro = None;
     }
 }

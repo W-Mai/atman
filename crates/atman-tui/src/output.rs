@@ -459,6 +459,131 @@ pub fn compute_startup_overlay(
     }
 }
 
+// Intro fade: banner + sessions ghost out as the new session's
+// transcript appears underneath. progress 0=fully visible, 1=fully gone.
+// Ratatui has no alpha channel, so we bucket into three fade steps.
+pub fn render_startup_intro_fade(
+    f: &mut ratatui::Frame,
+    transcript_area: ratatui::layout::Rect,
+    version: &str,
+    recent: &[crate::app::StartupSessionEntry],
+    progress: f32,
+) -> StartupOverlayLayout {
+    let layout = compute_startup_overlay(transcript_area, recent);
+    if progress >= 0.9 {
+        return layout;
+    }
+    let (fg_banner, fg_subtle, fg_bold, fg_cyan, extra_mod) = if progress < 0.33 {
+        (
+            Color::Cyan,
+            Color::DarkGray,
+            Color::Reset,
+            Color::Cyan,
+            Modifier::empty(),
+        )
+    } else if progress < 0.66 {
+        (
+            Color::Cyan,
+            Color::DarkGray,
+            Color::Reset,
+            Color::Cyan,
+            Modifier::DIM,
+        )
+    } else {
+        (
+            Color::DarkGray,
+            Color::DarkGray,
+            Color::DarkGray,
+            Color::DarkGray,
+            Modifier::DIM,
+        )
+    };
+    let logo_style = Style::default()
+        .fg(fg_banner)
+        .add_modifier(Modifier::BOLD | extra_mod);
+    let subtle = Style::default().fg(fg_subtle).add_modifier(extra_mod);
+    let bold_plain = if fg_bold == Color::Reset {
+        Style::default().add_modifier(Modifier::BOLD | extra_mod)
+    } else {
+        Style::default()
+            .fg(fg_bold)
+            .add_modifier(Modifier::BOLD | extra_mod)
+    };
+    let cyan_plain = Style::default().fg(fg_cyan).add_modifier(extra_mod);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(""));
+    for row in STARTUP_BANNER {
+        lines.push(Line::from(Span::styled((*row).to_string(), logo_style)).centered());
+    }
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(Span::styled(
+            format!("agentic coding in your terminal · v{version}"),
+            subtle,
+        ))
+        .centered(),
+    );
+    for _ in 0..STARTUP_INPUT_SLOT_PAD {
+        lines.push(Line::from(""));
+    }
+    for _ in 0..STARTUP_INPUT_SLOT_ROWS {
+        lines.push(Line::from(""));
+    }
+    for _ in 0..STARTUP_INPUT_SLOT_PAD {
+        lines.push(Line::from(""));
+    }
+    if recent.is_empty() {
+        lines.push(
+            Line::from(Span::styled(
+                "No previous sessions in this project yet.".to_string(),
+                subtle,
+            ))
+            .centered(),
+        );
+    } else {
+        lines.push(
+            Line::from(Span::styled(
+                "Recent sessions in this project".to_string(),
+                bold_plain,
+            ))
+            .centered(),
+        );
+        lines.push(Line::from(""));
+        for (i, entry) in recent.iter().enumerate() {
+            let title = entry
+                .goal
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&entry.short_id);
+            let title_col = format!("{:<32}", clamp_len(title, 32));
+            let age_col = format!("{:<10}", entry.age_label);
+            let events = format!("{} events", entry.event_count);
+            lines.push(
+                Line::from(vec![
+                    Span::styled(format!(" {}  ", i + 1), cyan_plain),
+                    Span::styled(title_col, bold_plain),
+                    Span::styled(format!(" {age_col}"), subtle),
+                    Span::styled(events, subtle),
+                ])
+                .centered(),
+            );
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(Span::styled(
+            "Type 1-9 to resume · start typing to begin a new session".to_string(),
+            subtle,
+        ))
+        .centered(),
+    );
+    let para =
+        ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(para, layout.area);
+    layout
+}
+
 pub fn render_startup_overlay(
     f: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
@@ -467,9 +592,8 @@ pub fn render_startup_overlay(
     dim: bool,
 ) -> StartupOverlayLayout {
     let layout = compute_startup_overlay(area, recent);
-    // Repaint the entire transcript area first so any prior turn behind
-    // the overlay stops bleeding through.
     f.render_widget(ratatui::widgets::Clear, area);
+    let inner_area = area;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let logo_style = {
@@ -574,7 +698,12 @@ pub fn render_startup_overlay(
 
     let para =
         ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
-    f.render_widget(para, layout.area);
+    // Paint into inner_area (inside the border of the actual passed-in
+    // area), NOT into layout.area — the latter would re-center a fresh
+    // rect inside `area`, which for a lerped animation frame means the
+    // content stays anchored to the middle of the shrinking rect
+    // instead of shrinking with it.
+    f.render_widget(para, inner_area);
     layout
 }
 

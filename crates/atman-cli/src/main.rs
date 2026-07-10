@@ -1100,7 +1100,7 @@ fn resolve_toml_route_call(line: &str) -> Option<String> {
     None
 }
 
-async fn run_boot_flow(executor: &Executor) -> Result<()> {
+async fn run_boot_flow(executor: &Executor, reporter: &Reporter) -> Result<()> {
     let cfg = match config_dir() {
         Ok(c) => c,
         Err(_) => return Ok(()),
@@ -1119,7 +1119,10 @@ async fn run_boot_flow(executor: &Executor) -> Result<()> {
     let value = executor.run(&parsed, &flow_name, vec![]).await?;
     let rendered = render_value(&value);
     if !rendered.is_empty() {
-        println!("{rendered}");
+        // Route through Reporter so the boot flow's greeting lands as a
+        // TUI system note (inside the alternate screen) instead of a
+        // raw println that would sit above the freshly-cleared frame.
+        reporter.info(rendered);
     }
     Ok(())
 }
@@ -1220,40 +1223,22 @@ struct PendingUserMessage {
     attachments: Vec<std::path::PathBuf>,
 }
 
-async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
-    let mut current = resume_sid;
-    loop {
-        let switch_target = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-        cmd_repl_once(current.take(), switch_target.clone()).await?;
-        match switch_target.lock().unwrap().take() {
-            Some(sid) => {
-                current = Some(sid);
-                println!("[atman] switching session…");
-            }
-            None => return Ok(()),
-        }
-    }
+struct PrebuiltSession {
+    session: std::sync::Arc<atman_runtime::Session>,
+    executor: Executor,
+    mcp_status: Vec<Result<atman_runtime::mcp::McpClientStatus, String>>,
+    is_fresh: bool,
+    root: PathBuf,
+    intro: Option<atman_tui::app::StartupIntro>,
 }
 
-async fn cmd_repl_once(
+async fn prebuild_session(
     resume_sid: Option<String>,
-    switch_target: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-) -> Result<()> {
-    use std::collections::VecDeque;
-    use tokio::sync::mpsc;
-
-    let use_tui = tui_mode_requested();
-    let (note_tx, note_rx) = mpsc::unbounded_channel::<atman_tui::TuiNote>();
-    let reporter = Reporter::new(use_tui, note_tx);
-
-    reporter.info(format!(
-        "atman v{} — type `:help` for commands, `:exit` to leave, `!nudge <text>` or `!stop` while a flow is running",
-        env!("CARGO_PKG_VERSION")
-    ));
-
+    intro: Option<atman_tui::app::StartupIntro>,
+) -> Result<PrebuiltSession> {
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
-    let is_fresh_session = resume_sid.is_none();
+    let is_fresh = resume_sid.is_none();
     let project_index = open_current_project_index()?;
     let session = std::sync::Arc::new(match resume_sid {
         Some(sid) => Session::open_existing_with_context(
@@ -1267,29 +1252,72 @@ async fn cmd_repl_once(
             .with_context(|| format!("opening session under {}", root.display()))?,
     });
     apply_session_config(&session);
-    if let Some(path) = session.events_path() {
-        let count = session.message_count();
-        if count > 0 {
-            reporter.info(format!(
-                "[atman] resumed session={} events={} ({} prior message(s))",
-                session.id(),
-                path.display(),
-                count
-            ));
-        } else {
-            reporter.info(format!(
-                "[atman] session={} events={}",
-                session.id(),
-                path.display()
-            ));
-        }
-    }
-
     let atman_daemon::bootstrap::BootstrapOutcome {
         mut executor,
         mcp_status,
     } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
         .await?;
+    attach_memory_stores(&mut executor, session.dir(), false)?;
+    session.refresh_todos_from_store_async().await;
+    session.refresh_plans_from_store_async().await;
+    Ok(PrebuiltSession {
+        session,
+        executor,
+        mcp_status,
+        is_fresh,
+        root,
+        intro,
+    })
+}
+
+type PrebuildHandle = tokio::task::JoinHandle<Result<PrebuiltSession>>;
+
+async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
+    // Hold the terminal guard across every session switch so the
+    // alternate screen stays alive between one cmd_repl_once and the
+    // next. Without this, each SwitchSession would call
+    // LeaveAlternateScreen and briefly show the user's shell.
+    let _terminal_guard = if tui_mode_requested() {
+        Some(atman_tui::terminal_guard::TerminalGuard::install()?)
+    } else {
+        None
+    };
+    let mut current = prebuild_session(resume_sid, None).await?;
+    loop {
+        let switch_target: std::sync::Arc<std::sync::Mutex<Option<PrebuildHandle>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        cmd_repl_once(current, switch_target.clone()).await?;
+        let next_handle = switch_target.lock().unwrap().take();
+        match next_handle {
+            Some(handle) => match handle.await {
+                Ok(Ok(next)) => current = next,
+                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(anyhow::anyhow!("prebuild task join failed: {e}")),
+            },
+            None => return Ok(()),
+        }
+    }
+}
+
+async fn cmd_repl_once(
+    prebuilt: PrebuiltSession,
+    switch_target: std::sync::Arc<std::sync::Mutex<Option<PrebuildHandle>>>,
+) -> Result<()> {
+    use std::collections::VecDeque;
+    use tokio::sync::mpsc;
+
+    let use_tui = tui_mode_requested();
+    let (note_tx, note_rx) = mpsc::unbounded_channel::<atman_tui::TuiNote>();
+    let reporter = Reporter::new(use_tui, note_tx);
+
+    let PrebuiltSession {
+        session,
+        executor,
+        mcp_status,
+        is_fresh: is_fresh_session,
+        root,
+        intro,
+    } = prebuilt;
     for outcome in &mcp_status {
         match outcome {
             Ok(s) => reporter.info(format!(
@@ -1299,9 +1327,6 @@ async fn cmd_repl_once(
             Err(e) => reporter.error(format!("[atman] mcp boot: {e}")),
         }
     }
-    attach_memory_stores(&mut executor, session.dir(), false)?;
-    session.refresh_todos_from_store_async().await;
-    session.refresh_plans_from_store_async().await;
 
     let lifecycles = match config_dir() {
         Ok(cfg) => atman_runtime::lifecycle::LifecycleRunner::from_dir(&cfg),
@@ -1313,7 +1338,7 @@ async fn cmd_repl_once(
 
     let classifier = build_interjection_classifier();
 
-    if let Err(e) = run_boot_flow(&executor).await {
+    if let Err(e) = run_boot_flow(&executor, &reporter).await {
         reporter.error(format!("[atman] boot flow error: {e}"));
     }
 
@@ -1413,8 +1438,17 @@ async fn cmd_repl_once(
                             .compact_reviews()
                             .decide(&review_id, atman_runtime::CompactReviewDecision::Reject);
                     }
-                    atman_tui::TuiControl::SwitchSession(sid) => {
-                        *switch_target_for_ctrl.lock().unwrap() = Some(sid);
+                    atman_tui::TuiControl::SwitchSession { sid, intro } => {
+                        // spawn_blocking + fresh current_thread runtime because MCP registration
+                        // futures aren't Send, so plain tokio::spawn can't take them.
+                        let handle = tokio::task::spawn_blocking(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .context("prebuild runtime init")?;
+                            rt.block_on(prebuild_session(Some(sid), intro))
+                        });
+                        *switch_target_for_ctrl.lock().unwrap() = Some(handle);
                         session_for_ctrl.cancel_flow();
                         if let Some(tx) = sh_tx_for_ctrl.lock().unwrap().take() {
                             let _ = tx.send(());
@@ -1462,6 +1496,7 @@ async fn cmd_repl_once(
             form_rx: Some(session.forms().subscribe()),
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
+            startup_intro: intro.clone(),
         };
         (
             Some(tokio::spawn(atman_tui::run_tui(handle))),
@@ -1591,17 +1626,12 @@ async fn cmd_repl_once(
         && !session_dir.as_os_str().is_empty()
         && session_dir_is_disposable(&session_dir)
     {
-        match std::fs::remove_dir_all(&session_dir) {
-            Ok(()) => eprintln!(
-                "[atman] discarded empty session {} ({})",
-                session_id,
-                session_dir.display()
-            ),
-            Err(e) => eprintln!(
-                "[atman] could not discard empty session {}: {e}",
-                session_dir.display()
-            ),
-        }
+        // Silent gc: the alternate screen is still owned by cmd_repl at
+        // this point so any print here would land inside the outgoing
+        // TUI frame. `atman session gc` reports leftovers, which is the
+        // right surface for this info.
+        let _ = std::fs::remove_dir_all(&session_dir);
+        let _ = session_id;
     }
     Ok(())
 }
