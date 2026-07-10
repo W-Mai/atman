@@ -16,11 +16,24 @@ type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'sta
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub struct TerminalGuard {
-    prev_hook_slot: Arc<Mutex<Option<PanicHook>>>,
+    prev_hook_slot: Option<Arc<Mutex<Option<PanicHook>>>>,
+    owner: bool,
 }
 
 impl TerminalGuard {
     pub fn install() -> Result<Self> {
+        // Idempotent: a second install() while the terminal is already
+        // in alternate mode yields a "borrowed" guard that skips
+        // LeaveAlternateScreen on drop. This lets an outer scope
+        // (cmd_repl) hold the master guard across many session
+        // switches without the inner run_tui teardown flashing the
+        // real terminal back at the user each time.
+        if TERMINAL_ACTIVE.load(Ordering::SeqCst) {
+            return Ok(Self {
+                prev_hook_slot: None,
+                owner: false,
+            });
+        }
         let prev_hook = std::panic::take_hook();
         let prev_slot: Arc<Mutex<Option<PanicHook>>> = Arc::new(Mutex::new(Some(prev_hook)));
         let prev_for_hook = Arc::clone(&prev_slot);
@@ -43,15 +56,20 @@ impl TerminalGuard {
         .context("enter alternate screen")?;
         TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
         Ok(Self {
-            prev_hook_slot: prev_slot,
+            prev_hook_slot: Some(prev_slot),
+            owner: true,
         })
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if !self.owner {
+            return;
+        }
         let _ = restore_terminal();
-        if let Ok(mut slot) = self.prev_hook_slot.lock()
+        if let Some(slot) = self.prev_hook_slot.as_ref()
+            && let Ok(mut slot) = slot.lock()
             && let Some(prev) = slot.take()
         {
             std::panic::set_hook(prev);
