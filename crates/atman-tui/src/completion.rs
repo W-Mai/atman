@@ -284,7 +284,7 @@ pub fn render_hint_strip(
 
 pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
     let w = area.width.saturating_sub(4).min(80);
-    let h = area.height.saturating_sub(4).min(22);
+    let h = area.height.saturating_sub(4).min(34);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let rect = Rect {
@@ -302,15 +302,20 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
     let body = vec![
         Line::from(section("Editing")),
         kv("← / →", "move cursor"),
+        kv("↑ / ↓", "move line ↑↓, or history at ends"),
         kv("Home / Ctrl+A", "cursor to start"),
         kv("End / Ctrl+E", "cursor to end"),
         kv("Ctrl+W / Alt+Backspace", "delete word"),
         kv("Ctrl+J / Shift+Enter", "insert newline"),
+        kv("Tab", "expand [Pasted Text …] chip"),
         kv("Enter", "submit"),
+        kv("Ctrl+C", "clear input, or twice to quit"),
+        kv("wheel over input", "move caret line ↑↓"),
         Line::from(""),
         Line::from(section("Scrollback")),
         kv("PageUp / PageDown", "scroll transcript"),
         kv("Home / End", "top / follow tail"),
+        kv("wheel outside input", "scroll transcript"),
         Line::from(""),
         Line::from(section("Interjection (while streaming)")),
         kv("Esc", "cancel current flow"),
@@ -319,6 +324,14 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
             "!nudge / course / redirect / stop",
         ),
         Line::from(""),
+        Line::from(section("Approvals (when pending)")),
+        kv("1..9", "approve the Nth request"),
+        kv("a", "approve all"),
+        kv("d (single pending)", "deny it"),
+        kv("d then d (multi)", "deny the first"),
+        kv("d then 1..9", "deny the Nth"),
+        kv("Esc", "deny all + cancel flow"),
+        Line::from(""),
         Line::from(section("Flows & Tools")),
         kv("click a tool / flow panel", "toggle expansion"),
         kv("Ctrl+O", "toggle last tool expansion"),
@@ -326,7 +339,7 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
         Line::from(section("Windows")),
         kv("F1", "this cheatsheet"),
         kv("F2 / :sidebar", "toggle sidebar"),
-        kv("Ctrl+C twice", "quit"),
+        kv("Ctrl+P", "command palette"),
     ];
     let p = Paragraph::new(body)
         .block(block)

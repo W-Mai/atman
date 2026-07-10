@@ -6,6 +6,13 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use crate::input::InputEditor;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchStatus {
+    Pending,
+    Answered,
+    Cancelled,
+}
+
 #[derive(Default)]
 pub struct FormModal {
     pub open: bool,
@@ -14,10 +21,14 @@ pub struct FormModal {
     pub multi_selected: Vec<bool>,
     pub text_editor: InputEditor,
     pub error: Option<String>,
+    pub batch_ids: Vec<String>,
+    pub batch_statuses: Vec<BatchStatus>,
+    pub batch_index: usize,
+    pub pending_switch: Option<String>,
 }
 
 impl FormModal {
-    pub fn attach(&mut self, form: PendingForm) {
+    pub fn attach(&mut self, form: PendingForm, pending_ids: &[String]) {
         let multi_len = match &form.kind {
             FormKind::MultiSelect { options, .. } => options.len(),
             _ => 0,
@@ -26,8 +37,55 @@ impl FormModal {
         self.text_editor = InputEditor::default();
         self.cursor = 0;
         self.error = None;
+        for id in pending_ids {
+            if !self.batch_ids.contains(id) {
+                self.batch_ids.push(id.clone());
+                self.batch_statuses.push(BatchStatus::Pending);
+            }
+        }
+        if let Some(idx) = self.batch_ids.iter().position(|id| id == &form.form_id) {
+            self.batch_index = idx;
+        }
         self.open = true;
         self.pending = Some(form);
+    }
+
+    pub fn mark_current(&mut self, status: BatchStatus) {
+        if let Some(slot) = self.batch_statuses.get_mut(self.batch_index) {
+            *slot = status;
+        }
+    }
+
+    pub fn switch_to(&mut self, direction: isize) -> Option<String> {
+        if self.batch_ids.len() <= 1 {
+            return None;
+        }
+        let len = self.batch_ids.len() as isize;
+        let mut cursor = self.batch_index as isize;
+        for _ in 0..len {
+            cursor = (cursor + direction).rem_euclid(len);
+            let i = cursor as usize;
+            if i == self.batch_index {
+                continue;
+            }
+            if matches!(self.batch_statuses.get(i), Some(BatchStatus::Pending)) {
+                self.batch_index = i;
+                return Some(self.batch_ids[i].clone());
+            }
+        }
+        None
+    }
+
+    pub fn next_pending_id(&self, direction: isize) -> Option<String> {
+        if self.batch_ids.is_empty() {
+            return None;
+        }
+        let len = self.batch_ids.len() as isize;
+        if len <= 1 {
+            return None;
+        }
+        let next = (self.batch_index as isize + direction).rem_euclid(len) as usize;
+        Some(self.batch_ids[next].clone())
     }
 
     pub fn close(&mut self) {
@@ -36,6 +94,17 @@ impl FormModal {
         self.error = None;
         self.multi_selected.clear();
         self.cursor = 0;
+    }
+
+    pub fn end_batch(&mut self) {
+        self.close();
+        self.batch_ids.clear();
+        self.batch_statuses.clear();
+        self.batch_index = 0;
+    }
+
+    pub fn batch_total(&self) -> usize {
+        self.batch_ids.len()
     }
 
     pub fn active_form_id(&self) -> Option<&str> {
@@ -113,6 +182,10 @@ impl FormModal {
                 text: self.text_editor.buf().to_string(),
             },
         };
+        self.mark_current(BatchStatus::Answered);
+        if let Some(next) = self.switch_to(1) {
+            self.pending_switch = Some(next);
+        }
         self.close();
         Some(answer)
     }
@@ -122,6 +195,10 @@ impl FormModal {
             self.pending.as_ref().map(|p| &p.kind),
             Some(FormKind::Confirm { .. })
         ) {
+            self.mark_current(BatchStatus::Answered);
+            if let Some(next) = self.switch_to(1) {
+                self.pending_switch = Some(next);
+            }
             self.close();
             Some(FormAnswer::Confirmed { value: false })
         } else {
@@ -133,8 +210,19 @@ impl FormModal {
         if !self.open {
             return None;
         }
+        self.pending.as_ref()?;
+        self.mark_current(BatchStatus::Cancelled);
         self.close();
+        if let Some(next) = self.switch_to(1) {
+            self.pending_switch = Some(next);
+        }
         Some(FormAnswer::Cancelled)
+    }
+
+    #[cfg(test)]
+    fn attach_test(&mut self, form: PendingForm) {
+        let id = form.form_id.clone();
+        self.attach(form, &[id]);
     }
 }
 
@@ -142,6 +230,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
     let Some(form) = modal.pending.as_ref() else {
         return;
     };
+    let t = crate::theme::theme();
     let outer_width = (area.width.saturating_mul(3) / 4).clamp(50, 100);
     let content_lines = estimate_height(&form.kind, &modal.multi_selected);
     let outer_height = (content_lines + 6).min(area.height.saturating_sub(4).max(6));
@@ -155,59 +244,81 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
     };
     crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
+    let title_spans = build_title_spans(form.kind.discriminator(), modal);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            format!(" form · {} ", form.kind.discriminator()),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .style(Style::default().bg(t.code_bg))
+        .title(Line::from(title_spans))
         .title_bottom(
             Line::from(Span::styled(
                 hint_for(&form.kind),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.subtle_fg),
             ))
             .right_aligned(),
         );
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
+    let inner_w = inner.width as usize;
+    let prompt_style = Style::default()
+        .fg(t.tinted_fg)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().fg(t.subtle_fg);
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         form.kind.prompt().to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
+        prompt_style,
     )));
     lines.push(Line::from(""));
+
     match &form.kind {
         FormKind::Confirm { .. } => {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "  [Y]es ",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("   "),
-                Span::styled("[N]o ", Style::default().fg(Color::Red)),
-            ]));
+            let yes_selected = matches!(
+                modal.batch_statuses.get(modal.batch_index),
+                Some(BatchStatus::Answered)
+            );
+            let no_selected = matches!(
+                modal.batch_statuses.get(modal.batch_index),
+                Some(BatchStatus::Cancelled)
+            );
+            let yes_style = if yes_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            };
+            let no_style = if no_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Red)
+            };
+            lines.push(render_pill(inner_w, "  Yes  ", yes_style, dim_style));
+            lines.push(Line::from(""));
+            lines.push(render_pill(inner_w, "  No  ", no_style, dim_style));
         }
         FormKind::SingleSelect { options, .. } => {
             for (i, label) in options.iter().enumerate() {
-                let marker = if i == modal.cursor { "▶ " } else { "  " };
-                let style = if i == modal.cursor {
+                let is_cursor = i == modal.cursor;
+                let row_style = if is_cursor {
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default()
+                    Style::default().fg(t.tinted_fg)
                 };
-                lines.push(Line::from(vec![
-                    Span::styled(marker.to_string(), style),
-                    Span::styled(label.clone(), style),
-                ]));
+                let prefix = if is_cursor { "▶ " } else { "  " };
+                let text = format!("{prefix}{label}");
+                lines.push(render_row_bg(inner_w, &text, row_style, t.code_bg));
             }
         }
         FormKind::MultiSelect {
@@ -215,20 +326,28 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
         } => {
             for (i, label) in options.iter().enumerate() {
                 let checked = modal.multi_selected.get(i).copied().unwrap_or(false);
-                let box_glyph = if checked { "[x]" } else { "[ ]" };
-                let cursor_prefix = if i == modal.cursor { "▶ " } else { "  " };
-                let row_style = if i == modal.cursor {
+                let is_cursor = i == modal.cursor;
+                let check_glyph = if checked { "✓" } else { " " };
+                let row_style = if is_cursor && checked {
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(Color::Black)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_cursor {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if checked {
+                    Style::default()
+                        .fg(Color::Green)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default()
+                    Style::default().fg(t.tinted_fg)
                 };
-                lines.push(Line::from(vec![
-                    Span::styled(cursor_prefix.to_string(), row_style),
-                    Span::styled(format!("{box_glyph} "), row_style),
-                    Span::styled(label.clone(), row_style),
-                ]));
+                let prefix = if is_cursor { "▶ " } else { "  " };
+                let text = format!("{prefix}[{check_glyph}] {label}");
+                lines.push(render_row_bg(inner_w, &text, row_style, t.code_bg));
             }
             let count = modal.multi_selected.iter().filter(|&&b| b).count();
             let bounds = match (min, max) {
@@ -240,7 +359,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 format!("  {count} selected{bounds}"),
-                Style::default().fg(Color::DarkGray),
+                dim_style,
             )));
         }
         FormKind::Text {
@@ -254,16 +373,13 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
             } else {
                 buf.to_string()
             };
-            let placeholder_style = if buf.is_empty() {
-                Style::default().fg(Color::DarkGray)
+            let text_style = if buf.is_empty() {
+                dim_style
             } else {
-                Style::default()
+                prompt_style
             };
             for row in display.split('\n') {
-                lines.push(Line::from(Span::styled(
-                    format!("  {row}"),
-                    placeholder_style,
-                )));
+                lines.push(Line::from(Span::styled(format!("  {row}"), text_style)));
             }
             if buf.is_empty() {
                 lines.push(Line::from(Span::styled(
@@ -274,7 +390,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
             if *multiline {
                 lines.push(Line::from(Span::styled(
                     "  (Ctrl+Enter to submit multi-line input)",
-                    Style::default().fg(Color::DarkGray),
+                    dim_style,
                 )));
             }
         }
@@ -290,6 +406,69 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
         .alignment(Alignment::Left)
         .wrap(Wrap { trim: false });
     f.render_widget(para, inner);
+}
+
+fn render_row_bg<'a>(width: usize, text: &str, style: Style, bg: Color) -> Line<'a> {
+    let text_w = unicode_width::UnicodeWidthStr::width(text);
+    let pad = width.saturating_sub(text_w);
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    spans.push(Span::styled(text.to_string(), style));
+    if pad > 0 {
+        let bg_fill_style = Style::default().bg(style.bg.unwrap_or(bg));
+        spans.push(Span::styled(" ".repeat(pad), bg_fill_style));
+    }
+    Line::from(spans)
+}
+
+fn render_pill<'a>(width: usize, label: &str, style: Style, _dim: Style) -> Line<'a> {
+    let label_w = unicode_width::UnicodeWidthStr::width(label);
+    let _ = width;
+    Line::from(vec![
+        Span::styled(label.to_string(), style),
+        Span::raw(" ".repeat(label_w.min(2))),
+    ])
+}
+
+fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
+    let bold_cyan = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled(format!(" form · {kind_name} "), bold_cyan));
+    let total = modal.batch_total();
+    if total > 1 {
+        spans.push(Span::raw(" "));
+        for (i, status) in modal.batch_statuses.iter().enumerate() {
+            let style = if i == modal.batch_index {
+                match status {
+                    BatchStatus::Pending => Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    BatchStatus::Answered => Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                    BatchStatus::Cancelled => {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    }
+                }
+            } else {
+                match status {
+                    BatchStatus::Pending => Style::default().fg(Color::DarkGray),
+                    BatchStatus::Answered => Style::default().fg(Color::Green),
+                    BatchStatus::Cancelled => Style::default().fg(Color::Red),
+                }
+            };
+            spans.push(Span::styled("━━━", style));
+            if i + 1 < total {
+                spans.push(Span::raw(" "));
+            }
+        }
+        spans.push(Span::styled(
+            format!(" {}/{} ", modal.batch_index + 1, total),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans
 }
 
 fn estimate_height(kind: &FormKind, _multi: &[bool]) -> u16 {
@@ -336,7 +515,7 @@ mod tests {
     #[test]
     fn attach_resets_state_per_kind() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::MultiSelect {
+        m.attach_test(mk(FormKind::MultiSelect {
             prompt: "?".into(),
             options: vec!["a".into(), "b".into(), "c".into()],
             min: None,
@@ -349,7 +528,7 @@ mod tests {
     #[test]
     fn move_cursor_wraps() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::SingleSelect {
+        m.attach_test(mk(FormKind::SingleSelect {
             prompt: "?".into(),
             options: vec!["a".into(), "b".into()],
         }));
@@ -362,7 +541,7 @@ mod tests {
     #[test]
     fn confirm_submit_yields_true() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::Confirm {
+        m.attach_test(mk(FormKind::Confirm {
             prompt: "sure?".into(),
         }));
         let a = m.submit().unwrap();
@@ -373,7 +552,7 @@ mod tests {
     #[test]
     fn confirm_no_yields_false() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::Confirm {
+        m.attach_test(mk(FormKind::Confirm {
             prompt: "sure?".into(),
         }));
         let a = m.confirm_no().unwrap();
@@ -383,7 +562,7 @@ mod tests {
     #[test]
     fn multi_select_min_bound_rejects_empty_submit() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::MultiSelect {
+        m.attach_test(mk(FormKind::MultiSelect {
             prompt: "?".into(),
             options: vec!["a".into(), "b".into()],
             min: Some(1),
@@ -397,7 +576,7 @@ mod tests {
     #[test]
     fn multi_select_max_bound_rejects_overfull_submit() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::MultiSelect {
+        m.attach_test(mk(FormKind::MultiSelect {
             prompt: "?".into(),
             options: vec!["a".into(), "b".into(), "c".into()],
             min: None,
@@ -414,7 +593,7 @@ mod tests {
     #[test]
     fn multi_select_valid_submit_returns_indices_and_labels() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::MultiSelect {
+        m.attach_test(mk(FormKind::MultiSelect {
             prompt: "?".into(),
             options: vec!["a".into(), "b".into(), "c".into()],
             min: None,
@@ -437,7 +616,7 @@ mod tests {
     #[test]
     fn text_submit_returns_editor_buf() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::Text {
+        m.attach_test(mk(FormKind::Text {
             prompt: "?".into(),
             placeholder: None,
             multiline: false,
@@ -450,7 +629,7 @@ mod tests {
     #[test]
     fn cancel_from_open_returns_cancelled() {
         let mut m = FormModal::default();
-        m.attach(mk(FormKind::Confirm { prompt: "?".into() }));
+        m.attach_test(mk(FormKind::Confirm { prompt: "?".into() }));
         let a = m.cancel().unwrap();
         assert!(matches!(a, FormAnswer::Cancelled));
         assert!(!m.open);

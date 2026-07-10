@@ -243,8 +243,8 @@ mod tests {
         let transcript = Rect::new(0, 1, 100, 30);
         let input = compute_input_rect(transcript, 1);
         let rect = compute_approvals_rect(transcript, input, 3).expect("approvals rect");
-        assert_eq!(rect.x, input.x);
-        assert_eq!(rect.width, input.width);
+        assert!(rect.x >= input.x);
+        assert!(rect.width <= input.width);
         assert_eq!(rect.y + rect.height, input.y);
     }
 

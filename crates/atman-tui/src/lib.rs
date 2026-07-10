@@ -15,7 +15,6 @@ use tokio::sync::{broadcast, mpsc};
 pub mod app;
 pub mod approval_bar;
 pub mod boot_animation;
-pub mod theme;
 pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
@@ -34,6 +33,7 @@ pub mod session_switcher;
 pub mod sidebar;
 pub mod status;
 pub mod terminal_guard;
+pub mod theme;
 pub mod workflow_viewer_modal;
 
 use app::{AppState, NoteLevel};
@@ -225,8 +225,6 @@ async fn run_frames(
     let mut sigterm = build_sigterm_stream();
     let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     let mut intro_tick = tokio::time::interval(std::time::Duration::from_millis(ANIMATION_TICK_MS));
-    let mut theme_tick = tokio::time::interval(std::time::Duration::from_secs(30));
-    theme_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Without Skip the interval bursts every missed tick when it wakes,
     // so an idle timer that sat unpolled for 3 s while the user read
@@ -256,15 +254,7 @@ async fn run_frames(
             _ = intro_tick.tick(), if app.startup_intro.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
-            _ = theme_tick.tick() => {
-                let mode = tokio::task::spawn_blocking(crate::theme::detect_mode).await;
-                if let Ok(mode) = mode
-                    && crate::theme::set_mode(mode)
-                {
-                    app.mark_items_dirty();
-                    let _ = terminal.clear();
-                }
-            }
+
             key = key_events.recv() => {
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
                     eprintln!("[atman] event: {key:?}");
@@ -470,22 +460,30 @@ async fn run_frames(
             _ = wait_form_change(handle.form_rx.as_mut()) => {
                 if let Some(rx) = handle.form_rx.as_mut() {
                     let latest = rx.borrow().clone();
-                    let front = latest.first().cloned();
-                    match (front, app.form_modal.active_form_id().is_some()) {
-                        (Some(pending), false) => {
-                            app.form_modal.attach(pending);
-                        }
-                        (Some(pending), true) => {
-                            if app
-                                .form_modal
-                                .active_form_id()
-                                .is_some_and(|id| id != pending.form_id)
-                            {
-                                app.form_modal.attach(pending);
-                            }
-                        }
-                        (None, _) => {
-                            app.form_modal.close();
+                    if latest.is_empty() {
+                        app.form_modal.end_batch();
+                    } else {
+                        let ids: Vec<String> =
+                            latest.iter().map(|p| p.form_id.clone()).collect();
+                        let current = app.form_modal.active_form_id().map(String::from);
+                        let want: Option<String> = current
+                            .filter(|id| ids.iter().any(|x| x == id))
+                            .or_else(|| {
+                                app.form_modal
+                                    .batch_ids
+                                    .iter()
+                                    .zip(app.form_modal.batch_statuses.iter())
+                                    .find(|(_, s)| matches!(s, crate::form_modal::BatchStatus::Pending))
+                                    .map(|(id, _)| id.clone())
+                                    .filter(|id| ids.iter().any(|x| x == id))
+                            })
+                            .or_else(|| latest.first().map(|p| p.form_id.clone()));
+                        if let Some(want_id) = want
+                            && let Some(target) =
+                                latest.iter().find(|p| p.form_id == want_id).cloned()
+                            && app.form_modal.active_form_id() != Some(target.form_id.as_str())
+                        {
+                            app.form_modal.attach(target, &ids);
                         }
                     }
                 }
@@ -1266,6 +1264,16 @@ fn handle_form_key(
         KeyAction::Char(' ') if is_multi => {
             app.form_modal.toggle_current();
         }
+        KeyAction::Tab => {
+            if let Some(target_id) = app.form_modal.switch_to(1)
+                && target_id != form_id
+            {
+                app.form_modal.pending_switch = Some(target_id.clone());
+                if let Some(sess) = app.session.as_ref() {
+                    sess.forms().promote(&target_id);
+                }
+            }
+        }
         KeyAction::HistoryUp | KeyAction::CursorLeft | KeyAction::Char('k') if !is_text => {
             app.form_modal.move_cursor(-1);
         }
@@ -1398,16 +1406,8 @@ fn handle_approval_key(
                 true
             }
             'd' | 'D' => {
-                if queue.len() <= 1 {
-                    if let Some(p) = queue.first() {
-                        let _ = tx.send(TuiControl::DenyTool {
-                            tool_use_id: p.tool_use_id.clone(),
-                            reason: "denied by user".into(),
-                        });
-                        app.push_note(format!("denied {}", p.tool_name), app::NoteLevel::Warn);
-                    }
-                    app.deny_arm = None;
-                } else if deny_armed {
+                let deny_first = queue.len() <= 1 || deny_armed;
+                if deny_first {
                     if let Some(p) = queue.first() {
                         let _ = tx.send(TuiControl::DenyTool {
                             tool_use_id: p.tool_use_id.clone(),

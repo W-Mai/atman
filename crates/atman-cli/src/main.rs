@@ -252,6 +252,8 @@ fn run_startup_config_migration() {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     run_startup_config_migration();
+    // Probe theme before raw mode so OSC 11 reply can't leak into KeyEvents.
+    let _ = atman_tui::theme::theme();
     match cli.cmd {
         None => cmd_repl(cli.r#continue).await,
         Some(Cmd::Version) => {
@@ -3534,6 +3536,7 @@ const TUI_PREVIEW_SCENES: &[(&str, &str)] = &[
     ("form-multiline", "multi-line text input"),
     ("form-single-select", "radio-style single select"),
     ("form-multi-select", "checkbox-style multi select"),
+    ("form-sequence", "three forms chained one after another"),
     ("notes", "info / warn / error system notes"),
     ("workflow-running", "long-lived workflow with nested nodes"),
     ("workflow-cancelled", "workflow ended with Err cascade"),
@@ -3591,9 +3594,7 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                         }
                         None => atman_runtime::CompactReviewDecision::AcceptAsIs,
                     };
-                    ctrl_session
-                        .compact_reviews()
-                        .decide(&review_id, decision);
+                    ctrl_session.compact_reviews().decide(&review_id, decision);
                 }
                 atman_tui::TuiControl::CompactReviewReject { review_id } => {
                     ctrl_session
@@ -3631,56 +3632,75 @@ fn spawn_preview_scene(
                 true
             }
             "form-confirm" => {
-                preview_scene_form(session, atman_runtime::form::FormKind::Confirm {
-                    prompt: "Delete `~/tmp/scratch`? This cannot be undone.".into(),
-                })
+                preview_scene_form(
+                    session,
+                    atman_runtime::form::FormKind::Confirm {
+                        prompt: "Delete `~/tmp/scratch`? This cannot be undone.".into(),
+                    },
+                )
                 .await;
                 true
             }
             "form-text" => {
-                preview_scene_form(session, atman_runtime::form::FormKind::Text {
-                    prompt: "New branch name".into(),
-                    placeholder: Some("feature/…".into()),
-                    multiline: false,
-                })
+                preview_scene_form(
+                    session,
+                    atman_runtime::form::FormKind::Text {
+                        prompt: "New branch name".into(),
+                        placeholder: Some("feature/…".into()),
+                        multiline: false,
+                    },
+                )
                 .await;
                 true
             }
             "form-multiline" => {
-                preview_scene_form(session, atman_runtime::form::FormKind::Text {
-                    prompt: "Commit message".into(),
-                    placeholder: Some("Describe the change…".into()),
-                    multiline: true,
-                })
+                preview_scene_form(
+                    session,
+                    atman_runtime::form::FormKind::Text {
+                        prompt: "Commit message".into(),
+                        placeholder: Some("Describe the change…".into()),
+                        multiline: true,
+                    },
+                )
                 .await;
                 true
             }
             "form-single-select" => {
-                preview_scene_form(session, atman_runtime::form::FormKind::SingleSelect {
-                    prompt: "Which model should reply?".into(),
-                    options: vec![
-                        "claude-opus-4".into(),
-                        "claude-sonnet-4".into(),
-                        "gpt-4o".into(),
-                        "deepseek-v3".into(),
-                    ],
-                })
+                preview_scene_form(
+                    session,
+                    atman_runtime::form::FormKind::SingleSelect {
+                        prompt: "Which model should reply?".into(),
+                        options: vec![
+                            "claude-opus-4".into(),
+                            "claude-sonnet-4".into(),
+                            "gpt-4o".into(),
+                            "deepseek-v3".into(),
+                        ],
+                    },
+                )
                 .await;
                 true
             }
             "form-multi-select" => {
-                preview_scene_form(session, atman_runtime::form::FormKind::MultiSelect {
-                    prompt: "Which files should the agent read?".into(),
-                    options: vec![
-                        "src/lib.rs".into(),
-                        "src/app.rs".into(),
-                        "src/output.rs".into(),
-                        "src/input.rs".into(),
-                    ],
-                    min: Some(1),
-                    max: None,
-                })
+                preview_scene_form(
+                    session,
+                    atman_runtime::form::FormKind::MultiSelect {
+                        prompt: "Which files should the agent read?".into(),
+                        options: vec![
+                            "src/lib.rs".into(),
+                            "src/app.rs".into(),
+                            "src/output.rs".into(),
+                            "src/input.rs".into(),
+                        ],
+                        min: Some(1),
+                        max: None,
+                    },
+                )
                 .await;
+                true
+            }
+            "form-sequence" => {
+                preview_scene_form_sequence(session).await;
                 true
             }
             "notes" => {
@@ -3790,8 +3810,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
             "force push to protected branch",
         ),
     ];
-    for i in 0..count.min(demos.len()) {
-        let (tool, args, preview) = demos[i];
+    for (i, (tool, args, preview)) in demos.iter().take(count).enumerate() {
         let node_id = format!("stmt_{i}");
         let tool_use_id = format!("preview_tool_{i}");
         let _ = tx.send(StreamFrame::FlowNodeStart {
@@ -3818,7 +3837,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
             level: "dangerous".into(),
             preview: Some((*preview).into()),
         });
-        let _ = reg.request(PendingApproval {
+        drop(reg.request(PendingApproval {
             tool_use_id,
             tool_name: (*tool).into(),
             args_preview: (*args).into(),
@@ -3826,14 +3845,11 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
             level: ApprovalLevel::Dangerous,
             run_id: FlowRunId::now(),
             emitted_at: chrono::Utc::now(),
-        });
+        }));
     }
 }
 
-async fn preview_scene_form(
-    session: std::sync::Arc<Session>,
-    kind: atman_runtime::form::FormKind,
-) {
+async fn preview_scene_form(session: std::sync::Arc<Session>, kind: atman_runtime::form::FormKind) {
     use atman_runtime::event::FlowRunId;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let _rx = session.forms().request(atman_runtime::form::PendingForm {
@@ -3846,6 +3862,57 @@ async fn preview_scene_form(
     std::mem::forget(_rx);
 }
 
+async fn preview_scene_form_sequence(session: std::sync::Arc<Session>) {
+    use atman_runtime::event::FlowRunId;
+    use atman_runtime::form::{FormKind, PendingForm};
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let forms = session.forms();
+    let steps: Vec<(&str, FormKind)> = vec![
+        (
+            "step-1",
+            FormKind::Confirm {
+                prompt: "Ready to configure your agent?".into(),
+            },
+        ),
+        (
+            "step-2",
+            FormKind::SingleSelect {
+                prompt: "Which model?".into(),
+                options: vec![
+                    "claude-opus-4".into(),
+                    "claude-sonnet-4".into(),
+                    "gpt-4o".into(),
+                ],
+            },
+        ),
+        (
+            "step-3",
+            FormKind::Text {
+                prompt: "Give this agent a name.".into(),
+                placeholder: Some("e.g. release-buddy".into()),
+                multiline: false,
+            },
+        ),
+    ];
+    let receivers: Vec<_> = steps
+        .into_iter()
+        .map(|(id, kind)| {
+            forms.request(PendingForm {
+                form_id: id.into(),
+                run_id: FlowRunId::now(),
+                tool_use_id: format!("preview_seq_{id}"),
+                kind,
+                emitted_at: chrono::Utc::now(),
+            })
+        })
+        .collect();
+    for rx in receivers {
+        if rx.await.is_err() {
+            break;
+        }
+    }
+}
+
 async fn preview_scene_notes(session: std::sync::Arc<Session>) {
     use atman_runtime::stream::StreamFrame;
     let tx = session.stream_tx();
@@ -3856,9 +3923,7 @@ async fn preview_scene_notes(session: std::sync::Arc<Session>) {
         "rate limit approaching (48/50 rpm)".into(),
     ));
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let _ = tx.send(StreamFrame::Note(
-        "provider returned 500 — retrying".into(),
-    ));
+    let _ = tx.send(StreamFrame::Note("provider returned 500 — retrying".into()));
 }
 
 async fn preview_scene_workflow(session: std::sync::Arc<Session>, cancel_midway: bool) {
@@ -3875,9 +3940,24 @@ async fn preview_scene_workflow(session: std::sync::Arc<Session>, cancel_midway:
         parent_node_id: None,
     });
     let steps: &[(&str, NodeKind)] = &[
-        ("plan", NodeKind::Message { role: "assistant".into() }),
-        ("search", NodeKind::ToolCall { path: "fs.grep".into() }),
-        ("write patch", NodeKind::ToolCall { path: "fs.write".into() }),
+        (
+            "plan",
+            NodeKind::Message {
+                role: "assistant".into(),
+            },
+        ),
+        (
+            "search",
+            NodeKind::ToolCall {
+                path: "fs.grep".into(),
+            },
+        ),
+        (
+            "write patch",
+            NodeKind::ToolCall {
+                path: "fs.write".into(),
+            },
+        ),
     ];
     for (i, (label, kind)) in steps.iter().enumerate() {
         let _ = tx.send(StreamFrame::FlowNodeStart {

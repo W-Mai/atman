@@ -70,6 +70,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (PageDown, _, _, _) => KeyAction::PageDown,
         (Home, _, _, _) => KeyAction::CursorHome,
         (End, _, _, _) => KeyAction::CursorEnd,
+        (Char('\u{1b}'), _, _, _) => KeyAction::Escape,
         (Char(c), false, _, _) => KeyAction::Char(c),
         _ => KeyAction::Ignore,
     }

@@ -268,6 +268,19 @@ impl FormRegistry {
         self.broadcast_snapshot();
     }
 
+    pub fn promote(&self, form_id: &str) {
+        let mut entries = self.entries.lock().unwrap();
+        if let Some(pos) = entries.iter().position(|e| e.pending.form_id == form_id) {
+            if pos == 0 {
+                return;
+            }
+            let entry = entries.remove(pos);
+            entries.insert(0, entry);
+        }
+        drop(entries);
+        self.broadcast_snapshot();
+    }
+
     fn broadcast_snapshot(&self) {
         let snap = self
             .entries
