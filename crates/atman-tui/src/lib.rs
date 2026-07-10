@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, mpsc};
 pub mod app;
 pub mod approval_bar;
 pub mod boot_animation;
+pub mod theme;
 pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
@@ -224,6 +225,8 @@ async fn run_frames(
     let mut sigterm = build_sigterm_stream();
     let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     let mut intro_tick = tokio::time::interval(std::time::Duration::from_millis(ANIMATION_TICK_MS));
+    let mut theme_tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    theme_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Without Skip the interval bursts every missed tick when it wakes,
     // so an idle timer that sat unpolled for 3 s while the user read
@@ -252,6 +255,15 @@ async fn run_frames(
             }
             _ = intro_tick.tick(), if app.startup_intro.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
+            }
+            _ = theme_tick.tick() => {
+                let mode = tokio::task::spawn_blocking(crate::theme::detect_mode).await;
+                if let Ok(mode) = mode
+                    && crate::theme::set_mode(mode)
+                {
+                    app.mark_items_dirty();
+                    let _ = terminal.clear();
+                }
             }
             key = key_events.recv() => {
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {

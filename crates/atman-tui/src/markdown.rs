@@ -539,7 +539,7 @@ fn digits_for(n: usize) -> usize {
 }
 
 pub fn block_bg() -> Color {
-    Color::Rgb(22, 24, 28)
+    crate::theme::theme().code_bg
 }
 
 fn heading_style(level: HeadingLevel) -> Style {

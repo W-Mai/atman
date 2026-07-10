@@ -400,7 +400,7 @@ impl std::fmt::Debug for LayoutCache {
 // Subtle stripe behind user messages so they visually separate from
 // assistant markdown without a heavy border or gutter glyph.
 fn user_message_bg() -> Color {
-    Color::Rgb(38, 42, 54)
+    crate::theme::theme().user_msg_bg
 }
 
 // The overlay is a self-contained composition rendered on top of the
@@ -791,16 +791,17 @@ fn render_assistant(md: &str, streaming: bool, panel_width: u16) -> Vec<Line<'st
 
 fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
+    let t = crate::theme::theme();
     let (glyph, fg, bg) = match level {
-        NoteLevel::Info => ("·", Color::Cyan, Color::Rgb(20, 26, 34)),
-        NoteLevel::Warn => ("!", Color::Yellow, Color::Rgb(38, 30, 16)),
-        NoteLevel::Error => ("✗", Color::Red, Color::Rgb(40, 20, 22)),
+        NoteLevel::Info => ("·", Color::Cyan, t.note_info_bg),
+        NoteLevel::Warn => ("!", Color::Yellow, t.note_warn_bg),
+        NoteLevel::Error => ("✗", Color::Red, t.note_error_bg),
     };
     let cleaned = text
         .strip_prefix("[atman] ")
         .or_else(|| text.strip_prefix("[atman]"))
         .unwrap_or(text);
-    let body_style = Style::default().fg(Color::Gray).bg(bg);
+    let body_style = Style::default().fg(t.tinted_fg).bg(bg);
     let glyph_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
     let target = panel_width.max(20) as usize;
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
