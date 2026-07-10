@@ -412,8 +412,9 @@ fn user_message_bg() -> Color {
 //   sessions header + rows
 //   1 pad row
 //   hint line
-const STARTUP_INPUT_SLOT_ROWS: u16 = 5;
+const STARTUP_INPUT_SLOT_ROWS: u16 = 8;
 const STARTUP_INPUT_SLOT_PAD: u16 = 1;
+const STARTUP_INPUT_MAX_WIDTH: u16 = 72;
 const STARTUP_BANNER: &[&str] = &[
     " █████╗ ████████╗███╗   ███╗ █████╗ ███╗   ██╗",
     "██╔══██╗╚══██╔══╝████╗ ████║██╔══██╗████╗  ██║",
@@ -423,45 +424,13 @@ const STARTUP_BANNER: &[&str] = &[
     "╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝",
 ];
 
-fn startup_banner_width() -> u16 {
-    use unicode_width::UnicodeWidthStr;
-    STARTUP_BANNER
-        .iter()
-        .map(|r| r.width() as u16)
-        .max()
-        .unwrap_or(0)
-}
-
 pub struct StartupOverlayLayout {
     pub area: ratatui::layout::Rect,
     pub input_slot: ratatui::layout::Rect,
     pub overlay_width: u16,
 }
 
-// The banner is the narrowest sensible width; the sessions list may push
-// wider. Cap so we never spill past the transcript.
-fn overlay_width(recent: &[crate::app::StartupSessionEntry], area_width: u16) -> u16 {
-    let banner = startup_banner_width();
-    let sessions_w: u16 = recent.iter().map(session_row_width).max().unwrap_or(0);
-    let hint_w = "Type 1-9 to resume · start typing to begin a new session"
-        .chars()
-        .count() as u16;
-    banner
-        .max(sessions_w)
-        .max(hint_w)
-        .saturating_add(4)
-        .min(area_width)
-}
-
-fn session_row_width(entry: &crate::app::StartupSessionEntry) -> u16 {
-    let title = entry
-        .goal
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&entry.short_id);
-    // "  N  title(32)  age(10) N events"
-    (2 + 3 + title.chars().count().max(32) + 12 + 12) as u16
-}
+const SESSION_CARD_TITLE_MAX: usize = 48;
 
 pub fn compute_startup_overlay(
     area: ratatui::layout::Rect,
@@ -471,7 +440,8 @@ pub fn compute_startup_overlay(
     let sessions_h: u16 = if recent.is_empty() {
         3
     } else {
-        (2 + recent.len() as u16 + 2).min(15)
+        let n = recent.len() as u16;
+        (2 + n * 2 + n.saturating_sub(1)).min(25)
     };
     let hint_h: u16 = 2;
     let total_h = banner_h
@@ -480,8 +450,12 @@ pub fn compute_startup_overlay(
         + STARTUP_INPUT_SLOT_PAD
         + sessions_h
         + hint_h;
-    let width = overlay_width(recent, area.width);
-    let x = area.x + area.width.saturating_sub(width) / 2;
+    // Splash lane is narrower than the docked input; sessions cards line
+    // up under this splash input, and the slide animates x/width/height
+    // from here to compute_input_rect on dismiss.
+    let input_docked = crate::layout::compute_input_rect(area, 1);
+    let width = STARTUP_INPUT_MAX_WIDTH.min(input_docked.width);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + area.height.saturating_sub(total_h) / 2;
     let overlay = ratatui::layout::Rect {
         x,
@@ -499,7 +473,7 @@ pub fn compute_startup_overlay(
     StartupOverlayLayout {
         area: overlay,
         input_slot,
-        overlay_width: width,
+        overlay_width: overlay.width,
     }
 }
 
@@ -517,25 +491,17 @@ pub fn render_startup_intro_fade(
     if progress >= 0.9 {
         return layout;
     }
-    let (fg_banner, fg_subtle, fg_bold, fg_cyan, extra_mod) = if progress < 0.33 {
+    let (fg_banner, fg_subtle, fg_bold, extra_mod) = if progress < 0.33 {
         (
             Color::Cyan,
             Color::DarkGray,
             Color::Reset,
-            Color::Cyan,
             Modifier::empty(),
         )
     } else if progress < 0.66 {
-        (
-            Color::Cyan,
-            Color::DarkGray,
-            Color::Reset,
-            Color::Cyan,
-            Modifier::DIM,
-        )
+        (Color::Cyan, Color::DarkGray, Color::Reset, Modifier::DIM)
     } else {
         (
-            Color::DarkGray,
             Color::DarkGray,
             Color::DarkGray,
             Color::DarkGray,
@@ -553,7 +519,6 @@ pub fn render_startup_intro_fade(
             .fg(fg_bold)
             .add_modifier(Modifier::BOLD | extra_mod)
     };
-    let cyan_plain = Style::default().fg(fg_cyan).add_modifier(extra_mod);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(""));
@@ -594,24 +559,12 @@ pub fn render_startup_intro_fade(
             .centered(),
         );
         lines.push(Line::from(""));
+        let card_width = layout.area.width as usize;
         for (i, entry) in recent.iter().enumerate() {
-            let title = entry
-                .goal
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&entry.short_id);
-            let title_col = format!("{:<32}", clamp_len(title, 32));
-            let age_col = format!("{:<10}", entry.age_label);
-            let events = format!("{} events", entry.event_count);
-            lines.push(
-                Line::from(vec![
-                    Span::styled(format!(" {}  ", i + 1), cyan_plain),
-                    Span::styled(title_col, bold_plain),
-                    Span::styled(format!(" {age_col}"), subtle),
-                    Span::styled(events, subtle),
-                ])
-                .centered(),
-            );
+            lines.extend(render_session_card(i + 1, entry, card_width, true));
+            if i + 1 < recent.len() {
+                lines.push(Line::from(""));
+            }
         }
     }
     lines.push(Line::from(""));
@@ -663,14 +616,6 @@ pub fn render_startup_overlay(
         }
         s
     };
-    let cyan_plain = {
-        let mut s = Style::default().fg(Color::Cyan);
-        if dim {
-            s = s.add_modifier(Modifier::DIM);
-        }
-        s
-    };
-
     lines.push(Line::from(""));
     for row in STARTUP_BANNER {
         lines.push(Line::from(Span::styled((*row).to_string(), logo_style)).centered());
@@ -711,24 +656,12 @@ pub fn render_startup_overlay(
             .centered(),
         );
         lines.push(Line::from(""));
+        let card_width = layout.area.width as usize;
         for (i, entry) in recent.iter().enumerate() {
-            let title = entry
-                .goal
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&entry.short_id);
-            let title_col = format!("{:<32}", clamp_len(title, 32));
-            let age_col = format!("{:<10}", entry.age_label);
-            let events = format!("{} events", entry.event_count);
-            lines.push(
-                Line::from(vec![
-                    Span::styled(format!(" {}  ", i + 1), cyan_plain),
-                    Span::styled(title_col, bold_plain),
-                    Span::styled(format!(" {age_col}"), subtle),
-                    Span::styled(events, subtle),
-                ])
-                .centered(),
-            );
+            lines.extend(render_session_card(i + 1, entry, card_width, dim));
+            if i + 1 < recent.len() {
+                lines.push(Line::from(""));
+            }
         }
     }
     lines.push(Line::from(""));
@@ -749,6 +682,57 @@ pub fn render_startup_overlay(
     // instead of shrinking with it.
     f.render_widget(para, inner_area);
     layout
+}
+
+fn render_session_card(
+    n: usize,
+    entry: &crate::app::StartupSessionEntry,
+    width: usize,
+    dim: bool,
+) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let bg = crate::markdown::block_bg();
+    let mut extra = Modifier::empty();
+    if dim {
+        extra |= Modifier::DIM;
+    }
+    let bg_only = Style::default().bg(bg).add_modifier(extra);
+    let index_style = Style::default()
+        .fg(Color::Cyan)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD | extra);
+    let title_style = Style::default().bg(bg).add_modifier(Modifier::BOLD | extra);
+    let meta_style = Style::default()
+        .fg(Color::DarkGray)
+        .bg(bg)
+        .add_modifier(extra);
+
+    let title_source = entry.goal.as_deref().unwrap_or(&entry.short_id);
+    let title = clamp_len(title_source, SESSION_CARD_TITLE_MAX);
+    let title_used = 4 + UnicodeWidthStr::width(title.as_str());
+    let title_pad = width.saturating_sub(title_used);
+    let title_line = Line::from(vec![
+        Span::styled(" ".to_string(), bg_only),
+        Span::styled(format!("{n} "), index_style),
+        Span::styled(" ".to_string(), bg_only),
+        Span::styled(title, title_style),
+        Span::styled(" ".repeat(title_pad), bg_only),
+    ]);
+
+    let project = entry.project.as_deref().unwrap_or("no-project");
+    let meta = format!(
+        "{}  ·  {}  ·  {} events",
+        entry.age_label, project, entry.event_count
+    );
+    let meta_used = 4 + UnicodeWidthStr::width(meta.as_str());
+    let meta_pad = width.saturating_sub(meta_used);
+    let meta_line = Line::from(vec![
+        Span::styled("    ".to_string(), bg_only),
+        Span::styled(meta, meta_style),
+        Span::styled(" ".repeat(meta_pad), bg_only),
+    ]);
+
+    vec![title_line, meta_line]
 }
 
 fn clamp_len(s: &str, max: usize) -> String {

@@ -46,6 +46,7 @@ pub struct StartupSessionEntry {
     pub session_id: String,
     pub short_id: String,
     pub goal: Option<String>,
+    pub project: Option<String>,
     pub age_label: String,
     pub event_count: u64,
 }

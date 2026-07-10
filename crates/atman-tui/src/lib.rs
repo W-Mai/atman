@@ -101,6 +101,7 @@ pub struct SessionPickerRow {
 
 pub enum TuiCommand {
     SetSidebar(sidebar::SidebarMode),
+    OpenSessionSwitcher,
 }
 
 pub struct TuiHandle {
@@ -161,12 +162,9 @@ pub async fn run_tui(handle: TuiHandle) -> Result<()> {
     let _guard = TerminalGuard::install()?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
-    // ratatui builds an empty previous_buffer for a fresh Terminal, so
-    // the first draw diffs from blank and paints every cell — no
-    // manual .clear() needed. A clear() here would blank the alternate
-    // screen for the ~tens of ms between run_tui entry and the first
-    // frame, giving the user a visible black flash during a session
-    // switch. Removed.
+    // A fresh Terminal's previous_buffer is blank but the physical screen
+    // still holds the outgoing tui's pixels; wipe once so the first diff is honest.
+    terminal.clear()?;
     run_frames(&mut terminal, handle).await
 }
 
@@ -453,6 +451,11 @@ async fn run_frames(
                     match cmd {
                         TuiCommand::SetSidebar(mode) => {
                             app.sidebar_mode = mode;
+                        }
+                        TuiCommand::OpenSessionSwitcher => {
+                            let scope = crate::session_switcher::SessionScope::Project;
+                            let rows = enumerate_session_rows(&app, scope);
+                            app.session_switcher.open_with(rows, scope);
                         }
                     }
                 }
@@ -1663,6 +1666,19 @@ fn request_session_switch(
     app.should_quit = true;
 }
 
+fn rect_union(a: ratatui::layout::Rect, b: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    let right = (a.x + a.width).max(b.x + b.width);
+    let bottom = (a.y + a.height).max(b.y + b.height);
+    ratatui::layout::Rect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    }
+}
+
 fn rect_contains(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
     col >= rect.x
         && col < rect.x.saturating_add(rect.width)
@@ -1799,13 +1815,15 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     } else {
         None
     };
+    let intro_overlay_area = if intro_active {
+        app.startup_intro
+            .as_ref()
+            .map(|i| output::compute_startup_overlay(l.transcript, &i.recent).area)
+    } else {
+        None
+    };
     let input_rect = if let Some(slot) = startup_slot {
-        ratatui::layout::Rect {
-            x: slot.x,
-            y: slot.y,
-            width: slot.width,
-            height: bottom_rect.height,
-        }
+        slot
     } else if let Some(slot) = intro_slot {
         let eased = ease_out(intro_progress);
         let mix = |a: u16, b: u16| ((a as f32) + (b as f32 - a as f32) * eased).round() as u16;
@@ -1813,7 +1831,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             x: mix(slot.x, bottom_rect.x),
             y: mix(slot.y, bottom_rect.y),
             width: mix(slot.width, bottom_rect.width),
-            height: bottom_rect.height,
+            height: mix(slot.height, bottom_rect.height),
         }
     } else {
         bottom_rect
@@ -1926,8 +1944,20 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         f.render_widget(ratatui::widgets::Clear, area);
         approval_bar::render(f, area, &app.pending_approvals);
     }
-    sanitize_widget_edges(f, input_rect);
-    f.render_widget(ratatui::widgets::Clear, input_rect);
+    // Wipe splash overlay ∪ docked rect for the entire lifetime of the intro,
+    // including the very last frame where progress hits 1.0 and the banner /
+    // sessions stop being drawn but still linger on screen from the frame before.
+    let clear_target = if app.startup_intro.is_some() {
+        if let Some(overlay) = intro_overlay_area {
+            rect_union(overlay, bottom_rect)
+        } else {
+            input_rect
+        }
+    } else {
+        input_rect
+    };
+    sanitize_widget_edges(f, clear_target);
+    f.render_widget(ratatui::widgets::Clear, clear_target);
     f.render_widget(
         input_paragraph(
             editor.buf(),

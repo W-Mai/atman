@@ -1542,9 +1542,13 @@ async fn cmd_repl_once(
                 continue;
             }
             if trimmed == "sessions" {
-                match list_recent_sessions(&data_dir()?, 20) {
-                    Ok(rows) => print_sessions_table(&rows, &reporter),
-                    Err(e) => reporter.error(format!("[atman] :sessions: {e}")),
+                if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                    let _ = tx.send(atman_tui::TuiCommand::OpenSessionSwitcher);
+                } else {
+                    match list_recent_sessions(&data_dir()?, 20) {
+                        Ok(rows) => print_sessions_table(&rows, &reporter),
+                        Err(e) => reporter.error(format!("[atman] :sessions: {e}")),
+                    }
                 }
                 continue;
             }
@@ -2139,6 +2143,7 @@ struct SessionRow {
     mtime: std::time::SystemTime,
     events_bytes: u64,
     goal: Option<String>,
+    project: Option<String>,
 }
 
 fn build_startup_recent(
@@ -2164,6 +2169,7 @@ fn build_startup_recent(
                 session_id: r.sid,
                 short_id,
                 goal: r.goal,
+                project: r.project,
                 age_label: format_age(age_secs),
                 event_count,
             }
@@ -2203,11 +2209,15 @@ fn list_recent_sessions(root: &Path, cap: usize) -> Result<Vec<SessionRow>> {
             .ok()
             .map(|s| s.trim_end().to_string())
             .filter(|s| !s.is_empty());
+        let project = atman_runtime::session_meta::SessionMeta::load(&path)
+            .and_then(|m| m.project_root)
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
         rows.push(SessionRow {
             sid,
             mtime,
             events_bytes,
             goal,
+            project,
         });
     }
     rows.sort_by_key(|r| std::cmp::Reverse(r.mtime));
