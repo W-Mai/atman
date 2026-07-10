@@ -1254,7 +1254,6 @@ fn handle_compact_review_key(
     app: &mut AppState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
-    let Some(tx) = control_tx else { return };
     let Some(modal) = app.compact_review.as_mut() else {
         return;
     };
@@ -1268,13 +1267,17 @@ fn handle_compact_review_key(
                 } else {
                     None
                 };
-                let _ = tx.send(TuiControl::CompactReviewAccept { review_id, edited });
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::CompactReviewAccept { review_id, edited });
+                }
                 app.compact_review = None;
             }
             KeyAction::Char('e') => modal.enter_editing(),
             KeyAction::Char('r') | KeyAction::Escape => {
                 let review_id = modal.pending.review_id.clone();
-                let _ = tx.send(TuiControl::CompactReviewReject { review_id });
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::CompactReviewReject { review_id });
+                }
                 app.compact_review = None;
             }
             KeyAction::PageUp => modal.scroll_up(),

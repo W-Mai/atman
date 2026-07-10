@@ -19,6 +19,7 @@ atman-daemon   = { path = "../atman-daemon" }
 atman-proto    = { path = "../atman-proto" }
 atman-tui      = { path = "../atman-tui" }
 reqwest.workspace      = true
+chrono.workspace       = true
 futures.workspace      = true
 libc                   = "0.2"
 clap.workspace         = true

@@ -58,7 +58,9 @@ enum Cmd {
         sandbox: Option<String>,
     },
     RebuildIndex,
-    TuiPreview,
+    TuiPreview {
+        scene: Option<String>,
+    },
     Version,
     Monitor {
         #[arg(long, default_value_t = 65098)]
@@ -309,7 +311,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Doctor { fix }) => cmd_doctor(fix).await,
         Some(Cmd::Init { sandbox }) => cmd_init(sandbox).await,
         Some(Cmd::RebuildIndex) => cmd_rebuild_index().await,
-        Some(Cmd::TuiPreview) => cmd_tui_preview().await,
+        Some(Cmd::TuiPreview { scene }) => cmd_tui_preview(scene).await,
         Some(Cmd::Monitor { port }) => cmd_monitor(port).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Start,
@@ -3522,65 +3524,409 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_tui_preview() -> Result<()> {
-    use atman_runtime::stream::StreamFrame;
+const TUI_PREVIEW_SCENES: &[(&str, &str)] = &[
+    ("chat", "streaming markdown + tool call round-trip"),
+    ("approval-single", "one pending approval"),
+    ("approval-multi", "several pending approvals stacked"),
+    ("form-confirm", "yes/no confirm modal"),
+    ("form-text", "single-line text input"),
+    ("form-multiline", "multi-line text input"),
+    ("form-single-select", "radio-style single select"),
+    ("form-multi-select", "checkbox-style multi select"),
+    ("notes", "info / warn / error system notes"),
+    ("workflow-running", "long-lived workflow with nested nodes"),
+    ("workflow-cancelled", "workflow ended with Err cascade"),
+    ("compact-review", "post-compaction summary review modal"),
+];
 
+async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
+    let scene = scene.unwrap_or_else(|| "chat".into());
+    if scene == "list" || scene == "help" || scene == "?" {
+        println!("available scenes:");
+        for (name, desc) in TUI_PREVIEW_SCENES {
+            println!("  {name:<22} {desc}");
+        }
+        return Ok(());
+    }
     let session = std::sync::Arc::new(Session::open_ephemeral());
+    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<atman_tui::TuiControl>();
+    let mut handle = atman_tui::TuiHandle::from_session(session.clone());
+    handle.control_tx = Some(ctrl_tx);
+    let ctrl_session = session.clone();
+    let ctrl_task = tokio::spawn(async move {
+        use atman_runtime::session::ApprovalDecision;
+        while let Some(msg) = ctrl_rx.recv().await {
+            match msg {
+                atman_tui::TuiControl::ApproveTool(id) => {
+                    ctrl_session
+                        .approval()
+                        .decide(&id, ApprovalDecision::Approve);
+                }
+                atman_tui::TuiControl::DenyTool {
+                    tool_use_id,
+                    reason,
+                } => {
+                    ctrl_session
+                        .approval()
+                        .decide(&tool_use_id, ApprovalDecision::Deny { reason });
+                }
+                atman_tui::TuiControl::ApproveAllPending => {
+                    ctrl_session
+                        .approval()
+                        .decide_all(ApprovalDecision::Approve);
+                }
+                atman_tui::TuiControl::DenyAllPending { reason } => {
+                    ctrl_session
+                        .approval()
+                        .decide_all(ApprovalDecision::Deny { reason });
+                }
+                atman_tui::TuiControl::FormSubmit { form_id, answer } => {
+                    ctrl_session.forms().submit(&form_id, answer);
+                }
+                atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
+                    let decision = match edited {
+                        Some(summary) => {
+                            atman_runtime::CompactReviewDecision::AcceptEdited { summary }
+                        }
+                        None => atman_runtime::CompactReviewDecision::AcceptAsIs,
+                    };
+                    ctrl_session
+                        .compact_reviews()
+                        .decide(&review_id, decision);
+                }
+                atman_tui::TuiControl::CompactReviewReject { review_id } => {
+                    ctrl_session
+                        .compact_reviews()
+                        .decide(&review_id, atman_runtime::CompactReviewDecision::Reject);
+                }
+                _ => {}
+            }
+        }
+    });
+    let feeder = spawn_preview_scene(&scene, session.clone())?;
+    let result = atman_tui::run_tui(handle).await;
+    feeder.abort();
+    ctrl_task.abort();
+    result
+}
+
+fn spawn_preview_scene(
+    scene: &str,
+    session: std::sync::Arc<Session>,
+) -> Result<tokio::task::JoinHandle<()>> {
+    let scene = scene.to_string();
+    Ok(tokio::spawn(async move {
+        let ok = match scene.as_str() {
+            "chat" => {
+                preview_scene_chat(session).await;
+                true
+            }
+            "approval-single" => {
+                preview_scene_approval(session, 1).await;
+                true
+            }
+            "approval-multi" => {
+                preview_scene_approval(session, 4).await;
+                true
+            }
+            "form-confirm" => {
+                preview_scene_form(session, atman_runtime::form::FormKind::Confirm {
+                    prompt: "Delete `~/tmp/scratch`? This cannot be undone.".into(),
+                })
+                .await;
+                true
+            }
+            "form-text" => {
+                preview_scene_form(session, atman_runtime::form::FormKind::Text {
+                    prompt: "New branch name".into(),
+                    placeholder: Some("feature/…".into()),
+                    multiline: false,
+                })
+                .await;
+                true
+            }
+            "form-multiline" => {
+                preview_scene_form(session, atman_runtime::form::FormKind::Text {
+                    prompt: "Commit message".into(),
+                    placeholder: Some("Describe the change…".into()),
+                    multiline: true,
+                })
+                .await;
+                true
+            }
+            "form-single-select" => {
+                preview_scene_form(session, atman_runtime::form::FormKind::SingleSelect {
+                    prompt: "Which model should reply?".into(),
+                    options: vec![
+                        "claude-opus-4".into(),
+                        "claude-sonnet-4".into(),
+                        "gpt-4o".into(),
+                        "deepseek-v3".into(),
+                    ],
+                })
+                .await;
+                true
+            }
+            "form-multi-select" => {
+                preview_scene_form(session, atman_runtime::form::FormKind::MultiSelect {
+                    prompt: "Which files should the agent read?".into(),
+                    options: vec![
+                        "src/lib.rs".into(),
+                        "src/app.rs".into(),
+                        "src/output.rs".into(),
+                        "src/input.rs".into(),
+                    ],
+                    min: Some(1),
+                    max: None,
+                })
+                .await;
+                true
+            }
+            "notes" => {
+                preview_scene_notes(session).await;
+                true
+            }
+            "workflow-running" => {
+                preview_scene_workflow(session, false).await;
+                true
+            }
+            "workflow-cancelled" => {
+                preview_scene_workflow(session, true).await;
+                true
+            }
+            "compact-review" => {
+                preview_scene_compact_review(session).await;
+                true
+            }
+            _ => false,
+        };
+        if !ok {
+            eprintln!("[atman] unknown tui-preview scene: {scene}. try `atman tui-preview list`.");
+        }
+    }))
+}
+
+async fn preview_scene_chat(session: std::sync::Arc<Session>) {
+    use atman_runtime::stream::StreamFrame;
     let tx = session.stream_tx();
-    let feeder = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let _ = tx.send(StreamFrame::LlmChunk {
+        text: "# Hello from atman\n\n".into(),
+        model: "demo".into(),
+    });
+    for word in [
+        "atman ",
+        "is ",
+        "a ",
+        "Rust ",
+        "code-agent ",
+        "runtime.\n\n",
+    ] {
         let _ = tx.send(StreamFrame::LlmChunk {
-            text: "# Hello from atman\n\n".into(),
+            text: word.into(),
             model: "demo".into(),
         });
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        for word in [
-            "atman ",
-            "is ",
-            "a ",
-            "Rust ",
-            "code-agent ",
-            "runtime.\n\n",
-        ] {
-            let _ = tx.send(StreamFrame::LlmChunk {
-                text: word.into(),
-                model: "demo".into(),
-            });
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-        let demo_id = "demo_tool_1".to_string();
-        let _ = tx.send(StreamFrame::ToolUseStart {
-            tool: "fs.list".into(),
-            args_preview: "path=\"examples\"".into(),
-            id: demo_id.clone(),
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        let _ = tx.send(StreamFrame::ToolUseDone {
-            tool: "fs.list".into(),
-            ok: true,
-            preview: "9 entries".into(),
-            id: demo_id,
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        for word in [
-            "Found ",
-            "`agent.at`, ",
-            "`hello.at`, ",
-            "and ",
-            "seven ",
-            "more.\n",
-        ] {
-            let _ = tx.send(StreamFrame::LlmChunk {
-                text: word.into(),
-                model: "demo".into(),
-            });
-            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        }
-        let _ = tx.send(StreamFrame::LlmDone { total_tokens: 48 });
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    }
+    let demo_id = "demo_tool_1".to_string();
+    let _ = tx.send(StreamFrame::ToolUseStart {
+        tool: "fs.list".into(),
+        args_preview: "path=\"examples\"".into(),
+        id: demo_id.clone(),
     });
-    let result = atman_tui::run_tui(atman_tui::TuiHandle::from_session(session.clone())).await;
-    feeder.abort();
-    result
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let _ = tx.send(StreamFrame::ToolUseDone {
+        tool: "fs.list".into(),
+        ok: true,
+        preview: "9 entries".into(),
+        id: demo_id,
+    });
+    for word in ["Found ", "`agent.at`, ", "`hello.at`, ", "and ", "more.\n"] {
+        let _ = tx.send(StreamFrame::LlmChunk {
+            text: word.into(),
+            model: "demo".into(),
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let _ = tx.send(StreamFrame::LlmDone { total_tokens: 48 });
+}
+
+async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) {
+    use atman_runtime::event::FlowRunId;
+    use atman_runtime::nodegraph::NodeKind;
+    use atman_runtime::session::PendingApproval;
+    use atman_runtime::stream::StreamFrame;
+    use atman_runtime::tool::ApprovalLevel;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let tx = session.stream_tx();
+    let run_id = FlowRunId::now().0.to_string();
+    let _ = tx.send(StreamFrame::FlowStart {
+        run_id: run_id.clone(),
+        flow_name: "demo".into(),
+        parent_run_id: None,
+        parent_node_id: None,
+    });
+    let reg = session.approval();
+    let demos: &[(&str, &str, &str)] = &[
+        (
+            "bash",
+            "cmd=\"rm -rf ./target\"",
+            "will remove build artifacts (~2.4 GB)",
+        ),
+        (
+            "fs.write",
+            "path=\"/etc/hosts\"",
+            "root-owned file, requires sudo",
+        ),
+        (
+            "http.request",
+            "url=\"https://example.com/api/users\", method=\"DELETE\"",
+            "external network call",
+        ),
+        (
+            "shell",
+            "cmd=\"git push --force origin main\"",
+            "force push to protected branch",
+        ),
+    ];
+    for i in 0..count.min(demos.len()) {
+        let (tool, args, preview) = demos[i];
+        let node_id = format!("stmt_{i}");
+        let tool_use_id = format!("preview_tool_{i}");
+        let _ = tx.send(StreamFrame::FlowNodeStart {
+            run_id: run_id.clone(),
+            node_id: node_id.clone(),
+            kind: NodeKind::ToolCall {
+                path: (*tool).into(),
+            },
+            label: (*tool).into(),
+            parent_node_id: None,
+        });
+        let _ = tx.send(StreamFrame::ToolNode {
+            run_id: run_id.clone(),
+            parent_node_id: node_id.clone(),
+            tool_use_id: tool_use_id.clone(),
+            tool: (*tool).into(),
+            args_preview: (*args).into(),
+        });
+        let _ = tx.send(StreamFrame::ToolPendingApproval {
+            run_id: run_id.clone(),
+            tool_use_id: tool_use_id.clone(),
+            tool_name: (*tool).into(),
+            args_preview: (*args).into(),
+            level: "dangerous".into(),
+            preview: Some((*preview).into()),
+        });
+        let _ = reg.request(PendingApproval {
+            tool_use_id,
+            tool_name: (*tool).into(),
+            args_preview: (*args).into(),
+            preview: Some((*preview).into()),
+            level: ApprovalLevel::Dangerous,
+            run_id: FlowRunId::now(),
+            emitted_at: chrono::Utc::now(),
+        });
+    }
+}
+
+async fn preview_scene_form(
+    session: std::sync::Arc<Session>,
+    kind: atman_runtime::form::FormKind,
+) {
+    use atman_runtime::event::FlowRunId;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let _rx = session.forms().request(atman_runtime::form::PendingForm {
+        form_id: "preview_form".into(),
+        run_id: FlowRunId::now(),
+        tool_use_id: "preview_form_tool".into(),
+        kind,
+        emitted_at: chrono::Utc::now(),
+    });
+    std::mem::forget(_rx);
+}
+
+async fn preview_scene_notes(session: std::sync::Arc<Session>) {
+    use atman_runtime::stream::StreamFrame;
+    let tx = session.stream_tx();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let _ = tx.send(StreamFrame::Note("connected to demo provider".into()));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let _ = tx.send(StreamFrame::Note(
+        "rate limit approaching (48/50 rpm)".into(),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let _ = tx.send(StreamFrame::Note(
+        "provider returned 500 — retrying".into(),
+    ));
+}
+
+async fn preview_scene_workflow(session: std::sync::Arc<Session>, cancel_midway: bool) {
+    use atman_runtime::event::{FlowNodeStatus, FlowRunId};
+    use atman_runtime::nodegraph::NodeKind;
+    use atman_runtime::stream::StreamFrame;
+    let tx = session.stream_tx();
+    let run_id = FlowRunId::now().0.to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let _ = tx.send(StreamFrame::FlowStart {
+        run_id: run_id.clone(),
+        flow_name: "demo".into(),
+        parent_run_id: None,
+        parent_node_id: None,
+    });
+    let steps: &[(&str, NodeKind)] = &[
+        ("plan", NodeKind::Message { role: "assistant".into() }),
+        ("search", NodeKind::ToolCall { path: "fs.grep".into() }),
+        ("write patch", NodeKind::ToolCall { path: "fs.write".into() }),
+    ];
+    for (i, (label, kind)) in steps.iter().enumerate() {
+        let _ = tx.send(StreamFrame::FlowNodeStart {
+            run_id: run_id.clone(),
+            node_id: format!("stmt_{i}"),
+            kind: kind.clone(),
+            label: (*label).into(),
+            parent_node_id: None,
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if i == 0 {
+            let _ = tx.send(StreamFrame::FlowNodeEnd {
+                run_id: run_id.clone(),
+                node_id: format!("stmt_{i}"),
+                status: FlowNodeStatus::Ok,
+                output_preview: Some("ready".into()),
+                parent_node_id: None,
+            });
+        } else if cancel_midway && i == 1 {
+            break;
+        }
+    }
+    if cancel_midway {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let _ = tx.send(StreamFrame::FlowDone {
+            run_id,
+            flow_name: "demo".into(),
+            ok: false,
+        });
+    }
+}
+
+async fn preview_scene_compact_review(session: std::sync::Arc<Session>) {
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let _rx = session
+        .compact_reviews()
+        .request(atman_runtime::session::PendingCompactReview {
+            review_id: "preview_review".into(),
+            summary: "The user asked for a Rust CLI that lists sessions and prints their titles. \
+The assistant designed the storage layout, wrote the JSON parsing, added a `session list` \
+subcommand, and wired it into the daemon. All tests pass."
+                .into(),
+            slice_preview: "user: build a session list\nassistant: sure, here's the plan…".into(),
+            slice_count: 24,
+            range_start: 1,
+            range_end: 24,
+            tokens_before: 12800,
+            emitted_at: chrono::Utc::now(),
+        });
+    std::mem::forget(_rx);
 }
 
 async fn cmd_doctor(fix: bool) -> Result<()> {
