@@ -103,7 +103,7 @@ fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect
         .min(transcript.width);
     // Default height fits three content rows even when the buffer is empty,
     // so the panel never looks like a single squished line.
-    let content_h = buf_lines.clamp(3, 6);
+    let content_h = buf_lines.clamp(3, 12);
     let outer_h = content_h.saturating_add(2);
     // One row of transcript peeks under the panel so users feel the
     // messages continue behind the floating input.
@@ -165,8 +165,9 @@ pub fn compute_approvals_rect(transcript: Rect, input_rect: Rect, rows: u16) -> 
     if rows == 0 {
         return None;
     }
-    let width = input_rect.width;
-    let x = input_rect.x;
+    let inset: u16 = 4;
+    let width = input_rect.width.saturating_sub(inset * 2).max(20);
+    let x = input_rect.x + (input_rect.width.saturating_sub(width)) / 2;
     let above_input = input_rect.y.saturating_sub(rows);
     if above_input <= transcript.y {
         return None;

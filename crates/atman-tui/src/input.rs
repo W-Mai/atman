@@ -107,6 +107,16 @@ pub struct InputEditor {
 }
 
 impl InputEditor {
+    pub fn seed_history(&mut self, entries: Vec<String>) {
+        for e in entries {
+            if self.history.last().is_none_or(|prev| prev != &e) {
+                self.history.push(e);
+            }
+        }
+        self.history_idx = None;
+        self.stashed = None;
+    }
+
     pub fn buf(&self) -> &str {
         &self.buf
     }
@@ -185,6 +195,74 @@ impl InputEditor {
 
     pub fn move_end(&mut self) {
         self.cursor = self.buf.len();
+    }
+
+    pub fn move_line_up(&mut self) -> bool {
+        use unicode_width::UnicodeWidthChar;
+        let head = &self.buf[..self.cursor];
+        let Some(cur_line_start_off) = head.rfind('\n') else {
+            return false;
+        };
+        let cur_line_start = cur_line_start_off + 1;
+        let cur_col: u16 = self.buf[cur_line_start..self.cursor]
+            .chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0) as u16)
+            .sum();
+        let prev_head = &self.buf[..cur_line_start_off];
+        let prev_line_start = prev_head.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let prev_line = &self.buf[prev_line_start..cur_line_start_off];
+        let mut used: u16 = 0;
+        let mut byte_off = prev_line_start;
+        for c in prev_line.chars() {
+            let w = UnicodeWidthChar::width(c).unwrap_or(0) as u16;
+            if used.saturating_add(w) > cur_col {
+                break;
+            }
+            used = used.saturating_add(w);
+            byte_off += c.len_utf8();
+            if used >= cur_col {
+                break;
+            }
+        }
+        self.cursor = byte_off;
+        true
+    }
+
+    pub fn move_line_down(&mut self) -> bool {
+        use unicode_width::UnicodeWidthChar;
+        let tail = &self.buf[self.cursor..];
+        let Some(rel) = tail.find('\n') else {
+            return false;
+        };
+        let cur_line_start = self.buf[..self.cursor]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let cur_col: u16 = self.buf[cur_line_start..self.cursor]
+            .chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0) as u16)
+            .sum();
+        let next_line_start = self.cursor + rel + 1;
+        let next_line_end = self.buf[next_line_start..]
+            .find('\n')
+            .map(|p| next_line_start + p)
+            .unwrap_or(self.buf.len());
+        let next_line = &self.buf[next_line_start..next_line_end];
+        let mut used: u16 = 0;
+        let mut byte_off = next_line_start;
+        for c in next_line.chars() {
+            let w = UnicodeWidthChar::width(c).unwrap_or(0) as u16;
+            if used.saturating_add(w) > cur_col {
+                break;
+            }
+            used = used.saturating_add(w);
+            byte_off += c.len_utf8();
+            if used >= cur_col {
+                break;
+            }
+        }
+        self.cursor = byte_off;
+        true
     }
 
     // Walks by char width, not char count, so double-wide CJK chars occupy

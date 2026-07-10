@@ -208,6 +208,16 @@ async fn run_frames(
         app.pending_approvals = rx.borrow().clone();
     }
     let mut editor = InputEditor::default();
+    if let Some(sess) = handle.session.as_ref() {
+        let past: Vec<String> = sess
+            .messages()
+            .iter()
+            .filter(|m| matches!(m.role, atman_runtime::message::MessageRole::User))
+            .map(|m| m.text_concat())
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        editor.seed_history(past);
+    }
     let (mut key_events, reader_shutdown) = spawn_event_reader();
     let mut interrupt_prompt: Option<std::time::Instant> = None;
     let mut shutdown = handle.shutdown_rx.take();
@@ -274,7 +284,21 @@ async fn run_frames(
                         Some(Ok(CtEvent::Mouse(me)))
                             if matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
                         {
-                            if matches!(me.kind, MouseEventKind::ScrollUp) {
+                            let over_input = app
+                                .input_rect
+                                .map(|r| rect_contains(r, me.column, me.row))
+                                .unwrap_or(false);
+                            if over_input {
+                                for _ in 0..3 {
+                                    if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                        if !editor.move_line_up() {
+                                            break;
+                                        }
+                                    } else if !editor.move_line_down() {
+                                        break;
+                                    }
+                                }
+                            } else if matches!(me.kind, MouseEventKind::ScrollUp) {
                                 scroll_delta = scroll_delta.saturating_sub(3);
                             } else {
                                 scroll_delta = scroll_delta.saturating_add(3);
@@ -1398,8 +1422,9 @@ fn handle_approval_key(
             let _ = tx.send(TuiControl::DenyAllPending {
                 reason: "user pressed Esc".into(),
             });
+            let _ = tx.send(TuiControl::CancelFlow);
             app.push_note(
-                format!("denied all {} pending", queue.len()),
+                format!("denied all {} pending, flow cancelled", queue.len()),
                 app::NoteLevel::Warn,
             );
             app.deny_arm = None;
@@ -1453,7 +1478,8 @@ fn handle_key(
         //     session interaction
         // Plain char keys just type into the editor and the overlay
         // stays put with the growing text visible in its input slot.
-        if let KeyAction::Char(c) = &action
+        if editor.buf().is_empty()
+            && let KeyAction::Char(c) = &action
             && let Some(digit) = c.to_digit(10)
             && (1..=9).contains(&digit)
         {
@@ -1560,12 +1586,16 @@ fn handle_key(
             edited = true;
         }
         KeyAction::HistoryUp => {
-            editor.history_up();
+            if !editor.move_line_up() {
+                editor.history_up();
+            }
             *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::HistoryDown => {
-            editor.history_down();
+            if !editor.move_line_down() {
+                editor.history_down();
+            }
             *interrupt_prompt = None;
             edited = true;
         }
@@ -1641,9 +1671,6 @@ fn handle_key(
                     let _ = tx.send(TuiControl::CancelFlow);
                 }
                 app.push_note("cancel requested", app::NoteLevel::Warn);
-            } else if !editor.buf().is_empty() {
-                editor.clear();
-                edited = true;
             }
             *interrupt_prompt = None;
         }
@@ -1676,14 +1703,20 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Interrupt => {
-            let within_window = interrupt_prompt
-                .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
-                .unwrap_or(false);
-            if within_window {
-                app.should_quit = true;
+            if !editor.buf().is_empty() {
+                editor.clear();
+                edited = true;
+                *interrupt_prompt = None;
             } else {
-                *interrupt_prompt = Some(std::time::Instant::now());
-                app.push_note("press Ctrl+C again to quit", app::NoteLevel::Warn);
+                let within_window = interrupt_prompt
+                    .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
+                    .unwrap_or(false);
+                if within_window {
+                    app.should_quit = true;
+                } else {
+                    *interrupt_prompt = Some(std::time::Instant::now());
+                    app.push_note("press Ctrl+C again to quit", app::NoteLevel::Warn);
+                }
             }
         }
         KeyAction::Quit => {
@@ -1850,13 +1883,15 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let approvals_rows: u16 = if pending_count == 0 {
         0
     } else {
-        (pending_count.min(9) as u16).saturating_add(1)
+        let items = pending_count.min(9) as u16;
+        let overflow = if pending_count > 9 { 1 } else { 0 };
+        items + overflow + 2
     };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
     let transcript_content = layout::compute_content_rect(l.transcript);
     let total_input_lines = editor.buf().split('\n').count() as u16;
-    let input_buf_lines = total_input_lines.min(6);
+    let input_buf_lines = total_input_lines.min(12);
     let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
     let cursor_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());
     let visible_rows = input_buf_lines.max(3);
