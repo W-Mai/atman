@@ -1,20 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
 
 use crate::event::Event;
 use crate::index::{AnchorIndex, ProjectEventInsert};
 use crate::redact::Redactor;
 
-const BATCH_SIZE: usize = 100;
-const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
-
 pub struct EventWriter {
-    handle: Option<JoinHandle<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
     tx: mpsc::UnboundedSender<Event>,
     stop_tx: Option<oneshot::Sender<()>>,
     events_path: PathBuf,
@@ -32,6 +27,8 @@ impl EventWriter {
         Self::spawn_full(session_dir, redactor, None, None)
     }
 
+    // Owns its own thread + rt so short-lived caller runtimes
+    // (spawn_blocking + throwaway current_thread rt) can't kill the loop.
     pub fn spawn_full(
         session_dir: impl AsRef<Path>,
         redactor: Option<Arc<Redactor>>,
@@ -44,15 +41,30 @@ impl EventWriter {
         let (tx, rx) = mpsc::unbounded_channel::<Event>();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let file_path = events_path.clone();
-        let handle = tokio::spawn(async move {
-            if let Err(e) =
-                writer_loop(rx, stop_rx, &file_path, project_index, session_id, redactor).await
-            {
-                eprintln!("[atman] event writer failed: {e}");
-            }
-        });
+        let thread = std::thread::Builder::new()
+            .name("atman-event-writer".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("[atman] event writer rt init failed: {e}");
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    if let Err(e) =
+                        writer_loop(rx, stop_rx, &file_path, project_index, session_id, redactor)
+                            .await
+                    {
+                        eprintln!("[atman] event writer failed: {e}");
+                    }
+                });
+            })?;
         Ok(Self {
-            handle: Some(handle),
+            thread: Some(thread),
             tx,
             stop_tx: Some(stop_tx),
             events_path,
@@ -71,8 +83,22 @@ impl EventWriter {
         if let Some(stop_tx) = self.stop_tx.take() {
             let _ = stop_tx.send(());
         }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.await;
+        if let Some(thread) = self.thread.take() {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = thread.join();
+            })
+            .await;
+        }
+    }
+}
+
+impl Drop for EventWriter {
+    fn drop(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }
@@ -85,14 +111,11 @@ async fn writer_loop(
     session_id: Option<String>,
     redactor: Option<Arc<Redactor>>,
 ) -> std::io::Result<()> {
-    let file = tokio::fs::OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .await?;
-    let mut buf = tokio::io::BufWriter::new(file);
-    let mut since_flush: usize = 0;
-    let mut flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
     let indexer = project_index.zip(session_id);
 
     loop {
@@ -100,44 +123,34 @@ async fn writer_loop(
             biased;
             _ = &mut stop_rx => {
                 while let Ok(event) = rx.try_recv() {
-                    write_event(&mut buf, &event, indexer.as_ref(), redactor.as_deref()).await?;
+                    write_event(&mut file, &event, indexer.as_ref(), redactor.as_deref()).await?;
                 }
                 break;
             }
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Some(event) => {
-                        write_event(&mut buf, &event, indexer.as_ref(), redactor.as_deref()).await?;
-                        since_flush += 1;
-                        if since_flush >= BATCH_SIZE {
-                            buf.flush().await?;
-                            since_flush = 0;
-                            flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
-                        }
+                        write_event(&mut file, &event, indexer.as_ref(), redactor.as_deref()).await?;
                     }
                     None => break,
                 }
             }
-            _ = tokio::time::sleep_until(flush_deadline) => {
-                buf.flush().await?;
-                since_flush = 0;
-                flush_deadline = tokio::time::Instant::now() + FLUSH_INTERVAL;
-            }
         }
     }
-    buf.flush().await?;
+    file.sync_data().await?;
     Ok(())
 }
 
 async fn write_event(
-    buf: &mut tokio::io::BufWriter<tokio::fs::File>,
+    file: &mut tokio::fs::File,
     event: &Event,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
 ) -> std::io::Result<()> {
     let line = serialize_event(event, redactor);
-    buf.write_all(line.as_bytes()).await?;
-    buf.write_all(b"\n").await?;
+    file.write_all(line.as_bytes()).await?;
+    file.write_all(b"\n").await?;
+    file.sync_data().await?;
     if let Some((idx, sid)) = indexer
         && let Err(e) = insert_project_row(idx, sid, event, &line)
     {
