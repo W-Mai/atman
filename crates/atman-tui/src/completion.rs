@@ -271,9 +271,9 @@ pub fn render_hint_strip(
         return;
     }
     let text = if narrow {
-        " /  :  !  @  F1  F3  ^K"
+        " /  :  !  @  F1  F3  ^P"
     } else {
-        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar · F3 select · Ctrl+K palette"
+        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar · F3 select · Ctrl+P palette"
     };
     let p = Paragraph::new(Line::from(Span::styled(
         text,

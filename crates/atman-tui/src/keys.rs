@@ -49,7 +49,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Char('x'), true, _, _) => KeyAction::HardStop,
         (Char('j'), true, _, _) => KeyAction::Newline,
         (Char('o'), true, _, _) => KeyAction::ToggleLastTool,
-        (Char('k'), true, _, _) => KeyAction::OpenCommandPalette,
+        (Char('p'), true, _, _) => KeyAction::OpenCommandPalette,
         (Char('w'), true, _, _) => KeyAction::DeleteWordBackward,
         (Backspace, _, _, true) => KeyAction::DeleteWordBackward,
         (Char('a'), true, _, _) => KeyAction::CursorHome,
