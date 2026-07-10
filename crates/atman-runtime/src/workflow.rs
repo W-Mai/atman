@@ -557,8 +557,8 @@ impl WorkflowGraph {
             }
             StreamFrame::FlowDone { run_id, ok, .. } => {
                 if let Some(n) = find_node_mut(&mut self.root, run_id) {
-                    n.status = if *ok { NodeStatus::Ok } else { NodeStatus::Err };
-                    n.ended_at = Some(now);
+                    let status = if *ok { NodeStatus::Ok } else { NodeStatus::Err };
+                    cascade_terminate(n, status, now);
                 }
             }
             StreamFrame::AssistantMsg {
@@ -625,6 +625,16 @@ impl WorkflowGraph {
             }
             _ => {}
         }
+    }
+}
+
+fn cascade_terminate(n: &mut WorkflowNode, status: NodeStatus, now: DateTime<Utc>) {
+    if matches!(n.status, NodeStatus::Running | NodeStatus::Pending) {
+        n.status = status;
+        n.ended_at = Some(now);
+    }
+    for child in n.children.iter_mut() {
+        cascade_terminate(child, status, now);
     }
 }
 
