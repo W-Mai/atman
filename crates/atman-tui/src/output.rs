@@ -768,11 +768,15 @@ fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
     let dash_style = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::DIM);
-    vec![Line::from(vec![
-        Span::raw(pad.clone()),
-        Span::styled("╌".repeat(dash_width), dash_style),
-        Span::raw(pad),
-    ])]
+    vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw(pad.clone()),
+            Span::styled("╌".repeat(dash_width), dash_style),
+            Span::raw(pad),
+        ]),
+        Line::from(""),
+    ]
 }
 
 fn render_assistant(md: &str, streaming: bool, panel_width: u16) -> Vec<Line<'static>> {
@@ -2292,9 +2296,12 @@ mod tests {
     #[test]
     fn divider_produces_dashed_line() {
         let lines = render_item(&OutputItem::Divider, &RenderCtx::empty());
-        assert_eq!(lines.len(), 2);
-        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("╌"), "got {text:?}");
+        let has_dash = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.as_ref().contains("╌"))
+        });
+        assert!(has_dash, "no dashed line in {lines:?}");
     }
 
     #[test]

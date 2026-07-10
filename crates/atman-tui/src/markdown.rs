@@ -145,10 +145,16 @@ impl Renderer {
             }
             Event::Rule => {
                 self.blank_line();
-                self.lines.push(Line::from(Span::styled(
-                    "─".repeat(self.rule_width as usize),
-                    Style::default().fg(Color::DarkGray),
-                )));
+                let side = 4usize;
+                let dash_w = (self.rule_width as usize).saturating_sub(side * 2).max(4);
+                let style = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM);
+                self.lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(side)),
+                    Span::styled("╌".repeat(dash_w), style),
+                    Span::raw(" ".repeat(side)),
+                ]));
                 self.fresh_line = true;
             }
             Event::TaskListMarker(done) => {
@@ -255,10 +261,16 @@ impl Renderer {
                 self.style_stack.pop();
                 self.end_line();
                 if matches!(level, HeadingLevel::H1) {
-                    self.lines.push(Line::from(Span::styled(
-                        "─".repeat(self.rule_width as usize),
-                        Style::default().fg(Color::DarkGray),
-                    )));
+                    let side = 4usize;
+                    let dash_w = (self.rule_width as usize).saturating_sub(side * 2).max(4);
+                    let style = Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM);
+                    self.lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(side)),
+                        Span::styled("╌".repeat(dash_w), style),
+                        Span::raw(" ".repeat(side)),
+                    ]));
                 }
                 self.heading_level = None;
                 self.blank_line();
@@ -402,7 +414,7 @@ impl Renderer {
             .fg(Color::DarkGray)
             .bg(bg)
             .add_modifier(Modifier::DIM);
-        let header = format!("┌─ {lang_label} ─");
+        let header = format!("╭─ {lang_label} ─");
         self.lines.push(bg_padded_line(&header, gutter, target, bg));
         self.lines.push(blank_bg_line(target, bg));
         let highlighted = crate::highlight::highlight_code(lang, body);
