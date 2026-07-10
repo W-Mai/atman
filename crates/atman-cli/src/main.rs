@@ -1308,9 +1308,11 @@ async fn prebuild_session(
 
 type PrebuildHandle = tokio::task::JoinHandle<Result<PrebuiltSession>>;
 
-async fn boot_first_session(resume_sid: Option<String>) -> Result<PrebuiltSession> {
+async fn boot_first_session(
+    resume_sid: Option<String>,
+) -> Result<(PrebuiltSession, Option<atman_tui::InheritedTerminal>)> {
     if !tui_mode_requested() {
-        return prebuild_session(resume_sid, None, None).await;
+        return Ok((prebuild_session(resume_sid, None, None).await?, None));
     }
     let version = env!("CARGO_PKG_VERSION").to_string();
     let recent = build_startup_recent(&data_dir()?, "", 5);
@@ -1324,9 +1326,9 @@ async fn boot_first_session(resume_sid: Option<String>) -> Result<PrebuiltSessio
     });
     let animation = atman_tui::boot_animation::run_boot_animation(rx, version, recent);
     let (anim_result, prebuild_result) = tokio::join!(animation, prebuild);
-    anim_result?;
+    let terminal = anim_result?;
     match prebuild_result {
-        Ok(Ok(session)) => Ok(session),
+        Ok(Ok(session)) => Ok((session, Some(terminal))),
         Ok(Err(e)) => Err(e),
         Err(e) => Err(anyhow::anyhow!("prebuild join failed: {e}")),
     }
@@ -1342,11 +1344,13 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
     } else {
         None
     };
-    let mut current = boot_first_session(resume_sid).await?;
+    let (first, boot_terminal) = boot_first_session(resume_sid).await?;
+    let mut current = first;
+    let mut inherited_terminal = boot_terminal;
     loop {
         let switch_target: std::sync::Arc<std::sync::Mutex<Option<PrebuildHandle>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
-        cmd_repl_once(current, switch_target.clone()).await?;
+        cmd_repl_once(current, switch_target.clone(), inherited_terminal.take()).await?;
         let next_handle = switch_target.lock().unwrap().take();
         match next_handle {
             Some(handle) => match handle.await {
@@ -1362,6 +1366,7 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
 async fn cmd_repl_once(
     prebuilt: PrebuiltSession,
     switch_target: std::sync::Arc<std::sync::Mutex<Option<PrebuildHandle>>>,
+    inherited_terminal: Option<atman_tui::InheritedTerminal>,
 ) -> Result<()> {
     use std::collections::VecDeque;
     use tokio::sync::mpsc;
@@ -1559,7 +1564,10 @@ async fn cmd_repl_once(
             startup_intro: intro.clone(),
         };
         (
-            Some(tokio::spawn(atman_tui::run_tui(handle))),
+            Some(tokio::spawn(atman_tui::run_tui_ex(
+                handle,
+                inherited_terminal,
+            ))),
             Some(sh_tx_shared),
             Some(ctrl_task),
             Some(cmd_tx),

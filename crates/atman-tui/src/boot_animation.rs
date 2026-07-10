@@ -1,5 +1,4 @@
 use anyhow::Result;
-use atman_runtime::ContextSnapshot;
 use atman_runtime::event::TurnId;
 use atman_runtime::workflow::{
     NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
@@ -107,7 +106,7 @@ pub async fn run_boot_animation(
     mut rx: mpsc::UnboundedReceiver<BootProgress>,
     version: String,
     recent: Vec<crate::app::StartupSessionEntry>,
-) -> Result<()> {
+) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     use std::io::stdout;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -121,16 +120,11 @@ pub async fn run_boot_animation(
     let mut current_step_started: Option<(BootStepId, std::time::Instant)> = None;
     let reveal_start = std::time::Instant::now();
     let reveal_ms_per_row: u128 = 60;
-    terminal.clear()?;
-    let result: Result<()> = loop {
+    let result: Result<Terminal<CrosstermBackend<std::io::Stdout>>> = loop {
         let reveal_count = ((reveal_start.elapsed().as_millis() / reveal_ms_per_row) as usize + 1)
             .min(recent.len());
-        terminal.draw(|f| render(f, &graph, frame, &version, &recent, reveal_count))?;
-        if let Some(t) = ready_at {
-            if t.elapsed() >= hold_after_ready {
-                break Ok(());
-            }
-        }
+        let settled = ready_at.is_some();
+        terminal.draw(|f| render(f, &graph, frame, &version, &recent, reveal_count, settled))?;
         tokio::select! {
             _ = spinner_tick.tick() => {
                 frame = frame.wrapping_add(1);
@@ -157,12 +151,17 @@ pub async fn run_boot_animation(
                             ready_at = Some(std::time::Instant::now());
                         }
                     }
-                    None => break Ok(()),
+                    None => break Ok(terminal),
                 }
             }
         }
+        if ready_at
+            .map(|t| t.elapsed() >= hold_after_ready)
+            .unwrap_or(false)
+        {
+            break Ok(terminal);
+        }
     };
-    let _ = terminal.clear();
     result
 }
 
@@ -173,21 +172,18 @@ fn render(
     version: &str,
     recent: &[crate::app::StartupSessionEntry],
     reveal_count: usize,
+    settled: bool,
 ) {
     let area = f.area();
     if area.width < 30 || area.height < 8 {
         return;
     }
-    let l = crate::layout::compute_ex(area, 2);
-    let ctx = ContextSnapshot::default();
+    let l = crate::layout::compute_ex(area, 1);
     f.render_widget(
         crate::status::render_bar(crate::status::StatusInputs {
             session_id: "········",
             goal: None,
             streaming: false,
-            context: &ctx,
-            attach_count: 0,
-            include_compact_line: true,
         }),
         l.status,
     );
@@ -197,6 +193,9 @@ fn render(
         crate::input::input_paragraph("", 0, false, 0),
         splash.input_slot,
     );
+    if settled {
+        return;
+    }
     let (mut lines, _) = crate::output::render_workflow_panel_with_regions(
         graph,
         &std::collections::HashSet::new(),

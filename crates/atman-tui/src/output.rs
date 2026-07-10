@@ -803,7 +803,9 @@ fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Lin
     let body_style = Style::default().fg(Color::Gray).bg(bg);
     let glyph_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
     let target = panel_width.max(20) as usize;
+    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(blank.clone());
     for (i, row) in cleaned.split('\n').enumerate() {
         let prefix = if i == 0 {
             format!(" {glyph} ")
@@ -821,6 +823,7 @@ fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Lin
         }
         lines.push(Line::from(spans));
     }
+    lines.push(blank);
     lines
 }
 

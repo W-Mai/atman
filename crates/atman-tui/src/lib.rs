@@ -159,13 +159,23 @@ impl TuiHandle {
     }
 }
 
+pub type InheritedTerminal = Terminal<CrosstermBackend<Stdout>>;
+
 pub async fn run_tui(handle: TuiHandle) -> Result<()> {
+    run_tui_ex(handle, None).await
+}
+
+pub async fn run_tui_ex(handle: TuiHandle, inherited: Option<InheritedTerminal>) -> Result<()> {
     let _guard = TerminalGuard::install()?;
-    let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend)?;
-    // A fresh Terminal's previous_buffer is blank but the physical screen
-    // still holds the outgoing tui's pixels; wipe once so the first diff is honest.
-    terminal.clear()?;
+    let mut terminal = match inherited {
+        Some(t) => t,
+        None => {
+            let backend = CrosstermBackend::new(stdout());
+            let mut t = Terminal::new(backend)?;
+            t.clear()?;
+            t
+        }
+    };
     run_frames(&mut terminal, handle).await
 }
 
@@ -1787,8 +1797,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     } else {
         app.sidebar_mode.resolve(wide_enough)
     };
-    let compact_status = !show_sidebar;
-    let status_height = if compact_status { 2 } else { 1 };
+    let status_height: u16 = 1;
     let pending_count = app.pending_approvals.len();
     let approvals_rows: u16 = if pending_count == 0 {
         0
@@ -1844,9 +1853,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             session_id: &app.session_id,
             goal: app.goal.as_deref(),
             streaming: app.streaming,
-            context: &app.context,
-            attach_count: app.attach_count,
-            include_compact_line: compact_status,
         }),
         l.status,
     );

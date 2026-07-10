@@ -1,4 +1,3 @@
-use atman_runtime::ContextSnapshot;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -7,22 +6,11 @@ pub struct StatusInputs<'a> {
     pub session_id: &'a str,
     pub goal: Option<&'a str>,
     pub streaming: bool,
-    pub context: &'a ContextSnapshot,
-    pub attach_count: usize,
-    pub include_compact_line: bool,
 }
 
 pub fn render_bar<'a>(inputs: StatusInputs<'a>) -> Paragraph<'a> {
     let gutter = crate::layout::CONTENT_GUTTER as usize;
-    let mut lines: Vec<Line<'a>> = Vec::with_capacity(2);
-    lines.push(with_gutter(top_line(&inputs), gutter));
-    if inputs.include_compact_line {
-        lines.push(with_gutter(
-            compact_context_line(inputs.context, inputs.attach_count),
-            gutter,
-        ));
-    }
-    Paragraph::new(lines)
+    Paragraph::new(with_gutter(top_line(&inputs), gutter))
 }
 
 fn with_gutter<'a>(line: Line<'a>, gutter: usize) -> Line<'a> {
@@ -64,32 +52,6 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         ));
     }
     Line::from(spans)
-}
-
-fn compact_context_line<'a>(ctx: &ContextSnapshot, attach_count: usize) -> Line<'a> {
-    let model = if ctx.model.is_empty() {
-        "(none)".to_string()
-    } else {
-        ctx.model.clone()
-    };
-    use crate::humanize::format_count;
-    let window = if ctx.window_budget == 0 {
-        format_count(ctx.window_tokens)
-    } else {
-        format!(
-            "{}/{}",
-            format_count(ctx.window_tokens),
-            format_count(ctx.window_budget)
-        )
-    };
-    let text = format!(
-        " {model} · ctx {window} · spent {}/{} · attach {attach_count} · mcp {}/{}",
-        format_count(ctx.tokens_in),
-        format_count(ctx.tokens_out),
-        ctx.mcp_ok,
-        ctx.mcp_total,
-    );
-    Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)))
 }
 
 fn truncate(s: &str, max: usize) -> String {
