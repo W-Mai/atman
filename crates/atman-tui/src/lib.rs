@@ -1317,8 +1317,27 @@ fn handle_approval_key(
         return false;
     };
     let queue = &app.pending_approvals;
+    let deny_armed = app
+        .deny_arm
+        .map(|t| t.elapsed() < std::time::Duration::from_millis(2000))
+        .unwrap_or(false);
+    if !deny_armed {
+        app.deny_arm = None;
+    }
     match action {
         KeyAction::Char(c) => match c {
+            '1'..='9' if deny_armed => {
+                let idx = (*c as u8 - b'1') as usize;
+                if let Some(p) = queue.get(idx) {
+                    let _ = tx.send(TuiControl::DenyTool {
+                        tool_use_id: p.tool_use_id.clone(),
+                        reason: "denied by user".into(),
+                    });
+                    app.push_note(format!("denied {}", p.tool_name), app::NoteLevel::Warn);
+                }
+                app.deny_arm = None;
+                true
+            }
             '1'..='9' => {
                 let idx = (*c as u8 - b'1') as usize;
                 if let Some(p) = queue.get(idx) {
@@ -1336,19 +1355,41 @@ fn handle_approval_key(
                     format!("approved all {} pending", queue.len()),
                     app::NoteLevel::Info,
                 );
+                app.deny_arm = None;
                 true
             }
             'd' | 'D' => {
-                if let Some(p) = queue.first() {
-                    let _ = tx.send(TuiControl::DenyTool {
-                        tool_use_id: p.tool_use_id.clone(),
-                        reason: "denied by user".into(),
-                    });
-                    app.push_note(format!("denied {}", p.tool_name), app::NoteLevel::Warn);
+                if queue.len() <= 1 {
+                    if let Some(p) = queue.first() {
+                        let _ = tx.send(TuiControl::DenyTool {
+                            tool_use_id: p.tool_use_id.clone(),
+                            reason: "denied by user".into(),
+                        });
+                        app.push_note(format!("denied {}", p.tool_name), app::NoteLevel::Warn);
+                    }
+                    app.deny_arm = None;
+                } else if deny_armed {
+                    if let Some(p) = queue.first() {
+                        let _ = tx.send(TuiControl::DenyTool {
+                            tool_use_id: p.tool_use_id.clone(),
+                            reason: "denied by user".into(),
+                        });
+                        app.push_note(format!("denied {}", p.tool_name), app::NoteLevel::Warn);
+                    }
+                    app.deny_arm = None;
+                } else {
+                    app.deny_arm = Some(std::time::Instant::now());
+                    app.push_note(
+                        format!("d + N to deny nth, dd to deny first (of {})", queue.len()),
+                        app::NoteLevel::Info,
+                    );
                 }
                 true
             }
-            _ => false,
+            _ => {
+                app.deny_arm = None;
+                false
+            }
         },
         KeyAction::Escape => {
             let _ = tx.send(TuiControl::DenyAllPending {
@@ -1358,6 +1399,7 @@ fn handle_approval_key(
                 format!("denied all {} pending", queue.len()),
                 app::NoteLevel::Warn,
             );
+            app.deny_arm = None;
             true
         }
         _ => false,
@@ -1591,7 +1633,7 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Escape => {
-            if app.streaming {
+            if app.streaming || app.has_running_workflow() {
                 if let Some(tx) = control_tx {
                     let _ = tx.send(TuiControl::CancelFlow);
                 }

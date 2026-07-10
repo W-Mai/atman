@@ -101,6 +101,7 @@ pub struct AppState {
     pub startup_intro: Option<StartupIntro>,
     pub form_modal: crate::form_modal::FormModal,
     pub animation_frame: u32,
+    pub deny_arm: Option<std::time::Instant>,
     pub items_version: u64,
     pub expanded_version: u64,
     pub layout_cache: crate::output::LayoutCache,
@@ -418,7 +419,12 @@ impl AppState {
             | StreamFrame::ToolPendingApproval { .. }
             | StreamFrame::ToolApproved { .. }
             | StreamFrame::ToolDenied { .. }) => {
+                let is_done = matches!(frame, StreamFrame::FlowDone { .. });
                 self.ensure_workflow_panel_and_apply(&frame);
+                if is_done {
+                    self.close_current_workflow_panel();
+                    self.streaming = false;
+                }
             }
             StreamFrame::Unknown => {}
         }
