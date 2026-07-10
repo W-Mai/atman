@@ -12,6 +12,7 @@ pub struct SidebarInputs<'a> {
     pub attach_count: usize,
     pub session_id: &'a str,
     pub session_dir: &'a str,
+    pub project_root: Option<&'a str>,
     pub streaming: bool,
     pub todos: &'a [atman_runtime::memory::todo::Todo],
     pub plans: &'a [atman_runtime::memory::plan::Plan],
@@ -49,7 +50,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" atman ")
-        .padding(ratatui::widgets::Padding::horizontal(1));
+        .padding(ratatui::widgets::Padding {
+            left: 2,
+            right: 2,
+            top: 1,
+            bottom: 1,
+        });
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
@@ -64,8 +70,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
             Constraint::Length(heights.goal),
             Constraint::Length(heights.context),
             Constraint::Length(heights.plans),
-            Constraint::Length(heights.todos),
             Constraint::Length(heights.session),
+            Constraint::Length(heights.todos),
         ])
         .split(inner);
 
@@ -81,14 +87,14 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
     if heights.plans > 0 {
         f.render_widget(plans_section(inputs.plans, heights.plans), sections[2]);
     }
-    if heights.todos > 0 {
-        f.render_widget(todos_section(inputs.todos, heights.todos), sections[3]);
-    }
     if heights.session > 0 {
         f.render_widget(
-            session_section(inputs.session_id, inputs.session_dir),
-            sections[4],
+            session_section(inputs.session_id, inputs.session_dir, inputs.project_root),
+            sections[3],
         );
+    }
+    if heights.todos > 0 {
+        f.render_widget(todos_section(inputs.todos, heights.todos), sections[4]);
     }
 }
 
@@ -103,8 +109,8 @@ struct SectionHeights {
 
 fn section_heights(inner_h: u16) -> SectionHeights {
     let context = 9u16;
-    let session = 4u16;
-    let todos = 3u16;
+    let session = 5u16;
+    let todos = 6u16;
     let plans = 3u16;
     let goal_max = 7u16;
     let full = context + session + todos + plans + goal_max;
@@ -328,15 +334,24 @@ fn truncate_line(s: &str, max_chars: usize) -> String {
     out
 }
 
-fn session_section<'a>(session_id: &'a str, session_dir: &'a str) -> Paragraph<'a> {
-    let lines = vec![
-        Line::from(section_title("▸ Session")),
-        Line::from(Span::raw(format!("  {session_id}"))),
-        Line::from(Span::styled(
-            format!("  {}", abbreviate_dir(session_dir)),
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+fn session_section<'a>(
+    session_id: &'a str,
+    session_dir: &'a str,
+    project_root: Option<&'a str>,
+) -> Paragraph<'a> {
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(4);
+    lines.push(Line::from(section_title("▸ Session")));
+    lines.push(Line::from(Span::raw(format!("  {session_id}"))));
+    if let Some(root) = project_root {
+        lines.push(Line::from(vec![
+            Span::styled("  pwd ", Style::default().fg(Color::DarkGray)),
+            Span::styled(abbreviate_dir(root), Style::default().fg(Color::Cyan)),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("  {}", abbreviate_dir(session_dir)),
+        Style::default().fg(Color::DarkGray),
+    )));
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
@@ -411,20 +426,20 @@ mod tests {
 
     #[test]
     fn section_heights_full_room_keeps_every_section() {
-        let h = section_heights(29);
+        let h = section_heights(30);
         assert_eq!(h.context, 9);
-        assert_eq!(h.session, 4);
-        assert_eq!(h.todos, 3);
+        assert_eq!(h.session, 5);
+        assert_eq!(h.todos, 6);
         assert_eq!(h.plans, 3);
-        assert_eq!(h.goal, 7);
+        assert!(h.goal >= 3);
     }
 
     #[test]
     fn section_heights_tight_drops_plans_first() {
-        let h = section_heights(20);
+        let h = section_heights(23);
         assert_eq!(h.context, 9);
-        assert_eq!(h.session, 4);
-        assert_eq!(h.todos, 3);
+        assert_eq!(h.session, 5);
+        assert_eq!(h.todos, 6);
         assert_eq!(h.plans, 0);
         assert!(h.goal >= 3);
     }

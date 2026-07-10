@@ -2,7 +2,7 @@ use ratatui::layout::{Constraint, Direction, Layout as RatatuiLayout, Rect};
 
 // Kept as public constants so the palette / status bar helpers can still
 // query "will the sidebar be visible?" without duplicating the width math.
-pub const SIDEBAR_WIDTH: u16 = 48;
+pub const SIDEBAR_WIDTH: u16 = 40;
 pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 80;
 
 // AppLayout only reserves status + transcript. Input, approvals, and the
@@ -99,7 +99,7 @@ enum InputYAnchor {
 
 fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect {
     let outer_width = (transcript.width * 3 / 4)
-        .clamp(50, 120)
+        .clamp(50, 96)
         .min(transcript.width);
     // Default height fits three content rows even when the buffer is empty,
     // so the panel never looks like a single squished line.
@@ -140,19 +140,21 @@ pub fn apply_horizontal_padding(rect: Rect, pad: u16) -> Rect {
 }
 
 pub const CONTENT_GUTTER: u16 = 3;
-pub const CONTENT_MAX_WIDTH: u16 = 120;
+pub const CONTENT_MAX_WIDTH: u16 = 128;
 
-// Excess space beyond CONTENT_MAX_WIDTH stays blank on the right so
-// long lines don't run edge-to-edge on wide terminals.
+// Center content within transcript up to CONTENT_MAX_WIDTH; on narrow
+// terminals the gutter shrinks toward CONTENT_GUTTER as a minimum.
 pub fn compute_content_rect(transcript: Rect) -> Rect {
-    let gutter = CONTENT_GUTTER;
-    if transcript.width <= gutter.saturating_mul(2) {
+    let min_gutter_total = CONTENT_GUTTER.saturating_mul(2);
+    if transcript.width <= min_gutter_total {
         return transcript;
     }
-    let inner_width = transcript.width.saturating_sub(gutter.saturating_mul(2));
+    let inner_width = transcript.width.saturating_sub(min_gutter_total);
     let content_width = inner_width.min(CONTENT_MAX_WIDTH);
+    let extra = transcript.width.saturating_sub(content_width);
+    let x = transcript.x.saturating_add(extra / 2);
     Rect {
-        x: transcript.x.saturating_add(gutter),
+        x,
         y: transcript.y,
         width: content_width,
         height: transcript.height,

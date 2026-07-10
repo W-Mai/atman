@@ -34,7 +34,8 @@ pub fn input_paragraph<'a>(
         .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(title)
-        .title_bottom(hint_line);
+        .title_bottom(hint_line)
+        .padding(ratatui::widgets::Padding::horizontal(1));
 
     let (before, after) = split_at_cursor(input, cursor);
     let mut lines: Vec<Line<'a>> = Vec::new();

@@ -1915,6 +1915,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         f.render_widget(paragraph, transcript_area);
     }
     if let Some(area) = sidebar_rect {
+        let project_root = app
+            .session
+            .as_ref()
+            .and_then(|s| s.meta())
+            .and_then(|m| m.project_root)
+            .map(|p| p.display().to_string());
         sidebar::render(
             f,
             area,
@@ -1924,6 +1930,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 attach_count: app.attach_count,
                 session_id: &app.session_id,
                 session_dir: &app.session_dir,
+                project_root: project_root.as_deref(),
                 streaming: app.streaming,
                 todos: &app.todos,
                 plans: &app.plans,

@@ -761,6 +761,20 @@ fn clamp_len(s: &str, max: usize) -> String {
     out
 }
 
+fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
+    let side_gap = 4u16;
+    let dash_width = panel_width.saturating_sub(side_gap * 2).max(4) as usize;
+    let pad = " ".repeat(side_gap as usize);
+    let dash_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
+    vec![Line::from(vec![
+        Span::raw(pad.clone()),
+        Span::styled("╌".repeat(dash_width), dash_style),
+        Span::raw(pad),
+    ])]
+}
+
 fn render_assistant(md: &str, streaming: bool, panel_width: u16) -> Vec<Line<'static>> {
     let mut lines = crate::markdown::render_markdown_with_width(md, panel_width);
     if streaming {
@@ -854,16 +868,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             render_assistant(md, *streaming, ctx.panel_width)
         }
         OutputItem::SystemNote { text, level } => render_system_note(text, *level, ctx.panel_width),
-        OutputItem::Divider => {
-            let width = ctx.panel_width.max(4) as usize;
-            vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "─".repeat(width),
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ]
-        }
+        OutputItem::Divider => make_dashed_divider(ctx.panel_width),
         OutputItem::WorkflowPanel {
             graph,
             expanded_nodes,
@@ -2285,9 +2290,11 @@ mod tests {
     }
 
     #[test]
-    fn divider_produces_three_lines() {
+    fn divider_produces_dashed_line() {
         let lines = render_item(&OutputItem::Divider, &RenderCtx::empty());
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 2);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("╌"), "got {text:?}");
     }
 
     #[test]

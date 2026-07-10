@@ -171,12 +171,7 @@ impl Renderer {
             }
             Tag::Heading { level, .. } => {
                 self.heading_level = Some(level);
-                let hashes = "#".repeat(heading_hashes(level));
-                let style = Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::BOLD);
-                self.current.push(Span::styled(format!("{hashes} "), style));
-                self.style_stack.push(style);
+                self.style_stack.push(heading_style(level));
             }
             Tag::BlockQuote(_) => {
                 self.blockquote_depth = self.blockquote_depth.saturating_add(1);
@@ -256,10 +251,16 @@ impl Renderer {
                 self.end_line();
                 self.blank_line();
             }
-            TagEnd::Heading(_) => {
+            TagEnd::Heading(level) => {
                 self.style_stack.pop();
-                self.heading_level = None;
                 self.end_line();
+                if matches!(level, HeadingLevel::H1) {
+                    self.lines.push(Line::from(Span::styled(
+                        "─".repeat(self.rule_width as usize),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                self.heading_level = None;
                 self.blank_line();
             }
             TagEnd::BlockQuote(_) => {
@@ -312,7 +313,12 @@ impl Renderer {
         if col_count == 0 {
             return;
         }
-        let mut widths = vec![0usize; col_count];
+        let target = self.rule_width as usize;
+        let inner_pad = 2usize;
+        let available = target.saturating_sub(inner_pad * 2);
+        let col_min = 4usize;
+        let sep = 3usize;
+        let mut widths = vec![col_min; col_count];
         for (i, cell) in self.table_header.iter().enumerate() {
             widths[i] = widths[i].max(cell.width());
         }
@@ -321,54 +327,107 @@ impl Renderer {
                 widths[i] = widths[i].max(cell.width());
             }
         }
-        let border_style = Style::default().fg(Color::DarkGray);
+        let cells_total: usize = widths.iter().sum::<usize>() + sep * col_count.saturating_sub(1);
+        if cells_total < available {
+            let extra = available - cells_total;
+            let per_col = extra / col_count;
+            let remainder = extra % col_count;
+            for (i, w) in widths.iter_mut().enumerate() {
+                *w += per_col + if i < remainder { 1 } else { 0 };
+            }
+        }
+        let bg = block_bg();
         let head_style = Style::default()
             .fg(Color::LightCyan)
+            .bg(bg)
             .add_modifier(Modifier::BOLD);
-        let top = format!("┌{}┐", horizontal_border(&widths, '┬'));
-        let mid = format!("├{}┤", horizontal_border(&widths, '┼'));
-        let bot = format!("└{}┘", horizontal_border(&widths, '┴'));
+        let cell_style = Style::default().bg(bg);
+        let rule_style = Style::default().fg(Color::DarkGray).bg(bg);
 
-        self.lines.push(Line::from(Span::styled(top, border_style)));
+        self.lines.push(blank_bg_line(target, bg));
         if !self.table_header.is_empty() {
-            self.lines.push(row_line(
+            self.lines.push(table_row(
                 &self.table_header,
                 &widths,
+                inner_pad,
+                target,
                 head_style,
-                border_style,
+                bg,
+                sep,
             ));
-            self.lines.push(Line::from(Span::styled(mid, border_style)));
-        }
-        for row in &self.table_body {
+            let rule: String = (0..col_count)
+                .map(|i| "─".repeat(widths[i]))
+                .collect::<Vec<_>>()
+                .join(&" ".repeat(sep));
             self.lines
-                .push(row_line(row, &widths, Style::default(), border_style));
+                .push(table_line(&rule, inner_pad, target, rule_style, bg));
         }
-        self.lines.push(Line::from(Span::styled(bot, border_style)));
+        let sep_rule: String = (0..col_count)
+            .map(|i| "╌".repeat(widths[i]))
+            .collect::<Vec<_>>()
+            .join(&" ".repeat(sep));
+        let sep_style = Style::default()
+            .fg(Color::DarkGray)
+            .bg(bg)
+            .add_modifier(Modifier::DIM);
+        for (i, row) in self.table_body.iter().enumerate() {
+            if i > 0 {
+                self.lines
+                    .push(table_line(&sep_rule, inner_pad, target, sep_style, bg));
+            }
+            self.lines.push(table_row(
+                row, &widths, inner_pad, target, cell_style, bg, sep,
+            ));
+        }
+        self.lines.push(blank_bg_line(target, bg));
         self.table_header.clear();
         self.table_body.clear();
         self.fresh_line = true;
     }
 
     fn render_code_block(&mut self, lang: &str, body: &str) {
+        use unicode_width::UnicodeWidthStr;
         self.blank_line();
+        let bg = block_bg();
+        let target = self.rule_width as usize;
+        let inner_pad = 2usize;
         let lang_label = if lang.is_empty() {
             "code".to_string()
         } else {
             lang.to_string()
         };
-        self.lines.push(Line::from(Span::styled(
-            format!("┌─ {lang_label} ─"),
-            Style::default().fg(Color::DarkGray),
-        )));
-        let gutter = Style::default().fg(Color::DarkGray);
-        for hl in crate::highlight::highlight_code(lang, body) {
-            let mut spans = Vec::with_capacity(hl.spans.len() + 1);
-            spans.push(Span::styled("│ ", gutter));
-            spans.extend(hl.spans);
+        let gutter = Style::default().fg(Color::DarkGray).bg(bg);
+        let bg_only = Style::default().bg(bg);
+        let lineno_style = Style::default()
+            .fg(Color::DarkGray)
+            .bg(bg)
+            .add_modifier(Modifier::DIM);
+        let header = format!("┌─ {lang_label} ─");
+        self.lines.push(bg_padded_line(&header, gutter, target, bg));
+        self.lines.push(blank_bg_line(target, bg));
+        let highlighted = crate::highlight::highlight_code(lang, body);
+        let width = digits_for(highlighted.len());
+        for (i, hl) in highlighted.into_iter().enumerate() {
+            let lineno = format!("{:>width$}  ", i + 1);
+            let mut used = inner_pad + UnicodeWidthStr::width(lineno.as_str());
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(hl.spans.len() + 3);
+            spans.push(Span::styled(" ".repeat(inner_pad), bg_only));
+            spans.push(Span::styled(lineno, lineno_style));
+            for src in hl.spans {
+                used += UnicodeWidthStr::width(src.content.as_ref());
+                let style = if src.style.bg.is_none() {
+                    src.style.bg(bg)
+                } else {
+                    src.style
+                };
+                spans.push(Span::styled(src.content, style));
+            }
+            if target > used {
+                spans.push(Span::styled(" ".repeat(target - used), bg_only));
+            }
             self.lines.push(Line::from(spans));
         }
-        self.lines
-            .push(Line::from(Span::styled("└─".to_string(), gutter)));
+        self.lines.push(blank_bg_line(target, bg));
         self.fresh_line = true;
         self.blank_line();
     }
@@ -389,46 +448,105 @@ impl Renderer {
     }
 }
 
-fn horizontal_border(widths: &[usize], junction: char) -> String {
-    let mut out = String::new();
-    for (i, w) in widths.iter().enumerate() {
-        if i > 0 {
-            out.push(junction);
-        }
-        out.push_str(&"─".repeat(w + 2));
-    }
-    out
+fn blank_bg_line(width: usize, bg: Color) -> Line<'static> {
+    Line::from(Span::styled(" ".repeat(width), Style::default().bg(bg)))
 }
 
-fn row_line(
-    cells: &[String],
-    widths: &[usize],
-    cell_style: Style,
-    border_style: Style,
-) -> Line<'static> {
+fn bg_padded_line(text: &str, style: Style, target: usize, bg: Color) -> Line<'static> {
     use unicode_width::UnicodeWidthStr;
-    let mut spans: Vec<Span<'static>> = Vec::with_capacity(widths.len() * 2 + 1);
-    spans.push(Span::styled("│", border_style));
-    for (i, w) in widths.iter().enumerate() {
-        let cell = cells.get(i).map(String::as_str).unwrap_or("");
-        let pad = w.saturating_sub(cell.width());
+    let used = text.width();
+    let mut spans = Vec::with_capacity(2);
+    spans.push(Span::styled(text.to_string(), style));
+    if target > used {
         spans.push(Span::styled(
-            format!(" {cell}{} ", " ".repeat(pad)),
-            cell_style,
+            " ".repeat(target - used),
+            Style::default().bg(bg),
         ));
-        spans.push(Span::styled("│", border_style));
     }
     Line::from(spans)
 }
 
-fn heading_hashes(level: HeadingLevel) -> usize {
+fn table_line(
+    text: &str,
+    inner_pad: usize,
+    target: usize,
+    style: Style,
+    bg: Color,
+) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let bg_only = Style::default().bg(bg);
+    let content_w = text.width();
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
+    spans.push(Span::styled(" ".repeat(inner_pad), bg_only));
+    spans.push(Span::styled(text.to_string(), style));
+    let right = target.saturating_sub(inner_pad + content_w);
+    if right > 0 {
+        spans.push(Span::styled(" ".repeat(right), bg_only));
+    }
+    Line::from(spans)
+}
+
+fn table_row(
+    cells: &[String],
+    widths: &[usize],
+    inner_pad: usize,
+    target: usize,
+    style: Style,
+    bg: Color,
+    sep: usize,
+) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let bg_only = Style::default().bg(bg);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(widths.len() * 2 + 3);
+    spans.push(Span::styled(" ".repeat(inner_pad), bg_only));
+    let mut used = inner_pad;
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ".repeat(sep), bg_only));
+            used += sep;
+        }
+        let cell = cells.get(i).map(String::as_str).unwrap_or("");
+        let pad = w.saturating_sub(cell.width());
+        spans.push(Span::styled(cell.to_string(), style));
+        spans.push(Span::styled(" ".repeat(pad), bg_only));
+        used += w;
+    }
+    let right = target.saturating_sub(used);
+    if right > 0 {
+        spans.push(Span::styled(" ".repeat(right), bg_only));
+    }
+    Line::from(spans)
+}
+
+fn digits_for(n: usize) -> usize {
+    if n == 0 {
+        1
+    } else {
+        (n as f32).log10().floor() as usize + 1
+    }
+}
+
+pub fn block_bg() -> Color {
+    Color::Rgb(22, 24, 28)
+}
+
+fn heading_style(level: HeadingLevel) -> Style {
     match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
+        HeadingLevel::H1 => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        HeadingLevel::H2 => Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD),
+        HeadingLevel::H3 => Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        HeadingLevel::H4 => Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+        HeadingLevel::H5 | HeadingLevel::H6 => Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD | Modifier::DIM),
     }
 }
 
@@ -462,10 +580,16 @@ mod tests {
     }
 
     #[test]
-    fn heading_gets_hash_prefix_and_bold_style() {
+    fn heading_renders_bold_without_hash_prefix() {
         let lines = render_markdown("# Title\n\nbody\n");
         let flat = plain(&lines);
-        assert!(flat[0].starts_with("# Title"), "got {:?}", flat);
+        assert!(flat[0].starts_with("Title"), "got {:?}", flat);
+        let bold = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "Title")
+            .expect("title span");
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -532,17 +656,15 @@ mod tests {
     }
 
     #[test]
-    fn table_renders_row_with_pipe_separators() {
+    fn table_renders_header_and_body_rows() {
         let lines = render_markdown("| a | b |\n| - | - |\n| 1 | 2 |\n");
         let flat = plain(&lines);
         assert!(
-            flat.iter()
-                .any(|l| l.contains("│") && l.contains("1") && l.contains("2")),
+            flat.iter().any(|l| l.contains("1") && l.contains("2")),
             "want data row: {flat:?}"
         );
         assert!(
-            flat.iter()
-                .any(|l| l.contains("│") && l.contains(" a ") && l.contains(" b ")),
+            flat.iter().any(|l| l.contains("a") && l.contains("b")),
             "want header row: {flat:?}"
         );
     }
