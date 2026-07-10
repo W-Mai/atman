@@ -209,7 +209,7 @@ async fn run_frames(
     }
     let mut editor = InputEditor::default();
     let (mut key_events, reader_shutdown) = spawn_event_reader();
-    let mut interrupt_prompt = false;
+    let mut interrupt_prompt: Option<std::time::Instant> = None;
     let mut shutdown = handle.shutdown_rx.take();
     let mut sigterm = build_sigterm_stream();
     let mut animation_tick = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -232,9 +232,6 @@ async fn run_frames(
         tokio::select! {
             biased;
             _ = wait_shutdown(shutdown.as_mut()) => {
-                break;
-            }
-            _ = tokio::signal::ctrl_c() => {
                 break;
             }
             _ = wait_sigterm(sigterm.as_mut()) => {
@@ -272,7 +269,7 @@ async fn run_frames(
                                 }
                                 _ => {}
                             }
-                            interrupt_prompt = false;
+                            interrupt_prompt = None;
                         }
                         Some(Ok(CtEvent::Mouse(me)))
                             if matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
@@ -282,9 +279,11 @@ async fn run_frames(
                             } else {
                                 scroll_delta = scroll_delta.saturating_add(3);
                             }
-                            interrupt_prompt = false;
+                            interrupt_prompt = None;
                         }
-                        Some(Ok(CtEvent::Key(ke))) => {
+                        Some(Ok(CtEvent::Key(ke)))
+                            if matches!(ke.kind, crossterm::event::KeyEventKind::Press) =>
+                        {
                             handle_key(
                                 map_key(ke),
                                 &mut app,
@@ -296,7 +295,7 @@ async fn run_frames(
                         }
                         Some(Ok(CtEvent::Paste(s))) => {
                             editor.ingest_paste(&s);
-                            interrupt_prompt = false;
+                            interrupt_prompt = None;
                             app.refresh_popup(editor.buf());
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
@@ -339,7 +338,7 @@ async fn run_frames(
                                     }
                                 }
                             }
-                            interrupt_prompt = false;
+                            interrupt_prompt = None;
                         }
                         Some(Ok(CtEvent::Resize(_, _))) => {}
                         _ => {}
@@ -363,11 +362,9 @@ async fn run_frames(
                 match frame {
                     Ok(frame) => {
                         app.apply_stream_frame(frame);
-                        interrupt_prompt = false;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         app.record_lag(n, std::time::Instant::now());
-                        interrupt_prompt = false;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -1371,7 +1368,7 @@ fn handle_key(
     action: KeyAction,
     app: &mut AppState,
     editor: &mut InputEditor,
-    interrupt_prompt: &mut bool,
+    interrupt_prompt: &mut Option<std::time::Instant>,
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
@@ -1485,26 +1482,26 @@ fn handle_key(
     match action {
         KeyAction::Char(c) => {
             editor.insert_char(c);
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::OpenCommandPalette => {
             app.palette.open();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::Backspace => {
             editor.backspace();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::DeleteWordBackward => {
             editor.delete_word_backward();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::Newline => {
             editor.insert_newline();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::Submit => {
@@ -1514,56 +1511,59 @@ fn handle_key(
                     let _ = tx.send(line);
                 }
             }
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::HistoryUp => {
             editor.history_up();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::HistoryDown => {
             editor.history_down();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::CursorLeft => {
             editor.move_left();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::CursorRight => {
             editor.move_right();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::CursorHome => {
             editor.move_home();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::CursorEnd => {
             editor.move_end();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::Tab => {
-            *interrupt_prompt = false;
+            if editor.expand_paste_at_cursor() {
+                edited = true;
+            }
+            *interrupt_prompt = None;
         }
         KeyAction::NudgePrefill => {
             editor.prefill("/nudge ");
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::CoursePrefill => {
             editor.prefill("/course ");
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::RedirectPrefill => {
             editor.prefill("/redirect ");
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::HardStop => {
             editor.prefill("/hard-stop ");
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::ScrollUp | KeyAction::PageUp => {
@@ -1572,7 +1572,7 @@ fn handle_key(
             } else {
                 1
             });
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::ScrollDown | KeyAction::PageDown => {
             app.scroll_down(if matches!(action, KeyAction::PageDown) {
@@ -1580,15 +1580,15 @@ fn handle_key(
             } else {
                 1
             });
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::Home => {
             app.scroll_to_top();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::End => {
             app.scroll_to_tail();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::Escape => {
             if app.streaming {
@@ -1600,11 +1600,11 @@ fn handle_key(
                 editor.clear();
                 edited = true;
             }
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::ToggleSidebar => {
             app.sidebar_mode = app.sidebar_mode.toggle();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::ToggleMouseCapture => {
             let now_on = app.toggle_mouse_capture();
@@ -1620,21 +1620,24 @@ fn handle_key(
                 );
                 app.select_mode_hinted = true;
             }
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::ToggleLastTool => {
             app.toggle_last_tool_expansion();
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::HelpModal => {
             app.cheatsheet_open = true;
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
         KeyAction::Interrupt => {
-            if *interrupt_prompt {
+            let within_window = interrupt_prompt
+                .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
+                .unwrap_or(false);
+            if within_window {
                 app.should_quit = true;
             } else {
-                *interrupt_prompt = true;
+                *interrupt_prompt = Some(std::time::Instant::now());
                 app.push_note("press Ctrl+C again to quit", app::NoteLevel::Warn);
             }
         }
@@ -1642,7 +1645,7 @@ fn handle_key(
             app.should_quit = true;
         }
         KeyAction::Ignore => {
-            *interrupt_prompt = false;
+            *interrupt_prompt = None;
         }
     }
     if edited {
@@ -1807,8 +1810,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
     let transcript_content = layout::compute_content_rect(l.transcript);
-    let input_buf_lines = editor.buf().split('\n').count().min(6) as u16;
+    let total_input_lines = editor.buf().split('\n').count() as u16;
+    let input_buf_lines = total_input_lines.min(6);
     let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
+    let cursor_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());
+    let visible_rows = input_buf_lines.max(3);
+    let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
     let startup_slot = if startup_active {
         let recent = match app.items.first() {
             Some(crate::app::OutputItem::StartupCard { recent, .. }) => recent.clone(),
@@ -1971,9 +1978,26 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             editor.cursor(),
             app.streaming,
             app.pending_below_rows(),
+            scroll_row,
         ),
         input_rect,
     );
+    if !app.streaming {
+        let raw_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());
+        let raw_col = crate::input::cursor_display_col(editor.buf(), editor.cursor());
+        let prompt_w: u16 = 2;
+        let inner_x = input_rect.x.saturating_add(1).saturating_add(1);
+        let inner_y = input_rect.y.saturating_add(1);
+        if raw_row >= scroll_row {
+            let cy = inner_y + (raw_row - scroll_row);
+            let cx = inner_x + prompt_w + raw_col;
+            if cy < input_rect.y + input_rect.height.saturating_sub(1)
+                && cx < input_rect.x + input_rect.width.saturating_sub(1)
+            {
+                f.set_cursor_position((cx, cy));
+            }
+        }
+    }
     if app.popup.is_open() {
         completion::render_popup(f, input_rect, &app.popup);
     }

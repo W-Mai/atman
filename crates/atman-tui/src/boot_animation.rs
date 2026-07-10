@@ -190,7 +190,7 @@ fn render(
     let splash = crate::output::compute_startup_overlay(l.transcript, recent);
     crate::output::render_startup_overlay(f, splash.area, version, recent, false, reveal_count);
     f.render_widget(
-        crate::input::input_paragraph("", 0, false, 0),
+        crate::input::input_paragraph("", 0, false, 0, 0),
         splash.input_slot,
     );
     if settled {

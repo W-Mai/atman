@@ -5,10 +5,12 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 
 type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
@@ -54,6 +56,12 @@ impl TerminalGuard {
             EnableBracketedPaste
         )
         .context("enter alternate screen")?;
+        if supports_keyboard_enhancement().unwrap_or(false) {
+            let _ = execute!(
+                stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            );
+        }
         TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
         Ok(Self {
             prev_hook_slot: Some(prev_slot),
@@ -81,6 +89,7 @@ fn restore_terminal() -> Result<()> {
     if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
         return Ok(());
     }
+    let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(
         stdout(),
         DisableBracketedPaste,

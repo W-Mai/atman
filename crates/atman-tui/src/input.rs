@@ -3,11 +3,25 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
+pub fn cursor_display_row(input: &str, cursor: usize) -> u16 {
+    let clamped = cursor.min(input.len());
+    input[..clamped].matches('\n').count() as u16
+}
+
+pub fn cursor_display_col(input: &str, cursor: usize) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    let clamped = cursor.min(input.len());
+    let head = &input[..clamped];
+    let last_line = head.rsplit('\n').next().unwrap_or("");
+    UnicodeWidthStr::width(last_line) as u16
+}
+
 pub fn input_paragraph<'a>(
     input: &'a str,
-    cursor: usize,
+    _cursor: usize,
     streaming: bool,
     pending_below: u16,
+    scroll_row: u16,
 ) -> Paragraph<'a> {
     let prompt_style = if streaming {
         Style::default().add_modifier(Modifier::DIM)
@@ -37,55 +51,25 @@ pub fn input_paragraph<'a>(
         .title_bottom(hint_line)
         .padding(ratatui::widgets::Padding::horizontal(1));
 
-    let (before, after) = split_at_cursor(input, cursor);
-    let mut lines: Vec<Line<'a>> = Vec::new();
-    let before_lines: Vec<&str> = if before.is_empty() {
+    let raw_lines: Vec<&str> = if input.is_empty() {
         vec![""]
     } else {
-        before.split('\n').collect()
+        input.split('\n').collect()
     };
-    let after_lines: Vec<&str> = if after.is_empty() {
-        vec![""]
-    } else {
-        after.split('\n').collect()
-    };
-    let last_before = before_lines.len() - 1;
-
-    for (i, seg) in before_lines.iter().enumerate() {
-        let mut spans: Vec<Span<'a>> = Vec::new();
-        if i == 0 {
-            spans.push(Span::styled("❯ ", prompt_style));
+    let mut lines: Vec<Line<'a>> = Vec::with_capacity(raw_lines.len());
+    for (i, seg) in raw_lines.iter().enumerate() {
+        let prefix = if i == 0 {
+            Span::styled("❯ ", prompt_style)
         } else {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(Span::raw(*seg));
-        if i == last_before {
-            spans.push(Span::styled(
-                "▏",
-                Style::default().add_modifier(Modifier::SLOW_BLINK),
-            ));
-            spans.push(Span::raw(after_lines[0]));
-            lines.push(Line::from(spans));
-            for tail in &after_lines[1..] {
-                lines.push(Line::from(vec![Span::raw("  "), Span::raw(*tail)]));
-            }
-        } else {
-            lines.push(Line::from(spans));
-        }
+            Span::raw("  ")
+        };
+        lines.push(Line::from(vec![prefix, Span::raw(*seg)]));
     }
 
     Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
-}
-
-fn split_at_cursor(s: &str, cursor: usize) -> (&str, &str) {
-    let clamped = cursor.min(s.len());
-    let mut safe = clamped;
-    while safe > 0 && !s.is_char_boundary(safe) {
-        safe -= 1;
-    }
-    s.split_at(safe)
+        .scroll((scroll_row, 0))
 }
 
 pub fn display_line_count(input: &str) -> usize {
@@ -282,6 +266,26 @@ impl InputEditor {
             self.history.push(line.clone());
         }
         Some(line)
+    }
+
+    pub fn expand_paste_at_cursor(&mut self) -> bool {
+        let hit = self.pending_pastes.iter().enumerate().find_map(|(i, p)| {
+            self.buf.find(&p.placeholder).and_then(|start| {
+                let end = start + p.placeholder.len();
+                if self.cursor >= start && self.cursor <= end {
+                    Some((i, start, end))
+                } else {
+                    None
+                }
+            })
+        });
+        let Some((idx, start, end)) = hit else {
+            return false;
+        };
+        let entry = self.pending_pastes.remove(idx);
+        self.buf.replace_range(start..end, &entry.content);
+        self.cursor = start + entry.content.len();
+        true
     }
 
     pub fn ingest_paste(&mut self, raw: &str) {
