@@ -1450,6 +1450,7 @@ async fn cmd_repl_once(
             std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(Some(sh_tx)));
         let sh_tx_for_ctrl = sh_tx_shared.clone();
+        session.flush_writer().await;
         let mut initial_items =
             atman_tui::history::flatten_transcript(&session.transcript_replay());
         if is_fresh_session {

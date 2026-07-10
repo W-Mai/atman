@@ -11,6 +11,7 @@ use crate::redact::Redactor;
 pub struct EventWriter {
     thread: Option<std::thread::JoinHandle<()>>,
     tx: mpsc::UnboundedSender<Event>,
+    flush_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
     stop_tx: Option<oneshot::Sender<()>>,
     events_path: PathBuf,
 }
@@ -39,6 +40,7 @@ impl EventWriter {
         let events_path = session_dir.join("events.jsonl");
         std::fs::create_dir_all(&session_dir)?;
         let (tx, rx) = mpsc::unbounded_channel::<Event>();
+        let (flush_tx, flush_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let file_path = events_path.clone();
         let thread = std::thread::Builder::new()
@@ -55,9 +57,16 @@ impl EventWriter {
                     }
                 };
                 rt.block_on(async move {
-                    if let Err(e) =
-                        writer_loop(rx, stop_rx, &file_path, project_index, session_id, redactor)
-                            .await
+                    if let Err(e) = writer_loop(
+                        rx,
+                        flush_rx,
+                        stop_rx,
+                        &file_path,
+                        project_index,
+                        session_id,
+                        redactor,
+                    )
+                    .await
                     {
                         eprintln!("[atman] event writer failed: {e}");
                     }
@@ -66,9 +75,18 @@ impl EventWriter {
         Ok(Self {
             thread: Some(thread),
             tx,
+            flush_tx,
             stop_tx: Some(stop_tx),
             events_path,
         })
+    }
+
+    pub async fn flush(&self) {
+        let (tx, rx) = oneshot::channel::<()>();
+        if self.flush_tx.send(tx).is_err() {
+            return;
+        }
+        let _ = rx.await;
     }
 
     pub fn sender(&self) -> mpsc::UnboundedSender<Event> {
@@ -105,6 +123,7 @@ impl Drop for EventWriter {
 
 async fn writer_loop(
     mut rx: mpsc::UnboundedReceiver<Event>,
+    mut flush_rx: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
     mut stop_rx: oneshot::Receiver<()>,
     path: &Path,
     project_index: Option<Arc<AnchorIndex>>,
@@ -125,12 +144,27 @@ async fn writer_loop(
                 while let Ok(event) = rx.try_recv() {
                     write_event(&mut file, &event, indexer.as_ref(), redactor.as_deref()).await?;
                 }
+                while let Ok(waiter) = flush_rx.try_recv() {
+                    let _ = waiter.send(());
+                }
                 break;
             }
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Some(event) => {
                         write_event(&mut file, &event, indexer.as_ref(), redactor.as_deref()).await?;
+                    }
+                    None => break,
+                }
+            }
+            maybe_flush = flush_rx.recv() => {
+                match maybe_flush {
+                    Some(waiter) => {
+                        while let Ok(event) = rx.try_recv() {
+                            write_event(&mut file, &event, indexer.as_ref(), redactor.as_deref()).await?;
+                        }
+                        file.sync_data().await?;
+                        let _ = waiter.send(());
                     }
                     None => break,
                 }

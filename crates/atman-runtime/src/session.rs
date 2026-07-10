@@ -1598,6 +1598,15 @@ impl Session {
             writer.shutdown().await;
         }
     }
+
+    // Rides FIFO queue ordering: once flush's own barrier is written,
+    // every earlier sink.emit is on disk too.
+    pub async fn flush_writer(&self) {
+        let Some(writer) = self.writer.as_ref() else {
+            return;
+        };
+        writer.flush().await;
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
