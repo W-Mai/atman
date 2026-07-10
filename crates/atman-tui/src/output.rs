@@ -761,6 +761,22 @@ fn clamp_len(s: &str, max: usize) -> String {
     out
 }
 
+fn render_assistant(md: &str, streaming: bool, panel_width: u16) -> Vec<Line<'static>> {
+    let mut lines = crate::markdown::render_markdown_with_width(md, panel_width);
+    if streaming {
+        let cursor = Span::styled(
+            "▏".to_string(),
+            Style::default().add_modifier(Modifier::SLOW_BLINK),
+        );
+        if let Some(last) = lines.last_mut() {
+            last.spans.push(cursor);
+        } else {
+            lines.push(Line::from(cursor));
+        }
+    }
+    lines
+}
+
 fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let (glyph, fg, bg) = match level {
@@ -835,27 +851,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         // animation can drive it, but layout-wise it contributes nothing.
         OutputItem::StartupCard { .. } => Vec::new(),
         OutputItem::AssistantMd { md, streaming } => {
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            // Gutter row sits above the body so markdown line indentation
-            // (code fences, list markers) isn't shifted by a first-line
-            // prefix.
-            lines.push(Line::from(Span::styled(
-                "✦ ATMAN".to_string(),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.extend(crate::markdown::render_markdown_with_width(
-                md,
-                ctx.panel_width,
-            ));
-            if *streaming {
-                lines.push(Line::from(Span::styled(
-                    "▏".to_string(),
-                    Style::default().add_modifier(Modifier::SLOW_BLINK),
-                )));
-            }
-            lines
+            render_assistant(md, *streaming, ctx.panel_width)
         }
         OutputItem::SystemNote { text, level } => render_system_note(text, *level, ctx.panel_width),
         OutputItem::Divider => {

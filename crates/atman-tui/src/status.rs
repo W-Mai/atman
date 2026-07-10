@@ -13,12 +13,23 @@ pub struct StatusInputs<'a> {
 }
 
 pub fn render_bar<'a>(inputs: StatusInputs<'a>) -> Paragraph<'a> {
+    let gutter = crate::layout::CONTENT_GUTTER as usize;
     let mut lines: Vec<Line<'a>> = Vec::with_capacity(2);
-    lines.push(top_line(&inputs));
+    lines.push(with_gutter(top_line(&inputs), gutter));
     if inputs.include_compact_line {
-        lines.push(compact_context_line(inputs.context, inputs.attach_count));
+        lines.push(with_gutter(
+            compact_context_line(inputs.context, inputs.attach_count),
+            gutter,
+        ));
     }
     Paragraph::new(lines)
+}
+
+fn with_gutter<'a>(line: Line<'a>, gutter: usize) -> Line<'a> {
+    let mut spans: Vec<Span<'a>> = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(Span::raw(" ".repeat(gutter)));
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
