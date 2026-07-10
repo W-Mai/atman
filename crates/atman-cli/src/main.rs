@@ -1187,11 +1187,12 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     let params: Vec<String> = flow.params.iter().map(|(id, _)| id.name.clone()).collect();
 
     let mut kv: Vec<(String, Value)> = Vec::new();
+    let tokens = split_quoted_args(rest_raw);
 
     let single_string_param = params.len() == 1
         && !rest_raw.is_empty()
-        && !rest_raw
-            .split_whitespace()
+        && !tokens
+            .iter()
             .any(|t| t.contains('=') && !t.starts_with('='));
     if single_string_param {
         kv.push((params[0].clone(), Value::Str(rest_raw.to_string())));
@@ -1199,7 +1200,7 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     }
 
     let mut positional_index = 0usize;
-    for tok in rest_raw.split_whitespace() {
+    for tok in tokens {
         if let Some((k, v)) = tok.split_once('=') {
             kv.push((k.to_string(), Value::Str(v.to_string())));
         } else if positional_index < params.len() {
@@ -1209,13 +1210,45 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
             ));
             positional_index += 1;
         } else {
-            bail!(
-                "extra positional argument `{tok}` (flow expects {} params)",
-                params.len()
-            );
+            kv.push((format!("_extra{positional_index}"), Value::Str(tok)));
+            positional_index += 1;
         }
     }
     Ok((parsed, flow_name, kv))
+}
+
+fn split_quoted_args(input: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '\\' if in_double => {
+                if let Some(&next) = chars.peek() {
+                    cur.push(next);
+                    chars.next();
+                }
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() || in_single || in_double {
+        out.push(cur);
+    }
+    out
 }
 
 #[derive(Default)]
