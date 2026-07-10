@@ -139,6 +139,26 @@ pub fn apply_horizontal_padding(rect: Rect, pad: u16) -> Rect {
     }
 }
 
+pub const CONTENT_GUTTER: u16 = 3;
+pub const CONTENT_MAX_WIDTH: u16 = 120;
+
+// Excess space beyond CONTENT_MAX_WIDTH stays blank on the right so
+// long lines don't run edge-to-edge on wide terminals.
+pub fn compute_content_rect(transcript: Rect) -> Rect {
+    let gutter = CONTENT_GUTTER;
+    if transcript.width <= gutter.saturating_mul(2) {
+        return transcript;
+    }
+    let inner_width = transcript.width.saturating_sub(gutter.saturating_mul(2));
+    let content_width = inner_width.min(CONTENT_MAX_WIDTH);
+    Rect {
+        x: transcript.x.saturating_add(gutter),
+        y: transcript.y,
+        width: content_width,
+        height: transcript.height,
+    }
+}
+
 pub fn compute_approvals_rect(transcript: Rect, input_rect: Rect, rows: u16) -> Option<Rect> {
     if rows == 0 {
         return None;

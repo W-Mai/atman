@@ -516,7 +516,6 @@ impl AppState {
     pub fn push_user_turn(&mut self, text: String) {
         self.close_current_workflow_panel();
         self.push_item(OutputItem::UserTurn { text });
-        self.items.push(OutputItem::Divider);
     }
 }
 
@@ -598,12 +597,11 @@ mod tests {
     }
 
     #[test]
-    fn user_turn_pushes_item_and_divider() {
+    fn user_turn_pushes_only_item() {
         let mut app = AppState::new("s".into(), None);
         app.push_user_turn("hi".into());
-        assert_eq!(app.items.len(), 2);
+        assert_eq!(app.items.len(), 1);
         assert!(matches!(app.items[0], OutputItem::UserTurn { .. }));
-        assert!(matches!(app.items[1], OutputItem::Divider));
     }
 
     #[test]

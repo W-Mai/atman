@@ -235,7 +235,15 @@ pub fn build_lines_with_ranges(
     let mut ranges: Vec<ItemRange> = Vec::with_capacity(items.len());
     let mut node_regions: Vec<NodeRegion> = Vec::new();
     let mut cursor: u16 = 0;
+    let mut prev_kind: Option<ItemKind> = None;
     for (idx, item) in items.iter().enumerate() {
+        let kind = ItemKind::of(item);
+        if let Some(prev) = prev_kind
+            && kind.wants_breathing_after(prev)
+        {
+            all_lines.push(Line::from(""));
+            cursor = cursor.saturating_add(1);
+        }
         let (item_lines, mut item_regions) = render_item_with_regions(item, ctx);
         let (rows, line_row_offsets) = wrap_row_offsets(&item_lines, width);
         ranges.push(ItemRange {
@@ -255,8 +263,44 @@ pub fn build_lines_with_ranges(
         node_regions.extend(item_regions);
         cursor = cursor.saturating_add(rows);
         all_lines.extend(item_lines);
+        if !matches!(kind, ItemKind::StartupCard) {
+            prev_kind = Some(kind);
+        }
     }
     (all_lines, ranges, node_regions, cursor)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemKind {
+    UserTurn,
+    Assistant,
+    SystemNote,
+    Divider,
+    WorkflowPanel,
+    StartupCard,
+}
+
+impl ItemKind {
+    fn of(item: &OutputItem) -> Self {
+        match item {
+            OutputItem::UserTurn { .. } => Self::UserTurn,
+            OutputItem::AssistantMd { .. } => Self::Assistant,
+            OutputItem::SystemNote { .. } => Self::SystemNote,
+            OutputItem::Divider => Self::Divider,
+            OutputItem::WorkflowPanel { .. } => Self::WorkflowPanel,
+            OutputItem::StartupCard { .. } => Self::StartupCard,
+        }
+    }
+
+    // Divider self-separates; StartupCard emits no lines; UserTurn brings its own top/bottom padding.
+    fn wants_breathing_after(self, prev: Self) -> bool {
+        if matches!(prev, Self::Divider | Self::StartupCard | Self::UserTurn)
+            || matches!(self, Self::Divider | Self::StartupCard | Self::UserTurn)
+        {
+            return false;
+        }
+        prev != self
+    }
 }
 
 fn wrap_row_offsets(lines: &[Line<'static>], _width: u16) -> (u16, Vec<u16>) {
@@ -717,6 +761,41 @@ fn clamp_len(s: &str, max: usize) -> String {
     out
 }
 
+fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let (glyph, fg, bg) = match level {
+        NoteLevel::Info => ("·", Color::Cyan, Color::Rgb(20, 26, 34)),
+        NoteLevel::Warn => ("!", Color::Yellow, Color::Rgb(38, 30, 16)),
+        NoteLevel::Error => ("✗", Color::Red, Color::Rgb(40, 20, 22)),
+    };
+    let cleaned = text
+        .strip_prefix("[atman] ")
+        .or_else(|| text.strip_prefix("[atman]"))
+        .unwrap_or(text);
+    let body_style = Style::default().fg(Color::Gray).bg(bg);
+    let glyph_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+    let target = panel_width.max(20) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, row) in cleaned.split('\n').enumerate() {
+        let prefix = if i == 0 {
+            format!(" {glyph} ")
+        } else {
+            "   ".into()
+        };
+        let used = UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(row);
+        let pad = target.saturating_sub(used);
+        let mut spans = vec![
+            Span::styled(prefix, glyph_style),
+            Span::styled(row.to_string(), body_style),
+        ];
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), body_style));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let bg = user_message_bg();
@@ -725,12 +804,12 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
         .bg(bg)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().bg(bg);
-    // Cap the stripe at 80 cols on wide terminals so long paragraphs don't
-    // stretch the block all the way to the sidebar.
-    let target = panel_width.clamp(20, 80) as usize;
+    let target = panel_width.max(20) as usize;
+    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(blank.clone());
     for (i, row) in text.split('\n').enumerate() {
-        let prompt = if i == 0 { "❯ " } else { "  " };
+        let prompt = if i == 0 { " ❯ " } else { "   " };
         let row_owned = row.to_string();
         let used = UnicodeWidthStr::width(prompt) + UnicodeWidthStr::width(row);
         let pad = target.saturating_sub(used);
@@ -743,6 +822,7 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
         }
         lines.push(Line::from(spans));
     }
+    lines.push(blank);
     lines
 }
 
@@ -765,7 +845,10 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             )));
-            lines.extend(crate::markdown::render_markdown(md));
+            lines.extend(crate::markdown::render_markdown_with_width(
+                md,
+                ctx.panel_width,
+            ));
             if *streaming {
                 lines.push(Line::from(Span::styled(
                     "▏".to_string(),
@@ -774,29 +857,17 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             }
             lines
         }
-        OutputItem::SystemNote { text, level } => {
-            let (glyph, color) = match level {
-                NoteLevel::Info => ("·", Color::Blue),
-                NoteLevel::Warn => ("!", Color::Yellow),
-                NoteLevel::Error => ("✗", Color::Red),
-            };
-            let cleaned = text
-                .strip_prefix("[atman] ")
-                .or_else(|| text.strip_prefix("[atman]"))
-                .unwrap_or(text)
-                .to_string();
-            vec![Line::from(vec![
-                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
-                Span::raw(cleaned),
-            ])]
+        OutputItem::SystemNote { text, level } => render_system_note(text, *level, ctx.panel_width),
+        OutputItem::Divider => {
+            let width = ctx.panel_width.max(4) as usize;
+            vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "─".repeat(width),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]
         }
-        OutputItem::Divider => vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "─".repeat(60),
-                Style::default().fg(Color::DarkGray),
-            )),
-        ],
         OutputItem::WorkflowPanel {
             graph,
             expanded_nodes,
@@ -1389,7 +1460,7 @@ fn append_fanout_horizontal(
     let _ = (fork_row, merge_row);
 }
 
-const MAX_BOX_WIDTH: u16 = 100;
+const MAX_BOX_WIDTH: u16 = crate::layout::CONTENT_MAX_WIDTH;
 const INDENT_PER_DEPTH: u16 = 4;
 
 fn tree_prefix_spans(ancestor_last: &[bool], is_last: Option<bool>) -> Vec<Span<'static>> {

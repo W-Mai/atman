@@ -1805,7 +1805,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
-    let transcript_content = layout::apply_horizontal_padding(l.transcript, 2);
+    let transcript_content = layout::compute_content_rect(l.transcript);
     let input_buf_lines = editor.buf().split('\n').count().min(6) as u16;
     let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
     let startup_slot = if startup_active {

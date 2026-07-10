@@ -209,7 +209,6 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>) {
             if !text.trim().is_empty() {
                 out.push(OutputItem::UserTurn { text });
             }
-            out.push(OutputItem::Divider);
         }
         MessageRole::Assistant => {
             for part in &msg.parts {
@@ -263,11 +262,10 @@ mod tests {
     }
 
     #[test]
-    fn user_message_becomes_turn_plus_divider() {
+    fn user_message_becomes_turn() {
         let out = flatten_messages(&[user("hi")]);
-        assert_eq!(out.len(), 2);
-        matches!(out[0], OutputItem::UserTurn { .. });
-        matches!(out[1], OutputItem::Divider);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], OutputItem::UserTurn { .. }));
     }
 
     #[test]

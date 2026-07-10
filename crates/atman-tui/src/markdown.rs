@@ -3,12 +3,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 pub fn render_markdown(md: &str) -> Vec<Line<'static>> {
+    render_markdown_with_width(md, 60)
+}
+
+pub fn render_markdown_with_width(md: &str, rule_width: u16) -> Vec<Line<'static>> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     let parser = Parser::new_ext(md, opts);
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer::with_rule_width(rule_width);
     for ev in parser {
         renderer.consume(ev);
     }
@@ -31,6 +35,16 @@ struct Renderer {
     table_row: Vec<String>,
     table_header: Vec<String>,
     table_body: Vec<Vec<String>>,
+    rule_width: u16,
+}
+
+impl Renderer {
+    fn with_rule_width(w: u16) -> Self {
+        Self {
+            rule_width: w.max(4),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -132,7 +146,7 @@ impl Renderer {
             Event::Rule => {
                 self.blank_line();
                 self.lines.push(Line::from(Span::styled(
-                    "─".repeat(60),
+                    "─".repeat(self.rule_width as usize),
                     Style::default().fg(Color::DarkGray),
                 )));
                 self.fresh_line = true;
