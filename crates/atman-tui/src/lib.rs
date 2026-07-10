@@ -1299,7 +1299,6 @@ fn handle_form_key(
             if let Some(target_id) = app.form_modal.switch_to(1)
                 && target_id != form_id
             {
-                app.form_modal.pending_switch = Some(target_id.clone());
                 if let Some(sess) = app.session.as_ref() {
                     sess.forms().promote(&target_id);
                 }

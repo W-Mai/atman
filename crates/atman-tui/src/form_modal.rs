@@ -34,7 +34,6 @@ pub struct FormModal {
     pub batch_index: usize,
     pub batch_answers: Vec<Option<FormAnswer>>,
     pub confirm_form: Option<PendingForm>,
-    pub pending_switch: Option<String>,
 }
 
 impl FormModal {
@@ -133,18 +132,6 @@ impl FormModal {
         None
     }
 
-    pub fn next_pending_id(&self, direction: isize) -> Option<String> {
-        if self.batch_ids.is_empty() {
-            return None;
-        }
-        let len = self.batch_ids.len() as isize;
-        if len <= 1 {
-            return None;
-        }
-        let next = (self.batch_index as isize + direction).rem_euclid(len) as usize;
-        Some(self.batch_ids[next].clone())
-    }
-
     pub fn close(&mut self) {
         self.open = false;
         self.pending = None;
@@ -160,7 +147,6 @@ impl FormModal {
         self.batch_answers.clear();
         self.batch_index = 0;
         self.confirm_form = None;
-        self.pending_switch = None;
     }
 
     pub fn batch_total(&self) -> usize {
