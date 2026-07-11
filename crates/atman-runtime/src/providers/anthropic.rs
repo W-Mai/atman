@@ -28,7 +28,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: "https://api.anthropic.com".into(),
             client: reqwest::Client::new(),
-            max_tokens: 4096,
+            max_tokens: 16384,
             anthropic_version: "2023-06-01".into(),
         }
     }
