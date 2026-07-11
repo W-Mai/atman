@@ -184,6 +184,7 @@ fn render(
             session_id: "········",
             goal: None,
             streaming: false,
+            waiting_for_llm: false,
         }),
         l.status,
     );

@@ -2005,6 +2005,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             session_id: &app.session_id,
             goal: app.goal.as_deref(),
             streaming: app.streaming,
+            waiting_for_llm: app.waiting_for_llm,
         }),
         l.status,
     );

@@ -77,6 +77,7 @@ pub struct AppState {
     pub follow_tail: bool,
     pub should_quit: bool,
     pub streaming: bool,
+    pub waiting_for_llm: bool,
     pub goal: Option<String>,
     pub session_id: String,
     pub session_dir: String,
@@ -382,6 +383,7 @@ impl AppState {
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         match frame {
             StreamFrame::ThinkingChunk { text } => {
+                self.waiting_for_llm = false;
                 if let Some(OutputItem::Thinking { text: t, .. }) = self.items.last_mut() {
                     t.push_str(&text);
                     self.items_version = self.items_version.wrapping_add(1);
@@ -393,6 +395,7 @@ impl AppState {
                 }
             }
             StreamFrame::LlmChunk { text, .. } => {
+                self.waiting_for_llm = false;
                 if let Some(OutputItem::Thinking { done, .. }) = self.items.last_mut()
                     && !*done
                 {
@@ -542,6 +545,7 @@ impl AppState {
     pub fn push_user_turn(&mut self, text: String) {
         self.close_current_workflow_panel();
         self.push_item(OutputItem::UserTurn { text });
+        self.waiting_for_llm = true;
     }
 }
 

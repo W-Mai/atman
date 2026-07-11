@@ -6,6 +6,7 @@ pub struct StatusInputs<'a> {
     pub session_id: &'a str,
     pub goal: Option<&'a str>,
     pub streaming: bool,
+    pub waiting_for_llm: bool,
 }
 
 pub fn render_bar<'a>(inputs: StatusInputs<'a>) -> Paragraph<'a> {
@@ -43,9 +44,14 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         ));
     }
     if inputs.streaming {
+        let label = if inputs.waiting_for_llm {
+            "thinking…"
+        } else {
+            "streaming…"
+        };
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            "streaming…",
+            label,
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
