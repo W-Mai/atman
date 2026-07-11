@@ -321,7 +321,7 @@ impl FormModal {
     fn is_confirm_form(&self) -> bool {
         self.pending
             .as_ref()
-            .is_some_and(|p| p.form_id == "__batch_confirm")
+            .is_some_and(|p| matches!(p.kind, FormKind::Confirm { .. }))
     }
 
     fn close_form_state(&mut self) {

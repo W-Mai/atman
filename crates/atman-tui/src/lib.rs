@@ -1326,6 +1326,12 @@ fn handle_form_key(
         KeyAction::HistoryDown | KeyAction::Char('j') if !is_text => {
             app.form_modal.move_cursor(1);
         }
+        KeyAction::CursorLeft if is_confirm => {
+            app.form_modal.move_cursor(-1);
+        }
+        KeyAction::CursorRight if is_confirm => {
+            app.form_modal.move_cursor(1);
+        }
         KeyAction::Char(c) if is_text => {
             app.form_modal.text_editor.insert_char(*c);
         }
