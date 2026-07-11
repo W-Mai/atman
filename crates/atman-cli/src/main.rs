@@ -1437,6 +1437,12 @@ async fn cmd_repl_once(
     let (lifecycle_tx, mut lifecycle_rx) =
         mpsc::unbounded_channel::<atman_dsl::ast::LifecycleEvent>();
     executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
+    if use_tui {
+        let resolver = std::sync::Arc::new(atman_tui::prompt_resolver::TuiPromptResolver::new(
+            session.forms(),
+        ));
+        executor.tool_ctx.prompt_resolver = Some(resolver);
+    }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
         .await;

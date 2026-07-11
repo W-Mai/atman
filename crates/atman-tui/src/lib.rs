@@ -29,6 +29,7 @@ pub mod layout;
 pub mod markdown;
 pub mod output;
 pub mod palette;
+pub mod prompt_resolver;
 pub mod session_switcher;
 pub mod sidebar;
 pub mod status;
