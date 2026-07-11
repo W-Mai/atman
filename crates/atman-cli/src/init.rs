@@ -81,6 +81,8 @@ pub const CONFIG_TOML: &str = r#"# atman configuration
 #   Anthropic / DeepSeek (anthropic-compat):  ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
 #   OpenAI / OpenAI-compat:                   OPENAI_API_KEY + OPENAI_BASE_URL
 
+# Note: model names containing "/" must be quoted: [models."provider/model-id"]
+
 [models.claude-opus-4.7]
 context_budget = 200000
 thinking = true
@@ -88,7 +90,6 @@ thinking = true
 [models.gpt-4o-mini]
 context_budget = 128000
 
-# Edit this to match your provider's model ID.
 [alias.smart]
 model = "claude-opus-4.7"
 
