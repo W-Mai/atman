@@ -273,6 +273,7 @@ pub fn build_lines_with_ranges(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ItemKind {
     UserTurn,
+    Thinking,
     Assistant,
     SystemNote,
     Divider,
@@ -284,6 +285,7 @@ impl ItemKind {
     fn of(item: &OutputItem) -> Self {
         match item {
             OutputItem::UserTurn { .. } => Self::UserTurn,
+            OutputItem::Thinking { .. } => Self::Thinking,
             OutputItem::AssistantMd { .. } => Self::Assistant,
             OutputItem::SystemNote { .. } => Self::SystemNote,
             OutputItem::Divider => Self::Divider,
@@ -773,6 +775,32 @@ fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
     ]
 }
 
+fn render_thinking(text: &str, done: bool, panel_width: u16) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let t = crate::theme::theme();
+    let style = Style::default().fg(t.subtle_fg).add_modifier(Modifier::DIM);
+    let header = if done { " thinking " } else { " thinking… " };
+    let target = panel_width.max(20) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(header.to_string(), style)));
+    for line in text.lines().take(20) {
+        let used = UnicodeWidthStr::width(line);
+        let pad = target.saturating_sub(used);
+        let mut spans = vec![Span::styled(line.to_string(), style)];
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), style));
+        }
+        lines.push(Line::from(spans));
+    }
+    if text.lines().count() > 20 {
+        lines.push(Line::from(Span::styled(
+            "  … (truncated)".to_string(),
+            style,
+        )));
+    }
+    lines
+}
+
 fn render_assistant(md: &str, streaming: bool, panel_width: u16) -> Vec<Line<'static>> {
     let mut lines = crate::markdown::render_markdown_with_width(md, panel_width);
     if streaming {
@@ -861,10 +889,7 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
     let mut lines = match item {
         OutputItem::UserTurn { text } => render_user_turn(text, ctx.panel_width),
-        // StartupCard is drawn as a full-frame overlay (see
-        // render_startup_overlay in lib.rs), never as a transcript row.
-        // We keep the variant in items so keyboard dismiss + slide
-        // animation can drive it, but layout-wise it contributes nothing.
+        OutputItem::Thinking { text, done } => render_thinking(text, *done, ctx.panel_width),
         OutputItem::StartupCard { .. } => Vec::new(),
         OutputItem::AssistantMd { md, streaming } => {
             render_assistant(md, *streaming, ctx.panel_width)

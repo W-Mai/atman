@@ -5,6 +5,7 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     for part in &msg.parts {
         chars += match part {
             MessagePart::Text { text } => text.len(),
+            MessagePart::Thinking { thinking } => thinking.len(),
             MessagePart::ToolResult { content, .. } => content.len(),
             MessagePart::Image { .. } => 512,
             MessagePart::ToolUse { name, input, .. } => name.len() + input.to_string().len(),

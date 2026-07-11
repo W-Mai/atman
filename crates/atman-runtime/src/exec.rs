@@ -553,6 +553,13 @@ async fn run_streaming_once<'a>(
                         }
                         state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
                     }
+                    Ok(NodeEvent::ThinkingChunk { text }) => {
+                        if let Some(tx) = &stream_tx {
+                            let _ = tx.send(crate::stream::StreamFrame::ThinkingChunk {
+                                text,
+                            });
+                        }
+                    }
                     Ok(NodeEvent::LlmDone { total_tokens }) => {
                         if let Some(tx) = &stream_tx {
                             let _ = tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
@@ -605,6 +612,11 @@ async fn run_streaming_once<'a>(
                     });
                 }
                 state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
+            }
+            NodeEvent::ThinkingChunk { text } => {
+                if let Some(tx) = &stream_tx {
+                    let _ = tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
+                }
             }
             NodeEvent::LlmDone { total_tokens } => {
                 if let Some(tx) = &stream_tx {

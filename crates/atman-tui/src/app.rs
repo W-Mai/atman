@@ -11,6 +11,10 @@ pub enum OutputItem {
     UserTurn {
         text: String,
     },
+    Thinking {
+        text: String,
+        done: bool,
+    },
     AssistantMd {
         md: String,
         streaming: bool,
@@ -377,7 +381,24 @@ impl AppState {
 
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         match frame {
+            StreamFrame::ThinkingChunk { text } => {
+                if let Some(OutputItem::Thinking { text: t, .. }) = self.items.last_mut() {
+                    t.push_str(&text);
+                    self.items_version = self.items_version.wrapping_add(1);
+                    self.streaming = true;
+                    self.reset_lag_state();
+                } else {
+                    self.push_item(OutputItem::Thinking { text, done: false });
+                    self.streaming = true;
+                }
+            }
             StreamFrame::LlmChunk { text, .. } => {
+                if let Some(OutputItem::Thinking { done, .. }) = self.items.last_mut()
+                    && !*done
+                {
+                    *done = true;
+                    self.items_version = self.items_version.wrapping_add(1);
+                }
                 if let Some(OutputItem::AssistantMd { md, streaming }) = self.items.last_mut()
                     && *streaming
                 {

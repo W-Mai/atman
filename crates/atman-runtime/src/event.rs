@@ -372,6 +372,9 @@ pub enum NodeEvent {
         text: String,
         cumulative_tokens: u64,
     },
+    ThinkingChunk {
+        text: String,
+    },
     LlmDone {
         total_tokens: u64,
     },

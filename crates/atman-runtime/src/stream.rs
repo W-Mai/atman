@@ -6,6 +6,9 @@ pub enum StreamFrame {
         text: String,
         model: String,
     },
+    ThinkingChunk {
+        text: String,
+    },
     LlmDone {
         total_tokens: u64,
     },

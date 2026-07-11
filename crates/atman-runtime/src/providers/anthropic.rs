@@ -130,6 +130,10 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
                 name: name.clone(),
                 input: input.clone(),
             },
+            MessagePart::Thinking { thinking } => ContentPart::Text {
+                text: thinking.clone(),
+                cache_control: None,
+            },
             MessagePart::ToolResult {
                 tool_use_id,
                 content,
@@ -247,6 +251,14 @@ impl Provider for AnthropicProvider {
                                             cumulative_tokens: cumulative,
                                         });
                                     }
+                                } else if delta_ty == "thinking_delta" {
+                                    if let Some(text) =
+                                        delta.get("thinking").and_then(|v| v.as_str())
+                                    {
+                                        let _ = tx.send(NodeEvent::ThinkingChunk {
+                                            text: text.to_string(),
+                                        });
+                                    }
                                 } else if delta_ty == "input_json_delta"
                                     && let Some(partial) =
                                         delta.get("partial_json").and_then(|v| v.as_str())
@@ -338,6 +350,7 @@ fn response_to_assistant(
     for block in body.content {
         match block {
             ContentBlock::Text { text } => parts.push(MessagePart::Text { text }),
+            ContentBlock::Thinking { thinking } => parts.push(MessagePart::Thinking { thinking }),
             ContentBlock::ToolUse { id, name, input } => {
                 parts.push(MessagePart::ToolUse { id, name, input })
             }
@@ -484,6 +497,9 @@ struct AnthropicUsage {
 enum ContentBlock {
     Text {
         text: String,
+    },
+    Thinking {
+        thinking: String,
     },
     ToolUse {
         id: String,

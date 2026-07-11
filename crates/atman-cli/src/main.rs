@@ -1952,6 +1952,7 @@ fn render_stream_frame(
         | StreamFrame::FlowNodeEnd { .. }
         | StreamFrame::FlowDone { .. }
         | StreamFrame::ToolNode { .. }
+        | StreamFrame::ThinkingChunk { .. }
         | StreamFrame::AssistantMsg { .. }
         | StreamFrame::ToolResultMsg { .. }
         | StreamFrame::ToolPendingApproval { .. }

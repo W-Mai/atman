@@ -26,6 +26,9 @@ pub enum MessagePart {
     Text {
         text: String,
     },
+    Thinking {
+        thinking: String,
+    },
     Image {
         source: ImageSource,
     },
@@ -85,6 +88,16 @@ impl Message {
         for p in &self.parts {
             if let MessagePart::Text { text } = p {
                 out.push_str(text);
+            }
+        }
+        out
+    }
+
+    pub fn thinking_concat(&self) -> String {
+        let mut out = String::new();
+        for p in &self.parts {
+            if let MessagePart::Thinking { thinking } = p {
+                out.push_str(thinking);
             }
         }
         out
