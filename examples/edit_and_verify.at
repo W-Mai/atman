@@ -19,7 +19,7 @@ flow edit_and_verify(file: path, instruction: string) -> EditResult {
 
     result = fix_until_test_passes {
         edit_flow: llm {
-            model: "xiaomi/mimo-v2.5-pro"
+            model: "smart"
             messages: [
                 system_msg(@"prompts/edit.md"),
                 user_msg("iter=" + to_json_string(iter) + "\nprevious failure:\n" + prev_fail + "\n\ninstruction: " + instruction),

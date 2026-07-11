@@ -11,7 +11,7 @@ flow agent_loop(messages: list, iteration: int) -> string {
         return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
     }
     reply = llm {
-        model: "claude-opus-4.7"
+        model: "smart"
         messages: messages
         tools: [fs.read, fs.write, fs.edit, fs.list, bash.exec, hunk.review, hunk.apply, memory.confess]
     }

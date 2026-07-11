@@ -65,6 +65,27 @@ pub const CONFIG_TOML: &str = r#"# atman configuration
 # Every section here is optional. atman ships with sensible defaults;
 # uncomment a section to override.
 
+# ── Model config + alias ──────────────────────────────────────────
+# Define models with their context budget + compaction ratio, then
+# create short aliases so flows don't hardcode provider model IDs.
+#
+# [models.claude-opus-4.7]
+# context_budget = 200000
+# compact_threshold_ratio = 0.8
+# thinking = true
+#
+# [models.deepseek-v4-pro]
+# context_budget = 1000000
+# compact_threshold_ratio = 0.8
+#
+# [alias.smart]
+# model = "claude-opus-4.7"
+#
+# [alias.cheap]
+# model = "gpt-4o-mini"
+#
+# Then in a flow:  model: "smart"  → resolves to claude-opus-4.7
+
 # Which model to hand to REPL bare text (see routes.at → default_route).
 # Set an ANTHROPIC_API_KEY / OPENAI_API_KEY / ATMAN_TEST_GLM_KEY in your shell.
 [suggest]
@@ -123,7 +144,7 @@ flow agent_loop(messages: list, iteration: int) -> string {
         return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
     }
     reply = llm {
-        model: "claude-opus-4.7"
+        model: "smart"
         messages: messages
         tools: [
             fs.read, fs.write, fs.edit, fs.list, fs.grep,
