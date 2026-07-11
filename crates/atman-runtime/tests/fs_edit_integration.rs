@@ -70,7 +70,7 @@ async fn fs_edit_end_to_end_read_then_edit_flow() {
         )
         .await
         .expect("edit after read succeeds");
-    assert!(matches!(edit_result, Value::Str(_)));
+    assert!(matches!(edit_result, Value::Struct(_)));
 
     let after = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(after.contains("print(\"hello, world\")"));

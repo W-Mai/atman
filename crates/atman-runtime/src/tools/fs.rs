@@ -185,9 +185,24 @@ impl Tool for FsWrite {
         Box::pin(async move {
             let path = extract_path(&args, "path", 0)?;
             let content = extract_string(&args, "content", 1)?;
-            ctx.fs_access.check_write(&path).map_err(|e| {
-                RuntimeError::ToolFailed(format!("fs.write({}): {e}", path.display()))
-            })?;
+            let mut approved = false;
+            if let Err(e) = ctx.fs_access.check_write(&path) {
+                match request_fs_write_approval(ctx, &path, &e.to_string()).await {
+                    Some(true) => approved = true,
+                    Some(false) => {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "fs.write({}): user denied the write operation",
+                            path.display()
+                        )));
+                    }
+                    None => {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "fs.write({}): {e}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
             tokio::fs::write(&path, content.as_bytes())
                 .await
                 .map_err(|e| {
@@ -195,7 +210,13 @@ impl Tool for FsWrite {
                 })?;
             let canonical = canonicalize_or_owned(&path);
             ctx.note_read(&canonical);
-            Ok(Value::Path(path))
+            Ok(Value::Struct(vec![
+                ("path".into(), Value::Path(path)),
+                (
+                    "approval".into(),
+                    Value::Str(if approved { "approved" } else { "auto" }.into()),
+                ),
+            ]))
         })
     }
 }
@@ -281,9 +302,24 @@ impl Tool for FsEdit {
             let old_string = extract_string(&args, "old_string", 1)?;
             let new_string = extract_string(&args, "new_string", 2)?;
             let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
-            ctx.fs_access.check_write(&path).map_err(|e| {
-                RuntimeError::ToolFailed(format!("fs.edit({}): {e}", path.display()))
-            })?;
+            let mut approved = false;
+            if let Err(e) = ctx.fs_access.check_write(&path) {
+                match request_fs_write_approval(ctx, &path, &e.to_string()).await {
+                    Some(true) => approved = true,
+                    Some(false) => {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "fs.edit({}): user denied the write operation",
+                            path.display()
+                        )));
+                    }
+                    None => {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "fs.edit({}): {e}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
             let canonical = canonicalize_or_owned(&path);
             if ctx.read_files.is_some() && !ctx.has_read(&canonical) {
                 return Err(RuntimeError::ToolFailed(format!(
@@ -344,10 +380,19 @@ impl Tool for FsEdit {
                 })?;
             let replaced = if replace_all { match_lines.len() } else { 1 };
             let first_line = match_lines[0];
-            Ok(Value::Str(format!(
-                "[fs.edit({}): replaced {replaced} occurrence(s), first at line {first_line}]",
-                path.display()
-            )))
+            Ok(Value::Struct(vec![
+                (
+                    "summary".into(),
+                    Value::Str(format!(
+                        "[fs.edit({}): replaced {replaced} occurrence(s), first at line {first_line}]",
+                        path.display()
+                    )),
+                ),
+                (
+                    "approval".into(),
+                    Value::Str(if approved { "approved" } else { "auto" }.into()),
+                ),
+            ]))
         })
     }
 }
@@ -626,6 +671,46 @@ async fn fs_grep_impl(args: ToolArgs) -> ToolResult {
     Ok(Value::List(hits))
 }
 
+async fn request_fs_write_approval(
+    ctx: &ToolCtx,
+    path: &std::path::Path,
+    reason: &str,
+) -> Option<bool> {
+    use crate::tool::ApprovalLevel;
+    let Some(approval) = &ctx.approval else {
+        return None;
+    };
+    let run_id = ctx.flow_run_id.clone()?;
+    let id = format!("fs_write_{}", uuid::Uuid::now_v7());
+    let pending = crate::session::PendingApproval {
+        tool_use_id: id.clone(),
+        tool_name: "fs.write (sandboxed)".to_string(),
+        args_preview: format!("path={}", path.display()),
+        preview: Some(reason.to_string()),
+        level: ApprovalLevel::Dangerous,
+        run_id,
+        emitted_at: chrono::Utc::now(),
+    };
+    let rx = approval.request(pending);
+    let run_id_for_emit = ctx.flow_run_id.clone();
+    if let (Some(sink), Some(rid)) = (ctx.events.as_ref(), run_id_for_emit) {
+        sink.emit(crate::event::Event::ToolPendingApproval {
+            seq: 0,
+            run_id: rid,
+            tool_use_id: id,
+            tool_name: "fs.write".into(),
+            args_preview: path.display().to_string(),
+            level: "dangerous".into(),
+            preview: Some(reason.to_string()),
+            ts: chrono::Utc::now(),
+        });
+    }
+    match rx.await {
+        Ok(crate::session::ApprovalDecision::Approve) => Some(true),
+        _ => Some(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,7 +859,14 @@ mod tests {
         };
         let v = FsEdit.call(args, &ctx).await.unwrap();
         let s = match v {
-            Value::Str(s) => s,
+            Value::Struct(fields) => fields
+                .into_iter()
+                .find(|(k, _)| k == "summary")
+                .map(|(_, v)| match v {
+                    Value::Str(s) => s,
+                    _ => panic!(),
+                })
+                .unwrap(),
             _ => panic!(),
         };
         assert!(s.contains("replaced 1 occurrence"), "summary: {s}");

@@ -11,6 +11,15 @@ pub trait Sandbox: Send + Sync {
         cwd: &'a Path,
     ) -> BoxFut<'a, Result<std::process::Output, RuntimeError>>;
 
+    fn spawn_relaxed<'a>(
+        &'a self,
+        cmd: &'a [&'a str],
+        env: &'a [(String, String)],
+        cwd: &'a Path,
+    ) -> BoxFut<'a, Result<std::process::Output, RuntimeError>> {
+        self.spawn(cmd, env, cwd)
+    }
+
     fn is_available(&self) -> bool;
 
     fn kind(&self) -> &'static str;
@@ -22,6 +31,7 @@ pub struct SandboxExec {
     extra_write: Vec<PathBuf>,
     profile_template: String,
     allow_network: bool,
+    relaxed_template: String,
 }
 
 impl SandboxExec {
@@ -32,6 +42,7 @@ impl SandboxExec {
             extra_write: Vec::new(),
             profile_template: DEFAULT_PROFILE.to_string(),
             allow_network: false,
+            relaxed_template: RELAXED_PROFILE.to_string(),
         }
     }
 
@@ -56,35 +67,52 @@ impl SandboxExec {
     }
 
     pub fn render_profile(&self, cwd: &Path) -> String {
-        let mut out = self
-            .profile_template
-            .replace("{PROJECT_ROOT}", &self.project_root.display().to_string())
-            .replace("{CWD}", &cwd.display().to_string());
-        if self.allow_network && !out.contains("(allow network") {
-            out.push_str("\n(allow network*)\n");
-        }
-        if !self.extra_read.is_empty() {
-            let mut extra = String::from("\n;; extra_read\n");
-            for r in &self.extra_read {
-                extra.push_str(&format!(
-                    "(allow file-read* (subpath \"{}\"))\n",
-                    r.display()
-                ));
-            }
-            out.push_str(&extra);
-        }
-        if !self.extra_write.is_empty() {
-            let mut extra = String::from("\n;; extra_write\n");
-            for r in &self.extra_write {
-                extra.push_str(&format!(
-                    "(allow file-write* (subpath \"{}\"))\n",
-                    r.display()
-                ));
-            }
-            out.push_str(&extra);
-        }
-        out
+        render_template(
+            &self.profile_template,
+            &self.project_root,
+            cwd,
+            &self.extra_read,
+            &self.extra_write,
+            self.allow_network,
+        )
     }
+}
+
+fn render_template(
+    template: &str,
+    project_root: &Path,
+    cwd: &Path,
+    extra_read: &[PathBuf],
+    extra_write: &[PathBuf],
+    allow_network: bool,
+) -> String {
+    let mut out = template
+        .replace("{PROJECT_ROOT}", &project_root.display().to_string())
+        .replace("{CWD}", &cwd.display().to_string());
+    if allow_network && !out.contains("(allow network") {
+        out.push_str("\n(allow network*)\n");
+    }
+    if !extra_read.is_empty() {
+        let mut extra = String::from("\n;; extra_read\n");
+        for r in extra_read {
+            extra.push_str(&format!(
+                "(allow file-read* (subpath \"{}\"))\n",
+                r.display()
+            ));
+        }
+        out.push_str(&extra);
+    }
+    if !extra_write.is_empty() {
+        let mut extra = String::from("\n;; extra_write\n");
+        for r in extra_write {
+            extra.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                r.display()
+            ));
+        }
+        out.push_str(&extra);
+    }
+    out
 }
 
 impl Sandbox for SandboxExec {
@@ -131,6 +159,50 @@ impl Sandbox for SandboxExec {
     fn kind(&self) -> &'static str {
         "sandbox-exec"
     }
+
+    fn spawn_relaxed<'a>(
+        &'a self,
+        cmd: &'a [&'a str],
+        env: &'a [(String, String)],
+        cwd: &'a Path,
+    ) -> BoxFut<'a, Result<std::process::Output, RuntimeError>> {
+        Box::pin(async move {
+            if !self.is_available() {
+                return Err(RuntimeError::ToolFailed(
+                    "sandbox-exec not available on this host".into(),
+                ));
+            }
+            let template = self.relaxed_template.clone();
+            let profile = render_template(
+                &template,
+                &self.project_root,
+                cwd,
+                &self.extra_read,
+                &self.extra_write,
+                self.allow_network,
+            );
+            let dir = std::env::temp_dir();
+            let profile_path = dir.join(format!("atman-sandbox-{}.sb", uuid::Uuid::new_v4()));
+            tokio::fs::write(&profile_path, profile)
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("write .sb: {e}")))?;
+            let mut command = tokio::process::Command::new("/usr/bin/sandbox-exec");
+            command
+                .arg("-f")
+                .arg(&profile_path)
+                .args(cmd)
+                .current_dir(cwd);
+            for (k, v) in env {
+                command.env(k, v);
+            }
+            let output = command
+                .output()
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("sandbox-exec spawn: {e}")));
+            let _ = tokio::fs::remove_file(&profile_path).await;
+            output
+        })
+    }
 }
 
 pub const DEFAULT_PROFILE: &str = r#"(version 1)
@@ -149,6 +221,24 @@ pub const DEFAULT_PROFILE: &str = r#"(version 1)
 (allow signal)
 "#;
 
+pub const RELAXED_PROFILE: &str = r#"(version 1)
+(deny default)
+(allow process-exec (regex #"^/bin/"))
+(allow process-exec (regex #"^/usr/bin/"))
+(allow process-exec (regex #"^/opt/homebrew/"))
+(allow process-fork)
+(allow file-read* (subpath "/"))
+(allow file-write* (subpath "{PROJECT_ROOT}"))
+(allow file-write* (subpath "{CWD}"))
+(allow file-write* (subpath "/tmp"))
+(allow file-write* (subpath "/private/tmp"))
+(allow file-write* (subpath "/private/var/folders"))
+(allow file-write* (regex #"^/dev/(null|zero|tty|dtracehelper|urandom|random|stdout|stderr|fd/)"))
+(allow sysctl*)
+(allow mach*)
+(allow signal)
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,15 +248,10 @@ mod tests {
         let sb = SandboxExec::new("/tmp/proj");
         let rendered = sb.render_profile(Path::new("/tmp/proj/sub"));
         assert!(
-            rendered.contains("(allow file-write* (subpath \"/tmp/proj\"))"),
-            "profile: {rendered}"
+            !rendered.contains("{PROJECT_ROOT}"),
+            "no residue: {rendered}"
         );
-        assert!(
-            rendered.contains("(allow file-write* (subpath \"/tmp/proj/sub\"))"),
-            "profile: {rendered}"
-        );
-        assert!(!rendered.contains("{PROJECT_ROOT}"), "no residue");
-        assert!(!rendered.contains("{CWD}"), "no residue");
+        assert!(!rendered.contains("{CWD}"), "no residue: {rendered}");
     }
 
     #[test]

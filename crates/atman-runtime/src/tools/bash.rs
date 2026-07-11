@@ -43,8 +43,30 @@ impl Tool for BashExec {
                 .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec cwd: {e}")))?;
             if let Some(sandbox) = &ctx.sandbox {
                 let output = sandbox.spawn(&["sh", "-c", &cmd], &[], &cwd).await?;
+                if output.status.success() {
+                    let duration_ms = start.elapsed().as_millis() as i64;
+                    return Ok(struct_result(&output, duration_ms, false));
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("Operation not permitted") || stderr.contains("denied") {
+                    match request_write_approval(ctx, &cmd, &stderr).await {
+                        Some(true) => {
+                            let output = sandbox
+                                .spawn_relaxed(&["sh", "-c", &cmd], &[], &cwd)
+                                .await?;
+                            let duration_ms = start.elapsed().as_millis() as i64;
+                            return Ok(struct_result(&output, duration_ms, true));
+                        }
+                        Some(false) => {
+                            return Err(RuntimeError::ToolFailed(format!(
+                                "bash.exec: user denied the write operation (cmd: {cmd})"
+                            )));
+                        }
+                        None => {}
+                    }
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
-                return Ok(struct_result(&output, duration_ms));
+                return Ok(struct_result(&output, duration_ms, false));
             }
             run_streaming(&cmd, ctx, start).await
         })
@@ -119,19 +141,58 @@ async fn run_streaming(cmd: &str, ctx: &ToolCtx, start: Instant) -> ToolResult {
         ("stdout".into(), Value::Str(stdout)),
         ("stderr".into(), Value::Str(stderr)),
         ("duration_ms".into(), Value::Int(duration_ms)),
+        ("approval".into(), Value::Str("auto".into())),
     ]))
 }
 
-fn struct_result(output: &std::process::Output, duration_ms: i64) -> Value {
+fn struct_result(output: &std::process::Output, duration_ms: i64, user_approved: bool) -> Value {
     let exit = output.status.code().unwrap_or(-1) as i64;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let approval = if user_approved { "approved" } else { "auto" };
     Value::Struct(vec![
         ("exit".into(), Value::Int(exit)),
         ("stdout".into(), Value::Str(stdout)),
         ("stderr".into(), Value::Str(stderr)),
         ("duration_ms".into(), Value::Int(duration_ms)),
+        ("approval".into(), Value::Str(approval.into())),
     ])
+}
+
+async fn request_write_approval(ctx: &ToolCtx, cmd: &str, stderr: &str) -> Option<bool> {
+    use crate::tool::ApprovalLevel;
+    let Some(approval) = &ctx.approval else {
+        return None;
+    };
+    let run_id = ctx.flow_run_id.clone()?;
+    let id = format!("bash_write_{}", uuid::Uuid::now_v7());
+    let pending = crate::session::PendingApproval {
+        tool_use_id: id.clone(),
+        tool_name: "bash.exec (sandboxed write)".to_string(),
+        args_preview: format!("cmd={cmd}"),
+        preview: Some(stderr.lines().take(5).collect::<Vec<_>>().join("\n")),
+        level: ApprovalLevel::Dangerous,
+        run_id,
+        emitted_at: chrono::Utc::now(),
+    };
+    let rx = approval.request(pending);
+    let run_id_for_emit = ctx.flow_run_id.clone();
+    if let (Some(sink), Some(rid)) = (ctx.events.as_ref(), run_id_for_emit) {
+        sink.emit(crate::event::Event::ToolPendingApproval {
+            seq: 0,
+            run_id: rid,
+            tool_use_id: id,
+            tool_name: "bash.exec".into(),
+            args_preview: cmd.to_string(),
+            level: "dangerous".into(),
+            preview: Some(stderr.lines().take(5).collect::<Vec<_>>().join("\n")),
+            ts: chrono::Utc::now(),
+        });
+    }
+    match rx.await {
+        Ok(crate::session::ApprovalDecision::Approve) => Some(true),
+        _ => Some(false),
+    }
 }
 
 fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, RuntimeError> {
