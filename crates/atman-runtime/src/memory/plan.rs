@@ -65,19 +65,36 @@ enum PlanEntry {
 
 pub struct PlanStore {
     path: PathBuf,
+    notify: Option<tokio::sync::watch::Sender<Vec<Plan>>>,
 }
 
 impl PlanStore {
     pub fn at(session_dir: impl AsRef<Path>) -> Self {
         Self {
             path: session_dir.as_ref().join("plans.jsonl"),
+            notify: None,
+        }
+    }
+
+    pub fn with_notify(mut self, tx: tokio::sync::watch::Sender<Vec<Plan>>) -> Self {
+        self.notify = Some(tx);
+        self
+    }
+
+    async fn notify_if_needed(&self) {
+        if let Some(tx) = &self.notify {
+            if let Ok(list) = self.list().await {
+                let _ = tx.send(list);
+            }
         }
     }
 
     pub async fn upsert(&self, plan: Plan) -> Result<(), RuntimeError> {
         let mut plan = plan;
         plan.updated_at = Utc::now();
-        append_jsonl(&self.path, &PlanEntry::Upsert(plan)).await
+        append_jsonl(&self.path, &PlanEntry::Upsert(plan)).await?;
+        self.notify_if_needed().await;
+        Ok(())
     }
 
     pub async fn tick(&self, plan_id: &str, step_index: usize) -> Result<(), RuntimeError> {
@@ -89,7 +106,9 @@ impl PlanStore {
                 at: Utc::now(),
             },
         )
-        .await
+        .await?;
+        self.notify_if_needed().await;
+        Ok(())
     }
 
     pub async fn list(&self) -> Result<Vec<Plan>, RuntimeError> {

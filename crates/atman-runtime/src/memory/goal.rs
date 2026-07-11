@@ -2,13 +2,20 @@ use std::path::{Path, PathBuf};
 
 pub struct GoalStore {
     path: PathBuf,
+    notify: Option<tokio::sync::watch::Sender<Option<String>>>,
 }
 
 impl GoalStore {
     pub fn at(session_dir: impl AsRef<Path>) -> Self {
         Self {
             path: session_dir.as_ref().join("goal.txt"),
+            notify: None,
         }
+    }
+
+    pub fn with_notify(mut self, tx: tokio::sync::watch::Sender<Option<String>>) -> Self {
+        self.notify = Some(tx);
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -29,12 +36,21 @@ impl GoalStore {
         {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.path, text.trim_end())
+        std::fs::write(&self.path, text.trim_end())?;
+        if let Some(tx) = &self.notify {
+            let _ = tx.send(Some(text.trim_end().to_string()));
+        }
+        Ok(())
     }
 
     pub fn clear(&self) -> std::io::Result<()> {
         match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Some(tx) = &self.notify {
+                    let _ = tx.send(None);
+                }
+                Ok(())
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         }

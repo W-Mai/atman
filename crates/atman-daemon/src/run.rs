@@ -218,6 +218,9 @@ async fn run_flow_inner(
         &scope_root,
         redactor,
         session.project_index(),
+        session.goal_watch().clone(),
+        session.todos_watch().clone(),
+        session.plans_watch().clone(),
     );
     if let Some(state) = daemon_state {
         executor.tool_ctx.prompt_resolver =

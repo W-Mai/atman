@@ -563,7 +563,7 @@ async fn cmd_run(
             Err(e) => eprintln!("[atman] mcp boot: {e}"),
         }
     }
-    attach_memory_stores(&mut executor, session.dir(), ephemeral)?;
+    attach_memory_stores(&mut executor, &session, ephemeral)?;
     executor.tool_ctx.prompt_resolver = Some(std::sync::Arc::new(
         atman_runtime::rendezvous::AutoResolveResolver {
             default: serde_json::json!({ "hunks": [] }),
@@ -1329,7 +1329,7 @@ async fn prebuild_session(
     emit(BootStepId::AttachMcp, false, mcp_ok);
 
     emit(BootStepId::AttachMemory, true, false);
-    attach_memory_stores(&mut executor, session.dir(), false)?;
+    attach_memory_stores(&mut executor, &session, false)?;
     emit(BootStepId::AttachMemory, false, true);
 
     emit(BootStepId::LoadTodos, true, false);
@@ -4410,9 +4410,10 @@ fn open_current_project_index() -> Result<Option<std::sync::Arc<atman_runtime::i
 
 fn attach_memory_stores(
     executor: &mut atman_runtime::Executor,
-    session_dir: &std::path::Path,
+    session: &atman_runtime::Session,
     ephemeral: bool,
 ) -> Result<()> {
+    let session_dir = session.dir();
     let (session_scope, scope_root, project_index) = if ephemeral {
         let scratch = data_dir()?.join("ephemeral");
         std::fs::create_dir_all(&scratch).ok();
@@ -4432,6 +4433,9 @@ fn attach_memory_stores(
         &scope_root,
         redactor,
         project_index,
+        session.goal_watch().clone(),
+        session.todos_watch().clone(),
+        session.plans_watch().clone(),
     );
     Ok(())
 }

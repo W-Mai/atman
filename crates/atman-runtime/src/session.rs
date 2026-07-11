@@ -1092,6 +1092,10 @@ impl Session {
         self.goal_watch.subscribe()
     }
 
+    pub fn goal_watch(&self) -> &watch::Sender<Option<String>> {
+        &self.goal_watch
+    }
+
     pub fn subscribe_context(&self) -> watch::Receiver<ContextSnapshot> {
         self.context_watch.subscribe()
     }
@@ -1175,8 +1179,16 @@ impl Session {
         self.todos_watch.subscribe()
     }
 
+    pub fn todos_watch(&self) -> &watch::Sender<Vec<crate::memory::todo::Todo>> {
+        &self.todos_watch
+    }
+
     pub fn subscribe_plans(&self) -> watch::Receiver<Vec<crate::memory::plan::Plan>> {
         self.plans_watch.subscribe()
+    }
+
+    pub fn plans_watch(&self) -> &watch::Sender<Vec<crate::memory::plan::Plan>> {
+        &self.plans_watch
     }
 
     pub async fn refresh_plans_from_store_async(&self) {

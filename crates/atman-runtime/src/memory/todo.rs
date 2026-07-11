@@ -34,18 +34,34 @@ enum TodoEntry {
 
 pub struct TodoStore {
     path: PathBuf,
+    notify: Option<tokio::sync::watch::Sender<Vec<Todo>>>,
 }
 
 impl TodoStore {
     pub fn at(session_dir: impl AsRef<Path>) -> Self {
         Self {
             path: session_dir.as_ref().join("todos.jsonl"),
+            notify: None,
+        }
+    }
+
+    pub fn with_notify(mut self, tx: tokio::sync::watch::Sender<Vec<Todo>>) -> Self {
+        self.notify = Some(tx);
+        self
+    }
+
+    async fn notify_if_needed(&self) {
+        if let Some(tx) = &self.notify {
+            if let Ok(list) = self.list().await {
+                let _ = tx.send(list);
+            }
         }
     }
 
     pub async fn add(&self, todo: Todo) -> Result<MemoryId, RuntimeError> {
         let id = todo.id.clone();
         append_jsonl(&self.path, &TodoEntry::Add(todo)).await?;
+        self.notify_if_needed().await;
         Ok(id)
     }
 
@@ -57,7 +73,9 @@ impl TodoStore {
                 status,
             },
         )
-        .await
+        .await?;
+        self.notify_if_needed().await;
+        Ok(())
     }
 
     pub async fn list(&self) -> Result<Vec<Todo>, RuntimeError> {

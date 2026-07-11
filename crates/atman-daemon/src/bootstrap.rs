@@ -246,26 +246,42 @@ pub fn parse_sandbox_config(text: &str) -> SandboxConfig {
 
 pub fn attach_memory_stores(
     executor: &mut Executor,
-    session_dir: &Path,
+    session: &atman_runtime::Session,
     project_scope_root: &Path,
 ) {
-    attach_memory_stores_with_redactor(executor, session_dir, project_scope_root, None, None);
+    attach_memory_stores_with_redactor(
+        executor,
+        session.dir(),
+        project_scope_root,
+        None,
+        None,
+        session.goal_watch().clone(),
+        session.todos_watch().clone(),
+        session.plans_watch().clone(),
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn attach_memory_stores_with_redactor(
     executor: &mut Executor,
     session_dir: &Path,
     project_scope_root: &Path,
     redactor: Option<Arc<atman_runtime::redact::Redactor>>,
     project_index: Option<Arc<atman_runtime::index::AnchorIndex>>,
+    goal_watch: tokio::sync::watch::Sender<Option<String>>,
+    todos_watch: tokio::sync::watch::Sender<Vec<atman_runtime::memory::todo::Todo>>,
+    plans_watch: tokio::sync::watch::Sender<Vec<atman_runtime::memory::plan::Plan>>,
 ) {
     let confession_root = project_scope_root.join("confessions");
     let spec_root = project_scope_root.join("specs");
     let _ = std::fs::create_dir_all(&confession_root);
     let _ = std::fs::create_dir_all(&spec_root);
-    let todo_store = Arc::new(atman_runtime::memory::todo::TodoStore::at(session_dir));
-    let goal_store = Arc::new(atman_runtime::memory::goal::GoalStore::at(session_dir));
-    let plan_store = Arc::new(atman_runtime::memory::plan::PlanStore::at(session_dir));
+    let todo_store =
+        Arc::new(atman_runtime::memory::todo::TodoStore::at(session_dir).with_notify(todos_watch));
+    let goal_store =
+        Arc::new(atman_runtime::memory::goal::GoalStore::at(session_dir).with_notify(goal_watch));
+    let plan_store =
+        Arc::new(atman_runtime::memory::plan::PlanStore::at(session_dir).with_notify(plans_watch));
     let mut confession_store =
         atman_runtime::memory::confession::ConfessionStore::at(&confession_root);
     let mut spec_store = atman_runtime::memory::spec::SpecStore::new(spec_root);
