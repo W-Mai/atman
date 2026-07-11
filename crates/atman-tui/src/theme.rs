@@ -91,6 +91,9 @@ pub fn detect_mode() -> ThemeMode {
             _ => {}
         }
     }
+    if let Some(mode) = read_config_theme_mode() {
+        return mode;
+    }
     let mut opts = terminal_colorsaurus::QueryOptions::default();
     opts.timeout = std::time::Duration::from_millis(80);
     match terminal_colorsaurus::theme_mode(opts) {
@@ -98,4 +101,37 @@ pub fn detect_mode() -> ThemeMode {
         Ok(terminal_colorsaurus::ThemeMode::Dark) => ThemeMode::Dark,
         _ => ThemeMode::Dark,
     }
+}
+
+fn read_config_theme_mode() -> Option<ThemeMode> {
+    let cfg = atman_runtime::storage::config_dir().ok()?;
+    let text = std::fs::read_to_string(cfg.join("config.toml")).ok()?;
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(name) = rest.strip_suffix(']')
+        {
+            in_section = name.trim() == "theme";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let k = k.trim();
+            let v = v.trim().trim_matches('"').trim_matches('\'');
+            if k == "mode" {
+                return match v.to_ascii_lowercase().as_str() {
+                    "light" => Some(ThemeMode::Light),
+                    "dark" => Some(ThemeMode::Dark),
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
 }
