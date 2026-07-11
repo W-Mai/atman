@@ -181,6 +181,16 @@ impl ProviderRegistry {
         {
             return Some(p.clone());
         }
+        if let Some(entry) = crate::model_registry::model_entry(model) {
+            let provider_name = format!("config:{}", entry.model);
+            if let Some(p) = self.providers.get(&provider_name) {
+                return Some(p.clone());
+            }
+            let provider_name = format!("config:{model}");
+            if let Some(p) = self.providers.get(&provider_name) {
+                return Some(p.clone());
+            }
+        }
         self.default
             .as_ref()
             .and_then(|n| self.providers.get(n).cloned())

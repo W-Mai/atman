@@ -12,9 +12,13 @@ pub struct ModelInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ModelEntry {
     pub model: String,
+    pub provider: Option<String>,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
     pub context_budget: Option<u64>,
     pub compact_threshold_ratio: Option<f64>,
     pub thinking: Option<bool>,
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -41,6 +45,25 @@ pub fn resolve_alias(name: &str) -> String {
         }
     }
     name.to_string()
+}
+
+pub fn model_entry(name: &str) -> Option<ModelEntry> {
+    let resolved = resolve_alias(name);
+    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
+        return cfg.models.get(&resolved).cloned();
+    }
+    None
+}
+
+pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
+    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
+        return cfg
+            .models
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+    }
+    Vec::new()
 }
 
 pub fn model_info(name: &str) -> ModelInfo {
@@ -161,6 +184,10 @@ mod tests {
                 context_budget: Some(8192),
                 compact_threshold_ratio: Some(0.9),
                 thinking: None,
+                provider: None,
+                api_key: None,
+                base_url: None,
+                max_tokens: None,
             },
         );
         set_model_config(cfg);
@@ -185,6 +212,10 @@ mod tests {
                 context_budget: Some(65_536),
                 compact_threshold_ratio: None,
                 thinking: None,
+                provider: None,
+                api_key: None,
+                base_url: None,
+                max_tokens: None,
             },
         );
         set_model_config(cfg);

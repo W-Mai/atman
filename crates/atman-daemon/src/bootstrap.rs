@@ -319,6 +319,43 @@ fn register_providers_from_env(executor: &mut Executor) {
         }
         executor.providers.register(Arc::new(p));
     }
+    register_providers_from_config(executor);
+}
+
+fn register_providers_from_config(executor: &mut Executor) {
+    for (name, entry) in atman_runtime::model_registry::all_model_entries() {
+        let Some(provider_type) = &entry.provider else {
+            continue;
+        };
+        let key = entry.api_key.as_deref().unwrap_or("");
+        if key.is_empty() {
+            continue;
+        }
+        let provider_name = format!("config:{name}");
+        match provider_type.as_str() {
+            "anthropic" => {
+                let mut p = AnthropicProvider::new(&provider_name, key);
+                if let Some(url) = &entry.base_url {
+                    p = p.with_base_url(url);
+                }
+                if let Some(mt) = entry.max_tokens {
+                    p = p.with_max_tokens(mt);
+                }
+                executor.providers.register(Arc::new(p));
+            }
+            "openai" => {
+                let mut p = OpenAiProvider::new(&provider_name, key);
+                if let Some(url) = &entry.base_url {
+                    p = p.with_base_url(url);
+                }
+                if let Some(mt) = entry.max_tokens {
+                    p = p.with_max_tokens(mt);
+                }
+                executor.providers.register(Arc::new(p));
+            }
+            _ => {}
+        }
+    }
 }
 
 pub fn load_preview_config(

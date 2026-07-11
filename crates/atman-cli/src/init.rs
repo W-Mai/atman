@@ -67,10 +67,17 @@ pub const CONFIG_TOML: &str = r#"# atman configuration
 
 # ── Model config + alias ──────────────────────────────────────────
 # Flows reference models by alias (e.g. model: "smart") so you can
-# switch providers without editing flows. Change the model = "..." line
-# below to match your API key.
+# switch providers without editing flows.
 #
-# Provider env vars:
+# Each [models.xxx] block can declare:
+#   provider   = "anthropic" | "openai"   — which API protocol to use
+#   api_key    = "sk-..."                  — key (or use env vars below)
+#   base_url   = "https://..."             — override the default endpoint
+#   max_tokens = 8192                      — response token cap
+#   context_budget = 200000                — context window size
+#   thinking   = true                      — enable extended thinking
+#
+# Provider env vars (alternative to api_key in config):
 #   Anthropic / DeepSeek (anthropic-compat):  ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
 #   OpenAI / OpenAI-compat:                   OPENAI_API_KEY + OPENAI_BASE_URL
 
