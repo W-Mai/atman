@@ -55,7 +55,7 @@ impl Provider for FlakyProvider {
             let remaining = self.fail_first_n.load(Ordering::SeqCst);
             if remaining > 0 {
                 self.fail_first_n.fetch_sub(1, Ordering::SeqCst);
-                return Err(RuntimeError::ToolFailed("simulated flake".into()));
+                return Err(RuntimeError::ToolFailed("connection reset by peer".into()));
             }
             Ok(self.assistant())
         })
@@ -75,7 +75,7 @@ impl Provider for FlakyProvider {
             Box::pin(async move {
                 let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
                 if should_fail {
-                    Err(RuntimeError::ToolFailed("simulated flake".into()))
+                    Err(RuntimeError::ToolFailed("connection reset by peer".into()))
                 } else {
                     Ok(msg)
                 }
@@ -148,5 +148,5 @@ async fn retry_exhausted_without_fallback_returns_err() {
     ex.providers
         .register(Arc::new(FlakyProvider::new("flaky", 5, "x")));
     let err = ex.run(&file, "t", vec![]).await.unwrap_err();
-    assert!(matches!(err, RuntimeError::ToolFailed(msg) if msg.contains("simulated flake")));
+    assert!(matches!(err, RuntimeError::ToolFailed(msg) if msg.contains("connection reset")));
 }

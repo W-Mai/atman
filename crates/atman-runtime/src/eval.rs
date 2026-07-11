@@ -891,14 +891,31 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             last_err = Some(e);
                             continue;
                         }
-                        if let Some(allowed) = retry_kinds_ref
-                            && attempt < retry_count
-                            && !allowed.contains(&e.kind())
-                        {
+                        if attempt < retry_count {
+                            let kind = e.kind();
+                            let should_retry = match &retry_kinds_ref {
+                                Some(allowed) => allowed.contains(&kind),
+                                None => true,
+                            };
+                            if !should_retry {
+                                last_err = Some(e);
+                                break;
+                            }
+                            if matches!(
+                                kind,
+                                crate::error::ErrorKind::RateLimit
+                                    | crate::error::ErrorKind::Timeout
+                                    | crate::error::ErrorKind::ProviderDown
+                                    | crate::error::ErrorKind::Transient
+                            ) {
+                                let delay_ms = 500u64 * (1u64 << attempt.min(6));
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                            }
                             last_err = Some(e);
-                            break;
+                        } else {
+                            last_err = Some(e);
                         }
-                        last_err = Some(e);
                     }
                 }
             }
