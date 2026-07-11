@@ -25,6 +25,7 @@ pub struct SandboxConfig {
     pub extra_read: Vec<PathBuf>,
     pub extra_write: Vec<PathBuf>,
     pub template_path: Option<PathBuf>,
+    pub allow_network: bool,
 }
 
 impl Default for SandboxConfig {
@@ -35,6 +36,7 @@ impl Default for SandboxConfig {
             extra_read: Vec::new(),
             extra_write: Vec::new(),
             template_path: None,
+            allow_network: false,
         }
     }
 }
@@ -172,6 +174,7 @@ fn build_sandbox(
     let sandbox = atman_runtime::sandbox::SandboxExec::new(project_root)
         .with_extra_read(cfg.extra_read.clone())
         .with_extra_write(cfg.extra_write.clone())
+        .with_allow_network(cfg.allow_network)
         .with_template(template);
     if !sandbox.is_available() {
         if cfg.strict {
@@ -209,6 +212,8 @@ pub fn parse_sandbox_config(text: &str) -> SandboxConfig {
         extra_write: Vec<String>,
         #[serde(default)]
         template_path: Option<String>,
+        #[serde(default)]
+        allow_network: Option<bool>,
     }
     #[derive(Debug, Deserialize, Default)]
     struct RawSandboxFile {
@@ -235,6 +240,7 @@ pub fn parse_sandbox_config(text: &str) -> SandboxConfig {
             .map(PathBuf::from)
             .collect(),
         template_path: file.sandbox.template_path.map(PathBuf::from),
+        allow_network: file.sandbox.allow_network.unwrap_or(false),
     }
 }
 

@@ -21,6 +21,7 @@ pub struct SandboxExec {
     extra_read: Vec<PathBuf>,
     extra_write: Vec<PathBuf>,
     profile_template: String,
+    allow_network: bool,
 }
 
 impl SandboxExec {
@@ -30,6 +31,7 @@ impl SandboxExec {
             extra_read: Vec::new(),
             extra_write: Vec::new(),
             profile_template: DEFAULT_PROFILE.to_string(),
+            allow_network: false,
         }
     }
 
@@ -48,11 +50,19 @@ impl SandboxExec {
         self
     }
 
+    pub fn with_allow_network(mut self, allow: bool) -> Self {
+        self.allow_network = allow;
+        self
+    }
+
     pub fn render_profile(&self, cwd: &Path) -> String {
         let mut out = self
             .profile_template
             .replace("{PROJECT_ROOT}", &self.project_root.display().to_string())
             .replace("{CWD}", &cwd.display().to_string());
+        if self.allow_network && !out.contains("(allow network") {
+            out.push_str("\n(allow network*)\n");
+        }
         if !self.extra_read.is_empty() {
             let mut extra = String::from("\n;; extra_read\n");
             for r in &self.extra_read {
