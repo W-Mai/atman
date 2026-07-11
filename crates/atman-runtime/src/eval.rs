@@ -577,7 +577,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 }
                 match k.name.as_str() {
                     "model" => match val {
-                        Value::Str(s) => model = Some(s),
+                        Value::Str(s) => model = Some(crate::model_registry::resolve_alias(&s)),
                         other => {
                             return Value::Err(RuntimeError::TypeMismatch {
                                 expected: "string".into(),

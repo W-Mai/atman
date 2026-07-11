@@ -2903,8 +2903,6 @@ fn apply_session_config(session: &atman_runtime::Session) {
     if let Some(mode) = parse_compact_review_mode(&text) {
         session.set_compact_review_mode(mode);
     }
-    // ATMAN_FS_ACCESS wins over the [fs_access] section so users can flip
-    // policies for a single run without editing config.toml.
     let env_mode = std::env::var("ATMAN_FS_ACCESS")
         .ok()
         .and_then(|s| s.parse::<atman_runtime::fs_access::FsAccessMode>().ok());
@@ -2912,6 +2910,55 @@ fn apply_session_config(session: &atman_runtime::Session) {
     if let Some(mode) = env_mode.or(cfg_mode) {
         session.set_fs_access_mode(mode);
     }
+    if let Some(mc) = parse_model_config(&text) {
+        atman_runtime::model_registry::set_model_config(mc);
+    }
+}
+
+pub fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::ModelConfig> {
+    use atman_runtime::model_registry::{AliasEntry, ModelConfig, ModelEntry};
+    #[derive(serde::Deserialize, Default)]
+    struct RawModel {
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        context_budget: Option<u64>,
+        #[serde(default)]
+        compact_threshold_ratio: Option<f64>,
+        #[serde(default)]
+        thinking: Option<bool>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct RawAlias {
+        model: String,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct RawFile {
+        #[serde(default)]
+        models: std::collections::HashMap<String, RawModel>,
+        #[serde(default)]
+        alias: std::collections::HashMap<String, RawAlias>,
+    }
+    let raw: RawFile = toml::from_str(text).ok()?;
+    let mut cfg = ModelConfig::default();
+    for (name, m) in raw.models {
+        cfg.models.insert(
+            name,
+            ModelEntry {
+                model: m.model.unwrap_or_default(),
+                context_budget: m.context_budget,
+                compact_threshold_ratio: m.compact_threshold_ratio,
+                thinking: m.thinking,
+            },
+        );
+    }
+    for (name, a) in raw.alias {
+        cfg.aliases.insert(name, AliasEntry { model: a.model });
+    }
+    if cfg.models.is_empty() && cfg.aliases.is_empty() {
+        return None;
+    }
+    Some(cfg)
 }
 
 // Reads [fs_access] mode = "..." out of the same config.toml we already
