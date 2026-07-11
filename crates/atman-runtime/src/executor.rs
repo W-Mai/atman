@@ -10,6 +10,7 @@ use crate::session::Session;
 use crate::tool::{ToolCtx, ToolRegistry};
 use crate::value::Value;
 
+#[derive(Clone)]
 pub struct Executor {
     pub tools: ToolRegistry,
     pub providers: ProviderRegistry,

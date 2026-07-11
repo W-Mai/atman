@@ -124,3 +124,34 @@ async fn replace_messages_range_emits_context_compact_event_and_marks_sink() {
     let ago = sink.last_compact_ago_seconds().expect("timestamp recorded");
     assert!(ago >= 0);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn replace_messages_range_sends_lifecycle_fire_signal() {
+    use atman_runtime::event::EventSink;
+    use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
+    use atman_runtime::tools::stdlib::ReplaceMessagesRange;
+    use atman_runtime::value::Value;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut ctx = ToolCtx::new();
+    ctx.events = Some(EventSink::new());
+    ctx.lifecycle_fire_tx = Some(tx);
+    let msgs = vec![
+        Value::Message(user(&"a".repeat(400))),
+        Value::Message(assistant(&"b".repeat(400))),
+        Value::Message(user(&"c".repeat(400))),
+        Value::Message(user("tail")),
+    ];
+    let args = ToolArgs {
+        positional: vec![
+            Value::List(msgs),
+            Value::Int(0),
+            Value::Int(3),
+            Value::Str("gist".into()),
+        ],
+        named: vec![],
+    };
+    let _ = ReplaceMessagesRange.call(args, &ctx).await.unwrap();
+    let ev = rx.try_recv().expect("lifecycle fire signal expected");
+    assert_eq!(ev, atman_dsl::ast::LifecycleEvent::ContextCompact);
+}

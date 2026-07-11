@@ -1414,7 +1414,7 @@ async fn cmd_repl_once(
 
     let PrebuiltSession {
         session,
-        executor,
+        mut executor,
         mcp_status,
         is_fresh: is_fresh_session,
         root,
@@ -1434,6 +1434,9 @@ async fn cmd_repl_once(
         Ok(cfg) => atman_runtime::lifecycle::LifecycleRunner::from_dir(&cfg),
         Err(_) => atman_runtime::lifecycle::LifecycleRunner::new(),
     };
+    let (lifecycle_tx, mut lifecycle_rx) =
+        mpsc::unbounded_channel::<atman_dsl::ast::LifecycleEvent>();
+    executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionStart)
         .await;
@@ -1626,9 +1629,15 @@ async fn cmd_repl_once(
         let line = if let Some(l) = pushback.pop_front() {
             l
         } else {
-            match input_rx.recv().await {
-                Some(l) => l,
-                None => break,
+            tokio::select! {
+                l = input_rx.recv() => match l {
+                    Some(l) => l,
+                    None => break,
+                },
+                Some(ev) = lifecycle_rx.recv() => {
+                    lifecycles.fire(&executor, ev).await;
+                    continue;
+                }
             }
         };
         if line.trim().is_empty() {

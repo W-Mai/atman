@@ -153,6 +153,17 @@ pub struct SafetyConfig {
     pub classifier: Arc<dyn SafetyClassifier>,
 }
 
+impl Clone for SafetyConfig {
+    fn clone(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            mode: self.mode,
+            auto_rewrite: self.auto_rewrite,
+            classifier: self.classifier.clone(),
+        }
+    }
+}
+
 impl SafetyConfig {
     pub fn noop() -> Self {
         Self {

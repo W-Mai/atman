@@ -160,6 +160,9 @@ async fn run_flow_inner(
                 sink: session.sink().clone(),
             }));
     }
+    let (lifecycle_tx, mut lifecycle_rx) =
+        tokio::sync::mpsc::unbounded_channel::<atman_dsl::ast::LifecycleEvent>();
+    executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
 
     let target_flow = parsed
         .flows
@@ -199,6 +202,9 @@ async fn run_flow_inner(
             Some(run_id),
         )
         .await;
+    while let Ok(ev) = lifecycle_rx.try_recv() {
+        lifecycles.fire(&executor, ev).await;
+    }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
         .await;

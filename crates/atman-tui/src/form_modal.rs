@@ -275,7 +275,11 @@ impl FormModal {
             return SubmitOutcome::BatchCancelled;
         }
         self.close_form_state();
-        if self.batch_statuses.iter().all(|s| !matches!(s, BatchStatus::Pending)) {
+        if self
+            .batch_statuses
+            .iter()
+            .all(|s| !matches!(s, BatchStatus::Pending))
+        {
             self.end_batch();
         }
         SubmitOutcome::None

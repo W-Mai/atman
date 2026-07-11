@@ -88,6 +88,8 @@ pub struct ToolCtx {
     pub data_root: Option<std::path::PathBuf>,
     pub project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
     pub fs_access: crate::fs_access::FsAccessPolicy,
+    pub lifecycle_fire_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
 }
 
 impl ToolCtx {
@@ -176,6 +178,14 @@ impl ToolCtx {
 
     pub fn with_fs_access(mut self, policy: crate::fs_access::FsAccessPolicy) -> Self {
         self.fs_access = policy;
+        self
+    }
+
+    pub fn with_lifecycle_fire_tx(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>,
+    ) -> Self {
+        self.lifecycle_fire_tx = Some(tx);
         self
     }
 

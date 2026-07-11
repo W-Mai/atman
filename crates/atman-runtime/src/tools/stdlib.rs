@@ -289,6 +289,9 @@ impl Tool for ReplaceMessagesRange {
                     ts: chrono::Utc::now(),
                 });
             }
+            if let Some(tx) = &ctx.lifecycle_fire_tx {
+                let _ = tx.send(atman_dsl::ast::LifecycleEvent::ContextCompact);
+            }
             let list: Vec<Value> = out.into_iter().map(Value::Message).collect();
             Ok(Value::List(list))
         })
