@@ -124,14 +124,21 @@ impl Sandbox for SandboxExec {
 }
 
 pub const DEFAULT_PROFILE: &str = r#"(version 1)
-(allow default)
-(deny file-write*)
+(deny default)
+(allow process-exec (regex #"^/bin/"))
+(allow process-exec (regex #"^/usr/bin/"))
+(allow process-exec (regex #"^/opt/homebrew/"))
+(allow process-fork)
+(allow file-read* (subpath "/"))
 (allow file-write* (subpath "{PROJECT_ROOT}"))
 (allow file-write* (subpath "{CWD}"))
 (allow file-write* (subpath "/tmp"))
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (subpath "/private/var/folders"))
 (allow file-write* (regex #"^/dev/(null|zero|tty|dtracehelper|urandom|random|stdout|stderr|fd/)"))
+(allow sysctl*)
+(allow mach*)
+(allow signal)
 "#;
 
 #[cfg(test)]
