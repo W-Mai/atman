@@ -389,13 +389,54 @@ fn preview_tool_value(v: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Unit => "()".into(),
         Value::List(items) => format!("list[{}]", items.len()),
-        Value::Struct(f) => format!("struct[{}]", f.len()),
+        Value::Struct(f) => {
+            let stdout = f
+                .iter()
+                .find(|(k, _)| k == "stdout")
+                .and_then(|(_, v)| match v {
+                    Value::Str(s) => Some(s.as_str()),
+                    _ => None,
+                });
+            let stderr = f
+                .iter()
+                .find(|(k, _)| k == "stderr")
+                .and_then(|(_, v)| match v {
+                    Value::Str(s) => Some(s.as_str()),
+                    _ => None,
+                });
+            let exit = f
+                .iter()
+                .find(|(k, _)| k == "exit")
+                .and_then(|(_, v)| match v {
+                    Value::Int(n) => Some(*n),
+                    _ => None,
+                });
+            if let (Some(stdout), Some(exit)) = (stdout, exit) {
+                let combined = if stdout.is_empty() {
+                    stderr.unwrap_or("").to_string()
+                } else {
+                    stdout.to_string()
+                };
+                let lines: Vec<&str> = combined.lines().collect();
+                if lines.len() > 10 {
+                    format!(
+                        "exit={exit}\n{}\n… ({} more lines, see `atman logs` for full output)",
+                        lines[..10].join("\n"),
+                        lines.len() - 10
+                    )
+                } else {
+                    format!("exit={exit}\n{combined}")
+                }
+            } else {
+                format!("struct[{}]", f.len())
+            }
+        }
         Value::Message(_) => "<message>".into(),
         Value::Err(e) => format!("err({e})"),
         Value::Path(p) => format!("{p:?}"),
         Value::EditProposal(_) => "<edit_proposal>".into(),
     };
-    truncate(&raw, 60)
+    truncate(&raw, 2000)
 }
 
 fn truncate(s: &str, max: usize) -> String {

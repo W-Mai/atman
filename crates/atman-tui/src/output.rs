@@ -1550,7 +1550,14 @@ fn append_workflow_node_boxed(
     let label = match &node.kind {
         WorkflowNodeKind::ToolCall {
             tool, args_preview, ..
-        } => format!("{tool}({})", truncate_preview(args_preview, 60)),
+        } => {
+            let short_args = truncate_preview(args_preview, 30);
+            if short_args.is_empty() {
+                tool.to_string()
+            } else {
+                format!("{tool}({short_args})")
+            }
+        }
         WorkflowNodeKind::FanoutBranch { branch_index } => {
             format!("branch[{branch_index}]  {}", node.label)
         }
