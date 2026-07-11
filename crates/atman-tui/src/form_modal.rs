@@ -183,7 +183,7 @@ impl FormModal {
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
-        let is_confirm = self.is_confirm_form();
+        let is_confirm = self.is_confirm_kind();
         if is_confirm {
             let len = 2isize;
             let cur = self.confirm_focus as isize + delta;
@@ -220,7 +220,7 @@ impl FormModal {
             Some(k) => k,
             None => return SubmitOutcome::None,
         };
-        let is_confirm_form = self.is_confirm_form();
+        let is_confirm_form = self.is_batch_confirm();
         let answer = match kind {
             FormKind::Confirm { .. } => FormAnswer::Confirmed { value: true },
             FormKind::SingleSelect { options, .. } => {
@@ -285,7 +285,7 @@ impl FormModal {
     }
 
     pub fn confirm_no(&mut self) -> SubmitOutcome {
-        if !self.is_confirm_form() {
+        if !self.is_batch_confirm() {
             return SubmitOutcome::None;
         }
         self.mark_current(BatchStatus::Cancelled);
@@ -300,7 +300,7 @@ impl FormModal {
         if self.pending.is_none() {
             return SubmitOutcome::None;
         }
-        let is_confirm_form = self.is_confirm_form();
+        let is_confirm_form = self.is_batch_confirm();
         self.mark_current(BatchStatus::Cancelled);
         if is_confirm_form {
             self.end_batch();
@@ -318,7 +318,13 @@ impl FormModal {
         SubmitOutcome::None
     }
 
-    fn is_confirm_form(&self) -> bool {
+    fn is_batch_confirm(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.form_id == "__batch_confirm")
+    }
+
+    fn is_confirm_kind(&self) -> bool {
         self.pending
             .as_ref()
             .is_some_and(|p| matches!(p.kind, FormKind::Confirm { .. }))
