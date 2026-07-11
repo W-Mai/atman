@@ -259,6 +259,12 @@ impl Provider for AnthropicProvider {
                                             text: text.to_string(),
                                         });
                                     }
+                                } else if let Some(text) =
+                                    delta.get("reasoning_content").and_then(|v| v.as_str())
+                                {
+                                    let _ = tx.send(NodeEvent::ThinkingChunk {
+                                        text: text.to_string(),
+                                    });
                                 } else if delta_ty == "input_json_delta"
                                     && let Some(partial) =
                                         delta.get("partial_json").and_then(|v| v.as_str())
