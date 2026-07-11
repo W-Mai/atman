@@ -547,6 +547,8 @@ async fn cmd_run(
         eprintln!("[atman] session={} events={}", session.id(), path.display());
     }
 
+    load_model_config_from_disk();
+
     let atman_daemon::bootstrap::BootstrapOutcome {
         mut executor,
         mcp_status,
@@ -562,6 +564,11 @@ async fn cmd_run(
         }
     }
     attach_memory_stores(&mut executor, session.dir(), ephemeral)?;
+    executor.tool_ctx.prompt_resolver = Some(std::sync::Arc::new(
+        atman_runtime::rendezvous::AutoResolveResolver {
+            default: serde_json::json!({ "hunks": [] }),
+        },
+    ));
 
     let target_flow = parsed
         .flows
@@ -2915,6 +2922,18 @@ fn apply_session_config(session: &atman_runtime::Session) {
     }
 }
 
+pub fn load_model_config_from_disk() {
+    let Ok(cfg) = config_dir() else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
+        return;
+    };
+    if let Some(mc) = parse_model_config(&text) {
+        atman_runtime::model_registry::set_model_config(mc);
+    }
+}
+
 pub fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::ModelConfig> {
     use atman_runtime::model_registry::{AliasEntry, ModelConfig, ModelEntry};
     #[derive(serde::Deserialize, Default)]
@@ -3097,7 +3116,8 @@ fn load_suggest_model() -> String {
     let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
         return default;
     };
-    parse_suggest_model(&text).unwrap_or(default)
+    let raw = parse_suggest_model(&text).unwrap_or(default);
+    atman_runtime::model_registry::resolve_alias(&raw)
 }
 
 fn parse_suggest_model(text: &str) -> Option<String> {
@@ -4243,6 +4263,32 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
         }
     }
     println!();
+
+    let cfg_text = std::fs::read_to_string(config_dir().unwrap_or_default().join("config.toml"))
+        .unwrap_or_default();
+    if let Some(mc) = parse_model_config(&cfg_text) {
+        println!("models:");
+        for (name, entry) in &mc.models {
+            let budget = entry
+                .context_budget
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "builtin".into());
+            let thinking = if entry.thinking.unwrap_or(false) {
+                " thinking"
+            } else {
+                ""
+            };
+            println!("  {name:<28} budget={budget}{thinking}");
+        }
+        if !mc.aliases.is_empty() {
+            println!("aliases:");
+            for (name, entry) in &mc.aliases {
+                println!("  {name:<28} → {model}", model = entry.model);
+            }
+        }
+        println!();
+    }
+
     let pcfg = load_preview_config();
     let ping = atman_runtime::tools::preview::ping(&pcfg.base_url, pcfg.timeout_ms).await;
     let (mark, note) = match &ping {

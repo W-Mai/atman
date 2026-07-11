@@ -19,6 +19,7 @@ pub struct LlmRequest {
     pub schema: Option<String>,
     pub cache_prompt: bool,
     pub tools: Vec<crate::tool::ToolSpec>,
+    pub thinking_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]

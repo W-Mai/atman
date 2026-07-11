@@ -303,6 +303,7 @@ async fn generate_llm_summary(
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
+        thinking_enabled: false,
     };
     let outcome = provider.call(req).await?;
     let text = outcome.text_concat();

@@ -71,6 +71,7 @@ fn fixed_request() -> LlmRequest {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
+        thinking_enabled: false,
     }
 }
 
@@ -104,6 +105,7 @@ fn openai_wire_body_tool_use_input_key_order_is_stable() {
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
+        thinking_enabled: false,
     };
     let body = p.wire_body_bytes(&req, false);
     let s = std::str::from_utf8(&body).unwrap();

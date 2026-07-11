@@ -210,6 +210,7 @@ mod tests {
             schema: None,
             cache_prompt: false,
             tools: Vec::new(),
+            thinking_enabled: false,
         }
     }
 

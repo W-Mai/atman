@@ -102,6 +102,10 @@ model = "gpt-4o-mini"
 # strict = false
 # allow_network = false
 
+# Theme: auto (detect from terminal), dark, or light.
+# [theme]
+# mode = "auto"
+
 # [fs_access]
 # mode = "workspace-write"
 

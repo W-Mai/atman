@@ -122,6 +122,7 @@ impl InjectionClassifier for LlmClassifier {
                 schema: None,
                 cache_prompt: false,
                 tools: Vec::new(),
+                thinking_enabled: false,
             };
             let am = match self.provider.call(req).await {
                 Ok(am) => am,

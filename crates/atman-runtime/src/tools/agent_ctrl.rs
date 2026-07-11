@@ -99,6 +99,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             schema: None,
             cache_prompt: false,
             tools: tool_specs.clone(),
+            thinking_enabled: false,
         };
         let outcome = provider.call(req).await;
         match outcome {

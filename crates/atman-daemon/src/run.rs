@@ -3,6 +3,52 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_proto::{FlowRunId as ProtoRunId, SessionId as ProtoSessionId};
+
+fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::ModelConfig> {
+    use atman_runtime::model_registry::{AliasEntry, ModelConfig, ModelEntry};
+    #[derive(serde::Deserialize, Default)]
+    struct RawModel {
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        context_budget: Option<u64>,
+        #[serde(default)]
+        compact_threshold_ratio: Option<f64>,
+        #[serde(default)]
+        thinking: Option<bool>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct RawAlias {
+        model: String,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct RawFile {
+        #[serde(default)]
+        models: std::collections::HashMap<String, RawModel>,
+        #[serde(default)]
+        alias: std::collections::HashMap<String, RawAlias>,
+    }
+    let raw: RawFile = toml::from_str(text).ok()?;
+    let mut cfg = ModelConfig::default();
+    for (name, m) in raw.models {
+        cfg.models.insert(
+            name,
+            ModelEntry {
+                model: m.model.unwrap_or_default(),
+                context_budget: m.context_budget,
+                compact_threshold_ratio: m.compact_threshold_ratio,
+                thinking: m.thinking,
+            },
+        );
+    }
+    for (name, a) in raw.alias {
+        cfg.aliases.insert(name, AliasEntry { model: a.model });
+    }
+    if cfg.models.is_empty() && cfg.aliases.is_empty() {
+        return None;
+    }
+    Some(cfg)
+}
 use atman_runtime::event::FlowRunId as RuntimeRunId;
 
 use crate::state::{DaemonState, LiveSession};
@@ -137,6 +183,14 @@ async fn run_flow_inner(
     })
     .await?;
     let mut executor = outcome.executor;
+
+    if let Some(dir) = &config_dir {
+        if let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) {
+            if let Some(mc) = parse_model_config(&text) {
+                atman_runtime::model_registry::set_model_config(mc);
+            }
+        }
+    }
 
     let lifecycles = match &config_dir {
         Some(c) => atman_runtime::lifecycle::LifecycleRunner::from_dir(c),

@@ -71,6 +71,14 @@ impl AnthropicProvider {
             system: req.system.clone(),
             messages: wire_messages,
             tools,
+            thinking: if req.thinking_enabled {
+                Some(ThinkingConfig {
+                    kind: "enabled",
+                    budget_tokens: self.max_tokens.saturating_sub(4096).max(1024),
+                })
+            } else {
+                None
+            },
         }
     }
 
@@ -442,6 +450,15 @@ struct MessagesRequest {
     messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+#[derive(Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    budget_tokens: u32,
 }
 
 #[derive(Serialize)]

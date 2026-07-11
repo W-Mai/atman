@@ -467,6 +467,7 @@ async fn eval_bind_with_watches(
             schema: None,
             cache_prompt,
             tools: Vec::new(),
+            thinking_enabled: false,
         };
         let outcome = run_streaming_once(provider.as_ref(), req, &rules, ctx).await;
         match outcome {

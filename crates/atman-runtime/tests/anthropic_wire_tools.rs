@@ -39,6 +39,7 @@ fn request_with_tools() -> LlmRequest {
                 input_schema: serde_json::json!({"type": "object"}),
             },
         ],
+        thinking_enabled: false,
     }
 }
 

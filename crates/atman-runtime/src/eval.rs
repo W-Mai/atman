@@ -807,6 +807,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     schema: None,
                     cache_prompt,
                     tools: tool_specs.clone(),
+                    thinking_enabled: crate::model_registry::model_info(&model).thinking_enabled(),
                 };
                 let start = std::time::Instant::now();
                 let outcome = call_and_maybe_stream(provider.as_ref(), req, ctx.session).await;
@@ -909,6 +910,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                     | crate::error::ErrorKind::Transient
                             ) {
                                 let delay_ms = 500u64 * (1u64 << attempt.min(6));
+                                if let Some(tx) = ctx.session.map(|s| s.stream_tx()) {
+                                    let _ = tx.send(crate::stream::StreamFrame::Note(format!(
+                                        "retrying in {}s…",
+                                        delay_ms / 1000
+                                    )));
+                                }
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
                                     .await;
                             }

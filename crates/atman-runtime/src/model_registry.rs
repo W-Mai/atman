@@ -6,6 +6,7 @@ pub struct ModelInfo {
     pub name: String,
     pub context_budget: u64,
     pub compact_threshold_ratio: f64,
+    pub thinking_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,6 +52,7 @@ pub fn model_info(name: &str) -> ModelInfo {
                 name: resolved.clone(),
                 context_budget: entry.context_budget.unwrap_or(budget),
                 compact_threshold_ratio: entry.compact_threshold_ratio.unwrap_or(ratio),
+                thinking_enabled: entry.thinking.unwrap_or(false),
             };
         }
     }
@@ -59,6 +61,7 @@ pub fn model_info(name: &str) -> ModelInfo {
         name: resolved,
         context_budget: budget,
         compact_threshold_ratio: ratio,
+        thinking_enabled: false,
     }
 }
 
@@ -99,6 +102,10 @@ fn builtin_budget(name: &str) -> (u64, f64) {
 impl ModelInfo {
     pub fn compact_threshold_tokens(&self) -> u64 {
         (self.context_budget as f64 * self.compact_threshold_ratio) as u64
+    }
+
+    pub fn thinking_enabled(&self) -> bool {
+        self.thinking_enabled
     }
 }
 

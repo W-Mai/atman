@@ -185,6 +185,7 @@ pub async fn generate_suggestion(
         schema: None,
         cache_prompt: false,
         tools: Vec::new(),
+        thinking_enabled: false,
     };
     let reply = provider
         .call(req)
