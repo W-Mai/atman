@@ -130,9 +130,12 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
                 name: name.clone(),
                 input: input.clone(),
             },
-            MessagePart::Thinking { thinking } => ContentPart::Text {
-                text: thinking.clone(),
-                cache_control: None,
+            MessagePart::Thinking {
+                thinking,
+                signature,
+            } => ContentPart::Thinking {
+                thinking: thinking.clone(),
+                signature: signature.clone(),
             },
             MessagePart::ToolResult {
                 tool_use_id,
@@ -205,6 +208,8 @@ impl Provider for AnthropicProvider {
 
                 let mut stream = resp.bytes_stream().eventsource();
                 let mut acc_text = String::new();
+                let mut acc_thinking = String::new();
+                let mut acc_signature: Option<String> = None;
                 let mut cumulative = 0u64;
                 let mut tool_use_partial: Vec<PartialToolUse> = Vec::new();
                 let mut stop_reason = StopReason::End;
@@ -255,6 +260,7 @@ impl Provider for AnthropicProvider {
                                     if let Some(text) =
                                         delta.get("thinking").and_then(|v| v.as_str())
                                     {
+                                        acc_thinking.push_str(text);
                                         let _ = tx.send(NodeEvent::ThinkingChunk {
                                             text: text.to_string(),
                                         });
@@ -262,9 +268,16 @@ impl Provider for AnthropicProvider {
                                 } else if let Some(text) =
                                     delta.get("reasoning_content").and_then(|v| v.as_str())
                                 {
+                                    acc_thinking.push_str(text);
                                     let _ = tx.send(NodeEvent::ThinkingChunk {
                                         text: text.to_string(),
                                     });
+                                } else if delta_ty == "signature_delta" {
+                                    if let Some(sig) =
+                                        delta.get("signature").and_then(|v| v.as_str())
+                                    {
+                                        acc_signature = Some(sig.to_string());
+                                    }
                                 } else if delta_ty == "input_json_delta"
                                     && let Some(partial) =
                                         delta.get("partial_json").and_then(|v| v.as_str())
@@ -305,6 +318,12 @@ impl Provider for AnthropicProvider {
                 });
 
                 let mut parts: Vec<MessagePart> = Vec::new();
+                if !acc_thinking.is_empty() {
+                    parts.push(MessagePart::Thinking {
+                        thinking: acc_thinking,
+                        signature: acc_signature,
+                    });
+                }
                 if !acc_text.is_empty() {
                     parts.push(MessagePart::Text { text: acc_text });
                 }
@@ -356,7 +375,13 @@ fn response_to_assistant(
     for block in body.content {
         match block {
             ContentBlock::Text { text } => parts.push(MessagePart::Text { text }),
-            ContentBlock::Thinking { thinking } => parts.push(MessagePart::Thinking { thinking }),
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => parts.push(MessagePart::Thinking {
+                thinking,
+                signature,
+            }),
             ContentBlock::ToolUse { id, name, input } => {
                 parts.push(MessagePart::ToolUse { id, name, input })
             }
@@ -447,6 +472,11 @@ enum ContentPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    Thinking {
+        thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     Image {
         source: ImageSourceWire,
     },
@@ -506,6 +536,8 @@ enum ContentBlock {
     },
     Thinking {
         thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
     },
     ToolUse {
         id: String,

@@ -28,6 +28,8 @@ pub enum MessagePart {
     },
     Thinking {
         thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     Image {
         source: ImageSource,
@@ -96,11 +98,21 @@ impl Message {
     pub fn thinking_concat(&self) -> String {
         let mut out = String::new();
         for p in &self.parts {
-            if let MessagePart::Thinking { thinking } = p {
+            if let MessagePart::Thinking { thinking, .. } = p {
                 out.push_str(thinking);
             }
         }
         out
+    }
+
+    pub fn thinking_signature(&self) -> Option<String> {
+        self.parts.iter().rev().find_map(|p| {
+            if let MessagePart::Thinking { signature, .. } = p {
+                signature.clone()
+            } else {
+                None
+            }
+        })
     }
 }
 
