@@ -3874,7 +3874,7 @@ async fn preview_scene_form(session: std::sync::Arc<Session>, kind: atman_runtim
 async fn preview_scene_form_sequence(session: std::sync::Arc<Session>) {
     use atman_runtime::event::FlowRunId;
     use atman_runtime::form::{FormKind, PendingForm};
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let forms = session.forms();
     let steps: Vec<(&str, FormKind)> = vec![
         (

@@ -34,9 +34,32 @@ pub struct FormModal {
     pub batch_index: usize,
     pub batch_answers: Vec<Option<FormAnswer>>,
     pub confirm_form: Option<PendingForm>,
+    pub confirm_focus: usize,
+    pub cached_forms: std::collections::HashMap<String, PendingForm>,
 }
 
 impl FormModal {
+    pub fn merge_batch_ids(&mut self, pending_ids: &[String]) {
+        for id in pending_ids {
+            if !self.batch_ids.contains(id) {
+                let confirm_idx = self
+                    .batch_ids
+                    .iter()
+                    .position(|x| x == "__batch_confirm")
+                    .unwrap_or(self.batch_ids.len());
+                self.batch_ids.insert(confirm_idx, id.clone());
+                self.batch_statuses
+                    .insert(confirm_idx, BatchStatus::Pending);
+                self.batch_answers.insert(confirm_idx, None);
+            }
+        }
+        if !self.batch_ids.contains(&"__batch_confirm".to_string()) {
+            self.batch_ids.push("__batch_confirm".into());
+            self.batch_statuses.push(BatchStatus::Pending);
+            self.batch_answers.push(None);
+        }
+    }
+
     pub fn attach(&mut self, form: PendingForm, pending_ids: &[String]) {
         let multi_len = match &form.kind {
             FormKind::MultiSelect { options, .. } => options.len(),
@@ -48,14 +71,26 @@ impl FormModal {
         self.error = None;
         for id in pending_ids {
             if !self.batch_ids.contains(id) {
-                self.batch_ids.push(id.clone());
-                self.batch_statuses.push(BatchStatus::Pending);
-                self.batch_answers.push(None);
+                let confirm_idx = self
+                    .batch_ids
+                    .iter()
+                    .position(|x| x == "__batch_confirm")
+                    .unwrap_or(self.batch_ids.len());
+                self.batch_ids.insert(confirm_idx, id.clone());
+                self.batch_statuses
+                    .insert(confirm_idx, BatchStatus::Pending);
+                self.batch_answers.insert(confirm_idx, None);
             }
+        }
+        if !self.batch_ids.contains(&"__batch_confirm".to_string()) {
+            self.batch_ids.push("__batch_confirm".into());
+            self.batch_statuses.push(BatchStatus::Pending);
+            self.batch_answers.push(None);
         }
         if let Some(idx) = self.batch_ids.iter().position(|id| id == &form.form_id) {
             self.batch_index = idx;
         }
+        self.cached_forms.insert(form.form_id.clone(), form.clone());
         self.open = true;
         self.pending = Some(form);
     }
@@ -83,14 +118,10 @@ impl FormModal {
         let all = self
             .batch_statuses
             .iter()
+            .take(self.batch_ids.len().saturating_sub(1))
             .all(|s| matches!(s, BatchStatus::Answered));
         if all {
             let form = self.build_confirm_form();
-            if !self.batch_ids.contains(&form.form_id) {
-                self.batch_ids.push(form.form_id.clone());
-                self.batch_statuses.push(BatchStatus::Pending);
-                self.batch_answers.push(None);
-            }
             if let Some(idx) = self.batch_ids.iter().position(|id| id == &form.form_id) {
                 self.batch_index = idx;
             }
@@ -100,6 +131,7 @@ impl FormModal {
             self.text_editor = InputEditor::default();
             self.error = None;
             self.confirm_form = self.pending.clone();
+            self.confirm_focus = 0;
             self.open = true;
             return true;
         }
@@ -117,19 +149,12 @@ impl FormModal {
             return None;
         }
         let len = self.batch_ids.len() as isize;
-        let mut cursor = self.batch_index as isize;
-        for _ in 0..len {
-            cursor = (cursor + direction).rem_euclid(len);
-            let i = cursor as usize;
-            if i == self.batch_index {
-                continue;
-            }
-            if matches!(self.batch_statuses.get(i), Some(BatchStatus::Pending)) {
-                self.batch_index = i;
-                return Some(self.batch_ids[i].clone());
-            }
+        let next = (self.batch_index as isize + direction).rem_euclid(len) as usize;
+        if next == self.batch_index {
+            return None;
         }
-        None
+        self.batch_index = next;
+        Some(self.batch_ids[next].clone())
     }
 
     pub fn close(&mut self) {
@@ -158,6 +183,13 @@ impl FormModal {
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
+        let is_confirm = self.is_confirm_form();
+        if is_confirm {
+            let len = 2isize;
+            let cur = self.confirm_focus as isize + delta;
+            self.confirm_focus = cur.rem_euclid(len) as usize;
+            return;
+        }
         let len = match self.pending.as_ref().map(|p| &p.kind) {
             Some(FormKind::SingleSelect { options, .. }) => options.len(),
             Some(FormKind::MultiSelect { options, .. }) => options.len(),
@@ -275,11 +307,12 @@ impl FormModal {
             return SubmitOutcome::BatchCancelled;
         }
         self.close_form_state();
-        if self
+        let real_pending = self
             .batch_statuses
             .iter()
-            .all(|s| !matches!(s, BatchStatus::Pending))
-        {
+            .take(self.batch_ids.len().saturating_sub(1))
+            .any(|s| matches!(s, BatchStatus::Pending));
+        if !real_pending {
             self.end_batch();
         }
         SubmitOutcome::None
@@ -356,17 +389,45 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
 
     match &form.kind {
         FormKind::Confirm { .. } => {
-            let yes_style = Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
-                .add_modifier(Modifier::BOLD);
-            let no_style = Style::default()
-                .fg(Color::Black)
-                .bg(Color::Red)
-                .add_modifier(Modifier::BOLD);
-            lines.push(render_full_row(inner_w, "  ▸ Yes  ", yes_style, t.modal_bg));
-            lines.push(Line::from(""));
-            lines.push(render_full_row(inner_w, "    No   ", no_style, t.modal_bg));
+            let yes_focused = modal.confirm_focus == 0;
+            let no_focused = modal.confirm_focus == 1;
+            let yes_style = if yes_focused {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.tinted_fg).bg(t.panel_bg)
+            };
+            let no_style = if no_focused {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.tinted_fg).bg(t.panel_bg)
+            };
+            let label = "  Yes  ";
+            let label_w = unicode_width::UnicodeWidthStr::width(label);
+            let gap = 3;
+            let no_label = "  No  ";
+            let no_w = unicode_width::UnicodeWidthStr::width(no_label);
+            let total = label_w + gap + no_w;
+            let left_pad = inner_w.saturating_sub(total) / 2;
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if left_pad > 0 {
+                spans.push(Span::styled(
+                    " ".repeat(left_pad),
+                    Style::default().bg(t.modal_bg),
+                ));
+            }
+            spans.push(Span::styled(label.to_string(), yes_style));
+            spans.push(Span::styled(
+                " ".repeat(gap),
+                Style::default().bg(t.modal_bg),
+            ));
+            spans.push(Span::styled(no_label.to_string(), no_style));
+            lines.push(Line::from(spans));
         }
         FormKind::SingleSelect { options, .. } => {
             for (i, label) in options.iter().enumerate() {
@@ -380,8 +441,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                     idle_row_style
                 };
                 let prefix = if is_cursor { "▶ " } else { "  " };
-                let text = format!("{prefix}{label}");
+                let text = format!(" {prefix}{label} ");
                 lines.push(render_full_row(inner_w, &text, row_style, t.modal_bg));
+                if i + 1 < options.len() {
+                    lines.push(Line::from(""));
+                }
             }
         }
         FormKind::MultiSelect {
@@ -410,8 +474,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                     idle_row_style
                 };
                 let prefix = if is_cursor { "▶ " } else { "  " };
-                let text = format!("{prefix}[{check_glyph}] {label}");
+                let text = format!(" {prefix}[{check_glyph}] {label} ");
                 lines.push(render_full_row(inner_w, &text, row_style, t.modal_bg));
+                if i + 1 < options.len() {
+                    lines.push(Line::from(""));
+                }
             }
             let count = modal.multi_selected.iter().filter(|&&b| b).count();
             let bounds = match (min, max) {
@@ -533,8 +600,8 @@ fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
 fn estimate_height(kind: &FormKind, _multi: &[bool]) -> u16 {
     match kind {
         FormKind::Confirm { .. } => 3,
-        FormKind::SingleSelect { options, .. } => options.len().min(12) as u16 + 2,
-        FormKind::MultiSelect { options, .. } => options.len().min(12) as u16 + 3,
+        FormKind::SingleSelect { options, .. } => options.len().min(12) as u16 * 2 + 1,
+        FormKind::MultiSelect { options, .. } => options.len().min(12) as u16 * 2 + 4,
         FormKind::Text { multiline, .. } => {
             if *multiline {
                 6
@@ -547,7 +614,7 @@ fn estimate_height(kind: &FormKind, _multi: &[bool]) -> u16 {
 
 fn hint_for(kind: &FormKind) -> &'static str {
     match kind {
-        FormKind::Confirm { .. } => " y/enter · yes  n · no  esc · cancel ",
+        FormKind::Confirm { .. } => " ←→/jk · move  enter · pick  esc · cancel ",
         FormKind::SingleSelect { .. } => " ↑↓/jk · move  enter · pick  esc · cancel ",
         FormKind::MultiSelect { .. } => {
             " ↑↓/jk · move  space · toggle  enter · submit  esc · cancel "

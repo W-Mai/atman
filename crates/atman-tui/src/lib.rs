@@ -469,6 +469,7 @@ async fn run_frames(
                     } else {
                         let ids: Vec<String> =
                             latest.iter().map(|p| p.form_id.clone()).collect();
+                        app.form_modal.merge_batch_ids(&ids);
                         let current = app.form_modal.active_form_id().map(String::from);
                         let want: Option<String> = current
                             .filter(|id| ids.iter().any(|x| x == id))
@@ -1299,15 +1300,30 @@ fn handle_form_key(
             if let Some(target_id) = app.form_modal.switch_to(1)
                 && target_id != form_id
             {
-                if let Some(sess) = app.session.as_ref() {
-                    sess.forms().promote(&target_id);
+                let in_registry = app
+                    .session
+                    .as_ref()
+                    .map(|s| {
+                        s.forms()
+                            .list_pending()
+                            .iter()
+                            .any(|p| p.form_id == target_id)
+                    })
+                    .unwrap_or(false);
+                if in_registry {
+                    if let Some(sess) = app.session.as_ref() {
+                        sess.forms().promote(&target_id);
+                    }
+                } else if let Some(cached) = app.form_modal.cached_forms.get(&target_id).cloned() {
+                    let ids = app.form_modal.batch_ids.clone();
+                    app.form_modal.attach(cached, &ids);
                 }
             }
         }
-        KeyAction::HistoryUp | KeyAction::CursorLeft | KeyAction::Char('k') if !is_text => {
+        KeyAction::HistoryUp | KeyAction::Char('k') if !is_text => {
             app.form_modal.move_cursor(-1);
         }
-        KeyAction::HistoryDown | KeyAction::CursorRight | KeyAction::Char('j') if !is_text => {
+        KeyAction::HistoryDown | KeyAction::Char('j') if !is_text => {
             app.form_modal.move_cursor(1);
         }
         KeyAction::Char(c) if is_text => {
