@@ -1,5 +1,5 @@
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
@@ -221,10 +221,13 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
             let line = Line::from(vec![
                 Span::styled(
                     item.insert.trim_end().to_string(),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(crate::theme::theme().accent),
                 ),
                 Span::raw("  "),
-                Span::styled(item.hint.clone(), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    item.hint.clone(),
+                    Style::default().fg(crate::theme::theme().subtle_fg),
+                ),
             ]);
             ListItem::new(line)
         })
@@ -233,11 +236,11 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(crate::theme::theme().subtle_fg)),
         )
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(crate::theme::theme().subtle_fg)
                 .add_modifier(Modifier::BOLD),
         );
     let mut list_state = ListState::default();
@@ -256,7 +259,7 @@ pub fn render_hint_strip(
         let text = " [YANK MODE] j/k select · Enter copy · Esc cancel";
         let p = Paragraph::new(Line::from(Span::styled(
             text,
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(crate::theme::theme().accent),
         )));
         f.render_widget(p, rect);
         return;
@@ -265,7 +268,7 @@ pub fn render_hint_strip(
         let text = " [SELECT MODE] drag to copy · F3 resume interaction";
         let p = Paragraph::new(Line::from(Span::styled(
             text,
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(crate::theme::theme().warn),
         )));
         f.render_widget(p, rect);
         return;
@@ -277,7 +280,7 @@ pub fn render_hint_strip(
     };
     let p = Paragraph::new(Line::from(Span::styled(
         text,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(crate::theme::theme().subtle_fg),
     )));
     f.render_widget(p, rect);
 }
@@ -297,7 +300,7 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(crate::theme::theme().accent))
         .title(" atman keybindings — Esc / F1 to close ");
     let body = vec![
         Line::from(section("Editing")),
@@ -352,14 +355,17 @@ fn section(text: &str) -> Span<'_> {
     Span::styled(
         text,
         Style::default()
-            .fg(Color::Cyan)
+            .fg(crate::theme::theme().accent)
             .add_modifier(Modifier::BOLD),
     )
 }
 
 fn kv<'a>(key: &'a str, value: &'a str) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!(" {key:<28}"), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!(" {key:<28}"),
+            Style::default().fg(crate::theme::theme().warn),
+        ),
         Span::raw(value),
     ])
 }

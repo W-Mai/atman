@@ -1,7 +1,7 @@
 use crate::input::InputEditor;
 use atman_runtime::PendingCompactReview;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
@@ -80,7 +80,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
     f.render_widget(Clear, rect);
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(Style::default().fg(crate::theme::theme().warn))
         .title(Span::styled(
             format!(
                 " Review Compaction — slice {}..{} ({} msgs, ~{} tokens) ",
@@ -90,7 +90,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
                 modal.pending.tokens_before,
             ),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(crate::theme::theme().warn)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
@@ -124,7 +124,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
 fn render_slice_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(crate::theme::theme().subtle_fg))
         .title(" Being replaced ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -137,8 +137,8 @@ fn render_slice_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewMo
 
 fn render_summary_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal) {
     let (title, colour) = match modal.mode {
-        CompactReviewMode::Viewing => (" Summary ", Color::Gray),
-        CompactReviewMode::Editing => (" Summary — editing ", Color::Green),
+        CompactReviewMode::Viewing => (" Summary ", crate::theme::theme().tinted_fg),
+        CompactReviewMode::Editing => (" Summary — editing ", crate::theme::theme().success),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -166,34 +166,39 @@ fn render_footer(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal)
             Span::styled(
                 "Enter",
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(crate::theme::theme().success)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" accept  "),
             Span::styled(
                 "e",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(crate::theme::theme().accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" edit  "),
             Span::styled(
                 "r/Esc",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(crate::theme::theme().error)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" reject  "),
-            Span::styled("PgUp/PgDn", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "PgUp/PgDn",
+                Style::default().fg(crate::theme::theme().subtle_fg),
+            ),
             Span::raw(" scroll slice"),
         ]),
         CompactReviewMode::Editing => Line::from(vec![
             Span::styled(
                 "Ctrl+Enter",
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(crate::theme::theme().success)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" commit edit  "),
-            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::styled("Esc", Style::default().fg(crate::theme::theme().warn)),
             Span::raw(" back to viewing (edits kept)"),
         ]),
     };

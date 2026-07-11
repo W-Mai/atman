@@ -20,6 +20,13 @@ pub struct Theme {
     pub subtle_fg: Color,
     pub modal_bg: Color,
     pub panel_bg: Color,
+    pub accent: Color,
+    pub success: Color,
+    pub warn: Color,
+    pub error: Color,
+    pub highlight_bg: Color,
+    pub border: Color,
+    pub heading: Color,
 }
 
 impl Theme {
@@ -35,6 +42,13 @@ impl Theme {
             subtle_fg: Color::DarkGray,
             modal_bg: Color::Rgb(12, 14, 18),
             panel_bg: Color::Rgb(28, 30, 36),
+            accent: Color::Cyan,
+            success: Color::Green,
+            warn: Color::Yellow,
+            error: Color::Red,
+            highlight_bg: Color::DarkGray,
+            border: Color::DarkGray,
+            heading: Color::Cyan,
         }
     }
 
@@ -50,6 +64,13 @@ impl Theme {
             subtle_fg: Color::Rgb(96, 96, 96),
             modal_bg: Color::Rgb(250, 250, 250),
             panel_bg: Color::Rgb(232, 232, 236),
+            accent: Color::Rgb(0, 120, 160),
+            success: Color::Rgb(0, 128, 0),
+            warn: Color::Rgb(180, 130, 0),
+            error: Color::Rgb(180, 0, 0),
+            highlight_bg: Color::Rgb(200, 220, 240),
+            border: Color::Rgb(180, 180, 180),
+            heading: Color::Rgb(0, 100, 140),
         }
     }
 }

@@ -1,6 +1,6 @@
 use atman_runtime::session::PendingApproval;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 
@@ -11,17 +11,17 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, pending: &[PendingApproval]) {
     let title = format!(" approvals · {} pending ", pending.len());
     let hint = Line::from(Span::styled(
         " 1..9 accept · a all · d deny · Esc deny all ",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(crate::theme::theme().subtle_fg),
     ))
     .right_aligned();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(Style::default().fg(crate::theme::theme().warn))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(crate::theme::theme().warn)
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(hint)
@@ -36,17 +36,23 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, pending: &[PendingApproval]) {
             Span::styled(
                 key,
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(crate::theme::theme().success)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(p.tool_name.clone(), Style::default().fg(Color::Cyan)),
-            Span::styled(format!("  {args}"), Style::default().fg(Color::Gray)),
+            Span::styled(
+                p.tool_name.clone(),
+                Style::default().fg(crate::theme::theme().accent),
+            ),
+            Span::styled(
+                format!("  {args}"),
+                Style::default().fg(crate::theme::theme().tinted_fg),
+            ),
         ]));
     }
     if pending.len() > 9 {
         lines.push(Line::from(Span::styled(
             format!("(+{} more, only 1..9 have hotkeys)", pending.len() - 9),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(crate::theme::theme().subtle_fg),
         )));
     }
     f.render_widget(Paragraph::new(lines).block(block), area);

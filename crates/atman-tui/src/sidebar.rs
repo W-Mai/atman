@@ -1,6 +1,6 @@
 use atman_runtime::ContextSnapshot;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
@@ -42,14 +42,13 @@ impl SidebarMode {
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
-    // Clear underneath so the transcript rows behind the card don't
-    // bleed through when messages scroll past the sidebar's y range.
+    let t = crate::theme::theme();
     crate::sanitize_widget_edges(f, area);
     f.render_widget(ratatui::widgets::Clear, area);
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(t.subtle_fg))
         .title(" atman ")
         .padding(ratatui::widgets::Padding {
             left: 2,
@@ -176,7 +175,7 @@ fn goal_section(goal: Option<&str>) -> Paragraph<'_> {
         if i == GOAL_MAX_LINES {
             lines.push(Line::from(Span::styled(
                 "  …",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(crate::theme::theme().subtle_fg),
             )));
             break;
         }
@@ -246,19 +245,19 @@ fn plans_section<'a>(plans: &'a [atman_runtime::memory::plan::Plan], max_h: u16)
     lines.push(Line::from(Span::styled(
         header,
         Style::default()
-            .fg(Color::Cyan)
+            .fg(crate::theme::theme().accent)
             .add_modifier(Modifier::BOLD),
     )));
     match latest {
         None => {
             lines.push(Line::from(Span::styled(
                 "  (no active plan)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(crate::theme::theme().subtle_fg),
             )));
         }
         Some(p) => {
             lines.push(Line::from(vec![
-                Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  ", Style::default().fg(crate::theme::theme().subtle_fg)),
                 Span::styled(
                     truncate_line(&p.title, 28),
                     Style::default().add_modifier(Modifier::BOLD),
@@ -280,44 +279,47 @@ fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], max_h: u16)
     lines.push(Line::from(Span::styled(
         format!("▸ Todos ({done}/{total})"),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(crate::theme::theme().accent)
             .add_modifier(Modifier::BOLD),
     )));
     if todos.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no todos yet)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(crate::theme::theme().subtle_fg),
         )));
         return Paragraph::new(lines);
     }
     let show_cap = (max_h as usize).saturating_sub(1);
     for todo in todos.iter().take(show_cap) {
         let (glyph, style) = match todo.status {
-            TodoStatus::Pending => ("○", Style::default().fg(Color::DarkGray)),
+            TodoStatus::Pending => ("○", Style::default().fg(crate::theme::theme().subtle_fg)),
             TodoStatus::InProgress => (
                 "⚡",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(crate::theme::theme().warn)
                     .add_modifier(Modifier::BOLD),
             ),
-            TodoStatus::Done => ("✓", Style::default().fg(Color::Green)),
+            TodoStatus::Done => ("✓", Style::default().fg(crate::theme::theme().success)),
             TodoStatus::Cancelled => (
                 "✗",
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(crate::theme::theme().subtle_fg)
                     .add_modifier(Modifier::CROSSED_OUT),
             ),
         };
         let content = &todo.where_;
         lines.push(Line::from(vec![
-            Span::styled(format!("  {glyph} "), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("  {glyph} "),
+                Style::default().fg(crate::theme::theme().subtle_fg),
+            ),
             Span::styled(truncate_line(content, 24), style),
         ]));
     }
     if todos.len() > show_cap {
         lines.push(Line::from(Span::styled(
             format!("  … +{} more", todos.len() - show_cap),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(crate::theme::theme().subtle_fg),
         )));
     }
     Paragraph::new(lines)
@@ -345,13 +347,19 @@ fn session_section<'a>(
     lines.push(Line::from(Span::raw(format!("  {session_id}"))));
     if let Some(root) = project_root {
         lines.push(Line::from(vec![
-            Span::styled("  pwd ", Style::default().fg(Color::DarkGray)),
-            Span::styled(abbreviate_dir(root), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "  pwd ",
+                Style::default().fg(crate::theme::theme().subtle_fg),
+            ),
+            Span::styled(
+                abbreviate_dir(root),
+                Style::default().fg(crate::theme::theme().accent),
+            ),
         ]));
     }
     lines.push(Line::from(Span::styled(
         format!("  {}", abbreviate_dir(session_dir)),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(crate::theme::theme().subtle_fg),
     )));
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
@@ -360,14 +368,17 @@ fn section_title(text: &str) -> Span<'_> {
     Span::styled(
         text,
         Style::default()
-            .fg(Color::Cyan)
+            .fg(crate::theme::theme().accent)
             .add_modifier(Modifier::BOLD),
     )
 }
 
 fn kv_line<'a>(key: &'a str, value: String, value_style: Style) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!("  {key:<7}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("  {key:<7}"),
+            Style::default().fg(crate::theme::theme().subtle_fg),
+        ),
         Span::styled(value, value_style),
     ])
 }

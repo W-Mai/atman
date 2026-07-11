@@ -1,5 +1,5 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
@@ -305,11 +305,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         )
     };
     let border_color = if switcher.rename_mode {
-        Color::Yellow
+        crate::theme::theme().warn
     } else if switcher.delete_armed.is_some() {
-        Color::Red
+        crate::theme::theme().error
     } else {
-        Color::Cyan
+        crate::theme::theme().accent
     };
     let outer = Block::default()
         .borders(Borders::ALL)
@@ -335,7 +335,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         f.render_widget(
             ratatui::widgets::Paragraph::new(Line::from(Span::styled(
                 hint,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(crate::theme::theme().subtle_fg),
             ))),
             inner,
         );
@@ -359,18 +359,24 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
                 Span::styled(
                     format!("{sid_short:<10}"),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(crate::theme::theme().warn)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("{:>5} msgs  ", row.message_count),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(crate::theme::theme().subtle_fg),
                 ),
-                Span::styled(format!("{updated:<19}  "), Style::default().fg(Color::Cyan)),
-                Span::styled(project_label, Style::default().fg(Color::Green)),
+                Span::styled(
+                    format!("{updated:<19}  "),
+                    Style::default().fg(crate::theme::theme().accent),
+                ),
+                Span::styled(
+                    project_label,
+                    Style::default().fg(crate::theme::theme().success),
+                ),
                 Span::styled(
                     format!("  {goal_snippet}"),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(crate::theme::theme().tinted_fg),
                 ),
             ]);
             ListItem::new(line)
@@ -379,7 +385,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(crate::theme::theme().subtle_fg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");

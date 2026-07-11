@@ -1,6 +1,6 @@
 use crate::input::InputEditor;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
@@ -130,11 +130,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
     );
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(crate::theme::theme().accent))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(crate::theme::theme().accent)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
@@ -158,7 +158,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
 fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(Style::default().fg(crate::theme::theme().warn))
         .title(" Query ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -171,9 +171,9 @@ fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchMod
 fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(crate::theme::theme().subtle_fg))
         .title(match modal.error {
-            Some(_) => Span::styled(" Error ", Style::default().fg(Color::Red)),
+            Some(_) => Span::styled(" Error ", Style::default().fg(crate::theme::theme().error)),
             None => Span::raw(format!(" Results ({}) ", modal.results.len())),
         });
     let inner = block.inner(rect);
@@ -192,7 +192,7 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 hint,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(crate::theme::theme().subtle_fg),
             ))),
             inner,
         );
@@ -209,19 +209,25 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
                 Span::styled(
                     format!("{sid_short:<10}"),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(crate::theme::theme().warn)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("{:>5} ", hit.seq),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(crate::theme::theme().subtle_fg),
                 ),
-                Span::styled(format!("{ts_short:<19} "), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!("{ts_short:<19} "),
+                    Style::default().fg(crate::theme::theme().accent),
+                ),
                 Span::styled(
                     format!("{:<15} ", hit.kind),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(crate::theme::theme().success),
                 ),
-                Span::styled(snippet, Style::default().fg(Color::Gray)),
+                Span::styled(
+                    snippet,
+                    Style::default().fg(crate::theme::theme().tinted_fg),
+                ),
             ]);
             ListItem::new(line)
         })
@@ -229,7 +235,7 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(crate::theme::theme().subtle_fg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
@@ -241,7 +247,7 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
 fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(crate::theme::theme().subtle_fg))
         .title(" Context (±3 events) ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);

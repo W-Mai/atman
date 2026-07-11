@@ -1,5 +1,5 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
@@ -161,11 +161,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
     f.render_widget(Clear, rect);
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
+        .border_style(Style::default().fg(crate::theme::theme().accent))
         .title(Span::styled(
             " Command Palette (Esc to close) ",
             Style::default()
-                .fg(Color::Magenta)
+                .fg(crate::theme::theme().accent)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
@@ -180,12 +180,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
         height: 1,
     };
     let hint_line = Line::from(vec![
-        Span::styled("▸ ", Style::default().fg(Color::DarkGray)),
+        Span::styled("▸ ", Style::default().fg(crate::theme::theme().subtle_fg)),
         Span::styled(
             palette.input.clone(),
             Style::default().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" _", Style::default().fg(Color::Magenta)),
+        Span::styled(" _", Style::default().fg(crate::theme::theme().accent)),
     ]);
     f.render_widget(Paragraph::new(hint_line), input_rect);
     let list_rect = Rect {
@@ -203,7 +203,10 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
                     format!("{:<28}", id.label()),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(id.hint().to_string(), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    id.hint().to_string(),
+                    Style::default().fg(crate::theme::theme().subtle_fg),
+                ),
             ]);
             ListItem::new(line)
         })
@@ -211,7 +214,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(crate::theme::theme().subtle_fg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
