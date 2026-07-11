@@ -66,55 +66,45 @@ pub const CONFIG_TOML: &str = r#"# atman configuration
 # uncomment a section to override.
 
 # ── Model config + alias ──────────────────────────────────────────
-# Define models with their context budget + compaction ratio, then
-# create short aliases so flows don't hardcode provider model IDs.
+# Flows reference models by alias (e.g. model: "smart") so you can
+# switch providers without editing flows. Change the model = "..." line
+# below to match your API key.
 #
-# [models.claude-opus-4.7]
-# context_budget = 200000
-# compact_threshold_ratio = 0.8
-# thinking = true
-#
-# [models.deepseek-v4-pro]
-# context_budget = 1000000
-# compact_threshold_ratio = 0.8
-#
-# [alias.smart]
-# model = "claude-opus-4.7"
-#
-# [alias.cheap]
-# model = "gpt-4o-mini"
-#
-# Then in a flow:  model: "smart"  → resolves to claude-opus-4.7
+# Provider env vars:
+#   Anthropic / DeepSeek (anthropic-compat):  ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
+#   OpenAI / OpenAI-compat:                   OPENAI_API_KEY + OPENAI_BASE_URL
 
-# Which model to hand to REPL bare text (see routes.at → default_route).
-# Set an ANTHROPIC_API_KEY / OPENAI_API_KEY / ATMAN_TEST_GLM_KEY in your shell.
+[models.claude-opus-4.7]
+context_budget = 200000
+thinking = true
+
+[models.gpt-4o-mini]
+context_budget = 128000
+
+# Edit this to match your provider's model ID.
+[alias.smart]
+model = "claude-opus-4.7"
+
+[alias.cheap]
+model = "gpt-4o-mini"
+
 [suggest]
-# model = "gpt-4o-mini"
+# model = "cheap"
 
-# Snapshot every flow on `atman run` into .atman/flow-registry.db so
-# `atman flow rollback` has something to rewind to.
 [registry]
 # auto_snapshot = true
 
-# Injection classifier for L2/L3 course-correction on `!nudge` / `!redirect`.
-# off | rule | llm
 [interjection]
 # classifier = "rule"
 
-# Sandbox for Tier 4 (shell.exec) on macOS. Enabled by default when
-# sandbox-exec is available; set enabled = false to opt out.
 [sandbox]
 # enabled = true
 # strict = false
+# allow_network = false
 
-# Filesystem access policy for fs.write / fs.edit. Defaults to
-# workspace-write: writes are allowed inside the current project + the
-# system tempdir, everything else is refused. Set to "read-only" to
-# block every write, "danger-full-access" to skip the check entirely.
 # [fs_access]
 # mode = "workspace-write"
 
-# preview daemon (agent audit UI at http://localhost:65097/). Optional.
 [preview]
 # base_url = "http://127.0.0.1:65097"
 # timeout_ms = 3000
