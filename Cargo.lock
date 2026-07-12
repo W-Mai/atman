@@ -180,6 +180,7 @@ dependencies = [
  "toml",
  "tower-http",
  "unicode-width",
+ "uuid",
 ]
 
 [[package]]

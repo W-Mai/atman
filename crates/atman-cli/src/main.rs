@@ -1300,13 +1300,16 @@ async fn prebuild_session(
     let is_fresh = resume_sid.is_none();
     let project_index = open_current_project_index()?;
     let session = std::sync::Arc::new(match resume_sid {
-        Some(sid) => Session::open_existing_with_context(
-            &root,
-            &sid,
-            redactor.clone(),
-            project_index.clone(),
-        )
-        .with_context(|| format!("resuming session {sid} under {}", root.display()))?,
+        Some(sid) => {
+            let resolved_sid = resolve_session_prefix(&root, &sid)?;
+            Session::open_existing_with_context(
+                &root,
+                &resolved_sid,
+                redactor.clone(),
+                project_index.clone(),
+            )
+            .with_context(|| format!("resuming session {resolved_sid} under {}", root.display()))?
+        }
         None => Session::open_with_context(&root, redactor.clone(), project_index.clone())
             .with_context(|| format!("opening session under {}", root.display()))?,
     });
@@ -1806,7 +1809,7 @@ fn print_session_summary(
     goal: Option<&str>,
     todos: &[atman_runtime::memory::todo::Todo],
 ) {
-    let sid_short = &sid[..sid.len().min(12)];
+    let sid_short = sid;
     let goal_line = goal.unwrap_or("(none)");
     let pending = todos
         .iter()
@@ -5249,6 +5252,40 @@ fn data_dir() -> Result<PathBuf> {
 
 fn config_dir() -> Result<PathBuf> {
     atman_runtime::storage::config_dir()
+}
+
+fn resolve_session_prefix(root: &std::path::Path, sid: &str) -> Result<String> {
+    if uuid::Uuid::parse_str(sid).is_ok() {
+        return Ok(sid.to_string());
+    }
+    let sessions = root.join("sessions");
+    let mut matches: Vec<String> = Vec::new();
+    if sessions.exists() {
+        if let Ok(entries) = std::fs::read_dir(&sessions) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(sid) {
+                    matches.push(name);
+                }
+            }
+        }
+    }
+    match matches.len() {
+        0 => bail!("no session found matching prefix `{sid}`"),
+        1 => Ok(matches[0].clone()),
+        _ => {
+            bail!(
+                "ambiguous session prefix `{sid}` matches {} sessions: {}",
+                matches.len(),
+                matches
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
 }
 
 fn latest_session(root: &std::path::Path) -> Result<Option<String>> {
