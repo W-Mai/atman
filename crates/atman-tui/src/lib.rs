@@ -291,6 +291,10 @@ async fn run_frames(
                                 .input_rect
                                 .map(|r| rect_contains(r, me.column, me.row))
                                 .unwrap_or(false);
+                            let over_sidebar = app
+                                .last_sidebar_rect
+                                .map(|r| rect_contains(r, me.column, me.row))
+                                .unwrap_or(false);
                             if over_input {
                                 for _ in 0..3 {
                                     if matches!(me.kind, MouseEventKind::ScrollUp) {
@@ -300,6 +304,12 @@ async fn run_frames(
                                     } else if !editor.move_line_down() {
                                         break;
                                     }
+                                }
+                            } else if over_sidebar {
+                                if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                    app.sidebar_scroll = app.sidebar_scroll.saturating_sub(2);
+                                } else {
+                                    app.sidebar_scroll = app.sidebar_scroll.saturating_add(2);
                                 }
                             } else if matches!(me.kind, MouseEventKind::ScrollUp) {
                                 scroll_delta = scroll_delta.saturating_sub(3);
@@ -2087,8 +2097,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 streaming: app.streaming,
                 todos: &app.todos,
                 plans: &app.plans,
+                sidebar_scroll: app.sidebar_scroll,
             },
         );
+        app.last_sidebar_rect = Some(area);
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(

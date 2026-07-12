@@ -16,6 +16,7 @@ pub struct SidebarInputs<'a> {
     pub streaming: bool,
     pub todos: &'a [atman_runtime::memory::todo::Todo],
     pub plans: &'a [atman_runtime::memory::plan::Plan],
+    pub sidebar_scroll: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -113,10 +114,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         );
     }
     if task_heights.todos > 0 {
-        f.render_widget(
-            todos_section(inputs.todos, task_heights.todos),
-            task_sections[2],
-        );
+        let p = todos_section(inputs.todos, task_heights.todos);
+        f.render_widget(p.scroll((inputs.sidebar_scroll, 0)), task_sections[2]);
     }
 
     let meta_heights = meta_section_heights(meta_area.height);
