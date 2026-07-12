@@ -57,6 +57,7 @@ pub struct Session {
     _watch_keepalive: WatchKeepalive,
     streamed_this_turn: std::sync::atomic::AtomicBool,
     manual_compact_pending: std::sync::atomic::AtomicBool,
+    last_input_tokens: std::sync::atomic::AtomicU64,
     compact_review_mode: Mutex<CompactReviewMode>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
@@ -932,6 +933,7 @@ impl Session {
             _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
+            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
@@ -1021,6 +1023,7 @@ impl Session {
             _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
+            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
@@ -1061,6 +1064,7 @@ impl Session {
             _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
+            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
@@ -1204,12 +1208,19 @@ impl Session {
     }
 
     pub fn record_llm_call(&self, model: &str, tokens_in: u64, tokens_out: u64) {
+        self.last_input_tokens
+            .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
         self.context_watch.send_modify(|snap| {
             snap.model = model.to_string();
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
             snap.tokens_out = snap.tokens_out.saturating_add(tokens_out);
         });
         self.refresh_window_snapshot();
+    }
+
+    pub fn last_input_tokens(&self) -> u64 {
+        self.last_input_tokens
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn refresh_window_snapshot(&self) {

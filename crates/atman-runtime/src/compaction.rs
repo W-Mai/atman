@@ -174,7 +174,12 @@ pub async fn maybe_auto_compact(
     let info = crate::model_registry::model_info(model);
     let threshold = info.compact_threshold_tokens();
     let msgs = session.messages();
-    let current = estimate_tokens_for_messages(&msgs);
+    let provider_tokens = session.last_input_tokens();
+    let current = if provider_tokens > 0 {
+        provider_tokens
+    } else {
+        estimate_tokens_for_messages(&msgs)
+    };
     if !forced && current <= threshold {
         return;
     }

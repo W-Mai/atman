@@ -946,7 +946,8 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     });
                 }
                 if let Some(session) = ctx.session {
-                    session.record_llm_call(&model, usage.input + usage.cached_input, usage.output);
+                    let input_with_cache = usage.input + usage.cached_input + usage.cache_write;
+                    session.record_llm_call(&model, input_with_cache, usage.output);
                 }
                 match outcome {
                     Ok(am) => {
