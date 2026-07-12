@@ -26,7 +26,7 @@ pub struct Todo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum TodoEntry {
     Add(Todo),
     Update { id: MemoryId, status: TodoStatus },
