@@ -48,6 +48,13 @@ pub fn is_plan_related(msg: &Message) -> bool {
     false
 }
 
+pub fn is_compaction_summary(msg: &Message) -> bool {
+    if !matches!(msg.role, MessageRole::System) {
+        return false;
+    }
+    msg.text_concat().contains("[atman:compact")
+}
+
 pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRange> {
     let total = estimate_tokens_for_messages(messages);
     if total <= budget || messages.len() < 4 {
@@ -62,7 +69,9 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
     let mut cur_start: Option<usize> = None;
     let mut cur_tokens: u64 = 0;
     for (i, msg) in messages.iter().enumerate().take(tail).skip(head) {
-        if matches!(msg.role, MessageRole::System) || is_plan_related(msg) {
+        let is_barrier = (matches!(msg.role, MessageRole::System) && !is_compaction_summary(msg))
+            || is_plan_related(msg);
+        if is_barrier {
             if let Some(start) = cur_start.take()
                 && i - start >= 3
             {
@@ -581,6 +590,66 @@ mod tests {
         assert!(
             tool_call_line.chars().count() < 1200,
             "tool_call line not truncated: {tool_call_line}"
+        );
+    }
+
+    fn compaction_summary(text: &str) -> Message {
+        let body = format!(
+            "[atman: compacted 5 messages]\n{text}\n[atman:compact seq_start=1 seq_end=5 count=5]"
+        );
+        Message::system_text(TurnId::now(), body)
+    }
+
+    #[test]
+    fn is_compaction_summary_detects_marker() {
+        assert!(is_compaction_summary(&compaction_summary("gist")));
+        assert!(!is_compaction_summary(&system("plain system msg")));
+        assert!(!is_compaction_summary(&user("user msg")));
+    }
+
+    #[test]
+    fn find_compact_range_spans_across_compaction_summaries() {
+        let msgs = vec![
+            system("head"),
+            user(&"x".repeat(3000)),
+            assistant(&"y".repeat(3000)),
+            user(&"z".repeat(3000)),
+            compaction_summary("first compaction summary"),
+            user(&"a".repeat(3000)),
+            assistant(&"b".repeat(3000)),
+            user(&"c".repeat(3000)),
+            assistant(&"d".repeat(3000)),
+            user("tail"),
+            assistant("tail"),
+        ];
+        let range = find_compact_range(&msgs, 500).expect("expected range across summary");
+        assert!(
+            range.start <= 4 && range.end > 4,
+            "range should span across the compaction summary at idx 4, got {range:?}"
+        );
+        assert!(
+            range.end - range.start >= 3,
+            "range must cover >= 3 msgs, got {}",
+            range.end - range.start
+        );
+    }
+
+    #[test]
+    fn find_compact_range_still_treats_plain_system_as_barrier() {
+        let msgs = vec![
+            user(&"x".repeat(3000)),
+            assistant(&"y".repeat(3000)),
+            system("plain system break"),
+            user(&"a".repeat(3000)),
+            assistant(&"b".repeat(3000)),
+            user(&"c".repeat(3000)),
+            assistant(&"d".repeat(3000)),
+            user("tail"),
+        ];
+        let range = find_compact_range(&msgs, 500).expect("expected range");
+        assert!(
+            range.start >= 3,
+            "must start after the plain system barrier, got {range:?}"
         );
     }
 }
