@@ -1402,7 +1402,11 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
                 Ok(Err(e)) => return Err(e),
                 Err(e) => return Err(anyhow::anyhow!("prebuild task join failed: {e}")),
             },
-            None => return Ok(()),
+            None => {
+                drop(_terminal_guard);
+                flush_pending_summary();
+                return Ok(());
+            }
         }
     }
 }
@@ -1764,10 +1768,36 @@ async fn cmd_repl_once(
         && session_dir_is_disposable(&session_dir)
     {
         let _ = std::fs::remove_dir_all(&session_dir);
-    } else {
-        print_session_summary(&session_id, user_msg_count, goal.as_deref(), &todos);
     }
+    SUMMARY_PENDING.with(|cell| {
+        *cell.borrow_mut() = Some(SessionSummary {
+            sid: session_id,
+            msg_count: user_msg_count,
+            goal,
+            todos,
+        });
+    });
     Ok(())
+}
+
+thread_local! {
+    static SUMMARY_PENDING: std::cell::RefCell<Option<SessionSummary>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct SessionSummary {
+    sid: String,
+    msg_count: usize,
+    goal: Option<String>,
+    todos: Vec<atman_runtime::memory::todo::Todo>,
+}
+
+pub fn flush_pending_summary() {
+    SUMMARY_PENDING.with(|cell| {
+        if let Some(s) = cell.borrow_mut().take() {
+            print_session_summary(&s.sid, s.msg_count, s.goal.as_deref(), &s.todos);
+        }
+    });
 }
 
 fn print_session_summary(
