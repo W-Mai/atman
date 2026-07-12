@@ -64,10 +64,27 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         return;
     }
 
-    let half = inner.height / 2;
+    let goal_need: u16 = 7;
+    let plans_need: u16 = 3;
+    let todos_need: u16 = 6;
+    let context_need: u16 = 9;
+    let session_need: u16 = 5;
+    let task_needs = goal_need + plans_need + todos_need;
+    let meta_needs = context_need + session_need;
+    let total = inner.height;
+    let (task_h, meta_h) = if total >= task_needs + meta_needs {
+        (task_needs, meta_needs)
+    } else if total > task_needs {
+        (task_needs, total.saturating_sub(task_needs))
+    } else if total >= 1 {
+        (total, 0u16)
+    } else {
+        (0u16, 0u16)
+    };
+
     let panels = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(half), Constraint::Min(half)])
+        .constraints([Constraint::Length(task_h), Constraint::Length(meta_h)])
         .split(inner);
 
     let task_panel = Block::default()

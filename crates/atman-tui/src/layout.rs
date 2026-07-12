@@ -37,7 +37,7 @@ pub fn compute_sidebar_rect(area: Rect, show: bool) -> Option<Rect> {
         return None;
     }
     let width = SIDEBAR_WIDTH;
-    let height = 24u16.min(area.height.saturating_sub(4));
+    let height = area.height.saturating_sub(4);
     if height == 0 {
         return None;
     }
