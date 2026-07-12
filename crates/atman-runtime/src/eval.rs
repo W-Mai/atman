@@ -858,22 +858,20 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             if let Some(session) = ctx.session
                 && let Some(goal) = session.goal()
             {
-                let prefix = format!("[session goal]\n{goal}\n[/session goal]");
-                system = Some(match system.take() {
-                    Some(existing) if !existing.is_empty() => format!("{prefix}\n\n{existing}"),
-                    _ => prefix,
-                });
+                final_messages.push(crate::message::Message::system_text(
+                    turn_id.clone(),
+                    format!("[session goal]\n{goal}\n[/session goal]"),
+                ));
             }
             if let Some(session) = ctx.session
                 && let Some(plan) = session.plan_system_prompt().await
             {
-                let prefix = format!(
-                    "[active plan]\n{plan}\n[/active plan]\n\nCall plan.tick to mark a step done. Call plan.write to revise."
-                );
-                system = Some(match system.take() {
-                    Some(existing) if !existing.is_empty() => format!("{prefix}\n\n{existing}"),
-                    _ => prefix,
-                });
+                final_messages.push(crate::message::Message::system_text(
+                    turn_id.clone(),
+                    format!(
+                        "[active plan]\n{plan}\n[/active plan]\n\nCall plan.tick to mark a step done. Call plan.write to revise."
+                    ),
+                ));
             }
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
