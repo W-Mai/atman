@@ -1761,6 +1761,10 @@ async fn cmd_repl_once(
         let store = atman_runtime::memory::todo::TodoStore::at(session.dir());
         store.list().await.unwrap_or_default()
     };
+    let plans: Vec<atman_runtime::memory::plan::Plan> = {
+        let store = atman_runtime::memory::plan::PlanStore::at(session.dir());
+        store.list().await.unwrap_or_default()
+    };
     let session_id = session.id().to_string();
     let session_dir = session.dir().to_path_buf();
     match std::sync::Arc::try_unwrap(session) {
@@ -1780,6 +1784,7 @@ async fn cmd_repl_once(
             msg_count: user_msg_count,
             goal,
             todos,
+            plans,
         });
     });
     Ok(())
@@ -1795,12 +1800,13 @@ struct SessionSummary {
     msg_count: usize,
     goal: Option<String>,
     todos: Vec<atman_runtime::memory::todo::Todo>,
+    plans: Vec<atman_runtime::memory::plan::Plan>,
 }
 
 pub fn flush_pending_summary() {
     SUMMARY_PENDING.with(|cell| {
         if let Some(s) = cell.borrow_mut().take() {
-            print_session_summary(&s.sid, s.msg_count, s.goal.as_deref(), &s.todos);
+            print_session_summary(&s.sid, s.msg_count, s.goal.as_deref(), &s.todos, &s.plans);
         }
     });
 }
@@ -1810,6 +1816,7 @@ fn print_session_summary(
     msg_count: usize,
     goal: Option<&str>,
     todos: &[atman_runtime::memory::todo::Todo],
+    plans: &[atman_runtime::memory::plan::Plan],
 ) {
     let sid_short = sid;
     let goal_line = goal.unwrap_or("(none)");
@@ -1821,11 +1828,20 @@ fn print_session_summary(
         .iter()
         .filter(|t| matches!(t.status, atman_runtime::memory::todo::TodoStatus::Done))
         .count();
+    let plan_line = plans
+        .iter()
+        .max_by_key(|p| p.updated_at)
+        .map(|p| {
+            let (step_done, step_total) = p.progress();
+            format!("{} ({step_done}/{step_total})", truncate_str(&p.title, 40))
+        })
+        .unwrap_or_else(|| "(none)".to_string());
 
     let lines = vec![
         format!(" session   {sid_short}"),
         format!(" messages  {msg_count}"),
         format!(" goal      {}", truncate_str(goal_line, 50)),
+        format!(" plan      {plan_line}"),
         format!(" todos     {done} done · {pending} pending"),
         String::new(),
         format!(" resume    atman --continue {sid_short}"),
