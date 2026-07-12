@@ -30,6 +30,14 @@ impl std::fmt::Display for SessionId {
     }
 }
 
+type WatchKeepalive = (
+    watch::Receiver<ContextSnapshot>,
+    watch::Receiver<Option<String>>,
+    watch::Receiver<usize>,
+    watch::Receiver<Vec<crate::memory::todo::Todo>>,
+    watch::Receiver<Vec<crate::memory::plan::Plan>>,
+);
+
 pub struct Session {
     id: SessionId,
     dir: PathBuf,
@@ -46,6 +54,7 @@ pub struct Session {
     attach_watch: watch::Sender<usize>,
     todos_watch: watch::Sender<Vec<crate::memory::todo::Todo>>,
     plans_watch: watch::Sender<Vec<crate::memory::plan::Plan>>,
+    _watch_keepalive: WatchKeepalive,
     streamed_this_turn: std::sync::atomic::AtomicBool,
     manual_compact_pending: std::sync::atomic::AtomicBool,
     compact_review_mode: Mutex<CompactReviewMode>,
@@ -841,13 +850,11 @@ impl Session {
         }
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(256);
-        let (context_watch, _) = watch::channel(ContextSnapshot::default());
-        let (goal_watch, _) = watch::channel(None);
-        let (attach_watch, _) = watch::channel(0);
-        let (todos_watch, todos_watch_rx) = watch::channel(Vec::new());
-        std::mem::forget(todos_watch_rx);
-        let (plans_watch, plans_watch_rx) = watch::channel(Vec::new());
-        std::mem::forget(plans_watch_rx);
+        let (context_watch, context_rx) = watch::channel(ContextSnapshot::default());
+        let (goal_watch, goal_rx) = watch::channel(None);
+        let (attach_watch, attach_rx) = watch::channel(0);
+        let (todos_watch, todos_rx) = watch::channel(Vec::new());
+        let (plans_watch, plans_rx) = watch::channel(Vec::new());
         Ok(Self {
             id,
             dir,
@@ -864,6 +871,7 @@ impl Session {
             attach_watch,
             todos_watch,
             plans_watch,
+            _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
@@ -928,13 +936,11 @@ impl Session {
         let initial_goal = load_goal(&dir);
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(256);
-        let (context_watch, _) = watch::channel(initial_context);
-        let (goal_watch, _) = watch::channel(initial_goal);
-        let (attach_watch, _) = watch::channel(0);
-        let (todos_watch, todos_watch_rx) = watch::channel(Vec::new());
-        std::mem::forget(todos_watch_rx);
-        let (plans_watch, plans_watch_rx) = watch::channel(Vec::new());
-        std::mem::forget(plans_watch_rx);
+        let (context_watch, context_rx) = watch::channel(initial_context);
+        let (goal_watch, goal_rx) = watch::channel(initial_goal);
+        let (attach_watch, attach_rx) = watch::channel(0);
+        let (todos_watch, todos_rx) = watch::channel(Vec::new());
+        let (plans_watch, plans_rx) = watch::channel(Vec::new());
         Ok(Self {
             id,
             dir,
@@ -951,6 +957,7 @@ impl Session {
             attach_watch,
             todos_watch,
             plans_watch,
+            _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
@@ -969,13 +976,11 @@ impl Session {
     pub fn open_ephemeral() -> Self {
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(256);
-        let (context_watch, _) = watch::channel(ContextSnapshot::default());
-        let (goal_watch, _) = watch::channel(None);
-        let (attach_watch, _) = watch::channel(0);
-        let (todos_watch, todos_watch_rx) = watch::channel(Vec::new());
-        std::mem::forget(todos_watch_rx);
-        let (plans_watch, plans_watch_rx) = watch::channel(Vec::new());
-        std::mem::forget(plans_watch_rx);
+        let (context_watch, context_rx) = watch::channel(ContextSnapshot::default());
+        let (goal_watch, goal_rx) = watch::channel(None);
+        let (attach_watch, attach_rx) = watch::channel(0);
+        let (todos_watch, todos_rx) = watch::channel(Vec::new());
+        let (plans_watch, plans_rx) = watch::channel(Vec::new());
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -992,6 +997,7 @@ impl Session {
             attach_watch,
             todos_watch,
             plans_watch,
+            _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
