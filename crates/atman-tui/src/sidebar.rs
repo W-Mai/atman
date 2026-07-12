@@ -115,7 +115,10 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
     }
     if task_heights.todos > 0 {
         let p = todos_section(inputs.todos, task_heights.todos);
-        f.render_widget(p.scroll((inputs.sidebar_scroll, 0)), task_sections[2]);
+        let total_lines = (inputs.todos.len() * 2 + 1) as u16;
+        let max_scroll = total_lines.saturating_sub(task_heights.todos);
+        let scroll = inputs.sidebar_scroll.min(max_scroll);
+        f.render_widget(p.scroll((scroll, 0)), task_sections[2]);
     }
 
     let meta_heights = meta_section_heights(meta_area.height);
