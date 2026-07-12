@@ -307,9 +307,9 @@ async fn run_frames(
                                 }
                             } else if over_sidebar {
                                 if matches!(me.kind, MouseEventKind::ScrollUp) {
-                                    app.sidebar_scroll = app.sidebar_scroll.saturating_sub(1);
+                                    app.todos_scroll = app.todos_scroll.saturating_sub(1);
                                 } else {
-                                    app.sidebar_scroll = app.sidebar_scroll.saturating_add(1);
+                                    app.todos_scroll = app.todos_scroll.saturating_add(1);
                                 }
                             } else if matches!(me.kind, MouseEventKind::ScrollUp) {
                                 scroll_delta = scroll_delta.saturating_sub(3);
@@ -2097,7 +2097,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 streaming: app.streaming,
                 todos: &app.todos,
                 plans: &app.plans,
-                sidebar_scroll: app.sidebar_scroll,
+                goal_scroll: app.goal_scroll,
+                plans_scroll: app.plans_scroll,
+                todos_scroll: app.todos_scroll,
             },
         );
         app.last_sidebar_rect = Some(area);

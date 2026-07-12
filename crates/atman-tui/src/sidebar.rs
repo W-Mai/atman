@@ -16,7 +16,9 @@ pub struct SidebarInputs<'a> {
     pub streaming: bool,
     pub todos: &'a [atman_runtime::memory::todo::Todo],
     pub plans: &'a [atman_runtime::memory::plan::Plan],
-    pub sidebar_scroll: u16,
+    pub goal_scroll: u16,
+    pub plans_scroll: u16,
+    pub todos_scroll: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -105,37 +107,23 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         .split(task_area);
 
     if task_heights.goal > 0 {
-        f.render_widget(goal_section(inputs.goal), task_sections[0]);
-    }
-    if task_heights.plans > 0 {
-        f.render_widget(
-            plans_section(inputs.plans, task_heights.plans),
-            task_sections[1],
+        render_scrollable_section(
+            f,
+            task_sections[0],
+            "▸ Goal",
+            goal_body(inputs.goal),
+            inputs.goal_scroll,
         );
     }
+    if task_heights.plans > 0 {
+        let header = plans_header(inputs.plans);
+        let body = plans_body(inputs.plans);
+        render_scrollable_section(f, task_sections[1], &header, body, inputs.plans_scroll);
+    }
     if task_heights.todos > 0 {
-        let done_count = inputs
-            .todos
-            .iter()
-            .filter(|tt| matches!(tt.status, atman_runtime::memory::todo::TodoStatus::Done))
-            .count();
-        let total = inputs.todos.len();
-        let header_line = Line::from(Span::styled(
-            format!("▸ Todos ({done_count}/{total})"),
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-        ));
+        let header = todos_header(inputs.todos);
         let body = todos_body(inputs.todos);
-        let body_count = body.len() as u16;
-        let visible_body = task_heights.todos.saturating_sub(1);
-        let max_scroll = body_count.saturating_sub(visible_body);
-        let scroll = inputs.sidebar_scroll.min(max_scroll);
-        let todo_area = task_sections[2];
-        let sub = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(todo_area);
-        f.render_widget(Paragraph::new(header_line), sub[0]);
-        f.render_widget(Paragraph::new(body).scroll((scroll, 0)), sub[1]);
+        render_scrollable_section(f, task_sections[2], &header, body, inputs.todos_scroll);
     }
 
     let meta_heights = meta_section_heights(meta_area.height);
@@ -199,9 +187,33 @@ fn meta_section_heights(inner_h: u16) -> MetaHeights {
     }
 }
 
-fn goal_section(goal: Option<&str>) -> Paragraph<'_> {
-    let mut lines: Vec<Line<'_>> = vec![Line::from(section_title("▸ Goal"))];
+fn render_scrollable_section(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    header: &str,
+    body: Vec<Line<'_>>,
+    scroll: u16,
+) {
+    let t = crate::theme::theme();
+    let header_line = Line::from(Span::styled(
+        header.to_string(),
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+    ));
+    let body_count = body.len() as u16;
+    let visible_body = area.height.saturating_sub(1);
+    let max_scroll = body_count.saturating_sub(visible_body);
+    let clamped = scroll.min(max_scroll);
+    let sub = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    f.render_widget(Paragraph::new(header_line), sub[0]);
+    f.render_widget(Paragraph::new(body).scroll((clamped, 0)), sub[1]);
+}
+
+fn goal_body(goal: Option<&str>) -> Vec<Line<'_>> {
     let goal_text = goal.unwrap_or("(none)");
+    let mut lines: Vec<Line<'_>> = Vec::new();
     for (i, l) in goal_text.lines().enumerate() {
         if i == GOAL_MAX_LINES {
             lines.push(Line::from(Span::styled(
@@ -212,7 +224,103 @@ fn goal_section(goal: Option<&str>) -> Paragraph<'_> {
         }
         lines.push(Line::from(Span::raw(format!("  {l}"))));
     }
-    Paragraph::new(lines).wrap(Wrap { trim: false })
+    lines
+}
+
+fn plans_header(plans: &[atman_runtime::memory::plan::Plan]) -> String {
+    let latest = plans.iter().max_by_key(|p| p.updated_at);
+    match latest {
+        Some(p) => {
+            let (done, total) = p.progress();
+            format!("▸ Plan ({done}/{total})")
+        }
+        None => "▸ Plan".to_string(),
+    }
+}
+
+fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
+    let latest = plans.iter().max_by_key(|p| p.updated_at);
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    match latest {
+        None => {
+            lines.push(Line::from(Span::styled(
+                "  (no active plan)",
+                Style::default().fg(crate::theme::theme().subtle_fg),
+            )));
+        }
+        Some(p) => {
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default().fg(crate::theme::theme().subtle_fg)),
+                Span::styled(
+                    truncate_line(&p.title, 28),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            for step in &p.steps {
+                let (glyph, style) = if step.done {
+                    ("✓", Style::default().fg(crate::theme::theme().success))
+                } else {
+                    ("○", Style::default().fg(crate::theme::theme().subtle_fg))
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {glyph} "), style),
+                    Span::styled(
+                        truncate_line(&step.text, 28),
+                        Style::default().fg(crate::theme::theme().tinted_fg),
+                    ),
+                ]));
+            }
+        }
+    }
+    lines
+}
+
+fn todos_header(todos: &[atman_runtime::memory::todo::Todo]) -> String {
+    use atman_runtime::memory::todo::TodoStatus;
+    let done = todos
+        .iter()
+        .filter(|tt| matches!(tt.status, TodoStatus::Done))
+        .count();
+    let total = todos.len();
+    format!("▸ Todos ({done}/{total})")
+}
+
+fn todos_body<'a>(todos: &'a [atman_runtime::memory::todo::Todo]) -> Vec<Line<'a>> {
+    use atman_runtime::memory::todo::TodoStatus;
+    let t = crate::theme::theme();
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    for todo in todos {
+        let (glyph, glyph_style) = match todo.status {
+            TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg)),
+            TodoStatus::InProgress => (
+                "⚡",
+                Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
+            ),
+            TodoStatus::Done => ("✓", Style::default().fg(t.success)),
+            TodoStatus::Cancelled => (
+                "✗",
+                Style::default()
+                    .fg(t.subtle_fg)
+                    .add_modifier(Modifier::CROSSED_OUT),
+            ),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {glyph} "), glyph_style),
+            Span::styled(
+                truncate_line(&todo.why, 32),
+                Style::default().fg(t.tinted_fg),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "    {} · {}",
+                truncate_line(&todo.where_, 20),
+                truncate_line(&todo.how, 8)
+            ),
+            Style::default().fg(t.meta_fg),
+        )));
+    }
+    lines
 }
 
 fn context_section<'a>(
@@ -261,80 +369,6 @@ fn context_section<'a>(
         ),
     ];
     Paragraph::new(lines)
-}
-
-fn plans_section<'a>(plans: &'a [atman_runtime::memory::plan::Plan], max_h: u16) -> Paragraph<'a> {
-    let latest = plans.iter().max_by_key(|p| p.updated_at);
-    let mut lines: Vec<Line<'_>> = Vec::with_capacity(max_h as usize);
-    let header = match latest {
-        Some(p) => {
-            let (done, total) = p.progress();
-            format!("▸ Plan ({done}/{total})")
-        }
-        None => "▸ Plan".to_string(),
-    };
-    lines.push(Line::from(Span::styled(
-        header,
-        Style::default()
-            .fg(crate::theme::theme().accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-    match latest {
-        None => {
-            lines.push(Line::from(Span::styled(
-                "  (no active plan)",
-                Style::default().fg(crate::theme::theme().subtle_fg),
-            )));
-        }
-        Some(p) => {
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default().fg(crate::theme::theme().subtle_fg)),
-                Span::styled(
-                    truncate_line(&p.title, 28),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-            ]));
-        }
-    }
-    Paragraph::new(lines)
-}
-
-fn todos_body<'a>(todos: &'a [atman_runtime::memory::todo::Todo]) -> Vec<Line<'a>> {
-    use atman_runtime::memory::todo::TodoStatus;
-    let t = crate::theme::theme();
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    for todo in todos {
-        let (glyph, glyph_style) = match todo.status {
-            TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg)),
-            TodoStatus::InProgress => (
-                "⚡",
-                Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
-            ),
-            TodoStatus::Done => ("✓", Style::default().fg(t.success)),
-            TodoStatus::Cancelled => (
-                "✗",
-                Style::default()
-                    .fg(t.subtle_fg)
-                    .add_modifier(Modifier::CROSSED_OUT),
-            ),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {glyph} "), glyph_style),
-            Span::styled(
-                truncate_line(&todo.why, 32),
-                Style::default().fg(t.tinted_fg),
-            ),
-        ]));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "    {} · {}",
-                truncate_line(&todo.where_, 20),
-                truncate_line(&todo.how, 8)
-            ),
-            Style::default().fg(t.meta_fg),
-        )));
-    }
-    lines
 }
 
 fn truncate_line(s: &str, max_chars: usize) -> String {
