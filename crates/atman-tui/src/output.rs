@@ -1160,7 +1160,7 @@ fn render_collapsed_workflow_card(
         "{} nodes · {} agents · {} tools · {} edits",
         stats.nodes, stats.agents, stats.tools, stats.edits
     );
-    let button_text = "─[⛶]─";
+    let button_text = "[⛶]";
     let button_w = UnicodeWidthStr::width(button_text) as u16;
     let title_w = UnicodeWidthStr::width(title.as_str());
     let stats_w = UnicodeWidthStr::width(stats_text.as_str());
