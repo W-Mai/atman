@@ -157,9 +157,10 @@ struct TaskHeights {
 }
 
 fn task_section_heights(inner_h: u16) -> TaskHeights {
-    let goal = 7u16;
-    let plans = 3u16;
-    let todos = inner_h.saturating_sub(goal).saturating_sub(plans);
+    let goal = 7u16.min(inner_h);
+    let remaining = inner_h.saturating_sub(goal);
+    let plans = remaining / 2;
+    let todos = remaining - plans;
     TaskHeights { goal, plans, todos }
 }
 
@@ -495,19 +496,19 @@ mod tests {
     }
 
     #[test]
-    fn task_heights_full_room_gives_todos_remaining() {
-        let h = task_section_heights(20);
+    fn task_heights_full_room_splits_between_plans_and_todos() {
+        let h = task_section_heights(30);
         assert_eq!(h.goal, 7);
-        assert_eq!(h.plans, 3);
-        assert_eq!(h.todos, 10);
+        assert_eq!(h.plans, 11);
+        assert_eq!(h.todos, 12);
     }
 
     #[test]
-    fn task_heights_tight_shrinks_todos() {
+    fn task_heights_tight_shrinks_proportionally() {
         let h = task_section_heights(9);
         assert_eq!(h.goal, 7);
-        assert_eq!(h.plans, 3);
-        assert_eq!(h.todos, 0);
+        assert_eq!(h.plans, 1);
+        assert_eq!(h.todos, 1);
     }
 
     #[test]
