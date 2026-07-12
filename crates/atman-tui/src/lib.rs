@@ -2096,7 +2096,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         let goal_scroll = app.goal_scroll;
         let plans_scroll = app.plans_scroll;
         let todos_scroll = app.todos_scroll;
-        sidebar::render(
+        let sr = sidebar::render(
             f,
             area,
             sidebar::SidebarInputs {
@@ -2118,6 +2118,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             },
         );
         app.last_sidebar_rect = Some(area);
+        app.last_goal_rect = sr.goal_rect;
+        app.last_plan_rect = sr.plan_rect;
+        app.last_todo_rect = sr.todo_rect;
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(

@@ -47,7 +47,17 @@ impl SidebarMode {
     }
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
+pub struct SidebarRenderResult {
+    pub goal_rect: Option<Rect>,
+    pub plan_rect: Option<Rect>,
+    pub todo_rect: Option<Rect>,
+}
+
+pub fn render(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    inputs: SidebarInputs<'_>,
+) -> SidebarRenderResult {
     let t = crate::theme::theme();
     crate::sanitize_widget_edges(f, area);
     f.render_widget(ratatui::widgets::Clear, area);
@@ -67,7 +77,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
     f.render_widget(outer, area);
 
     if inner.height == 0 || inner.width == 0 {
-        return;
+        return SidebarRenderResult {
+            goal_rect: None,
+            plan_rect: None,
+            todo_rect: None,
+        };
     }
 
     let _goal_need: u16 = 7;
@@ -127,7 +141,14 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         ])
         .split(task_area);
 
+    let mut result = SidebarRenderResult {
+        goal_rect: None,
+        plan_rect: None,
+        todo_rect: None,
+    };
+
     if task_heights.goal > 0 {
+        result.goal_rect = Some(task_sections[0]);
         let c = render_scrollable_section(
             f,
             task_sections[0],
@@ -138,12 +159,14 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         (inputs.on_goal_scroll)(c);
     }
     if task_heights.plans > 0 {
+        result.plan_rect = Some(task_sections[1]);
         let header = plans_header(inputs.plans);
         let body = plans_body(inputs.plans);
         let c = render_scrollable_section(f, task_sections[1], &header, body, inputs.plans_scroll);
         (inputs.on_plans_scroll)(c);
     }
     if task_heights.todos > 0 {
+        result.todo_rect = Some(task_sections[2]);
         let header = todos_header(inputs.todos);
         let body = todos_body(inputs.todos);
         let c = render_scrollable_section(f, task_sections[2], &header, body, inputs.todos_scroll);
@@ -171,6 +194,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
             meta_sections[1],
         );
     }
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
