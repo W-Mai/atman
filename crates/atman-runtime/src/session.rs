@@ -560,6 +560,30 @@ fn replay_context_snapshot_from(path: &Path) -> ContextSnapshot {
 }
 
 fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
+    if let Some((checkpoint_seq, mut messages)) = load_last_checkpoint(path)? {
+        let values = read_jsonl_values(path)?;
+        let patches = collect_attachment_patches(&values);
+        for v in &values {
+            let ty = v["type"].as_str().unwrap_or("");
+            let seq = v["seq"].as_u64().unwrap_or(0);
+            if seq <= checkpoint_seq {
+                continue;
+            }
+            if let "user_msg" | "assistant_msg" | "tool_result_msg" | "system_msg" = ty {
+                if let Some(m) = v.get("message")
+                    && let Ok(mut msg) = serde_json::from_value::<Message>(m.clone())
+                {
+                    if let Some(seq) = v["seq"].as_u64()
+                        && let Some(ps) = patches.get(&seq)
+                    {
+                        apply_attachment_patches(&mut msg, ps);
+                    }
+                    messages.push(msg);
+                }
+            }
+        }
+        return Ok(messages);
+    }
     let entries = replay_transcript_from(path)?;
     let mut out = Vec::new();
     for entry in entries {
@@ -568,6 +592,40 @@ fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
         }
     }
     Ok(out)
+}
+
+fn read_jsonl_values(path: &Path) -> Result<Vec<serde_json::Value>, SessionOpenError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(SessionOpenError::Replay {
+                path: path.to_path_buf(),
+                source: e,
+            });
+        }
+    };
+    Ok(parse_json_lines(&text))
+}
+
+fn load_last_checkpoint(path: &Path) -> Result<Option<(u64, Vec<Message>)>, SessionOpenError> {
+    let values = read_jsonl_values(path)?;
+    for v in values.iter().rev() {
+        if v["type"].as_str() == Some("checkpoint") {
+            let seq = v["seq"].as_u64().unwrap_or(0);
+            let messages = v
+                .get("messages")
+                .and_then(|m| serde_json::from_value::<Vec<Message>>(m.clone()).ok())
+                .unwrap_or_default();
+            return Ok(Some((seq, messages)));
+        }
+    }
+    Ok(None)
+}
+
+fn find_last_seq(path: &Path) -> Result<Option<u64>, SessionOpenError> {
+    let values = read_jsonl_values(path)?;
+    Ok(values.iter().rev().find_map(|v| v["seq"].as_u64()))
 }
 
 #[derive(Debug, Clone)]
@@ -929,6 +987,9 @@ impl Session {
         }
         let events_path = dir.join("events.jsonl");
         let messages = replay_messages_from(&events_path)?;
+        if let Some(last_seq) = find_last_seq(&events_path)? {
+            sink.restore_seq(last_seq);
+        }
         let mut initial_context = replay_context_snapshot_from(&events_path);
         initial_context.window_tokens = crate::compaction::estimate_tokens_for_messages(&messages);
         initial_context.window_budget =
@@ -1492,6 +1553,15 @@ impl Session {
             ts,
         });
         self.refresh_window_snapshot();
+        let checkpoint_messages = self.messages.lock().unwrap().clone();
+        let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
+        self.sink.emit(Event::Checkpoint {
+            seq: 0,
+            session_id: self.id.to_string(),
+            messages: checkpoint_messages,
+            window_tokens,
+            ts: chrono::Utc::now(),
+        });
         Some(CompactResult {
             before_tokens,
             after_tokens,

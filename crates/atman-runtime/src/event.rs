@@ -142,6 +142,14 @@ pub enum Event {
         replacement_msg_seq: Option<u64>,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    Checkpoint {
+        #[serde(default)]
+        seq: u64,
+        session_id: String,
+        messages: Vec<crate::message::Message>,
+        window_tokens: u64,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
     ContextTruncated {
         #[serde(default)]
         seq: u64,
@@ -289,6 +297,7 @@ impl Event {
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
             | Event::ContextCompact { seq, .. }
+            | Event::Checkpoint { seq, .. }
             | Event::ContextTruncated { seq, .. }
             | Event::WatchWarn { seq, .. }
             | Event::PendingPrompt { seq, .. }
@@ -319,6 +328,7 @@ impl Event {
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
             | Event::ContextCompact { seq, .. }
+            | Event::Checkpoint { seq, .. }
             | Event::ContextTruncated { seq, .. }
             | Event::WatchWarn { seq, .. }
             | Event::PendingPrompt { seq, .. }
@@ -426,6 +436,11 @@ impl EventSink {
     // If parallel-tool dispatch is introduced, switch call sites to reserve_seq.
     pub fn next_seq_peek(&self) -> u64 {
         self.seq_counter.load(std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    pub fn restore_seq(&self, last_seq: u64) {
+        self.seq_counter
+            .store(last_seq, std::sync::atomic::Ordering::SeqCst);
     }
 
     // Atomic reserve for the future parallel-dispatch case: returns a seq value that

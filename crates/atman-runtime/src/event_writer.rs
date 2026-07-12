@@ -260,6 +260,7 @@ pub(crate) fn extract_ts(event: &Event) -> String {
         | Event::UserInject { ts, .. }
         | Event::ContentFilterHit { ts, .. }
         | Event::ContextCompact { ts, .. }
+        | Event::Checkpoint { ts, .. }
         | Event::ContextTruncated { ts, .. }
         | Event::WatchWarn { ts, .. }
         | Event::PendingPrompt { ts, .. }
@@ -290,6 +291,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::UserInject { .. } => "user_inject",
         Event::ContentFilterHit { .. } => "content_filter_hit",
         Event::ContextCompact { .. } => "context_compact",
+        Event::Checkpoint { .. } => "checkpoint",
         Event::ContextTruncated { .. } => "context_truncated",
         Event::WatchWarn { .. } => "watch_warn",
         Event::PendingPrompt { .. } => "pending_prompt",
@@ -373,6 +375,7 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         ),
         Event::LlmCall { .. }
         | Event::ContextCompact { .. }
+        | Event::Checkpoint { .. }
         | Event::PendingPrompt { .. }
         | Event::PromptResolved { .. } => (None, None),
     }
