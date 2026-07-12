@@ -306,10 +306,19 @@ async fn run_frames(
                                     }
                                 }
                             } else if over_sidebar {
-                                if matches!(me.kind, MouseEventKind::ScrollUp) {
-                                    app.todos_scroll = app.todos_scroll.saturating_sub(1);
-                                } else {
-                                    app.todos_scroll = app.todos_scroll.saturating_add(1);
+                                let over_goal = app.last_goal_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
+                                let over_plan = app.last_plan_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
+                                let over_todo = app.last_todo_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
+                                let up = matches!(me.kind, MouseEventKind::ScrollUp);
+                                if over_goal {
+                                    if up { app.goal_scroll = app.goal_scroll.saturating_sub(1); }
+                                    else { app.goal_scroll = app.goal_scroll.saturating_add(1); }
+                                } else if over_plan {
+                                    if up { app.plans_scroll = app.plans_scroll.saturating_sub(1); }
+                                    else { app.plans_scroll = app.plans_scroll.saturating_add(1); }
+                                } else if over_todo {
+                                    if up { app.todos_scroll = app.todos_scroll.saturating_sub(1); }
+                                    else { app.todos_scroll = app.todos_scroll.saturating_add(1); }
                                 }
                             } else if matches!(me.kind, MouseEventKind::ScrollUp) {
                                 scroll_delta = scroll_delta.saturating_sub(3);
@@ -2084,6 +2093,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             .and_then(|s| s.meta())
             .and_then(|m| m.project_root)
             .map(|p| p.display().to_string());
+        let goal_scroll = app.goal_scroll;
+        let plans_scroll = app.plans_scroll;
+        let todos_scroll = app.todos_scroll;
         sidebar::render(
             f,
             area,
@@ -2097,9 +2109,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 streaming: app.streaming,
                 todos: &app.todos,
                 plans: &app.plans,
-                goal_scroll: app.goal_scroll,
-                plans_scroll: app.plans_scroll,
-                todos_scroll: app.todos_scroll,
+                goal_scroll,
+                plans_scroll,
+                todos_scroll,
+                on_goal_scroll: &|_c| {},
+                on_plans_scroll: &|_c| {},
+                on_todos_scroll: &|_c| {},
             },
         );
         app.last_sidebar_rect = Some(area);

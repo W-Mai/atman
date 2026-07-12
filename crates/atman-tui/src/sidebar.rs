@@ -19,6 +19,9 @@ pub struct SidebarInputs<'a> {
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
+    pub on_goal_scroll: &'a dyn Fn(u16),
+    pub on_plans_scroll: &'a dyn Fn(u16),
+    pub on_todos_scroll: &'a dyn Fn(u16),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -96,7 +99,25 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
     let meta_area = meta_panel.inner(panels[1]);
     f.render_widget(meta_panel, panels[1]);
 
-    let task_heights = task_section_heights(task_area.height);
+    let goal_lines = inputs
+        .goal
+        .map(|g| g.lines().count() as u16 + 1)
+        .unwrap_or(2);
+    let plan_lines = {
+        let latest = inputs.plans.iter().max_by_key(|p| p.updated_at);
+        match latest {
+            Some(p) => 1 + p.steps.len() as u16,
+            None => 2,
+        }
+    };
+    let todo_lines = {
+        if inputs.todos.is_empty() {
+            2
+        } else {
+            (inputs.todos.len() * 2 + 1) as u16
+        }
+    };
+    let task_heights = task_section_heights(task_area.height, goal_lines, plan_lines, todo_lines);
     let task_sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -107,23 +128,26 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         .split(task_area);
 
     if task_heights.goal > 0 {
-        render_scrollable_section(
+        let c = render_scrollable_section(
             f,
             task_sections[0],
             "▸ Goal",
             goal_body(inputs.goal),
             inputs.goal_scroll,
         );
+        (inputs.on_goal_scroll)(c);
     }
     if task_heights.plans > 0 {
         let header = plans_header(inputs.plans);
         let body = plans_body(inputs.plans);
-        render_scrollable_section(f, task_sections[1], &header, body, inputs.plans_scroll);
+        let c = render_scrollable_section(f, task_sections[1], &header, body, inputs.plans_scroll);
+        (inputs.on_plans_scroll)(c);
     }
     if task_heights.todos > 0 {
         let header = todos_header(inputs.todos);
         let body = todos_body(inputs.todos);
-        render_scrollable_section(f, task_sections[2], &header, body, inputs.todos_scroll);
+        let c = render_scrollable_section(f, task_sections[2], &header, body, inputs.todos_scroll);
+        (inputs.on_todos_scroll)(c);
     }
 
     let meta_heights = meta_section_heights(meta_area.height);
@@ -156,11 +180,20 @@ struct TaskHeights {
     todos: u16,
 }
 
-fn task_section_heights(inner_h: u16) -> TaskHeights {
-    let goal = 7u16.min(inner_h);
-    let remaining = inner_h.saturating_sub(goal);
-    let plans = remaining / 2;
-    let todos = remaining - plans;
+fn task_section_heights(
+    inner_h: u16,
+    goal_lines: u16,
+    plan_lines: u16,
+    todo_lines: u16,
+) -> TaskHeights {
+    let goal_need = goal_lines.min(inner_h);
+    let plan_need = plan_lines.min(inner_h.saturating_sub(goal_need));
+    let todo_need = todo_lines.min(inner_h.saturating_sub(goal_need).saturating_sub(plan_need));
+    let used = goal_need + plan_need + todo_need;
+    let extra = inner_h.saturating_sub(used);
+    let goal = goal_need + (extra / 3);
+    let plans = plan_need + (extra / 3);
+    let todos = inner_h.saturating_sub(goal).saturating_sub(plans);
     TaskHeights { goal, plans, todos }
 }
 
@@ -194,7 +227,7 @@ fn render_scrollable_section(
     header: &str,
     body: Vec<Line<'_>>,
     scroll: u16,
-) {
+) -> u16 {
     let t = crate::theme::theme();
     let header_line = Line::from(Span::styled(
         header.to_string(),
@@ -210,6 +243,7 @@ fn render_scrollable_section(
         .split(area);
     f.render_widget(Paragraph::new(header_line), sub[0]);
     f.render_widget(Paragraph::new(body).scroll((clamped, 0)), sub[1]);
+    clamped
 }
 
 fn goal_body(goal: Option<&str>) -> Vec<Line<'_>> {
@@ -496,19 +530,18 @@ mod tests {
     }
 
     #[test]
-    fn task_heights_full_room_splits_between_plans_and_todos() {
-        let h = task_section_heights(30);
-        assert_eq!(h.goal, 7);
-        assert_eq!(h.plans, 11);
-        assert_eq!(h.todos, 12);
+    fn task_heights_content_fits() {
+        let h = task_section_heights(30, 2, 6, 41);
+        assert!(h.goal >= 2);
+        assert!(h.plans >= 6);
+        assert!(h.todos >= 20);
     }
 
     #[test]
-    fn task_heights_tight_shrinks_proportionally() {
-        let h = task_section_heights(9);
-        assert_eq!(h.goal, 7);
-        assert_eq!(h.plans, 1);
-        assert_eq!(h.todos, 1);
+    fn task_heights_tight_shrinks() {
+        let h = task_section_heights(9, 2, 6, 41);
+        assert_eq!(h.goal, 2);
+        assert!(h.plans + h.todos <= 7);
     }
 
     #[test]
