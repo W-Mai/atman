@@ -114,11 +114,28 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         );
     }
     if task_heights.todos > 0 {
-        let p = todos_section(inputs.todos, task_heights.todos);
-        let total_lines = (inputs.todos.len() * 2 + 1) as u16;
-        let max_scroll = total_lines.saturating_sub(task_heights.todos);
+        let done_count = inputs
+            .todos
+            .iter()
+            .filter(|tt| matches!(tt.status, atman_runtime::memory::todo::TodoStatus::Done))
+            .count();
+        let total = inputs.todos.len();
+        let header_line = Line::from(Span::styled(
+            format!("▸ Todos ({done_count}/{total})"),
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        ));
+        let body = todos_body(inputs.todos);
+        let body_count = body.len() as u16;
+        let visible_body = task_heights.todos.saturating_sub(1);
+        let max_scroll = body_count.saturating_sub(visible_body);
         let scroll = inputs.sidebar_scroll.min(max_scroll);
-        f.render_widget(p.scroll((scroll, 0)), task_sections[2]);
+        let todo_area = task_sections[2];
+        let sub = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(todo_area);
+        f.render_widget(Paragraph::new(header_line), sub[0]);
+        f.render_widget(Paragraph::new(body).scroll((scroll, 0)), sub[1]);
     }
 
     let meta_heights = meta_section_heights(meta_area.height);
@@ -282,27 +299,10 @@ fn plans_section<'a>(plans: &'a [atman_runtime::memory::plan::Plan], max_h: u16)
     Paragraph::new(lines)
 }
 
-fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], _max_h: u16) -> Paragraph<'a> {
+fn todos_body<'a>(todos: &'a [atman_runtime::memory::todo::Todo]) -> Vec<Line<'a>> {
     use atman_runtime::memory::todo::TodoStatus;
     let t = crate::theme::theme();
-    let done = todos
-        .iter()
-        .filter(|tt| matches!(tt.status, TodoStatus::Done))
-        .count();
-    let total = todos.len();
     let mut lines: Vec<Line<'_>> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("▸ Todos ({done}/{total})"),
-        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-    )));
-    if todos.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (no todos yet)",
-            Style::default().fg(t.subtle_fg),
-        )));
-        return Paragraph::new(lines);
-    }
-    let panel_w = 32usize;
     for todo in todos {
         let (glyph, glyph_style) = match todo.status {
             TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg)),
@@ -318,21 +318,23 @@ fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], _max_h: u16
                     .add_modifier(Modifier::CROSSED_OUT),
             ),
         };
-        let title = truncate_line(&todo.why, panel_w);
         lines.push(Line::from(vec![
             Span::styled(format!("  {glyph} "), glyph_style),
-            Span::styled(title, Style::default().fg(t.tinted_fg)),
+            Span::styled(
+                truncate_line(&todo.why, 32),
+                Style::default().fg(t.tinted_fg),
+            ),
         ]));
         lines.push(Line::from(Span::styled(
             format!(
                 "    {} · {}",
                 truncate_line(&todo.where_, 20),
-                truncate_line(&todo.how, panel_w.saturating_sub(24))
+                truncate_line(&todo.how, 8)
             ),
             Style::default().fg(t.meta_fg),
         )));
     }
-    Paragraph::new(lines)
+    lines
 }
 
 fn truncate_line(s: &str, max_chars: usize) -> String {

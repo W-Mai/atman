@@ -307,9 +307,9 @@ async fn run_frames(
                                 }
                             } else if over_sidebar {
                                 if matches!(me.kind, MouseEventKind::ScrollUp) {
-                                    app.sidebar_scroll = app.sidebar_scroll.saturating_sub(2);
+                                    app.sidebar_scroll = app.sidebar_scroll.saturating_sub(1);
                                 } else {
-                                    app.sidebar_scroll = app.sidebar_scroll.saturating_add(2);
+                                    app.sidebar_scroll = app.sidebar_scroll.saturating_add(1);
                                 }
                             } else if matches!(me.kind, MouseEventKind::ScrollUp) {
                                 scroll_delta = scroll_delta.saturating_sub(3);
