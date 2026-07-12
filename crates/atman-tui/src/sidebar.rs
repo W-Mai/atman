@@ -282,52 +282,55 @@ fn plans_section<'a>(plans: &'a [atman_runtime::memory::plan::Plan], max_h: u16)
 
 fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], _max_h: u16) -> Paragraph<'a> {
     use atman_runtime::memory::todo::TodoStatus;
+    let t = crate::theme::theme();
     let done = todos
         .iter()
-        .filter(|t| matches!(t.status, TodoStatus::Done))
+        .filter(|tt| matches!(tt.status, TodoStatus::Done))
         .count();
     let total = todos.len();
     let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("▸ Todos ({done}/{total})"),
-        Style::default()
-            .fg(crate::theme::theme().accent)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
     )));
     if todos.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no todos yet)",
-            Style::default().fg(crate::theme::theme().subtle_fg),
+            Style::default().fg(t.subtle_fg),
         )));
         return Paragraph::new(lines);
     }
+    let panel_w = 32usize;
     for todo in todos {
-        let (glyph, style) = match todo.status {
-            TodoStatus::Pending => ("○", Style::default().fg(crate::theme::theme().subtle_fg)),
+        let (glyph, glyph_style) = match todo.status {
+            TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg)),
             TodoStatus::InProgress => (
                 "⚡",
-                Style::default()
-                    .fg(crate::theme::theme().warn)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
             ),
-            TodoStatus::Done => ("✓", Style::default().fg(crate::theme::theme().success)),
+            TodoStatus::Done => ("✓", Style::default().fg(t.success)),
             TodoStatus::Cancelled => (
                 "✗",
                 Style::default()
-                    .fg(crate::theme::theme().subtle_fg)
+                    .fg(t.subtle_fg)
                     .add_modifier(Modifier::CROSSED_OUT),
             ),
         };
-        let content = &todo.where_;
+        let title = truncate_line(&todo.why, panel_w);
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {glyph} "),
-                Style::default().fg(crate::theme::theme().subtle_fg),
-            ),
-            Span::styled(truncate_line(content, 24), style),
+            Span::styled(format!("  {glyph} "), glyph_style),
+            Span::styled(title, Style::default().fg(t.tinted_fg)),
         ]));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "    {} · {}",
+                truncate_line(&todo.where_, 20),
+                truncate_line(&todo.how, panel_w.saturating_sub(24))
+            ),
+            Style::default().fg(t.meta_fg),
+        )));
     }
-    Paragraph::new(lines).scroll((0, 0))
+    Paragraph::new(lines)
 }
 
 fn truncate_line(s: &str, max_chars: usize) -> String {

@@ -27,6 +27,7 @@ pub struct Theme {
     pub highlight_bg: Color,
     pub border: Color,
     pub heading: Color,
+    pub meta_fg: Color,
 }
 
 impl Theme {
@@ -49,6 +50,7 @@ impl Theme {
             highlight_bg: Color::DarkGray,
             border: Color::DarkGray,
             heading: Color::Cyan,
+            meta_fg: Color::DarkGray,
         }
     }
 
@@ -71,6 +73,7 @@ impl Theme {
             highlight_bg: Color::Rgb(200, 220, 240),
             border: Color::Rgb(180, 180, 180),
             heading: Color::Rgb(0, 100, 140),
+            meta_fg: Color::Rgb(140, 140, 140),
         }
     }
 }
