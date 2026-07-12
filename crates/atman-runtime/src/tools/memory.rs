@@ -200,7 +200,9 @@ impl Tool for MemoryTodoSet {
              Best practice: create a todo for each discrete subtask. Keep `where` \
              specific (file path or module), `why` one sentence, `how` a brief \
              approach, `expected_result` the verification criteria. Don't create \
-             todos for trivial steps — only for things the user would want to track.",
+             todos for trivial steps — only for things the user would want to track.\n\n\
+             To modify an existing todo, cancel the old one then create a new one. \
+             There is no update tool.",
         )
     }
 
