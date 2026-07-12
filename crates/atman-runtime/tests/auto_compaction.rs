@@ -19,7 +19,7 @@ fn build_long_history(session: &Session, msg_count: usize) {
 async fn compact_messages_replaces_middle_span() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Session::open(tmp.path()).unwrap();
-    session.record_llm_call("llama-3b", 0, 0);
+    session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     build_long_history(&session, 20);
     let before_len = session.message_count();
     let result = session
@@ -38,7 +38,7 @@ async fn compact_messages_replaces_middle_span() {
 async fn compact_messages_returns_none_below_budget() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Session::open(tmp.path()).unwrap();
-    session.record_llm_call("claude-opus-4.7", 0, 0);
+    session.record_llm_call("claude-opus-4.7", 0, 0, 0, 0, None, None);
     for i in 0..4 {
         let msg = Message::user_text(TurnId::now(), format!("hi {i}"));
         session.append_message(msg, None);
@@ -54,7 +54,7 @@ async fn maybe_auto_compact_emits_warning_when_no_range_found() {
     let big = "y".repeat(50_000);
     session.append_message(Message::user_text(TurnId::now(), big.clone()), None);
     session.append_message(Message::assistant_text(TurnId::now(), big), None);
-    session.record_llm_call("llama-3b", 0, 0);
+    session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     let providers = atman_runtime::provider::ProviderRegistry::new();
     maybe_auto_compact(&session, "llama-3b", &providers).await;
     let warned = session
@@ -76,7 +76,7 @@ async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Session::open(tmp.path()).unwrap();
     build_long_history(&session, 60);
-    session.record_llm_call("mock-summary", 0, 0);
+    session.record_llm_call("mock-summary", 0, 0, 0, 0, None, None);
     let mut providers = ProviderRegistry::new();
     providers.register(Arc::new(MockProvider::new("mock-summary").with_fallback(
         Value::Str("We investigated compaction and shipped the anchor-based fs.read tool.".into()),
@@ -119,7 +119,7 @@ async fn setup_review_env() -> (
     let tmp = tempfile::tempdir().unwrap();
     let session = Arc::new(Session::open(tmp.path()).unwrap());
     build_long_history(&session, 60);
-    session.record_llm_call("mock-summary", 0, 0);
+    session.record_llm_call("mock-summary", 0, 0, 0, 0, None, None);
     let mut providers = ProviderRegistry::new();
     providers
         .register(Arc::new(MockProvider::new("mock-summary").with_fallback(
@@ -273,7 +273,7 @@ async fn review_always_without_subscriber_auto_accepts_daemon_shape() {
 async fn cooldown_blocks_repeat_compaction_within_window() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Session::open(tmp.path()).unwrap();
-    session.record_llm_call("llama-3b", 0, 0);
+    session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     build_long_history(&session, 20);
     assert!(session.approval_cooldown_ok_for_compact());
     let _ = session.compact_messages("first".into()).unwrap();

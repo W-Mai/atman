@@ -459,6 +459,10 @@ pub struct ContextSnapshot {
     pub memory_recent_count: u16,
     pub window_tokens: u64,
     pub window_budget: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub last_ttft_ms: u64,
+    pub last_tokens_per_sec: f64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1207,13 +1211,27 @@ impl Session {
         let _ = self.attach_watch.send(count);
     }
 
-    pub fn record_llm_call(&self, model: &str, tokens_in: u64, tokens_out: u64) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_llm_call(
+        &self,
+        model: &str,
+        tokens_in: u64,
+        tokens_out: u64,
+        cache_read: u64,
+        cache_write: u64,
+        ttft_ms: Option<u64>,
+        tokens_per_sec: Option<f64>,
+    ) {
         self.last_input_tokens
             .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
         self.context_watch.send_modify(|snap| {
             snap.model = model.to_string();
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
             snap.tokens_out = snap.tokens_out.saturating_add(tokens_out);
+            snap.cache_read = cache_read;
+            snap.cache_write = cache_write;
+            snap.last_ttft_ms = ttft_ms.unwrap_or(0);
+            snap.last_tokens_per_sec = tokens_per_sec.unwrap_or(0.0);
         });
         self.refresh_window_snapshot();
     }

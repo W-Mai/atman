@@ -15,13 +15,7 @@ async fn cache_prompt_true_sends_ephemeral_cache_control() {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .and(body_partial_json(serde_json::json!({
-            "messages": [{
-                "role": "user",
-                "content": [{
-                    "type": "text",
-                    "cache_control": {"type": "ephemeral"}
-                }]
-            }]
+            "cache_control": {"type": "ephemeral"}
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "m",
@@ -97,13 +91,7 @@ async fn cache_kwarg_flows_from_dsl_to_provider() {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .and(body_partial_json(serde_json::json!({
-            "messages": [{
-                "role": "user",
-                "content": [{
-                    "type": "text",
-                    "cache_control": {"type": "ephemeral"}
-                }]
-            }]
+            "cache_control": {"type": "ephemeral"}
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "m",

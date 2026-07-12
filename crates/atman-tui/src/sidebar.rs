@@ -427,6 +427,37 @@ fn context_section<'a>(
             ),
             plain,
         ),
+        kv_line(
+            "cache",
+            if ctx.cache_read > 0 || ctx.cache_write > 0 {
+                format!(
+                    "read {} · write {}",
+                    format_count(ctx.cache_read),
+                    format_count(ctx.cache_write)
+                )
+            } else {
+                "—".to_string()
+            },
+            plain,
+        ),
+        kv_line(
+            "ttft",
+            if ctx.last_ttft_ms > 0 {
+                format!("{}ms", ctx.last_ttft_ms)
+            } else {
+                "—".to_string()
+            },
+            plain,
+        ),
+        kv_line(
+            "speed",
+            if ctx.last_tokens_per_sec > 0.0 {
+                format!("{:.1} tok/s", ctx.last_tokens_per_sec)
+            } else {
+                "—".to_string()
+            },
+            plain,
+        ),
         kv_line("attach", format!("{attach_count}"), plain),
         kv_line("mcp", format!("{}/{}", ctx.mcp_ok, ctx.mcp_total), plain),
         kv_line(

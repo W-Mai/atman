@@ -41,6 +41,9 @@ impl FlakyProvider {
             },
             stop_reason: StopReason::End,
             token_usage: TokenUsage::default(),
+            timing: atman_runtime::provider::CallTiming::default(),
+            model: String::new(),
+            response_id: None,
         }
     }
 }

@@ -62,6 +62,9 @@ impl Provider for RecordingProvider {
                 },
                 stop_reason: StopReason::End,
                 token_usage: TokenUsage::default(),
+                timing: atman_runtime::provider::CallTiming::default(),
+                model: String::new(),
+                response_id: None,
             })
         })
     }
@@ -94,6 +97,9 @@ impl Provider for RecordingProvider {
             },
             stop_reason: StopReason::End,
             token_usage: TokenUsage::default(),
+            timing: atman_runtime::provider::CallTiming::default(),
+            model: String::new(),
+            response_id: None,
         };
         let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
             Box::pin(async move {

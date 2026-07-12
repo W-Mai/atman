@@ -53,6 +53,9 @@ impl Provider for ScriptedProvider {
                     ),
                     stop_reason: StopReason::End,
                     token_usage: TokenUsage::default(),
+                    timing: atman_runtime::provider::CallTiming::default(),
+                    model: String::new(),
+                    response_id: None,
                 }),
                 Err(e) => Err(e),
             }
@@ -83,6 +86,9 @@ impl Provider for ScriptedProvider {
                         message: atman_runtime::message::Message::assistant_text(turn_id, text),
                         stop_reason: StopReason::End,
                         token_usage: TokenUsage::default(),
+                        timing: atman_runtime::provider::CallTiming::default(),
+                        model: String::new(),
+                        response_id: None,
                     }),
                     Err(e) => Err(e),
                 }

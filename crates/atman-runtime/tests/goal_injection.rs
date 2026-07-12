@@ -14,11 +14,15 @@ fn mock_that_echoes_system() -> Arc<CapturedProvider> {
 #[derive(Default)]
 struct CapturedProvider {
     last_system: std::sync::Mutex<Option<String>>,
+    last_messages: std::sync::Mutex<Vec<Message>>,
 }
 
 impl CapturedProvider {
     fn last_system(&self) -> Option<String> {
         self.last_system.lock().unwrap().clone()
+    }
+    fn last_messages(&self) -> Vec<Message> {
+        self.last_messages.lock().unwrap().clone()
     }
 }
 
@@ -35,6 +39,7 @@ impl atman_runtime::provider::Provider for CapturedProvider {
     > {
         Box::pin(async move {
             *self.last_system.lock().unwrap() = req.system.clone();
+            *self.last_messages.lock().unwrap() = req.messages.clone();
             let turn_id = atman_runtime::event::TurnId::now();
             Ok(atman_runtime::provider::AssistantMessage::text_only(
                 Message {
@@ -67,7 +72,8 @@ impl atman_runtime::provider::Provider for CapturedProvider {
                 ))
             })
         };
-        *self.last_system.lock().unwrap() = req.system;
+        *self.last_system.lock().unwrap() = req.system.clone();
+        *self.last_messages.lock().unwrap() = req.messages.clone();
         atman_runtime::provider::wrap_call_as_streaming(f)
     }
 }
@@ -98,16 +104,19 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
         .unwrap();
     session.end_turn();
 
-    let seen = provider
-        .last_system()
-        .expect("provider should record system");
+    let msgs = provider.last_messages();
+    let goal_msg: String = msgs
+        .iter()
+        .map(|m| m.text_concat())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        seen.contains("ship the atman agent"),
-        "want goal text in system prompt, got: {seen}"
+        goal_msg.contains("ship the atman agent"),
+        "want goal text in messages, got: {goal_msg}"
     );
     assert!(
-        seen.contains("[session goal]") && seen.contains("[/session goal]"),
-        "want goal delimiters, got: {seen}"
+        goal_msg.contains("[session goal]") && goal_msg.contains("[/session goal]"),
+        "want goal delimiters, got: {goal_msg}"
     );
 }
 
@@ -140,13 +149,19 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
     session.end_turn();
 
     let seen = provider.last_system().unwrap();
-    let goal_at = seen.find("stay minimal").expect("goal present");
-    let user_at = seen
-        .find("you are a helpful assistant")
-        .expect("user system present");
     assert!(
-        goal_at < user_at,
-        "goal must come before user's system: {seen}"
+        seen.contains("you are a helpful assistant"),
+        "user system must stay in system prompt: {seen}"
+    );
+    let msgs = provider.last_messages();
+    let goal_msg: String = msgs
+        .iter()
+        .map(|m| m.text_concat())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        goal_msg.contains("stay minimal"),
+        "goal must be in messages: {goal_msg}"
     );
 }
 
@@ -199,8 +214,16 @@ async fn goal_survives_multiple_turns_in_same_session() {
             .await
             .unwrap();
         session.end_turn();
-        let seen = provider.last_system().unwrap();
-        assert!(seen.contains("persistent goal"), "turn missed goal: {seen}");
+        let msgs = provider.last_messages();
+        let joined: String = msgs
+            .iter()
+            .map(|m| m.text_concat())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("persistent goal"),
+            "turn missed goal: {joined}"
+        );
     }
 }
 

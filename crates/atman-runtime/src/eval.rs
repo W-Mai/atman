@@ -947,7 +947,22 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 }
                 if let Some(session) = ctx.session {
                     let input_with_cache = usage.input + usage.cached_input + usage.cache_write;
-                    session.record_llm_call(&model, input_with_cache, usage.output);
+                    let (ttft_ms, tps) = match &outcome {
+                        Ok(am) => (
+                            am.timing.ttft_ms,
+                            am.timing.tokens_per_second(am.token_usage.output),
+                        ),
+                        Err(_) => (None, None),
+                    };
+                    session.record_llm_call(
+                        &model,
+                        input_with_cache,
+                        usage.output,
+                        usage.cached_input,
+                        usage.cache_write,
+                        ttft_ms,
+                        tps,
+                    );
                 }
                 match outcome {
                     Ok(am) => {

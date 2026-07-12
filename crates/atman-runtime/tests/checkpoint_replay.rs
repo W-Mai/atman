@@ -20,7 +20,7 @@ async fn checkpoint_event_written_after_compaction() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Session::open(tmp.path()).unwrap();
     let sid = session.id().to_string();
-    session.record_llm_call("llama-3b", 0, 0);
+    session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     build_long_history(&session, 20);
     session.compact_messages("test summary".into()).unwrap();
     session.shutdown().await;
@@ -41,7 +41,7 @@ async fn checkpoint_skips_dead_history_on_reopen() {
     {
         let session = Session::open(tmp.path()).unwrap();
         sid = session.id().to_string();
-        session.record_llm_call("llama-3b", 0, 0);
+        session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
         build_long_history(&session, 20);
         session
             .compact_messages("compacted summary".into())
@@ -90,7 +90,7 @@ async fn checkpoint_restores_seq_counter_on_reopen() {
     {
         let session = Session::open(tmp.path()).unwrap();
         sid = session.id().to_string();
-        session.record_llm_call("llama-3b", 0, 0);
+        session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
         build_long_history(&session, 20);
         session.compact_messages("summary".into()).unwrap();
         session.shutdown().await;

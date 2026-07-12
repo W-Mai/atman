@@ -25,7 +25,7 @@ async fn resume_shows_the_compacted_view_not_the_raw_history() {
     let sid = {
         let session = Session::open(tmp.path()).unwrap();
         build_long_history(&session, 60);
-        session.record_llm_call("mock-summary", 0, 0);
+        session.record_llm_call("mock-summary", 0, 0, 0, 0, None, None);
         let mut providers = ProviderRegistry::new();
         providers.register(Arc::new(MockProvider::new("mock-summary").with_fallback(
             Value::Str("Compacted: we did stuff, decided things, moved on.".into()),
