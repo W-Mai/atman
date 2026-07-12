@@ -322,9 +322,7 @@ fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
                     (
                         "✓",
                         Style::default().fg(t.success),
-                        Style::default()
-                            .fg(t.meta_fg)
-                            .add_modifier(Modifier::CROSSED_OUT),
+                        Style::default().fg(t.meta_fg),
                     )
                 } else {
                     (
@@ -333,7 +331,7 @@ fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
                         Style::default().fg(t.tinted_fg),
                     )
                 };
-                let indent = if i + 1 == total { "  " } else { " │" };
+                let indent = if total <= 1 { "  " } else { " │" };
                 lines.push(Line::from(vec![
                     Span::styled(format!(" {indent} "), Style::default().fg(t.subtle_fg)),
                     Span::styled(format!("{glyph} "), glyph_style),
