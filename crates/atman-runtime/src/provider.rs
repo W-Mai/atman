@@ -28,6 +28,7 @@ pub struct TokenUsage {
     pub cached_input: u64,
     pub output: u64,
     pub cache_write: u64,
+    pub reasoning_tokens: u64,
 }
 
 impl TokenUsage {
@@ -36,6 +37,24 @@ impl TokenUsage {
             .saturating_add(self.cached_input)
             .saturating_add(self.output)
             .saturating_add(self.cache_write)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallTiming {
+    pub total_ms: u64,
+    pub ttft_ms: Option<u64>,
+}
+
+impl CallTiming {
+    pub fn tokens_per_second(&self, output_tokens: u64) -> Option<f64> {
+        let ttft = self.ttft_ms? as f64;
+        let total = self.total_ms as f64;
+        let gen_ms = total - ttft;
+        if gen_ms <= 0.0 || output_tokens == 0 {
+            return None;
+        }
+        Some(output_tokens as f64 / (gen_ms / 1000.0))
     }
 }
 
@@ -52,6 +71,10 @@ pub struct AssistantMessage {
     pub message: Message,
     pub stop_reason: StopReason,
     pub token_usage: TokenUsage,
+    #[allow(dead_code)]
+    pub timing: CallTiming,
+    pub model: String,
+    pub response_id: Option<String>,
 }
 
 impl AssistantMessage {
@@ -60,6 +83,9 @@ impl AssistantMessage {
             message: msg,
             stop_reason: StopReason::End,
             token_usage: TokenUsage::default(),
+            timing: CallTiming::default(),
+            model: String::new(),
+            response_id: None,
         }
     }
 

@@ -7,8 +7,8 @@ use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
 use crate::message::{Message, MessagePart, MessageRole};
 use crate::provider::{
-    AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
-    estimate_tokens,
+    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
+    TokenUsage, estimate_tokens,
 };
 use crate::tool::BoxFut;
 use crate::value::Value;
@@ -168,6 +168,9 @@ fn value_to_assistant_message(v: &Value, turn_id: crate::event::TurnId) -> Assis
             output: estimate_tokens(&text),
             ..Default::default()
         },
+        timing: CallTiming::default(),
+        model: String::new(),
+        response_id: None,
     }
 }
 

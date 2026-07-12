@@ -6,8 +6,8 @@ use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
 use crate::message::{ImageData, Message, MessagePart, MessageRole};
 use crate::provider::{
-    AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
-    estimate_tokens,
+    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
+    TokenUsage, estimate_tokens,
 };
 use crate::providers::classify_attachment_error;
 use crate::tool::BoxFut;
@@ -421,7 +421,11 @@ impl Provider for AnthropicProvider {
                         cached_input: cache_read_tokens,
                         output: cumulative,
                         cache_write: cache_write_tokens,
+                        ..Default::default()
                     },
+                    timing: CallTiming::default(),
+                    model: String::new(),
+                    response_id: None,
                 })
             },
         );
@@ -472,6 +476,7 @@ fn response_to_assistant(
             cached_input: u.cache_read_input_tokens.unwrap_or(0),
             output: u.output_tokens.unwrap_or(0),
             cache_write: u.cache_creation_input_tokens.unwrap_or(0),
+            ..Default::default()
         })
         .unwrap_or_default();
     AssistantMessage {
@@ -482,6 +487,9 @@ fn response_to_assistant(
         },
         stop_reason,
         token_usage: usage,
+        timing: CallTiming::default(),
+        model: body.model.unwrap_or_default(),
+        response_id: body.id,
     }
 }
 
@@ -597,6 +605,10 @@ struct MessagesResponse {
     stop_reason: Option<String>,
     #[serde(default)]
     usage: Option<AnthropicUsage>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

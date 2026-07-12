@@ -356,10 +356,17 @@ async fn call_and_maybe_stream_inner(
     };
     let stream_tx = session.stream_tx();
     let model_name = req.model.clone();
+    let request_start = std::time::Instant::now();
+    let mut first_token_at: Option<std::time::Instant> = None;
     let obs = provider.call_streaming(req);
     let mut events = obs.events;
     let output = obs.output;
     tokio::pin!(output);
+    let mark_first_token = |first: &mut Option<std::time::Instant>| {
+        if first.is_none() {
+            *first = Some(std::time::Instant::now());
+        }
+    };
     loop {
         tokio::select! {
             biased;
@@ -367,12 +374,14 @@ async fn call_and_maybe_stream_inner(
                 match ev {
                     Ok(crate::event::NodeEvent::LlmChunk { text, .. }) => {
                         session.mark_streamed();
+                        mark_first_token(&mut first_token_at);
                         let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
                             text,
                             model: model_name.clone(),
                         });
                     }
                     Ok(crate::event::NodeEvent::ThinkingChunk { text }) => {
+                        mark_first_token(&mut first_token_at);
                         let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
                     }
                     Ok(crate::event::NodeEvent::LlmDone { total_tokens }) => {
@@ -386,12 +395,14 @@ async fn call_and_maybe_stream_inner(
                     match ev {
                         crate::event::NodeEvent::LlmChunk { text, .. } => {
                             session.mark_streamed();
+                            mark_first_token(&mut first_token_at);
                             let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
                                 text,
                                 model: model_name.clone(),
                             });
                         }
                         crate::event::NodeEvent::ThinkingChunk { text } => {
+                            mark_first_token(&mut first_token_at);
                             let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
                         }
                         crate::event::NodeEvent::LlmDone { total_tokens } => {
@@ -399,6 +410,15 @@ async fn call_and_maybe_stream_inner(
                         }
                         _ => {}
                     }
+                }
+                let total_ms = request_start.elapsed().as_millis() as u64;
+                let ttft_ms = first_token_at.map(|t| t.duration_since(request_start).as_millis() as u64);
+                let mut result = result;
+                if let Ok(ref mut am) = result {
+                    am.timing = crate::provider::CallTiming {
+                        total_ms,
+                        ttft_ms,
+                    };
                 }
                 return result;
             }
@@ -901,6 +921,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             .output
                             .max(crate::provider::estimate_tokens(&am.text_concat())),
                         cache_write: am.token_usage.cache_write,
+                        ..Default::default()
                     },
                     Err(_) => crate::provider::TokenUsage {
                         input: crate::provider::estimate_tokens(&prompt),

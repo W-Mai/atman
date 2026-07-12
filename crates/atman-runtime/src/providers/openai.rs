@@ -6,8 +6,8 @@ use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
 use crate::message::{ImageData, Message, MessagePart, MessageRole};
 use crate::provider::{
-    AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
-    estimate_tokens,
+    AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
+    TokenUsage, estimate_tokens,
 };
 use crate::providers::classify_attachment_error;
 use crate::tool::BoxFut;
@@ -380,6 +380,9 @@ impl Provider for OpenAiProvider {
                         output: total,
                         ..Default::default()
                     },
+                    timing: CallTiming::default(),
+                    model: String::new(),
+                    response_id: None,
                 })
             },
         );
@@ -434,6 +437,7 @@ fn response_to_assistant(
         cached_input: 0,
         output: u.completion_tokens.unwrap_or(0),
         cache_write: 0,
+        ..Default::default()
     });
     AssistantMessage {
         message: Message {
@@ -443,6 +447,9 @@ fn response_to_assistant(
         },
         stop_reason,
         token_usage: usage.unwrap_or_default(),
+        timing: CallTiming::default(),
+        model: body.model.unwrap_or_default(),
+        response_id: body.id,
     }
 }
 
@@ -540,6 +547,10 @@ struct ChatCompletionsResponse {
     choices: Vec<ChatChoice>,
     #[serde(default)]
     usage: Option<OpenAiUsage>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
