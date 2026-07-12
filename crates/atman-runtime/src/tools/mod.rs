@@ -12,6 +12,7 @@ pub mod memory;
 pub mod memory_stubs;
 pub mod plan;
 pub mod preview;
+pub mod session;
 pub mod stdlib;
 pub mod test;
 pub mod web;
@@ -58,6 +59,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(hunk::HunkReview));
     reg.register(Arc::new(agent_ctrl::AgentSpawn));
     reg.register(Arc::new(form::FormAsk));
+    reg.register(Arc::new(session::SessionPush));
 }
 
 pub fn register_shell(reg: &mut ToolRegistry) {

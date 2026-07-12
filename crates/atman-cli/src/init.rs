@@ -137,17 +137,16 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         capabilities { shell: true }
     }
     _prompt_lands_via_begin_turn = user_prompt
-    messages = memory.recent_turns(n: 10)
-    return subflow(agent_loop, messages, 0)
+    return subflow(agent_loop, 0)
 }
 
-flow agent_loop(messages: list, iteration: int) -> string {
+flow agent_loop(iteration: int) -> string {
     when iteration >= 200 {
         return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
     }
     reply = llm {
         model: "smart"
-        messages: messages
+        context: session
         retry: 12
         tools: [
             fs.read, fs.write, fs.edit, fs.list, fs.grep,
@@ -158,7 +157,8 @@ flow agent_loop(messages: list, iteration: int) -> string {
             memory.goal.get, memory.goal.set, memory.goal.clear,
             memory.recent_turns, memory.history.search, memory.history.read,
             plan.write, plan.read, plan.tick,
-            agent.spawn
+            agent.spawn,
+            session.push
         ]
     }
     tool_uses = extract_tool_uses(reply)
@@ -166,9 +166,9 @@ flow agent_loop(messages: list, iteration: int) -> string {
         return text_concat(reply)
     }
     tool_results = dispatch_all(tool_uses)
-    new_history = concat(messages, concat([reply], tool_results))
+    session.push(tool_results)
     j = iteration + 1
-    return subflow(agent_loop, new_history, j)
+    return subflow(agent_loop, j)
 }
 "#;
 

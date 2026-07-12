@@ -33,6 +33,31 @@ pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxF
     Box::pin(async move { eval_expr_inner(expr, env, ctx).await })
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ContextMode {
+    None,
+    Session,
+    SessionRecent(usize),
+}
+
+fn parse_context_mode(s: &str) -> ContextMode {
+    match s.trim() {
+        "session" => ContextMode::Session,
+        "none" | "" => ContextMode::None,
+        other if other.starts_with("session_recent") => {
+            let rest = &other["session_recent".len()..];
+            let rest = rest
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim();
+            let n: usize = rest.parse().unwrap_or(10);
+            ContextMode::SessionRecent(n.max(1))
+        }
+        _ => ContextMode::None,
+    }
+}
+
 async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
     match expr {
         Expr::Literal(lit) => eval_literal(lit),
@@ -201,7 +226,9 @@ async fn dispatch_tool_call<'a>(
         c
     };
     let ctx_with_anchors = if let Some(session) = ctx.session {
-        ctx_with_anchors.with_session_messages(std::sync::Arc::new(session.messages()))
+        ctx_with_anchors
+            .with_session_messages(std::sync::Arc::new(session.messages()))
+            .with_session_messages_handle(session.messages_handle())
     } else {
         ctx_with_anchors
     };
@@ -545,6 +572,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut retry_kinds: Option<std::collections::HashSet<crate::error::ErrorKind>> = None;
             let mut cache_prompt = false;
             let mut context_budget: Option<u64> = None;
+            let mut context_mode = ContextMode::None;
             let mut fallback_expr: Option<&Expr> = None;
             let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
             for (k, v) in kwargs {
@@ -567,6 +595,27 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             Ok(specs) => tool_specs = specs,
                             Err(msg) => return Value::Err(RuntimeError::ToolFailed(msg)),
                         }
+                        continue;
+                    }
+                    "context" => {
+                        context_mode = match v {
+                            atman_dsl::ast::Expr::Ident(id) => parse_context_mode(&id.name),
+                            atman_dsl::ast::Expr::Member { base, field } => {
+                                let mut full = String::new();
+                                if let atman_dsl::ast::Expr::Ident(id) = base.as_ref() {
+                                    full.push_str(&id.name);
+                                }
+                                full.push('.');
+                                full.push_str(&field.name);
+                                parse_context_mode(&full)
+                            }
+                            other => {
+                                return Value::Err(RuntimeError::ToolFailed(format!(
+                                    "llm.context: expected ident like `session` or `none`, got {}",
+                                    expr_shape(other)
+                                )));
+                            }
+                        };
                         continue;
                     }
                     _ => {}
@@ -665,6 +714,11 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     "llm node: cannot specify both `messages:` and `prompt:` (pick one)".into(),
                 ));
             }
+            if !matches!(context_mode, ContextMode::None) && messages_override.is_some() {
+                return Value::Err(RuntimeError::ToolFailed(
+                    "llm node: cannot specify both `messages:` and `context:` (pick one)".into(),
+                ));
+            }
             let Some(provider) = ctx.providers.resolve(&model) else {
                 return Value::Err(RuntimeError::ToolFailed(format!(
                     "no provider registered for model `{model}`"
@@ -677,6 +731,25 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let (mut final_messages, prompt_for_budget) = if let Some(msgs) = messages_override {
                 let budget_text = msgs.last().map(|m| m.text_concat()).unwrap_or_default();
                 (msgs, budget_text)
+            } else if !matches!(context_mode, ContextMode::None)
+                && let Some(session) = ctx.session
+            {
+                let mut history = match context_mode {
+                    ContextMode::Session => session.messages(),
+                    ContextMode::SessionRecent(n) => {
+                        let all = session.messages();
+                        let start = all.len().saturating_sub(n);
+                        all[start..].to_vec()
+                    }
+                    ContextMode::None => Vec::new(),
+                };
+                let budget_text = prompt.clone().unwrap_or_default();
+                if let Some(p) = prompt
+                    && !p.is_empty()
+                {
+                    history.push(crate::message::Message::user_text(turn_id.clone(), p));
+                }
+                (history, budget_text)
             } else {
                 let Some(mut prompt_text) = prompt else {
                     return Value::Err(RuntimeError::MissingArg(
@@ -1734,6 +1807,29 @@ fn type_mismatch(expected: &str, l: &Value, r: &Value) -> Value {
 mod tests {
     use super::*;
     use atman_dsl::parse::parse_file;
+
+    #[test]
+    fn parse_context_mode_handles_variants() {
+        assert!(matches!(
+            parse_context_mode("session"),
+            ContextMode::Session
+        ));
+        assert!(matches!(parse_context_mode("none"), ContextMode::None));
+        assert!(matches!(parse_context_mode(""), ContextMode::None));
+        assert!(matches!(
+            parse_context_mode(" session "),
+            ContextMode::Session
+        ));
+        match parse_context_mode("session_recent(5)") {
+            ContextMode::SessionRecent(n) => assert_eq!(n, 5),
+            other => panic!("expected SessionRecent(5), got {other:?}"),
+        }
+        match parse_context_mode("session_recent") {
+            ContextMode::SessionRecent(n) => assert_eq!(n, 10),
+            other => panic!("expected SessionRecent(10), got {other:?}"),
+        }
+        assert!(matches!(parse_context_mode("garbage"), ContextMode::None));
+    }
 
     async fn eval_snippet(expr_src: &str) -> Value {
         let src = format!("flow t() {{\n    return {expr_src}\n}}\n");

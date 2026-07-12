@@ -77,6 +77,8 @@ pub struct ToolCtx {
     pub events: Option<crate::event::EventSink>,
     pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
     pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
+    pub session_messages_handle:
+        Option<std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>>,
     pub current_node_id: Option<String>,
     pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     pub read_files:
@@ -134,6 +136,14 @@ impl ToolCtx {
         msgs: std::sync::Arc<Vec<crate::message::Message>>,
     ) -> Self {
         self.session_messages = Some(msgs);
+        self
+    }
+
+    pub fn with_session_messages_handle(
+        mut self,
+        handle: std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>,
+    ) -> Self {
+        self.session_messages_handle = Some(handle);
         self
     }
 

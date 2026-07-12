@@ -43,7 +43,7 @@ pub struct Session {
     dir: PathBuf,
     writer: Option<EventWriter>,
     sink: EventSink,
-    messages: Mutex<Vec<Message>>,
+    messages: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
     current_turn: Mutex<Option<TurnId>>,
     injection_queue: Mutex<Vec<Injection>>,
     injection_tx: broadcast::Sender<Injection>,
@@ -860,7 +860,7 @@ impl Session {
             dir,
             writer: Some(writer),
             sink,
-            messages: Mutex::new(Vec::new()),
+            messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
@@ -946,7 +946,7 @@ impl Session {
             dir,
             writer: Some(writer),
             sink,
-            messages: Mutex::new(messages),
+            messages: std::sync::Arc::new(std::sync::Mutex::new(messages)),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
@@ -986,7 +986,7 @@ impl Session {
             dir: PathBuf::new(),
             writer: None,
             sink: EventSink::new(),
-            messages: Mutex::new(Vec::new()),
+            messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
@@ -1393,6 +1393,10 @@ impl Session {
 
     pub fn messages(&self) -> Vec<Message> {
         self.messages.lock().unwrap().clone()
+    }
+
+    pub fn messages_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<Message>>> {
+        self.messages.clone()
     }
 
     pub fn message_count(&self) -> usize {
