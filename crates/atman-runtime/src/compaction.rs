@@ -276,8 +276,8 @@ fn format_slice_for_preview(slice: &[Message]) -> String {
     let mut out = String::new();
     for (i, msg) in slice.iter().enumerate() {
         let role = msg.role.as_str();
-        let text = msg.text_concat();
-        let truncated: String = text.chars().take(400).collect();
+        let body = serialize_message_for_summary(msg);
+        let truncated: String = body.chars().take(400).collect();
         out.push_str(&format!("[{i}] {role}: {truncated}\n"));
     }
     out.chars().take(16_000).collect()
@@ -319,11 +319,49 @@ fn format_slice_for_summary(slice: &[Message]) -> String {
     let mut out = String::new();
     for (i, msg) in slice.iter().enumerate() {
         let role = msg.role.as_str();
-        let text = msg.text_concat();
-        let truncated: String = text.chars().take(2000).collect();
+        let body = serialize_message_for_summary(msg);
+        let truncated: String = body.chars().take(2000).collect();
         out.push_str(&format!("[{i}] {role}: {truncated}\n\n"));
     }
     out.chars().take(60_000).collect()
+}
+
+fn serialize_message_for_summary(msg: &Message) -> String {
+    let mut parts = Vec::new();
+    for part in &msg.parts {
+        match part {
+            MessagePart::Text { text } => {
+                parts.push(text.clone());
+            }
+            MessagePart::Thinking { thinking, .. } => {
+                let truncated: String = thinking.chars().take(500).collect();
+                parts.push(format!("[thinking: {truncated}]"));
+            }
+            MessagePart::ToolUse { name, input, .. } => {
+                let input_str = if input.is_null() {
+                    String::new()
+                } else {
+                    input.to_string()
+                };
+                let truncated: String = input_str.chars().take(800).collect();
+                parts.push(format!("[tool_call: {name}({truncated})]"));
+            }
+            MessagePart::ToolResult {
+                content,
+                is_error,
+                tool_use_id,
+            } => {
+                let truncated: String = content.chars().take(1000).collect();
+                let marker = if *is_error { "ERROR" } else { "ok" };
+                let id_short: String = tool_use_id.chars().take(12).collect();
+                parts.push(format!("[tool_result {id_short}… {marker}: {truncated}]"));
+            }
+            MessagePart::Image { .. } => {
+                parts.push("[image]".into());
+            }
+        }
+    }
+    parts.join(" ")
 }
 
 pub fn replace_range_with_summary(
@@ -446,5 +484,103 @@ mod tests {
         assert!(out[1].text_concat().contains("gist: talked about"));
         assert_eq!(out[2].role, MessageRole::User);
         assert_eq!(out[2].text_concat(), "tail");
+    }
+
+    fn assistant_with_tool_use(text: &str, tool_name: &str, input: serde_json::Value) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            parts: vec![
+                MessagePart::Text { text: text.into() },
+                MessagePart::ToolUse {
+                    id: "call_test".into(),
+                    name: tool_name.into(),
+                    input,
+                },
+            ],
+            turn_id: TurnId::now(),
+        }
+    }
+
+    fn tool_result(id: &str, content: &str, is_error: bool) -> Message {
+        Message {
+            role: MessageRole::Tool,
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id: id.into(),
+                content: content.into(),
+                is_error,
+            }],
+            turn_id: TurnId::now(),
+        }
+    }
+
+    fn thinking(text: &str) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            parts: vec![
+                MessagePart::Thinking {
+                    thinking: text.into(),
+                    signature: None,
+                },
+                MessagePart::Text {
+                    text: "after thinking".into(),
+                },
+            ],
+            turn_id: TurnId::now(),
+        }
+    }
+
+    #[test]
+    fn format_slice_for_summary_includes_tool_use() {
+        let slice = vec![
+            user("read the file"),
+            assistant_with_tool_use(
+                "let me check",
+                "fs.read",
+                serde_json::json!({"path": "/tmp/foo.rs"}),
+            ),
+            tool_result("call_test", "fn main() {}", false),
+        ];
+        let out = format_slice_for_summary(&slice);
+        assert!(out.contains("fs.read"), "missing tool name: {out}");
+        assert!(out.contains("/tmp/foo.rs"), "missing tool input: {out}");
+        assert!(
+            out.contains("fn main()"),
+            "missing tool_result content: {out}"
+        );
+        assert!(out.contains("tool_call"), "missing tool_call marker: {out}");
+        assert!(
+            out.contains("tool_result"),
+            "missing tool_result marker: {out}"
+        );
+    }
+
+    #[test]
+    fn format_slice_for_summary_includes_thinking() {
+        let slice = vec![thinking("I should consider the edge case")];
+        let out = format_slice_for_summary(&slice);
+        assert!(out.contains("thinking"), "missing thinking marker: {out}");
+        assert!(out.contains("edge case"), "missing thinking content: {out}");
+    }
+
+    #[test]
+    fn format_slice_for_summary_marks_error_tool_results() {
+        let slice = vec![tool_result("call_1", "permission denied", true)];
+        let out = format_slice_for_summary(&slice);
+        assert!(out.contains("ERROR"), "missing ERROR marker: {out}");
+    }
+
+    #[test]
+    fn format_slice_for_summary_truncates_long_tool_input() {
+        let long_input = serde_json::json!({"content": "x".repeat(2000)});
+        let slice = vec![assistant_with_tool_use("check", "fs.write", long_input)];
+        let out = format_slice_for_summary(&slice);
+        let tool_call_line = out
+            .lines()
+            .find(|l| l.contains("tool_call"))
+            .unwrap_or_else(|| panic!("no tool_call line in {out}"));
+        assert!(
+            tool_call_line.chars().count() < 1200,
+            "tool_call line not truncated: {tool_call_line}"
+        );
     }
 }
