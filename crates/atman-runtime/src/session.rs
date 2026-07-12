@@ -16,7 +16,7 @@ pub struct SessionId(pub Uuid);
 
 impl SessionId {
     pub fn now() -> Self {
-        Self(Uuid::now_v7())
+        Self(Uuid::new_v4())
     }
 
     pub fn parse(s: &str) -> Result<Self, uuid::Error> {

@@ -1776,7 +1776,7 @@ fn print_session_summary(
     goal: Option<&str>,
     todos: &[atman_runtime::memory::todo::Todo],
 ) {
-    let sid_short = &sid[..sid.len().min(8)];
+    let sid_short = &sid[..sid.len().min(12)];
     let goal_line = goal.unwrap_or("(none)");
     let pending = todos
         .iter()
@@ -1788,24 +1788,28 @@ fn print_session_summary(
         .count();
 
     let lines = vec![
-        format!(" session  {sid_short}"),
-        format!(" messages {msg_count}"),
-        format!(" goal     {}", truncate_str(goal_line, 48)),
-        format!(" todos    {done} done · {pending} pending"),
+        format!(" session   {sid_short}"),
+        format!(" messages  {msg_count}"),
+        format!(" goal      {}", truncate_str(goal_line, 50)),
+        format!(" todos     {done} done · {pending} pending"),
         String::new(),
-        format!(" resume:  atman --continue {sid_short}"),
+        format!(" resume    atman --continue {sid_short}"),
     ];
 
     let max_w = lines
         .iter()
-        .map(|l| l.chars().count())
+        .map(|l| unicode_width::UnicodeWidthStr::width(l.as_str()))
         .max()
         .unwrap_or(0)
         .max(40);
     let inner_w = max_w + 4;
     let top = format!("╭{}╮", "─".repeat(inner_w));
     let bot = format!("╰{}╯", "─".repeat(inner_w));
-    let pad = |l: &str| format!("│  {:<width$}  │", l, width = max_w);
+    let pad = |l: &str| {
+        let visible = unicode_width::UnicodeWidthStr::width(l);
+        let trail = max_w.saturating_sub(visible);
+        format!("│  {}{}  │", l, " ".repeat(trail))
+    };
 
     println!();
     println!("{}", top);

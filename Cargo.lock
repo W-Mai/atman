@@ -179,6 +179,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tower-http",
+ "unicode-width",
 ]
 
 [[package]]
