@@ -169,6 +169,26 @@ impl Tool for MemoryTodoSet {
         Tier::One
     }
 
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Create a todo item. Returns the todo id (UUID string). \
+             Save the returned id — you need it for memory.todo.done / memory.todo.cancel.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "where": {"type": "string", "description": "Where to do it (file path, module, etc.)"},
+                "why": {"type": "string", "description": "Why this needs doing"},
+                "how": {"type": "string", "description": "How to do it (brief approach)"},
+                "expected_result": {"type": "string", "description": "What success looks like"}
+            },
+            "required": ["where", "why", "how", "expected_result"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let where_ = required_string(&args, "where")?;
@@ -202,15 +222,122 @@ impl Tool for MemoryTodoDone {
         Tier::One
     }
 
+    fn description(&self) -> Option<&str> {
+        Some("Mark a todo as done. The id must be the UUID string returned by memory.todo.set.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The UUID returned by memory.todo.set (e.g. \"019f5500-9a53-7800-8083-b608fdc4124a\")"}
+            },
+            "required": ["id"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let id = required_string(&args, "id")?;
-            let uuid = uuid::Uuid::parse_str(&id)
-                .map_err(|e| RuntimeError::ToolFailed(format!("bad todo id: {e}")))?;
+            let uuid = uuid::Uuid::parse_str(&id).map_err(|e| {
+                RuntimeError::ToolFailed(format!(
+                    "bad todo id: {e}. The id must be the UUID returned by memory.todo.set."
+                ))
+            })?;
             self.store
                 .set_status(&MemoryId(uuid), TodoStatus::Done)
                 .await?;
-            Ok(Value::Unit)
+            Ok(Value::Str("ok".into()))
+        })
+    }
+}
+
+pub struct MemoryTodoCancel {
+    pub store: Arc<TodoStore>,
+}
+
+impl Tool for MemoryTodoCancel {
+    fn name(&self) -> &str {
+        "memory.todo.cancel"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Cancel a todo. The id must be the UUID string returned by memory.todo.set.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The UUID returned by memory.todo.set"}
+            },
+            "required": ["id"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let id = required_string(&args, "id")?;
+            let uuid = uuid::Uuid::parse_str(&id).map_err(|e| {
+                RuntimeError::ToolFailed(format!(
+                    "bad todo id: {e}. The id must be the UUID returned by memory.todo.set."
+                ))
+            })?;
+            self.store
+                .set_status(&MemoryId(uuid), TodoStatus::Cancelled)
+                .await?;
+            Ok(Value::Str("ok".into()))
+        })
+    }
+}
+
+pub struct MemoryTodoList {
+    pub store: Arc<TodoStore>,
+}
+
+impl Tool for MemoryTodoList {
+    fn name(&self) -> &str {
+        "memory.todo.list"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "List all todos in the current session. Returns a JSON array of {id, where, why, how, expected_result, status}.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let todos = self.store.list().await?;
+            let items: Vec<Value> = todos
+                .into_iter()
+                .map(|t| {
+                    Value::Struct(vec![
+                        ("id".into(), Value::Str(t.id.to_string())),
+                        ("where".into(), Value::Str(t.where_)),
+                        ("why".into(), Value::Str(t.why)),
+                        ("how".into(), Value::Str(t.how)),
+                        ("expected_result".into(), Value::Str(t.expected_result)),
+                        (
+                            "status".into(),
+                            Value::Str(format!("{:?}", t.status).to_lowercase()),
+                        ),
+                    ])
+                })
+                .collect();
+            Ok(Value::List(items))
         })
     }
 }

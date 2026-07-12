@@ -153,7 +153,7 @@ flow agent_loop(messages: list, iteration: int) -> string {
             bash.exec,
             hunk.review, hunk.apply,
             memory.confess,
-            memory.todo.set, memory.todo.done,
+            memory.todo.set, memory.todo.done, memory.todo.cancel, memory.todo.list,
             memory.goal.get, memory.goal.set, memory.goal.clear,
             memory.recent_turns, memory.history.search, memory.history.read,
             plan.write, plan.read, plan.tick,
