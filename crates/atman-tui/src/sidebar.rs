@@ -45,6 +45,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
     let t = crate::theme::theme();
     crate::sanitize_widget_edges(f, area);
     f.render_widget(ratatui::widgets::Clear, area);
+
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -63,107 +64,133 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         return;
     }
 
-    let heights = section_heights(inner.height);
-    let sections = Layout::default()
+    let half = inner.height / 2;
+    let panels = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(heights.goal),
-            Constraint::Length(heights.context),
-            Constraint::Length(heights.plans),
-            Constraint::Length(heights.session),
-            Constraint::Length(heights.todos),
-        ])
+        .constraints([Constraint::Min(half), Constraint::Min(half)])
         .split(inner);
 
-    if heights.goal > 0 {
-        f.render_widget(goal_section(inputs.goal), sections[0]);
+    let task_panel = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(t.subtle_fg));
+    let meta_panel = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(t.subtle_fg));
+
+    let task_area = task_panel.inner(panels[0]);
+    f.render_widget(task_panel, panels[0]);
+    let meta_area = meta_panel.inner(panels[1]);
+    f.render_widget(meta_panel, panels[1]);
+
+    let task_heights = task_section_heights(task_area.height);
+    let task_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(task_heights.goal),
+            Constraint::Length(task_heights.plans),
+            Constraint::Length(task_heights.todos),
+        ])
+        .split(task_area);
+
+    if task_heights.goal > 0 {
+        f.render_widget(goal_section(inputs.goal), task_sections[0]);
     }
-    if heights.context > 0 {
+    if task_heights.plans > 0 {
+        f.render_widget(
+            plans_section(inputs.plans, task_heights.plans),
+            task_sections[1],
+        );
+    }
+    if task_heights.todos > 0 {
+        f.render_widget(
+            todos_section(inputs.todos, task_heights.todos),
+            task_sections[2],
+        );
+    }
+
+    let meta_heights = meta_section_heights(meta_area.height);
+    let meta_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(meta_heights.context),
+            Constraint::Length(meta_heights.session),
+        ])
+        .split(meta_area);
+
+    if meta_heights.context > 0 {
         f.render_widget(
             context_section(inputs.context, inputs.attach_count, inputs.streaming),
-            sections[1],
+            meta_sections[0],
         );
     }
-    if heights.plans > 0 {
-        f.render_widget(plans_section(inputs.plans, heights.plans), sections[2]);
-    }
-    if heights.session > 0 {
+    if meta_heights.session > 0 {
         f.render_widget(
             session_section(inputs.session_id, inputs.session_dir, inputs.project_root),
-            sections[3],
+            meta_sections[1],
         );
-    }
-    if heights.todos > 0 {
-        f.render_widget(todos_section(inputs.todos, heights.todos), sections[4]);
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SectionHeights {
+struct TaskHeights {
     goal: u16,
-    context: u16,
     plans: u16,
     todos: u16,
-    session: u16,
 }
 
-fn section_heights(inner_h: u16) -> SectionHeights {
-    let context = 9u16;
-    let session = 5u16;
+fn task_section_heights(inner_h: u16) -> TaskHeights {
     let todos = 6u16;
     let plans = 3u16;
     let goal_max = 7u16;
-    let full = context + session + todos + plans + goal_max;
+    let full = goal_max + plans + todos;
     if inner_h >= full {
-        return SectionHeights {
+        return TaskHeights {
             goal: goal_max,
-            context,
             plans,
             todos,
-            session,
         };
     }
-    if inner_h >= context + session + todos + plans + 3 {
-        return SectionHeights {
-            goal: inner_h - context - session - todos - plans,
-            context,
+    if inner_h >= plans + todos + 2 {
+        return TaskHeights {
+            goal: inner_h - plans - todos,
             plans,
             todos,
-            session,
         };
     }
-    if inner_h >= context + session + todos + 3 {
-        return SectionHeights {
-            goal: inner_h - context - session - todos,
-            context,
+    if inner_h >= todos + 2 {
+        return TaskHeights {
+            goal: inner_h - todos,
             plans: 0,
             todos,
-            session,
         };
     }
-    if inner_h >= context + session + 3 {
-        return SectionHeights {
-            goal: inner_h - context - session,
-            context,
-            plans: 0,
-            todos: 0,
-            session,
-        };
+    TaskHeights {
+        goal: inner_h,
+        plans: 0,
+        todos: 0,
     }
-    if inner_h >= context + 3 {
-        return SectionHeights {
-            goal: inner_h - context,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetaHeights {
+    context: u16,
+    session: u16,
+}
+
+fn meta_section_heights(inner_h: u16) -> MetaHeights {
+    let context = 9u16;
+    let session = 5u16;
+    if inner_h >= context + session {
+        return MetaHeights { context, session };
+    }
+    if inner_h >= context {
+        return MetaHeights {
             context,
-            plans: 0,
-            todos: 0,
             session: 0,
         };
     }
-    SectionHeights {
-        goal: 0,
+    MetaHeights {
         context: inner_h,
-        plans: 0,
-        todos: 0,
         session: 0,
     }
 }
@@ -437,32 +464,32 @@ mod tests {
     }
 
     #[test]
-    fn section_heights_full_room_keeps_every_section() {
-        let h = section_heights(30);
-        assert_eq!(h.context, 9);
-        assert_eq!(h.session, 5);
-        assert_eq!(h.todos, 6);
+    fn task_heights_full_room_keeps_every_section() {
+        let h = task_section_heights(20);
+        assert_eq!(h.goal, 7);
         assert_eq!(h.plans, 3);
-        assert!(h.goal >= 3);
+        assert_eq!(h.todos, 6);
     }
 
     #[test]
-    fn section_heights_tight_drops_plans_first() {
-        let h = section_heights(23);
-        assert_eq!(h.context, 9);
-        assert_eq!(h.session, 5);
+    fn task_heights_tight_drops_plans_first() {
+        let h = task_section_heights(9);
         assert_eq!(h.todos, 6);
         assert_eq!(h.plans, 0);
-        assert!(h.goal >= 3);
+        assert!(h.goal >= 1);
     }
 
     #[test]
-    fn section_heights_very_tight_drops_session_and_below() {
-        let h = section_heights(12);
+    fn meta_heights_full() {
+        let h = meta_section_heights(20);
         assert_eq!(h.context, 9);
-        assert_eq!(h.todos, 0);
-        assert_eq!(h.plans, 0);
+        assert_eq!(h.session, 5);
+    }
+
+    #[test]
+    fn meta_heights_tight_drops_session() {
+        let h = meta_section_heights(9);
+        assert_eq!(h.context, 9);
         assert_eq!(h.session, 0);
-        assert!(h.goal >= 3);
     }
 }
