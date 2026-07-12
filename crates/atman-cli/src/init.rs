@@ -147,6 +147,7 @@ flow agent_loop(iteration: int) -> string {
     reply = llm {
         model: "smart"
         context: session
+        cache: true
         retry: 12
         tools: [
             fs.read, fs.write, fs.edit, fs.list, fs.grep,

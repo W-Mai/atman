@@ -52,13 +52,7 @@ impl AnthropicProvider {
         let raw_wire: Vec<WireMessage> = req
             .messages
             .iter()
-            .enumerate()
-            .map(|(idx, m)| {
-                let is_last_user = idx + 1 == req.messages.len()
-                    && m.role == MessageRole::User
-                    && req.cache_prompt;
-                build_wire_message(m, is_last_user)
-            })
+            .map(|m| build_wire_message(m, false))
             .collect();
         let wire_messages = merge_consecutive_same_role(raw_wire);
         let tools: Vec<WireTool> = req
@@ -82,6 +76,11 @@ impl AnthropicProvider {
                     kind: "enabled",
                     budget_tokens: self.max_tokens.saturating_sub(4096).max(1024),
                 })
+            } else {
+                None
+            },
+            cache_control: if req.cache_prompt {
+                Some(CacheControl { kind: "ephemeral" })
             } else {
                 None
             },
@@ -478,6 +477,8 @@ struct MessagesRequest {
     tools: Vec<WireTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Serialize, Clone)]
