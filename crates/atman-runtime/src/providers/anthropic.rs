@@ -244,6 +244,9 @@ impl Provider for AnthropicProvider {
                 let mut acc_thinking = String::new();
                 let mut acc_signature: Option<String> = None;
                 let mut cumulative = 0u64;
+                let mut input_tokens: u64 = 0;
+                let mut cache_read_tokens: u64 = 0;
+                let mut cache_write_tokens: u64 = 0;
                 let mut tool_use_partial: Vec<PartialToolUse> = Vec::new();
                 let mut stop_reason = StopReason::End;
                 while let Some(event) = tokio::select! {
@@ -261,6 +264,22 @@ impl Provider for AnthropicProvider {
                     };
                     let ty = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     match ty {
+                        "message_start" => {
+                            if let Some(usage) = parsed.pointer("/message/usage") {
+                                input_tokens = usage
+                                    .get("input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                cache_read_tokens = usage
+                                    .get("cache_read_input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                cache_write_tokens = usage
+                                    .get("cache_creation_input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                            }
+                        }
                         "content_block_start" => {
                             if let Some(block) = parsed.get("content_block")
                                 && block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
@@ -327,6 +346,24 @@ impl Provider for AnthropicProvider {
                             {
                                 cumulative = out;
                             }
+                            if let Some(inp) = parsed
+                                .pointer("/usage/input_tokens")
+                                .and_then(|v| v.as_u64())
+                            {
+                                input_tokens = inp;
+                            }
+                            if let Some(cr) = parsed
+                                .pointer("/usage/cache_read_input_tokens")
+                                .and_then(|v| v.as_u64())
+                            {
+                                cache_read_tokens = cr;
+                            }
+                            if let Some(cw) = parsed
+                                .pointer("/usage/cache_creation_input_tokens")
+                                .and_then(|v| v.as_u64())
+                            {
+                                cache_write_tokens = cw;
+                            }
                             if let Some(reason) = parsed
                                 .pointer("/delta/stop_reason")
                                 .and_then(|v| v.as_str())
@@ -380,8 +417,10 @@ impl Provider for AnthropicProvider {
                     },
                     stop_reason,
                     token_usage: TokenUsage {
+                        input: input_tokens,
+                        cached_input: cache_read_tokens,
                         output: cumulative,
-                        ..Default::default()
+                        cache_write: cache_write_tokens,
                     },
                 })
             },
