@@ -844,8 +844,10 @@ impl Session {
         let (context_watch, _) = watch::channel(ContextSnapshot::default());
         let (goal_watch, _) = watch::channel(None);
         let (attach_watch, _) = watch::channel(0);
-        let (todos_watch, _) = watch::channel(Vec::new());
-        let (plans_watch, _) = watch::channel(Vec::new());
+        let (todos_watch, todos_watch_rx) = watch::channel(Vec::new());
+        std::mem::forget(todos_watch_rx);
+        let (plans_watch, plans_watch_rx) = watch::channel(Vec::new());
+        std::mem::forget(plans_watch_rx);
         Ok(Self {
             id,
             dir,
@@ -929,8 +931,10 @@ impl Session {
         let (context_watch, _) = watch::channel(initial_context);
         let (goal_watch, _) = watch::channel(initial_goal);
         let (attach_watch, _) = watch::channel(0);
-        let (todos_watch, _) = watch::channel(Vec::new());
-        let (plans_watch, _) = watch::channel(Vec::new());
+        let (todos_watch, todos_watch_rx) = watch::channel(Vec::new());
+        std::mem::forget(todos_watch_rx);
+        let (plans_watch, plans_watch_rx) = watch::channel(Vec::new());
+        std::mem::forget(plans_watch_rx);
         Ok(Self {
             id,
             dir,
@@ -968,8 +972,10 @@ impl Session {
         let (context_watch, _) = watch::channel(ContextSnapshot::default());
         let (goal_watch, _) = watch::channel(None);
         let (attach_watch, _) = watch::channel(0);
-        let (todos_watch, _) = watch::channel(Vec::new());
-        let (plans_watch, _) = watch::channel(Vec::new());
+        let (todos_watch, todos_watch_rx) = watch::channel(Vec::new());
+        std::mem::forget(todos_watch_rx);
+        let (plans_watch, plans_watch_rx) = watch::channel(Vec::new());
+        std::mem::forget(plans_watch_rx);
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),

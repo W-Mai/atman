@@ -1448,6 +1448,8 @@ async fn cmd_repl_once(
         Ok(cfg) => atman_runtime::lifecycle::LifecycleRunner::from_dir(&cfg),
         Err(_) => atman_runtime::lifecycle::LifecycleRunner::new(),
     };
+    session.refresh_todos_from_store_async().await;
+    session.refresh_plans_from_store_async().await;
     let (lifecycle_tx, mut lifecycle_rx) =
         mpsc::unbounded_channel::<atman_dsl::ast::LifecycleEvent>();
     executor.tool_ctx.lifecycle_fire_tx = Some(lifecycle_tx);
