@@ -441,7 +441,11 @@ async fn run_frames(
                     app.todos = rx.borrow().clone();
                     let first_pending = app.todos.iter().position(|t| !matches!(t.status, atman_runtime::memory::todo::TodoStatus::Done | atman_runtime::memory::todo::TodoStatus::Cancelled));
                     if let Some(idx) = first_pending {
-                        app.todos_scroll = (idx * 2) as u16;
+                        if idx > 0 {
+                            app.todos_scroll = ((idx - 1) * 2) as u16;
+                        } else {
+                            app.todos_scroll = 0;
+                        }
                     }
                 }
             }
@@ -451,7 +455,11 @@ async fn run_frames(
                     let first_pending_step = app.plans.iter().max_by_key(|p| p.updated_at)
                         .and_then(|p| p.steps.iter().position(|s| !s.done));
                     if let Some(idx) = first_pending_step {
-                        app.plans_scroll = (idx + 1) as u16;
+                        if idx > 0 {
+                            app.plans_scroll = idx as u16;
+                        } else {
+                            app.plans_scroll = 0;
+                        }
                     }
                 }
             }

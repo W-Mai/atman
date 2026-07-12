@@ -101,17 +101,15 @@ pub fn render(
         .constraints([Constraint::Length(task_h), Constraint::Length(meta_h)])
         .split(inner);
 
-    let task_panel = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(t.subtle_fg));
-    let meta_panel = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(t.subtle_fg));
-
-    let task_area = task_panel.inner(panels[0]);
-    f.render_widget(task_panel, panels[0]);
-    let meta_area = meta_panel.inner(panels[1]);
-    f.render_widget(meta_panel, panels[1]);
+    let task_area = panels[0];
+    let meta_area = {
+        let mp = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(t.subtle_fg));
+        let inner = mp.inner(panels[1]);
+        f.render_widget(mp, panels[1]);
+        inner
+    };
 
     let goal_lines = inputs
         .goal
