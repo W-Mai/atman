@@ -372,6 +372,9 @@ async fn call_and_maybe_stream_inner(
                             model: model_name.clone(),
                         });
                     }
+                    Ok(crate::event::NodeEvent::ThinkingChunk { text }) => {
+                        let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
+                    }
                     Ok(crate::event::NodeEvent::LlmDone { total_tokens }) => {
                         let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
                     }
@@ -387,6 +390,9 @@ async fn call_and_maybe_stream_inner(
                                 text,
                                 model: model_name.clone(),
                             });
+                        }
+                        crate::event::NodeEvent::ThinkingChunk { text } => {
+                            let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
                         }
                         crate::event::NodeEvent::LlmDone { total_tokens } => {
                             let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });

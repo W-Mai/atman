@@ -49,12 +49,18 @@ impl AnthropicProvider {
     }
 
     fn build_body(&self, req: &LlmRequest, stream: bool) -> MessagesRequest {
-        let mut wire_messages = Vec::with_capacity(req.messages.len());
-        for (idx, m) in req.messages.iter().enumerate() {
-            let is_last_user =
-                idx + 1 == req.messages.len() && m.role == MessageRole::User && req.cache_prompt;
-            wire_messages.push(build_wire_message(m, is_last_user));
-        }
+        let raw_wire: Vec<WireMessage> = req
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(idx, m)| {
+                let is_last_user = idx + 1 == req.messages.len()
+                    && m.role == MessageRole::User
+                    && req.cache_prompt;
+                build_wire_message(m, is_last_user)
+            })
+            .collect();
+        let wire_messages = merge_consecutive_same_role(raw_wire);
         let tools: Vec<WireTool> = req
             .tools
             .iter()
@@ -160,6 +166,26 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
         role,
         content: MessageContent::Blocks(blocks),
     }
+}
+
+fn merge_consecutive_same_role(wire: Vec<WireMessage>) -> Vec<WireMessage> {
+    let mut out: Vec<WireMessage> = Vec::with_capacity(wire.len());
+    for msg in wire {
+        let WireMessage { role, content } = msg;
+        let mut content = Some(content);
+        if let Some(last) = out.last_mut()
+            && last.role == role
+            && let Some(msg_content) = content.take()
+        {
+            let MessageContent::Blocks(last_blocks) = &mut last.content;
+            let MessageContent::Blocks(msg_blocks) = msg_content;
+            last_blocks.extend(msg_blocks);
+        }
+        if let Some(content) = content {
+            out.push(WireMessage { role, content });
+        }
+    }
+    out
 }
 
 impl Provider for AnthropicProvider {
@@ -440,7 +466,7 @@ fn net_err(e: reqwest::Error) -> RuntimeError {
     RuntimeError::ToolFailed(format!("anthropic net: {e}"))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct MessagesRequest {
     model: String,
     max_tokens: u32,
@@ -454,14 +480,14 @@ struct MessagesRequest {
     thinking: Option<ThinkingConfig>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ThinkingConfig {
     #[serde(rename = "type")]
     kind: &'static str,
     budget_tokens: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct WireTool {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -469,19 +495,19 @@ struct WireTool {
     input_schema: serde_json::Value,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct WireMessage {
     role: &'static str,
     content: MessageContent,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(untagged)]
 enum MessageContent {
     Blocks(Vec<ContentPart>),
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentPart {
     Text {
@@ -510,7 +536,7 @@ enum ContentPart {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ImageSourceWire {
     #[serde(rename = "type")]
     kind: &'static str,
@@ -518,7 +544,7 @@ struct ImageSourceWire {
     data: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct CacheControl {
     #[serde(rename = "type")]
     kind: &'static str,
