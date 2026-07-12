@@ -239,35 +239,47 @@ fn plans_header(plans: &[atman_runtime::memory::plan::Plan]) -> String {
 }
 
 fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
+    let t = crate::theme::theme();
     let latest = plans.iter().max_by_key(|p| p.updated_at);
     let mut lines: Vec<Line<'_>> = Vec::new();
     match latest {
         None => {
             lines.push(Line::from(Span::styled(
                 "  (no active plan)",
-                Style::default().fg(crate::theme::theme().subtle_fg),
+                Style::default().fg(t.subtle_fg),
             )));
         }
         Some(p) => {
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default().fg(crate::theme::theme().subtle_fg)),
-                Span::styled(
-                    truncate_line(&p.title, 28),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            for step in &p.steps {
-                let (glyph, style) = if step.done {
-                    ("✓", Style::default().fg(crate::theme::theme().success))
+            lines.push(Line::from(Span::styled(
+                truncate_line(&p.title, 30),
+                Style::default()
+                    .fg(t.tinted_fg)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            let total = p.steps.len();
+            for (i, step) in p.steps.iter().enumerate() {
+                let num = format!("{}", i + 1);
+                let (glyph, glyph_style, text_style) = if step.done {
+                    (
+                        "✓",
+                        Style::default().fg(t.success),
+                        Style::default()
+                            .fg(t.meta_fg)
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    )
                 } else {
-                    ("○", Style::default().fg(crate::theme::theme().subtle_fg))
+                    (
+                        "○",
+                        Style::default().fg(t.subtle_fg),
+                        Style::default().fg(t.tinted_fg),
+                    )
                 };
+                let indent = if i + 1 == total { "  " } else { " │" };
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  {glyph} "), style),
-                    Span::styled(
-                        truncate_line(&step.text, 28),
-                        Style::default().fg(crate::theme::theme().tinted_fg),
-                    ),
+                    Span::styled(format!(" {indent} "), Style::default().fg(t.subtle_fg)),
+                    Span::styled(format!("{glyph} "), glyph_style),
+                    Span::styled(format!("{num:>2}. "), Style::default().fg(t.meta_fg)),
+                    Span::styled(truncate_line(&step.text, 22), text_style),
                 ]));
             }
         }
