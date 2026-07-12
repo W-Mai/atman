@@ -1747,8 +1747,13 @@ async fn cmd_repl_once(
         let _ = ct.await;
     }
     let user_msg_count = session.user_message_count();
-    let session_dir = session.dir().to_path_buf();
+    let goal = session.goal();
+    let todos: Vec<atman_runtime::memory::todo::Todo> = {
+        let store = atman_runtime::memory::todo::TodoStore::at(session.dir());
+        store.list().await.unwrap_or_default()
+    };
     let session_id = session.id().to_string();
+    let session_dir = session.dir().to_path_buf();
     match std::sync::Arc::try_unwrap(session) {
         Ok(s) => s.shutdown().await,
         Err(_) => eprintln!("[atman] session still had refs at shutdown; skipping graceful close"),
@@ -1758,14 +1763,67 @@ async fn cmd_repl_once(
         && !session_dir.as_os_str().is_empty()
         && session_dir_is_disposable(&session_dir)
     {
-        // Silent gc: the alternate screen is still owned by cmd_repl at
-        // this point so any print here would land inside the outgoing
-        // TUI frame. `atman session gc` reports leftovers, which is the
-        // right surface for this info.
         let _ = std::fs::remove_dir_all(&session_dir);
-        let _ = session_id;
+    } else {
+        print_session_summary(&session_id, user_msg_count, goal.as_deref(), &todos);
     }
     Ok(())
+}
+
+fn print_session_summary(
+    sid: &str,
+    msg_count: usize,
+    goal: Option<&str>,
+    todos: &[atman_runtime::memory::todo::Todo],
+) {
+    let sid_short = &sid[..sid.len().min(8)];
+    let goal_line = goal.unwrap_or("(none)");
+    let pending = todos
+        .iter()
+        .filter(|t| matches!(t.status, atman_runtime::memory::todo::TodoStatus::Pending))
+        .count();
+    let done = todos
+        .iter()
+        .filter(|t| matches!(t.status, atman_runtime::memory::todo::TodoStatus::Done))
+        .count();
+
+    let lines = vec![
+        format!(" session  {sid_short}"),
+        format!(" messages {msg_count}"),
+        format!(" goal     {}", truncate_str(goal_line, 48)),
+        format!(" todos    {done} done · {pending} pending"),
+        String::new(),
+        format!(" resume:  atman --continue {sid_short}"),
+    ];
+
+    let max_w = lines
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(40);
+    let inner_w = max_w + 4;
+    let top = format!("╭{}╮", "─".repeat(inner_w));
+    let bot = format!("╰{}╯", "─".repeat(inner_w));
+    let pad = |l: &str| format!("│  {:<width$}  │", l, width = max_w);
+
+    println!();
+    println!("{}", top);
+    for l in &lines {
+        println!("{}", pad(l));
+    }
+    println!("{}", bot);
+    println!();
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn delete_session_dir(data_root: &std::path::Path, sid: &str) {
