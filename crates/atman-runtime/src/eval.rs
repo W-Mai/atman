@@ -909,8 +909,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                     | crate::error::ErrorKind::ProviderDown
                                     | crate::error::ErrorKind::Transient
                             ) {
-                                let exp = (1u64 << attempt).min(64);
-                                let delay_ms = (1000u64 * exp).min(60_000);
+                                let delay_ms = (1000u64 << attempt).min(3_600_000);
                                 if let Some(tx) = ctx.session.map(|s| s.stream_tx()) {
                                     let _ = tx.send(crate::stream::StreamFrame::Note(format!(
                                         "retrying in {}s…",
