@@ -148,7 +148,7 @@ flow agent_loop(messages: list, iteration: int) -> string {
     reply = llm {
         model: "smart"
         messages: messages
-        retry: 5
+        retry: 60
         tools: [
             fs.read, fs.write, fs.edit, fs.list, fs.grep,
             bash.exec,
