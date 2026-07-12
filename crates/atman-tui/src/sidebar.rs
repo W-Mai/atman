@@ -64,22 +64,16 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, inputs: SidebarInputs<'_>) {
         return;
     }
 
-    let goal_need: u16 = 7;
-    let plans_need: u16 = 3;
-    let todos_need: u16 = 6;
+    let _goal_need: u16 = 7;
+    let _plans_need: u16 = 3;
     let context_need: u16 = 9;
     let session_need: u16 = 5;
-    let task_needs = goal_need + plans_need + todos_need;
     let meta_needs = context_need + session_need;
     let total = inner.height;
-    let (task_h, meta_h) = if total >= task_needs + meta_needs {
-        (task_needs, meta_needs)
-    } else if total > task_needs {
-        (task_needs, total.saturating_sub(task_needs))
-    } else if total >= 1 {
-        (total, 0u16)
+    let (task_h, meta_h) = if total > meta_needs {
+        (total - meta_needs, meta_needs)
     } else {
-        (0u16, 0u16)
+        (total, 0u16)
     };
 
     let panels = Layout::default()
@@ -156,36 +150,10 @@ struct TaskHeights {
 }
 
 fn task_section_heights(inner_h: u16) -> TaskHeights {
-    let todos = 6u16;
+    let goal = 7u16;
     let plans = 3u16;
-    let goal_max = 7u16;
-    let full = goal_max + plans + todos;
-    if inner_h >= full {
-        return TaskHeights {
-            goal: goal_max,
-            plans,
-            todos,
-        };
-    }
-    if inner_h >= plans + todos + 2 {
-        return TaskHeights {
-            goal: inner_h - plans - todos,
-            plans,
-            todos,
-        };
-    }
-    if inner_h >= todos + 2 {
-        return TaskHeights {
-            goal: inner_h - todos,
-            plans: 0,
-            todos,
-        };
-    }
-    TaskHeights {
-        goal: inner_h,
-        plans: 0,
-        todos: 0,
-    }
+    let todos = inner_h.saturating_sub(goal).saturating_sub(plans);
+    TaskHeights { goal, plans, todos }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,14 +280,14 @@ fn plans_section<'a>(plans: &'a [atman_runtime::memory::plan::Plan], max_h: u16)
     Paragraph::new(lines)
 }
 
-fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], max_h: u16) -> Paragraph<'a> {
+fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], _max_h: u16) -> Paragraph<'a> {
     use atman_runtime::memory::todo::TodoStatus;
     let done = todos
         .iter()
         .filter(|t| matches!(t.status, TodoStatus::Done))
         .count();
     let total = todos.len();
-    let mut lines: Vec<Line<'_>> = Vec::with_capacity(max_h as usize);
+    let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("▸ Todos ({done}/{total})"),
         Style::default()
@@ -333,8 +301,7 @@ fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], max_h: u16)
         )));
         return Paragraph::new(lines);
     }
-    let show_cap = (max_h as usize).saturating_sub(1);
-    for todo in todos.iter().take(show_cap) {
+    for todo in todos {
         let (glyph, style) = match todo.status {
             TodoStatus::Pending => ("○", Style::default().fg(crate::theme::theme().subtle_fg)),
             TodoStatus::InProgress => (
@@ -360,13 +327,7 @@ fn todos_section<'a>(todos: &'a [atman_runtime::memory::todo::Todo], max_h: u16)
             Span::styled(truncate_line(content, 24), style),
         ]));
     }
-    if todos.len() > show_cap {
-        lines.push(Line::from(Span::styled(
-            format!("  … +{} more", todos.len() - show_cap),
-            Style::default().fg(crate::theme::theme().subtle_fg),
-        )));
-    }
-    Paragraph::new(lines)
+    Paragraph::new(lines).scroll((0, 0))
 }
 
 fn truncate_line(s: &str, max_chars: usize) -> String {
@@ -481,19 +442,19 @@ mod tests {
     }
 
     #[test]
-    fn task_heights_full_room_keeps_every_section() {
+    fn task_heights_full_room_gives_todos_remaining() {
         let h = task_section_heights(20);
         assert_eq!(h.goal, 7);
         assert_eq!(h.plans, 3);
-        assert_eq!(h.todos, 6);
+        assert_eq!(h.todos, 10);
     }
 
     #[test]
-    fn task_heights_tight_drops_plans_first() {
+    fn task_heights_tight_shrinks_todos() {
         let h = task_section_heights(9);
-        assert_eq!(h.todos, 6);
-        assert_eq!(h.plans, 0);
-        assert!(h.goal >= 1);
+        assert_eq!(h.goal, 7);
+        assert_eq!(h.plans, 3);
+        assert_eq!(h.todos, 0);
     }
 
     #[test]
