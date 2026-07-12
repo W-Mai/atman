@@ -54,10 +54,27 @@ impl Tool for MemoryGoalSet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Overwrite the session goal. atman injects the goal as a system-prompt \
-             prefix on every llm call in this session; it does not enter message \
-             history and is never compacted or evicted.",
+            "Set the session goal — a short directive (1-2 sentences) that atman injects \
+             as a system-prompt prefix on every LLM call. It persists across turns, never \
+             enters message history, and is never compacted.\n\n\
+             Best practice: set the goal early (right after understanding the user's request), \
+             keep it concise and actionable. Update it if the user's intent changes. Clear it \
+             when the task is complete. Example: 'Fix the login bug in auth.rs and add a \
+             regression test.'",
         )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The goal text, 1-2 sentences. Be specific: what to do, where, and what 'done' looks like."
+                }
+            },
+            "required": ["text"]
+        })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -143,7 +160,14 @@ impl Tool for MemoryGoalClear {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Erase the session goal so future llm calls stop receiving the goal prefix.")
+        Some(
+            "Clear the session goal. Call this when the task is complete or the user \
+             changes direction entirely. Returns nothing.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
     }
 
     fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -171,8 +195,12 @@ impl Tool for MemoryTodoSet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Create a todo item. Returns the todo id (UUID string). \
-             Save the returned id — you need it for memory.todo.done / memory.todo.cancel.",
+            "Create a todo item. Returns the todo id (UUID string) — save it for \
+             memory.todo.done / memory.todo.cancel / memory.todo.delete.\n\n\
+             Best practice: create a todo for each discrete subtask. Keep `where` \
+             specific (file path or module), `why` one sentence, `how` a brief \
+             approach, `expected_result` the verification criteria. Don't create \
+             todos for trivial steps — only for things the user would want to track.",
         )
     }
 
@@ -223,7 +251,11 @@ impl Tool for MemoryTodoDone {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Mark a todo as done. The id must be the UUID string returned by memory.todo.set.")
+        Some(
+            "Mark a todo as done. Once done, a todo cannot be un-done. \
+             The id must be the UUID string returned by memory.todo.set. \
+             Returns \"ok\" on success (including if already done).",
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -266,7 +298,11 @@ impl Tool for MemoryTodoCancel {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Cancel a todo. The id must be the UUID string returned by memory.todo.set.")
+        Some(
+            "Cancel a todo. Once cancelled, a todo cannot be re-activated. \
+             The id must be the UUID string returned by memory.todo.set. \
+             Returns \"ok\" on success (including if already cancelled).",
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -295,6 +331,51 @@ impl Tool for MemoryTodoCancel {
     }
 }
 
+pub struct MemoryTodoDelete {
+    pub store: Arc<TodoStore>,
+}
+
+impl Tool for MemoryTodoDelete {
+    fn name(&self) -> &str {
+        "memory.todo.delete"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Permanently delete a todo. Unlike done/cancel, the todo is removed \
+             entirely from the list. Use for todos created by mistake. \
+             The id must be the UUID string returned by memory.todo.set.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The UUID returned by memory.todo.set"}
+            },
+            "required": ["id"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let id = required_string(&args, "id")?;
+            let uuid = uuid::Uuid::parse_str(&id).map_err(|e| {
+                RuntimeError::ToolFailed(format!(
+                    "bad todo id: {e}. The id must be the UUID returned by memory.todo.set."
+                ))
+            })?;
+            self.store.delete(&MemoryId(uuid)).await?;
+            Ok(Value::Str("ok".into()))
+        })
+    }
+}
+
 pub struct MemoryTodoList {
     pub store: Arc<TodoStore>,
 }
@@ -310,7 +391,10 @@ impl Tool for MemoryTodoList {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "List all todos in the current session. Returns a JSON array of {id, where, why, how, expected_result, status}.",
+            "List all todos in the current session. Returns an array of \
+             {id, where, why, how, expected_result, status}. \
+             status is one of: pending, done, cancelled. \
+             Call this to check progress before starting new work.",
         )
     }
 

@@ -26,10 +26,11 @@ pub struct Todo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum TodoEntry {
+#[serde(rename_all = "snake_case")]
+pub enum TodoEntry {
     Add(Todo),
     Update { id: MemoryId, status: TodoStatus },
+    Delete { id: MemoryId },
 }
 
 pub struct TodoStore {
@@ -78,6 +79,12 @@ impl TodoStore {
         Ok(())
     }
 
+    pub async fn delete(&self, id: &MemoryId) -> Result<(), RuntimeError> {
+        append_jsonl(&self.path, &TodoEntry::Delete { id: id.clone() }).await?;
+        self.notify_if_needed().await;
+        Ok(())
+    }
+
     pub async fn list(&self) -> Result<Vec<Todo>, RuntimeError> {
         let entries: Vec<TodoEntry> = read_jsonl(&self.path).await?;
         let mut items: Vec<Todo> = Vec::new();
@@ -88,6 +95,9 @@ impl TodoStore {
                     if let Some(existing) = items.iter_mut().find(|t| t.id == id) {
                         existing.status = status;
                     }
+                }
+                TodoEntry::Delete { id } => {
+                    items.retain(|t| t.id != id);
                 }
             }
         }

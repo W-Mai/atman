@@ -20,11 +20,14 @@ impl Tool for PlanWrite {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Save (or overwrite) a numbered plan the session should follow. `id` picks the plan \
-             to update; if omitted, `latest` writes to the newest plan or creates a fresh one \
-             using a slug derived from the title. `steps` is a list of short strings, one per step. \
-             Existing steps are replaced wholesale — use plan.tick to mark progress without \
-             rewriting the plan. Returns the stored plan's id.",
+            "Create or overwrite a step-by-step plan. atman injects the plan as a \
+             system-prompt prefix on every LLM call so the agent always knows what \
+             step it's on. Use plan.tick to mark steps complete.\n\n\
+             Best practice: call plan.write early, right after setting the goal. \
+             Break work into 3-8 concrete steps. Each step should be a single \
+             actionable verb: 'read auth.rs', 'add validate_token function', \
+             'write regression test for empty token'. Update the plan if you \
+             discover the approach needs to change. Use plan.tick after each step.",
         )
     }
 
@@ -73,8 +76,10 @@ impl Tool for PlanRead {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Return the current plan as a markdown checklist. Without `id` returns the most \
-             recently updated plan; empty string when no plan exists.",
+            "Read the current plan as a markdown checklist with progress markers. \
+             Without `id`, returns the most recently updated plan. \
+             Returns empty string if no plan exists. Call this to refresh your \
+             memory of the plan before starting a new step.",
         )
     }
 
@@ -124,8 +129,9 @@ impl Tool for PlanTick {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Mark step `step_index` (0-based) of a plan as done. Without `id` targets the latest \
-             plan. Returns the updated plan rendered as a markdown checklist.",
+            "Mark a plan step as done (0-based index). Without `id`, targets the \
+             latest plan. Returns the updated plan as markdown. Call this right \
+             after completing each step to keep progress visible in the sidebar.",
         )
     }
 

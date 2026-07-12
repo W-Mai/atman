@@ -92,6 +92,9 @@ pub fn register_memory(
     reg.register(Arc::new(memory::MemoryTodoCancel {
         store: todo_store.clone(),
     }));
+    reg.register(Arc::new(memory::MemoryTodoDelete {
+        store: todo_store.clone(),
+    }));
     reg.register(Arc::new(memory::MemoryTodoList { store: todo_store }));
     reg.register(Arc::new(memory::MemoryConfess {
         store: confession_store.clone(),
