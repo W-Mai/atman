@@ -103,7 +103,6 @@ async fn run_streaming(
         .stderr(Stdio::piped())
         .group_spawn()
         .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec spawn: {e}")))?;
-
     let stdout = child
         .inner()
         .stdout
@@ -157,7 +156,6 @@ async fn run_streaming(
         (collected, truncated)
     });
 
-    let mut timed_out = false;
     let status = tokio::select! {
         biased;
         _ = ctx.cancel.cancelled() => {
@@ -172,12 +170,17 @@ async fn run_streaming(
             } else {
                 std::future::pending::<()>().await;
             }
-        } => {
-            timed_out = true;
+        }         => {
             let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
-            child.wait().await
-                .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec wait after timeout: {e}")))?
+            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+            return Ok(Value::Struct(vec![
+                ("exit".into(), Value::Int(-1)),
+                ("stdout".into(), Value::Str(String::new())),
+                ("stderr".into(), Value::Str(String::new())),
+                ("duration_ms".into(), Value::Int(start.elapsed().as_millis() as i64)),
+                ("approval".into(), Value::Str("auto".into())),
+                ("timed_out".into(), Value::Bool(true)),
+            ]));
         }
         status = child.wait() => status
             .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec wait: {e}")))?,
@@ -200,7 +203,7 @@ async fn run_streaming(
         ("stderr".into(), Value::Str(stderr_final)),
         ("duration_ms".into(), Value::Int(duration_ms)),
         ("approval".into(), Value::Str("auto".into())),
-        ("timed_out".into(), Value::Bool(timed_out)),
+        ("timed_out".into(), Value::Bool(false)),
     ];
     if let Some(p) = stdout_path.or(stderr_path) {
         fields.push((

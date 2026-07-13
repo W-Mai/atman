@@ -591,6 +591,9 @@ async fn cmd_run(
         turn_id.clone(),
         format!("atman run {} flow={flow_name}", file.display()),
     );
+    session
+        .approval()
+        .set_auto_ceiling(atman_runtime::tool::ApprovalLevel::Dangerous);
     session.begin_turn(user_msg);
     let outcome = executor
         .run_in_turn(&parsed, &flow_name, args, Some(turn_id), Some(&session))
