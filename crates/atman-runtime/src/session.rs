@@ -1242,7 +1242,13 @@ impl Session {
     }
 
     pub fn refresh_window_snapshot(&self) {
-        let window = crate::compaction::estimate_tokens_for_messages(&self.messages());
+        let provider_tokens = self.last_input_tokens();
+        let estimated = crate::compaction::estimate_tokens_for_messages(&self.messages());
+        let window = if provider_tokens > 0 {
+            provider_tokens
+        } else {
+            estimated
+        };
         let budget = crate::model_registry::model_info(&self.last_model()).context_budget;
         self.context_watch.send_modify(|snap| {
             snap.window_tokens = window;
