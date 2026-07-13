@@ -1,6 +1,7 @@
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::error::RuntimeError;
@@ -94,22 +95,22 @@ async fn run_streaming(
     start: Instant,
     timeout: Option<Duration>,
 ) -> ToolResult {
-    let mut child = tokio::process::Command::new("sh")
+    let mut child: AsyncGroupChild = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
+        .group_spawn()
         .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec spawn: {e}")))?;
 
-    let pid = child.id();
     let stdout = child
+        .inner()
         .stdout
         .take()
         .ok_or_else(|| RuntimeError::ToolFailed("bash.exec: missing stdout".into()))?;
     let stderr = child
+        .inner()
         .stderr
         .take()
         .ok_or_else(|| RuntimeError::ToolFailed("bash.exec: missing stderr".into()))?;
@@ -160,9 +161,8 @@ async fn run_streaming(
     let status = tokio::select! {
         biased;
         _ = ctx.cancel.cancelled() => {
-            kill_process_group(pid);
+            let _ = child.start_kill();
             let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
-            let _ = child.kill().await;
             drain_readers(stdout_reader, stderr_reader).await;
             return Err(RuntimeError::Cancelled("bash.exec cancelled".into()));
         }
@@ -174,9 +174,8 @@ async fn run_streaming(
             }
         } => {
             timed_out = true;
-            kill_process_group(pid);
+            let _ = child.start_kill();
             let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
-            let _ = child.kill().await;
             child.wait().await
                 .map_err(|e| RuntimeError::ToolFailed(format!("bash.exec wait after timeout: {e}")))?
         }
@@ -272,15 +271,6 @@ fn tail_bytes(s: &str, max: usize) -> &str {
         .map(|(i, _)| start + i)
         .unwrap_or(start);
     &s[boundary..]
-}
-
-fn kill_process_group(pid: Option<u32>) {
-    let Some(pid) = pid else { return };
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
-    }
-    let _ = pid;
 }
 
 fn struct_result(output: &std::process::Output, duration_ms: i64, user_approved: bool) -> Value {

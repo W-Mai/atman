@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -165,7 +166,7 @@ enum StreamKind {
 }
 
 pub(crate) enum BgControl {
-    Kill { force: bool },
+    Kill,
 }
 
 pub struct BgEntry {
@@ -340,14 +341,9 @@ impl BgRegistry {
         ]))
     }
 
-    pub fn kill(
-        &self,
-        handle_str: &str,
-        session_id: &str,
-        force: bool,
-    ) -> Result<Value, RuntimeError> {
+    pub fn kill(&self, handle_str: &str, session_id: &str) -> Result<Value, RuntimeError> {
         let entry = self.lookup(handle_str, session_id)?;
-        let _ = entry.control_tx.try_send(BgControl::Kill { force });
+        let _ = entry.control_tx.try_send(BgControl::Kill);
         let st = entry.status.lock().unwrap().clone();
         Ok(Value::Struct(vec![
             ("handle".into(), Value::Str(handle_str.into())),
@@ -374,14 +370,13 @@ async fn run_bg_process(
     registry: Arc<BgRegistry>,
 ) {
     let started_at = now_ms();
-    let mut child = match tokio::process::Command::new("sh")
+    let mut child: AsyncGroupChild = match tokio::process::Command::new("sh")
         .arg("-c")
         .arg(&cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
+        .group_spawn()
     {
         Ok(c) => c,
         Err(e) => {
@@ -400,8 +395,8 @@ async fn run_bg_process(
         started_at,
     };
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let stdout = child.inner().stdout.take();
+    let stderr = child.inner().stderr.take();
 
     let stdout_reader = stdout.map(|s| {
         let output = output.clone();
@@ -431,7 +426,7 @@ async fn run_bg_process(
         _ = cancel.cancelled() => ExitReason::Cancelled,
         ctrl = control_rx.recv() => {
             match ctrl {
-                Some(BgControl::Kill { force }) => ExitReason::Kill(force),
+                Some(BgControl::Kill) => ExitReason::Kill,
                 None => ExitReason::Natural,
             }
         }
@@ -453,44 +448,31 @@ async fn run_bg_process(
             ended_at,
         },
         ExitReason::Timeout => {
-            kill_process_group(pid);
+            let _ = child.start_kill();
             let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
-            let _ = child.kill().await;
             BgStatus::TimedOut {
                 started_at,
                 ended_at,
             }
         }
-        ExitReason::Kill(force) => {
-            if !*force {
-                kill_process_group_signal(pid, libc::SIGTERM);
-                if tokio::time::timeout(Duration::from_millis(500), child.wait())
-                    .await
-                    .is_err()
-                {
-                    kill_process_group(pid);
-                    let _ = child.kill().await;
-                }
-            } else {
-                kill_process_group(pid);
-                let _ = child.kill().await;
-            }
+        ExitReason::Kill => {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
             BgStatus::Killed {
                 started_at,
                 ended_at,
             }
         }
         ExitReason::Cancelled => {
-            kill_process_group(pid);
-            let _ = child.kill().await;
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
             BgStatus::Killed {
                 started_at,
                 ended_at,
             }
         }
         ExitReason::Exited(Err(_)) => {
-            kill_process_group(pid);
-            let _ = child.kill().await;
+            let _ = child.start_kill();
             BgStatus::Failed {
                 error: "wait failed".into(),
                 started_at,
@@ -562,27 +544,9 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(
 enum ExitReason {
     Exited(std::io::Result<std::process::ExitStatus>),
     Timeout,
-    Kill(bool),
+    Kill,
     Cancelled,
     Natural,
-}
-
-fn kill_process_group(pid: Option<u32>) {
-    let Some(pid) = pid else { return };
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
-    }
-    let _ = pid;
-}
-
-fn kill_process_group_signal(pid: Option<u32>, sig: i32) {
-    let Some(pid) = pid else { return };
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(pid as i32), sig);
-    }
-    let _ = pid;
 }
 
 fn now_ms() -> i64 {
@@ -752,9 +716,7 @@ impl Tool for BashKill {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
-            let force = extract_string(&args, "signal", 1)
-                .map(|s| s == "kill")
-                .unwrap_or(false);
+            let _ = extract_string(&args, "signal", 1);
             let session_id = ctx
                 .turn_id
                 .as_ref()
@@ -763,7 +725,7 @@ impl Tool for BashKill {
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.kill: registry not available".into())
             })?;
-            registry.kill(&handle, &session_id, force)
+            registry.kill(&handle, &session_id)
         })
     }
 }
