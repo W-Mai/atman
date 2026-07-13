@@ -151,7 +151,7 @@ flow agent_loop(iteration: int) -> string {
         retry: 12
         tools: [
             fs.read, fs.write, fs.edit, fs.list, fs.grep,
-            bash.exec, bash.spawn, bash.status, bash.output, bash.kill,
+            bash.exec, bash.spawn, bash.status, bash.output, bash.kill, bash.list,
             web.fetch, web.search,
             hunk.review, hunk.apply,
             memory.confess,

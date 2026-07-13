@@ -73,6 +73,7 @@ pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {
     reg.register(Arc::new(bash_bg::BashStatus));
     reg.register(Arc::new(bash_bg::BashOutput));
     reg.register(Arc::new(bash_bg::BashKill));
+    reg.register(Arc::new(bash_bg::BashList));
     registry
 }
 

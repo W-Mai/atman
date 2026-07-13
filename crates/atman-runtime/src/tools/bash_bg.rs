@@ -195,11 +195,7 @@ impl BgRegistry {
         max_output_bytes: u64,
         ctx: &ToolCtx,
     ) -> Result<Value, RuntimeError> {
-        let session_id = ctx
-            .turn_id
-            .as_ref()
-            .map(|t| t.0.to_string())
-            .unwrap_or_else(|| "anon".to_string());
+        let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
         let local_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handle = BgHandle {
             session_id: session_id.clone(),
@@ -354,6 +350,38 @@ impl BgRegistry {
     fn remove(&self, handle_str: &str) {
         self.entries.lock().unwrap().remove(handle_str);
     }
+
+    pub fn list(&self, session_id: &str) -> Value {
+        let entries = self.entries.lock().unwrap();
+        let items: Vec<Value> = entries
+            .iter()
+            .filter(|(_, e)| e.session_id == session_id)
+            .map(|(handle, entry)| {
+                let st = entry.status.lock().unwrap().clone();
+                let out = entry.output.lock().unwrap();
+                let mut fields = vec![
+                    ("handle".into(), Value::Str(handle.clone())),
+                    ("status".into(), Value::Str(st.kind().into())),
+                    ("started_at".into(), Value::Int(st.started_at())),
+                ];
+                if let Some(ec) = st.exit_code() {
+                    fields.push(("exit_code".into(), Value::Int(ec as i64)));
+                }
+                fields.push(("bytes_total".into(), Value::Int(out.total_bytes as i64)));
+                Value::Struct(fields)
+            })
+            .collect();
+        Value::List(items)
+    }
+}
+
+impl Drop for BgRegistry {
+    fn drop(&mut self) {
+        let entries = self.entries.lock().unwrap();
+        for (_, entry) in entries.iter() {
+            let _ = entry.control_tx.try_send(BgControl::Kill);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -370,14 +398,14 @@ async fn run_bg_process(
     registry: Arc<BgRegistry>,
 ) {
     let started_at = now_ms();
-    let mut child: AsyncGroupChild = match tokio::process::Command::new("sh")
+    let mut command = tokio::process::Command::new("sh");
+    command
         .arg("-c")
         .arg(&cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .group_spawn()
-    {
+        .stderr(Stdio::piped());
+    let mut child: AsyncGroupChild = match command.group().kill_on_drop(true).spawn() {
         Ok(c) => c,
         Err(e) => {
             *status.lock().unwrap() = BgStatus::Failed {
@@ -625,11 +653,7 @@ impl Tool for BashStatus {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
-            let session_id = ctx
-                .turn_id
-                .as_ref()
-                .map(|t| t.0.to_string())
-                .unwrap_or_else(|| "anon".to_string());
+            let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.status: registry not available".into())
             })?;
@@ -672,11 +696,7 @@ impl Tool for BashOutput {
             let limit = extract_optional_int(&args, "limit_bytes")
                 .unwrap_or(DEFAULT_OUTPUT_LIMIT as i64)
                 .max(1) as usize;
-            let session_id = ctx
-                .turn_id
-                .as_ref()
-                .map(|t| t.0.to_string())
-                .unwrap_or_else(|| "anon".to_string());
+            let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.output: registry not available".into())
             })?;
@@ -717,15 +737,43 @@ impl Tool for BashKill {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
             let _ = extract_string(&args, "signal", 1);
-            let session_id = ctx
-                .turn_id
-                .as_ref()
-                .map(|t| t.0.to_string())
-                .unwrap_or_else(|| "anon".to_string());
+            let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.kill: registry not available".into())
             })?;
             registry.kill(&handle, &session_id)
+        })
+    }
+}
+
+pub struct BashList;
+
+impl Tool for BashList {
+    fn name(&self) -> &str {
+        "bash.list"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Four
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "List all background bash processes for the current session. Returns a list of {handle, status, started_at, exit_code?, bytes_total}.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
+            let registry = ctx.bg_registry.clone().ok_or_else(|| {
+                RuntimeError::ToolFailed("bash.list: registry not available".into())
+            })?;
+            Ok(registry.list(&session_id))
         })
     }
 }
@@ -754,7 +802,6 @@ fn extract_optional_int(args: &ToolArgs, name: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::TurnId;
     use crate::tool::{ToolArgs, ToolCtx};
     use crate::value::Value;
     use std::sync::Arc;
@@ -764,7 +811,7 @@ mod tests {
         let mut ctx = ToolCtx::new();
         ctx.bg_registry = Some(registry);
         ctx.session_dir = Some(dir.to_path_buf());
-        ctx.turn_id = Some(TurnId::now());
+        ctx.session_id = Some("test-session".to_string());
         ctx
     }
 
@@ -971,7 +1018,7 @@ mod tests {
         let mut ctx_b = ToolCtx::new();
         ctx_b.bg_registry = Some(registry.clone());
         ctx_b.session_dir = Some(dir.path().to_path_buf());
-        ctx_b.turn_id = Some(TurnId::now());
+        ctx_b.session_id = Some("other-session".to_string());
         let status_args = ToolArgs {
             positional: vec![Value::Str(handle)],
             named: vec![],

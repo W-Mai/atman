@@ -93,6 +93,7 @@ pub struct ToolCtx {
     pub lifecycle_fire_tx:
         Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
+    pub session_id: Option<String>,
 }
 
 impl ToolCtx {
@@ -210,6 +211,11 @@ impl ToolCtx {
         registry: std::sync::Arc<crate::tools::bash_bg::BgRegistry>,
     ) -> Self {
         self.bg_registry = Some(registry);
+        self
+    }
+
+    pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = Some(id.into());
         self
     }
 

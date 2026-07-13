@@ -1,5 +1,4 @@
 use atman_dsl::parse::parse_file;
-use atman_runtime::event::TurnId;
 use atman_runtime::tools;
 use atman_runtime::{Executor, Value};
 
@@ -211,6 +210,17 @@ async fn bash_output_cursor_incremental_read() {
 
 #[tokio::test]
 async fn bash_spawn_cross_session_rejected() {
+    let mut ex = Executor::new();
+    tools::register_tier_zero(&mut ex.tools);
+    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex
+        .tool_ctx
+        .clone()
+        .with_bg_registry(bg)
+        .with_session_dir(std::env::temp_dir().join(format!("atman_test_{}", uuid::Uuid::now_v7())))
+        .with_session_id("session-a");
+
     let src = r#"flow t() -> string {
     contract { capabilities { shell: true } }
     h = bash.spawn(cmd: "sleep 100")
@@ -218,19 +228,7 @@ async fn bash_spawn_cross_session_rejected() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
-    let turn_a = TurnId::now();
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_test_{}", uuid::Uuid::now_v7())),
-    );
-    let v = ex
-        .run_in_turn(&file, "t", vec![], Some(turn_a.clone()), None)
-        .await
-        .unwrap();
-    let handle = match v {
+    let handle = match ex.run(&file, "t", vec![]).await.unwrap() {
         Value::Str(s) => s,
         _ => panic!("expected str"),
     };
@@ -239,10 +237,12 @@ async fn bash_spawn_cross_session_rejected() {
     tools::register_tier_zero(&mut ex2.tools);
     tools::register_shell(&mut ex2.tools);
     let bg2 = tools::register_bash_bg(&mut ex2.tools);
-    let turn_b = TurnId::now();
-    ex2.tool_ctx = ex2.tool_ctx.clone().with_bg_registry(bg2).with_session_dir(
-        std::env::temp_dir().join(format!("atman_test_{}", uuid::Uuid::now_v7())),
-    );
+    ex2.tool_ctx = ex2
+        .tool_ctx
+        .clone()
+        .with_bg_registry(bg2)
+        .with_session_dir(std::env::temp_dir().join(format!("atman_test_{}", uuid::Uuid::now_v7())))
+        .with_session_id("session-b");
 
     let src2 = format!(
         r#"flow t() -> string {{
@@ -253,13 +253,102 @@ async fn bash_spawn_cross_session_rejected() {
 "#
     );
     let file2 = parse_file(&src2).unwrap();
-    let err = ex2
-        .run_in_turn(&file2, "t", vec![], Some(turn_b), None)
-        .await
-        .unwrap_err();
+    let err = ex2.run(&file2, "t", vec![]).await.unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("does not belong to session"),
         "expected cross-session rejection, got: {msg}"
+    );
+}
+
+fn make_executor_with_bg() -> (
+    Executor,
+    std::sync::Arc<atman_runtime::tools::bash_bg::BgRegistry>,
+) {
+    let mut ex = Executor::new();
+    tools::register_tier_zero(&mut ex.tools);
+    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    let dir = std::env::temp_dir().join(format!("atman_test_{}", uuid::Uuid::now_v7()));
+    ex.tool_ctx = ex
+        .tool_ctx
+        .clone()
+        .with_bg_registry(bg.clone())
+        .with_session_dir(dir)
+        .with_session_id("test-session-fixed");
+    (ex, bg)
+}
+
+#[tokio::test]
+async fn bash_spawn_survives_across_turns_same_session() {
+    let (ex, _bg) = make_executor_with_bg();
+
+    let spawn_src = r#"flow t() -> string {
+    contract { capabilities { shell: true } }
+    h = bash.spawn(cmd: "sleep 100")
+    return h.handle
+}
+"#;
+    let file = parse_file(spawn_src).unwrap();
+    let handle = match ex.run(&file, "t", vec![]).await.unwrap() {
+        Value::Str(s) => s,
+        _ => panic!("expected str"),
+    };
+
+    let status_src = format!(
+        r#"flow t() -> string {{
+    contract {{ capabilities {{ shell: true }} }}
+    s = bash.status(handle: "{handle}")
+    return to_json_string(s)
+}}
+"#
+    );
+    let file2 = parse_file(&status_src).unwrap();
+    let v = ex.run(&file2, "t", vec![]).await.unwrap();
+    let s = match v {
+        Value::Str(s) => s,
+        _ => panic!("expected str"),
+    };
+    assert!(
+        s.contains("running") || s.contains("exited"),
+        "same-session cross-turn access should work, got: {s}"
+    );
+
+    let kill_src = format!(
+        r#"flow t() -> string {{
+    contract {{ capabilities {{ shell: true }} }}
+    bash.kill(handle: "{handle}")
+    bash.exec(cmd: "sleep 0.3")
+    return "killed"
+}}
+"#
+    );
+    let file3 = parse_file(&kill_src).unwrap();
+    let _ = ex.run(&file3, "t", vec![]).await;
+}
+
+#[tokio::test]
+async fn bash_list_returns_all_session_handles() {
+    let (ex, _bg) = make_executor_with_bg();
+
+    let src = r#"flow t() -> string {
+    contract { capabilities { shell: true } }
+    bash.spawn(cmd: "echo a")
+    bash.spawn(cmd: "echo b")
+    bash.exec(cmd: "sleep 0.3")
+    result = bash.list()
+    return to_json_string(result)
+}
+"#;
+    let file = parse_file(src).unwrap();
+    let v = ex.run(&file, "t", vec![]).await.unwrap();
+    let s = match v {
+        Value::Str(s) => s,
+        _ => panic!("expected str"),
+    };
+    assert!(s.contains("bg_"), "list should contain handles: {s}");
+    assert!(
+        s.matches("bg_").count() >= 2,
+        "list should have at least 2 handles: {s}"
     );
 }

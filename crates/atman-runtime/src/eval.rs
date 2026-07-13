@@ -240,7 +240,8 @@ async fn dispatch_tool_call<'a>(
             .with_stream_tx(session.stream_tx())
             .with_read_files(session.read_files())
             .with_approval(session.approval())
-            .with_session_dir(session.dir().to_path_buf());
+            .with_session_dir(session.dir().to_path_buf())
+            .with_session_id(session.id().to_string());
         if let Some(idx) = session.project_index() {
             c = c.with_project_index(idx);
         }
