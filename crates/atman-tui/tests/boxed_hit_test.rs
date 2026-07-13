@@ -24,6 +24,7 @@ fn tool_node(id: &str, label: &str, children: Vec<WorkflowNode>) -> WorkflowNode
         children,
         parallelism: Parallelism::Serial,
         approval: None,
+        llm_stats: None,
     }
 }
 
@@ -42,6 +43,7 @@ fn root_flow(children: Vec<WorkflowNode>) -> WorkflowNode {
         children,
         parallelism: Parallelism::Serial,
         approval: None,
+        llm_stats: None,
     }
 }
 

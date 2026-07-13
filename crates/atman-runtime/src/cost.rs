@@ -105,6 +105,10 @@ mod tests {
             },
             wallclock_ms: 100,
             status: LlmCallStatus::Ok,
+            ttft_ms: None,
+            tokens_per_second: None,
+            run_id: None,
+            node_id: None,
             ts: chrono::Utc::now(),
         }
     }
@@ -122,6 +126,10 @@ mod tests {
             status: LlmCallStatus::Errored {
                 message: "boom".into(),
             },
+            ttft_ms: None,
+            tokens_per_second: None,
+            run_id: None,
+            node_id: None,
             ts: chrono::Utc::now(),
         }
     }

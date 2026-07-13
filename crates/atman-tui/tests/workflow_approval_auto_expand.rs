@@ -27,6 +27,7 @@ fn tool_with_approval(
         output_preview: None,
         children: Vec::new(),
         parallelism: Parallelism::Serial,
+        llm_stats: None,
         approval,
     }
 }
@@ -45,6 +46,7 @@ fn root_flow(children: Vec<WorkflowNode>) -> WorkflowNode {
         output_preview: None,
         children,
         parallelism: Parallelism::Serial,
+        llm_stats: None,
         approval: None,
     }
 }

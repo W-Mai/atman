@@ -12,6 +12,18 @@ pub enum StreamFrame {
     LlmDone {
         total_tokens: u64,
     },
+    LlmCallStats {
+        model: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read: u64,
+        cache_write: u64,
+        ttft_ms: u64,
+        tokens_per_second: f64,
+        wallclock_ms: u64,
+        run_id: Option<String>,
+        node_id: Option<String>,
+    },
     ToolUseStart {
         tool: String,
         args_preview: String,

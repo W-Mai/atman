@@ -71,6 +71,7 @@ pub fn build_boot_graph() -> WorkflowGraph {
             children: Vec::new(),
             parallelism: Parallelism::Serial,
             approval: None,
+            llm_stats: None,
         });
     }
     WorkflowGraph {

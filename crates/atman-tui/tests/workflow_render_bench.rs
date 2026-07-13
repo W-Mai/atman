@@ -50,6 +50,7 @@ fn make_tool_node(idx: usize, running: bool) -> WorkflowNode {
         children: Vec::new(),
         parallelism: Parallelism::Serial,
         approval: None,
+        llm_stats: None,
     }
 }
 
@@ -65,6 +66,7 @@ fn make_stmt_wrapper(kind: NodeKind, children: Vec<WorkflowNode>) -> WorkflowNod
         children,
         parallelism: Parallelism::Serial,
         approval: None,
+        llm_stats: None,
     }
 }
 
@@ -99,6 +101,7 @@ fn build_workflow_of_size(target: usize) -> WorkflowGraph {
         children: cursor,
         parallelism: Parallelism::Serial,
         approval: None,
+        llm_stats: None,
     };
     WorkflowGraph {
         turn_id: TurnId::now(),

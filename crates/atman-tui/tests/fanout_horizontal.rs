@@ -20,6 +20,7 @@ fn stmt_node(id: &str, label: &str) -> WorkflowNode {
         children: Vec::new(),
         parallelism: Parallelism::Serial,
         approval: None,
+        llm_stats: None,
     }
 }
 
@@ -37,6 +38,7 @@ fn fanout_branch(index: usize, leaves: Vec<WorkflowNode>) -> WorkflowNode {
         children: leaves,
         parallelism: Parallelism::Parallel,
         approval: None,
+        llm_stats: None,
     }
 }
 
@@ -55,6 +57,7 @@ fn root_flow(children: Vec<WorkflowNode>) -> WorkflowNode {
         children,
         parallelism: Parallelism::Serial,
         approval: None,
+        llm_stats: None,
     }
 }
 

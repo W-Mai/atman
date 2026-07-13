@@ -1588,6 +1588,11 @@ fn append_workflow_node_boxed(
         }
         _ => node.label.clone(),
     };
+    let label = if let Some(stats) = &node.llm_stats {
+        format!("{label}  · {}", format_llm_stats_brief(stats))
+    } else {
+        label
+    };
     let mut approval_hotkey: Option<u8> = None;
     let mut auto_expand = false;
     if let Some(ApprovalState::Pending { .. }) = &node.approval {
@@ -2099,6 +2104,24 @@ fn truncate_preview(s: &str, max: usize) -> String {
     acc
 }
 
+fn format_llm_stats_brief(stats: &atman_runtime::workflow::LlmStats) -> String {
+    use crate::humanize::format_count;
+    let mut parts = Vec::new();
+    if stats.cache_read > 0 {
+        parts.push(format!("cache {}", format_count(stats.cache_read)));
+    }
+    if stats.ttft_ms > 0 {
+        parts.push(format!("ttft {}ms", stats.ttft_ms));
+    }
+    if stats.tokens_per_second > 0.0 {
+        parts.push(format!("{:.0} tok/s", stats.tokens_per_second));
+    }
+    if stats.output_tokens > 0 {
+        parts.push(format!("out {}", format_count(stats.output_tokens)));
+    }
+    parts.join(" · ")
+}
+
 pub fn empty_hint<'a>() -> Paragraph<'a> {
     Paragraph::new("plain text → agent · :help for builtins · Ctrl+C to interrupt")
         .style(Style::default().fg(Color::DarkGray))
@@ -2422,6 +2445,7 @@ mod tests {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 },
                 WorkflowNode {
                     id: "s1".into(),
@@ -2436,10 +2460,12 @@ mod tests {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 },
             ],
             parallelism: Parallelism::Serial,
             approval: None,
+            llm_stats: None,
         });
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
@@ -2488,9 +2514,11 @@ mod tests {
                 children: Vec::new(),
                 parallelism: Parallelism::Serial,
                 approval: None,
+                llm_stats: None,
             }],
             parallelism: Parallelism::Serial,
             approval: None,
+            llm_stats: None,
         });
         let panel = OutputItem::WorkflowPanel {
             turn_index: 0,
@@ -2536,6 +2564,7 @@ mod tests {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 }]
             };
             WorkflowNode {
@@ -2552,6 +2581,7 @@ mod tests {
                 children: deeper,
                 parallelism: Parallelism::Serial,
                 approval: None,
+                llm_stats: None,
             }
         }
 

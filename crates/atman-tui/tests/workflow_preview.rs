@@ -27,6 +27,7 @@ fn pending_tool(id: &str, tool: &str, args: &str, level: &str) -> WorkflowNode {
         output_preview: None,
         children: Vec::new(),
         parallelism: Parallelism::Serial,
+        llm_stats: None,
         approval: Some(ApprovalState::Pending {
             level: level.into(),
             preview: None,
@@ -50,6 +51,7 @@ fn ok_tool(id: &str, tool: &str, args: &str, result: &str) -> WorkflowNode {
         output_preview: None,
         children: Vec::new(),
         parallelism: Parallelism::Serial,
+        llm_stats: None,
         approval: Some(ApprovalState::Approved),
     }
 }
@@ -68,6 +70,7 @@ fn root_flow(children: Vec<WorkflowNode>) -> WorkflowNode {
         output_preview: None,
         children,
         parallelism: Parallelism::Serial,
+        llm_stats: None,
         approval: None,
     }
 }
@@ -162,6 +165,7 @@ fn preview_fanout_branches_after_flip() {
             children: leaves,
             parallelism: Parallelism::Parallel,
             approval: None,
+            llm_stats: None,
         }
     }
     let root = root_flow(vec![

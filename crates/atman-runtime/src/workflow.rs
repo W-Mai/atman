@@ -22,6 +22,20 @@ pub struct WorkflowNode {
     pub parallelism: Parallelism,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_stats: Option<LlmStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct LlmStats {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub ttft_ms: u64,
+    pub tokens_per_second: f64,
+    pub wallclock_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -120,6 +134,7 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 };
                 match (parent_run_id.as_ref(), parent_node_id.as_deref()) {
                     (Some(prid), Some(pid)) => {
@@ -176,6 +191,7 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &parent_id) {
                     if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. }) {
@@ -212,6 +228,32 @@ impl WorkflowGraph {
                     }
                 }
             }
+            Event::LlmCall {
+                run_id,
+                node_id,
+                model,
+                usage,
+                wallclock_ms,
+                ttft_ms,
+                tokens_per_second,
+                ..
+            } => {
+                if let (Some(rid), Some(nid)) = (run_id, node_id) {
+                    let scoped = scope_id(&rid.0.to_string(), nid);
+                    if let Some(n) = find_node_mut(&mut self.root, &scoped) {
+                        n.llm_stats = Some(LlmStats {
+                            model: model.clone(),
+                            input_tokens: usage.input,
+                            output_tokens: usage.output,
+                            cache_read: usage.cached_input,
+                            cache_write: usage.cache_write,
+                            ttft_ms: ttft_ms.unwrap_or(0),
+                            tokens_per_second: tokens_per_second.unwrap_or(0.0),
+                            wallclock_ms: *wallclock_ms,
+                        });
+                    }
+                }
+            }
             Event::ToolNode {
                 run_id,
                 parent_node_id,
@@ -240,6 +282,7 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &scoped_parent) {
                     parent.children.push(node);
@@ -278,6 +321,7 @@ impl WorkflowGraph {
                             children: Vec::new(),
                             parallelism: Parallelism::Serial,
                             approval: None,
+                            llm_stats: None,
                         };
                         if let Some(parent) = find_node_mut(&mut self.root, &flow_id) {
                             parent.children.push(node);
@@ -404,6 +448,7 @@ impl WorkflowGraph {
                         children: Vec::new(),
                         parallelism: Parallelism::Serial,
                         approval: None,
+                        llm_stats: None,
                     });
                 }
             }
@@ -438,6 +483,7 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 };
                 match (parent_run_id.as_deref(), parent_node_id.as_deref()) {
                     (Some(prid), Some(pid)) => {
@@ -481,6 +527,7 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &parent_id) {
                     if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. }) {
@@ -516,6 +563,34 @@ impl WorkflowGraph {
                     }
                 }
             }
+            StreamFrame::LlmCallStats {
+                model,
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_write,
+                ttft_ms,
+                tokens_per_second,
+                wallclock_ms,
+                run_id,
+                node_id,
+            } => {
+                if let (Some(rid), Some(nid)) = (run_id.as_deref(), node_id.as_deref()) {
+                    let scoped = scope_id(rid, nid);
+                    if let Some(n) = find_node_mut(&mut self.root, &scoped) {
+                        n.llm_stats = Some(LlmStats {
+                            model: model.clone(),
+                            input_tokens: *input_tokens,
+                            output_tokens: *output_tokens,
+                            cache_read: *cache_read,
+                            cache_write: *cache_write,
+                            ttft_ms: *ttft_ms,
+                            tokens_per_second: *tokens_per_second,
+                            wallclock_ms: *wallclock_ms,
+                        });
+                    }
+                }
+            }
             StreamFrame::ToolNode {
                 run_id,
                 parent_node_id,
@@ -541,6 +616,7 @@ impl WorkflowGraph {
                     children: Vec::new(),
                     parallelism: Parallelism::Serial,
                     approval: None,
+                    llm_stats: None,
                 };
                 if let Some(parent) = find_node_mut(&mut self.root, &scoped_parent) {
                     parent.children.push(node);

@@ -934,6 +934,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         message: e.to_string(),
                     },
                 };
+                let (ttft_ms, tps) = match &outcome {
+                    Ok(am) => (
+                        am.timing.ttft_ms,
+                        am.timing.tokens_per_second(am.token_usage.output),
+                    ),
+                    Err(_) => (None, None),
+                };
                 if let Some(sink) = ctx.events {
                     sink.emit(crate::event::Event::LlmCall {
                         seq: 0,
@@ -941,19 +948,30 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         provider: provider.name().to_string(),
                         usage: usage.clone(),
                         wallclock_ms: elapsed_ms,
+                        ttft_ms,
+                        tokens_per_second: tps,
                         status,
+                        run_id: ctx.flow_run_id.clone(),
+                        node_id: ctx.current_node_id.clone(),
                         ts: chrono::Utc::now(),
                     });
                 }
                 if let Some(session) = ctx.session {
                     let input_with_cache = usage.input + usage.cached_input + usage.cache_write;
-                    let (ttft_ms, tps) = match &outcome {
-                        Ok(am) => (
-                            am.timing.ttft_ms,
-                            am.timing.tokens_per_second(am.token_usage.output),
-                        ),
-                        Err(_) => (None, None),
-                    };
+                    let _ = session
+                        .stream_tx()
+                        .send(crate::stream::StreamFrame::LlmCallStats {
+                            model: model.clone(),
+                            input_tokens: usage.input,
+                            output_tokens: usage.output,
+                            cache_read: usage.cached_input,
+                            cache_write: usage.cache_write,
+                            ttft_ms: ttft_ms.unwrap_or(0),
+                            tokens_per_second: tps.unwrap_or(0.0),
+                            wallclock_ms: elapsed_ms,
+                            run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+                            node_id: ctx.current_node_id.clone(),
+                        });
                     session.record_llm_call(
                         &model,
                         input_with_cache,

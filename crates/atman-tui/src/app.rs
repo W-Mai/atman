@@ -445,6 +445,7 @@ impl AppState {
             | StreamFrame::FlowNodeEnd { .. }
             | StreamFrame::FlowDone { .. }
             | StreamFrame::ToolNode { .. }
+            | StreamFrame::LlmCallStats { .. }
             | StreamFrame::AssistantMsg { .. }
             | StreamFrame::ToolResultMsg { .. }
             | StreamFrame::ToolPendingApproval { .. }

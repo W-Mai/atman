@@ -374,7 +374,11 @@ fn emit_child_llm_call(
             provider: "sub".into(),
             usage: am.token_usage.clone(),
             wallclock_ms: 0,
+            ttft_ms: am.timing.ttft_ms,
+            tokens_per_second: am.timing.tokens_per_second(am.token_usage.output),
             status: crate::event::LlmCallStatus::Ok,
+            run_id: None,
+            node_id: None,
             ts: chrono::Utc::now(),
         });
     }

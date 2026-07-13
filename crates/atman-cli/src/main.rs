@@ -2073,6 +2073,7 @@ fn render_stream_frame(
         | StreamFrame::FlowDone { .. }
         | StreamFrame::ToolNode { .. }
         | StreamFrame::ThinkingChunk { .. }
+        | StreamFrame::LlmCallStats { .. }
         | StreamFrame::AssistantMsg { .. }
         | StreamFrame::ToolResultMsg { .. }
         | StreamFrame::ToolPendingApproval { .. }

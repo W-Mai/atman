@@ -65,7 +65,13 @@ pub enum Event {
         provider: String,
         usage: crate::provider::TokenUsage,
         wallclock_ms: u64,
+        ttft_ms: Option<u64>,
+        tokens_per_second: Option<f64>,
         status: LlmCallStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<crate::event::FlowRunId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node_id: Option<String>,
         ts: chrono::DateTime<chrono::Utc>,
     },
     TurnStart {
