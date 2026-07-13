@@ -14,6 +14,7 @@ pub enum OutputItem {
     Thinking {
         text: String,
         done: bool,
+        expanded: bool,
     },
     AssistantMd {
         md: String,
@@ -397,7 +398,11 @@ impl AppState {
                     self.streaming = true;
                     self.reset_lag_state();
                 } else {
-                    self.push_item(OutputItem::Thinking { text, done: false });
+                    self.push_item(OutputItem::Thinking {
+                        text,
+                        done: false,
+                        expanded: false,
+                    });
                     self.streaming = true;
                 }
             }

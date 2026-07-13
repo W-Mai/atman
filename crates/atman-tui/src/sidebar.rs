@@ -419,7 +419,7 @@ fn context_section<'a>(
         kv_line("model", model, plain),
         kv_line("window", window, stream_style),
         kv_line(
-            "spent",
+            "total",
             format!(
                 "in {} · out {}",
                 format_count(ctx.tokens_in),
@@ -441,21 +441,16 @@ fn context_section<'a>(
             plain,
         ),
         kv_line(
-            "ttft",
-            if ctx.last_ttft_ms > 0 {
-                format!("{}ms", ctx.last_ttft_ms)
-            } else {
-                "—".to_string()
-            },
-            plain,
-        ),
-        kv_line(
-            "speed",
-            if ctx.last_tokens_per_sec > 0.0 {
-                format!("{:.1} tok/s", ctx.last_tokens_per_sec)
-            } else {
-                "—".to_string()
-            },
+            "last",
+            format!(
+                "ttft {} · {:.0} tok/s",
+                if ctx.last_ttft_ms > 0 {
+                    format!("{}ms", ctx.last_ttft_ms)
+                } else {
+                    "—".to_string()
+                },
+                ctx.last_tokens_per_sec
+            ),
             plain,
         ),
         kv_line("attach", format!("{attach_count}"), plain),

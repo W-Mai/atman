@@ -1228,8 +1228,8 @@ impl Session {
             snap.model = model.to_string();
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
             snap.tokens_out = snap.tokens_out.saturating_add(tokens_out);
-            snap.cache_read = cache_read;
-            snap.cache_write = cache_write;
+            snap.cache_read = snap.cache_read.saturating_add(cache_read);
+            snap.cache_write = snap.cache_write.saturating_add(cache_write);
             snap.last_ttft_ms = ttft_ms.unwrap_or(0);
             snap.last_tokens_per_sec = tokens_per_sec.unwrap_or(0.0);
         });

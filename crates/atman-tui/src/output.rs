@@ -775,28 +775,59 @@ fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
     ]
 }
 
-fn render_thinking(text: &str, done: bool, panel_width: u16) -> Vec<Line<'static>> {
+fn render_thinking(
+    text: &str,
+    done: bool,
+    expanded: bool,
+    animation_frame: u32,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let style = Style::default().fg(t.subtle_fg).add_modifier(Modifier::DIM);
-    let header = if done { " thinking " } else { " thinking… " };
+    let bg_style = Style::default()
+        .fg(t.subtle_fg)
+        .bg(t.code_bg)
+        .add_modifier(Modifier::DIM);
+    let glyph = if done {
+        "✓"
+    } else {
+        spinner_char(animation_frame)
+    };
+    let header = if done {
+        format!(" {glyph} thinking ")
+    } else {
+        format!(" {glyph} thinking… ")
+    };
     let target = panel_width.max(20) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(Span::styled(header.to_string(), style)));
-    for line in text.lines().take(20) {
+    lines.push(Line::from(Span::styled(header, style)));
+    let all_lines: Vec<&str> = text.lines().collect();
+    let max_lines = if expanded {
+        all_lines.len()
+    } else {
+        8.min(all_lines.len())
+    };
+    for line in all_lines.iter().take(max_lines) {
+        let line: &str = line;
         let used = UnicodeWidthStr::width(line);
         let pad = target.saturating_sub(used);
-        let mut spans = vec![Span::styled(line.to_string(), style)];
+        let mut spans = vec![Span::styled(line.to_string(), bg_style)];
         if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), style));
+            spans.push(Span::styled(" ".repeat(pad), bg_style));
         }
         lines.push(Line::from(spans));
     }
-    if text.lines().count() > 20 {
+    if !expanded && all_lines.len() > max_lines {
         lines.push(Line::from(Span::styled(
-            "  … (truncated)".to_string(),
+            format!(
+                " ▼ {} more lines — click to expand",
+                all_lines.len() - max_lines
+            ),
             style,
         )));
+    } else if expanded && all_lines.len() > 8 {
+        lines.push(Line::from(Span::styled(" ▲ click to collapse", style)));
     }
     lines
 }
@@ -889,7 +920,11 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
 pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
     let mut lines = match item {
         OutputItem::UserTurn { text } => render_user_turn(text, ctx.panel_width),
-        OutputItem::Thinking { text, done } => render_thinking(text, *done, ctx.panel_width),
+        OutputItem::Thinking {
+            text,
+            done,
+            expanded,
+        } => render_thinking(text, *done, *expanded, ctx.animation_frame, ctx.panel_width),
         OutputItem::StartupCard { .. } => Vec::new(),
         OutputItem::AssistantMd { md, streaming } => {
             render_assistant(md, *streaming, ctx.panel_width)
