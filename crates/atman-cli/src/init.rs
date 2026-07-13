@@ -152,6 +152,7 @@ flow agent_loop(iteration: int) -> string {
         tools: [
             fs.read, fs.write, fs.edit, fs.list, fs.grep,
             bash.exec,
+            web.fetch, web.search,
             hunk.review, hunk.apply,
             memory.confess,
             memory.todo.set, memory.todo.done, memory.todo.cancel, memory.todo.delete, memory.todo.list,

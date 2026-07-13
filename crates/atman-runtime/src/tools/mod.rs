@@ -70,8 +70,10 @@ pub fn register_web(reg: &mut ToolRegistry, config: web::WebConfig) {
     reg.register(Arc::new(web::WebFetch::new(config)));
 }
 
-pub fn register_web_search(reg: &mut ToolRegistry, provider: Arc<dyn web::SearchProvider>) {
-    reg.register(Arc::new(web::WebSearch::new(provider)));
+pub fn register_web_search(reg: &mut ToolRegistry, config: &web::SearchConfig) {
+    if let Some(provider) = web::build_search_provider(config) {
+        reg.register(Arc::new(web::WebSearch::new(provider)));
+    }
 }
 
 pub fn register_preview(reg: &mut ToolRegistry, config: preview::PreviewConfig) {

@@ -7,7 +7,6 @@ use crate::value::Value;
 #[derive(Debug, Clone)]
 pub struct WebConfig {
     pub max_bytes: usize,
-    // Empty allowlist means "any URL allowed"; denylist runs first.
     pub url_allowlist: Vec<String>,
     pub url_denylist: Vec<String>,
 }
@@ -34,15 +33,397 @@ impl WebConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "provider", rename_all = "lowercase")]
+pub enum SearchConfig {
+    #[serde(rename = "none")]
+    None,
+    Tavily {
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        base_url: Option<String>,
+        #[serde(default)]
+        max_results: Option<usize>,
+    },
+    Searxng {
+        #[serde(default)]
+        base_url: Option<String>,
+        #[serde(default)]
+        max_results: Option<usize>,
+    },
+    Parallel {
+        api_key: String,
+        #[serde(default)]
+        base_url: Option<String>,
+        #[serde(default)]
+        max_results: Option<usize>,
+    },
+    Brave {
+        api_key: String,
+        #[serde(default)]
+        base_url: Option<String>,
+    },
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self::Tavily {
+            api_key: None,
+            base_url: None,
+            max_results: None,
+        }
+    }
+}
+
+fn tavily_default_endpoint() -> String {
+    "https://api.tavily.com".into()
+}
+fn parallel_default_endpoint() -> String {
+    "https://api.parallel.ai".into()
+}
+fn brave_default_endpoint() -> String {
+    "https://api.search.brave.com/res/v1/web/search".into()
+}
+fn default_max_results() -> usize {
+    8
+}
+
+impl SearchConfig {
+    pub fn provider_name(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Tavily { .. } => "tavily",
+            Self::Searxng { .. } => "searxng",
+            Self::Parallel { .. } => "parallel",
+            Self::Brave { .. } => "brave",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct SearchResult {
     pub title: String,
     pub url: String,
-    pub description: String,
+    pub snippet: String,
+    pub content: Option<String>,
+    pub published_date: Option<String>,
+    pub score: Option<f64>,
+}
+
+impl SearchResult {
+    pub fn into_value(self) -> Value {
+        let mut fields: Vec<(String, Value)> = vec![
+            ("title".into(), Value::Str(self.title)),
+            ("url".into(), Value::Str(self.url)),
+            ("snippet".into(), Value::Str(self.snippet)),
+        ];
+        if let Some(c) = self.content {
+            fields.push(("content".into(), Value::Str(c)));
+        }
+        if let Some(d) = self.published_date {
+            fields.push(("published_date".into(), Value::Str(d)));
+        }
+        if let Some(s) = self.score {
+            fields.push(("score".into(), Value::Float(s)));
+        }
+        Value::Struct(fields)
+    }
 }
 
 pub trait SearchProvider: Send + Sync {
+    fn name(&self) -> &'static str;
     fn call<'a>(&'a self, query: &'a str) -> BoxFut<'a, Result<Vec<SearchResult>, RuntimeError>>;
+}
+
+pub fn build_search_provider(cfg: &SearchConfig) -> Option<Arc<dyn SearchProvider>> {
+    match cfg {
+        SearchConfig::None => None,
+        SearchConfig::Tavily {
+            api_key,
+            base_url,
+            max_results,
+        } => Some(Arc::new(TavilySearch::new(
+            api_key.clone(),
+            base_url.clone().unwrap_or_else(tavily_default_endpoint),
+            max_results.unwrap_or_else(default_max_results),
+        ))),
+        SearchConfig::Searxng {
+            base_url,
+            max_results,
+        } => Some(Arc::new(SearxngSearch::new(
+            base_url
+                .clone()
+                .unwrap_or_else(|| "http://localhost:8080".into()),
+            max_results.unwrap_or_else(default_max_results),
+        ))),
+        SearchConfig::Parallel {
+            api_key,
+            base_url,
+            max_results,
+        } => Some(Arc::new(ParallelSearch::new(
+            api_key.clone(),
+            base_url.clone().unwrap_or_else(parallel_default_endpoint),
+            max_results.unwrap_or_else(default_max_results),
+        ))),
+        SearchConfig::Brave { api_key, base_url } => Some(Arc::new(BraveSearch::with_endpoint(
+            api_key.clone(),
+            base_url.clone().unwrap_or_else(brave_default_endpoint),
+        ))),
+    }
+}
+
+pub struct TavilySearch {
+    api_key: Option<String>,
+    base_url: String,
+    max_results: usize,
+    client: reqwest::Client,
+}
+
+impl TavilySearch {
+    pub fn new(api_key: Option<String>, base_url: String, max_results: usize) -> Self {
+        Self {
+            api_key,
+            base_url,
+            max_results: max_results.max(1),
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+impl SearchProvider for TavilySearch {
+    fn name(&self) -> &'static str {
+        "tavily"
+    }
+
+    fn call<'a>(&'a self, query: &'a str) -> BoxFut<'a, Result<Vec<SearchResult>, RuntimeError>> {
+        Box::pin(async move {
+            let body = serde_json::json!({
+                "query": query,
+                "max_results": self.max_results,
+                "search_depth": "basic",
+            });
+            let mut req = self
+                .client
+                .post(format!("{}/search", self.base_url))
+                .header("Content-Type", "application/json")
+                .json(&body);
+            if let Some(key) = &self.api_key {
+                req = req.header("Authorization", format!("Bearer {key}"));
+            } else {
+                req = req.header("X-Tavily-Access-Mode", "keyless");
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("web.search: tavily: {e}")))?;
+            let status = resp.status();
+            let json: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("web.search: tavily decode: {e}")))?;
+            if !status.is_success() {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "web.search: tavily returned {status}: {json}"
+                )));
+            }
+            let items = json
+                .get("results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            Ok(items
+                .into_iter()
+                .map(|item| SearchResult {
+                    title: item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .into(),
+                    url: item
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .into(),
+                    snippet: item
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .into(),
+                    content: item
+                        .get("raw_content")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    published_date: None,
+                    score: item.get("score").and_then(|v| v.as_f64()),
+                })
+                .collect())
+        })
+    }
+}
+
+pub struct SearxngSearch {
+    base_url: String,
+    max_results: usize,
+    client: reqwest::Client,
+}
+
+impl SearxngSearch {
+    pub fn new(base_url: String, max_results: usize) -> Self {
+        Self {
+            base_url,
+            max_results: max_results.max(1),
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+impl SearchProvider for SearxngSearch {
+    fn name(&self) -> &'static str {
+        "searxng"
+    }
+
+    fn call<'a>(&'a self, query: &'a str) -> BoxFut<'a, Result<Vec<SearchResult>, RuntimeError>> {
+        Box::pin(async move {
+            let resp = self
+                .client
+                .get(format!("{}/search", self.base_url.trim_end_matches('/')))
+                .query(&[("q", query), ("format", "json")])
+                .send()
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("web.search: searxng: {e}")))?;
+            let status = resp.status();
+            let json: serde_json::Value = resp.json().await.map_err(|e| {
+                RuntimeError::ToolFailed(format!("web.search: searxng decode: {e}"))
+            })?;
+            if !status.is_success() {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "web.search: searxng returned {status}: {json}"
+                )));
+            }
+            let items = json
+                .get("results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            Ok(items
+                .into_iter()
+                .take(self.max_results)
+                .map(|item| SearchResult {
+                    title: item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .into(),
+                    url: item
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .into(),
+                    snippet: item
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .into(),
+                    content: None,
+                    published_date: None,
+                    score: None,
+                })
+                .collect())
+        })
+    }
+}
+
+pub struct ParallelSearch {
+    api_key: String,
+    base_url: String,
+    max_results: usize,
+    client: reqwest::Client,
+}
+
+impl ParallelSearch {
+    pub fn new(api_key: String, base_url: String, max_results: usize) -> Self {
+        Self {
+            api_key,
+            base_url,
+            max_results: max_results.max(1),
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+impl SearchProvider for ParallelSearch {
+    fn name(&self) -> &'static str {
+        "parallel"
+    }
+
+    fn call<'a>(&'a self, query: &'a str) -> BoxFut<'a, Result<Vec<SearchResult>, RuntimeError>> {
+        Box::pin(async move {
+            let body = serde_json::json!({
+                "objective": query,
+                "search_queries": [query],
+            });
+            let resp = self
+                .client
+                .post(format!("{}/v1/search", self.base_url.trim_end_matches('/')))
+                .header("Content-Type", "application/json")
+                .header("x-api-key", &self.api_key)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("web.search: parallel: {e}")))?;
+            let status = resp.status();
+            let json: serde_json::Value = resp.json().await.map_err(|e| {
+                RuntimeError::ToolFailed(format!("web.search: parallel decode: {e}"))
+            })?;
+            if !status.is_success() {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "web.search: parallel returned {status}: {json}"
+                )));
+            }
+            let items = json
+                .get("results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            Ok(items
+                .into_iter()
+                .take(self.max_results)
+                .map(|item| {
+                    let excerpts = item
+                        .get("excerpts")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| {
+                            arr.iter()
+                                .filter_map(|e| e.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n\n")
+                                .into()
+                        })
+                        .filter(|s: &String| !s.is_empty());
+                    SearchResult {
+                        title: item
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .into(),
+                        url: item
+                            .get("url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .into(),
+                        snippet: excerpts.clone().unwrap_or_default(),
+                        content: excerpts,
+                        published_date: item
+                            .get("publish_date")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        score: None,
+                    }
+                })
+                .collect())
+        })
+    }
 }
 
 pub struct BraveSearch {
@@ -66,6 +447,10 @@ impl BraveSearch {
 }
 
 impl SearchProvider for BraveSearch {
+    fn name(&self) -> &'static str {
+        "brave"
+    }
+
     fn call<'a>(&'a self, query: &'a str) -> BoxFut<'a, Result<Vec<SearchResult>, RuntimeError>> {
         Box::pin(async move {
             let resp = self
@@ -99,17 +484,20 @@ impl SearchProvider for BraveSearch {
                         .get("title")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
-                        .to_string(),
+                        .into(),
                     url: item
                         .get("url")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
-                        .to_string(),
-                    description: item
+                        .into(),
+                    snippet: item
                         .get("description")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
-                        .to_string(),
+                        .into(),
+                    content: None,
+                    published_date: None,
+                    score: None,
                 })
                 .collect())
         })
@@ -140,16 +528,7 @@ impl Tool for WebSearch {
             let query = extract_string(&args, "query", 0)?;
             let results = self.provider.call(&query).await?;
             Ok(Value::List(
-                results
-                    .into_iter()
-                    .map(|r| {
-                        Value::Struct(vec![
-                            ("title".into(), Value::Str(r.title)),
-                            ("url".into(), Value::Str(r.url)),
-                            ("description".into(), Value::Str(r.description)),
-                        ])
-                    })
-                    .collect(),
+                results.into_iter().map(SearchResult::into_value).collect(),
             ))
         })
     }
@@ -196,26 +575,47 @@ impl Tool for WebFetch {
                 .await
                 .map_err(|e| RuntimeError::ToolFailed(format!("web.fetch({url}): {e}")))?;
             let status = resp.status().as_u16() as i64;
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
             let bytes = resp
                 .bytes()
                 .await
                 .map_err(|e| RuntimeError::ToolFailed(format!("web.fetch read body: {e}")))?;
             let truncated = bytes.len() > self.config.max_bytes;
-            let body = if truncated {
+            let raw = if truncated {
                 let slice = &bytes[..self.config.max_bytes];
+                String::from_utf8_lossy(slice).into_owned()
+            } else {
+                String::from_utf8_lossy(&bytes).into_owned()
+            };
+            let is_html = content_type.contains("text/html");
+            let body = if is_html {
+                match htmd::convert(&raw) {
+                    Ok(md) => md,
+                    Err(_) => raw,
+                }
+            } else {
+                raw
+            };
+            let body = if truncated {
                 format!(
                     "{}\n[atman: truncated at {} bytes; full length {}]",
-                    String::from_utf8_lossy(slice),
+                    body,
                     self.config.max_bytes,
                     bytes.len()
                 )
             } else {
-                String::from_utf8_lossy(&bytes).into_owned()
+                body
             };
             Ok(Value::Struct(vec![
                 ("status".into(), Value::Int(status)),
                 ("body".into(), Value::Str(body)),
                 ("truncated".into(), Value::Bool(truncated)),
+                ("content_type".into(), Value::Str(content_type)),
             ]))
         })
     }
@@ -430,5 +830,270 @@ mod tests {
             msg.contains("429") || msg.contains("rate limit"),
             "msg: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn tavily_search_keyless_sends_keyless_header() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "results": [
+                {"title": "Rust async", "url": "https://example.com/a", "content": "tokio primer", "score": 0.9}
+            ]
+        });
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(wiremock::matchers::header(
+                "X-Tavily-Access-Mode",
+                "keyless",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = TavilySearch::new(None, server.uri(), 5);
+        let results = provider.call("rust async").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Rust async");
+        assert_eq!(results[0].url, "https://example.com/a");
+        assert_eq!(results[0].snippet, "tokio primer");
+        assert_eq!(results[0].score, Some(0.9));
+    }
+
+    #[tokio::test]
+    async fn tavily_search_keyed_sends_bearer() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer tvly-secret",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"results": []})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = TavilySearch::new(Some("tvly-secret".into()), server.uri(), 5);
+        provider.call("q").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn searxng_search_maps_results() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "results": [
+                {"title": "SearXNG", "url": "https://example.com/s", "content": "meta search"},
+                {"title": "second", "url": "https://example.com/b", "content": "more"}
+            ]
+        });
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .and(wiremock::matchers::query_param("format", "json"))
+            .and(wiremock::matchers::query_param("q", "test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let provider = SearxngSearch::new(server.uri(), 1);
+        let results = provider.call("test").await.unwrap();
+        assert_eq!(results.len(), 1, "max_results should cap");
+        assert_eq!(results[0].title, "SearXNG");
+    }
+
+    #[tokio::test]
+    async fn parallel_search_maps_excerpts_to_content() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "results": [
+                {"title": "Parallel", "url": "https://example.com/p", "excerpts": ["line one", "line two"], "publish_date": "2026-01-01"}
+            ]
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(wiremock::matchers::header("x-api-key", "par-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let provider = ParallelSearch::new("par-key".into(), server.uri(), 5);
+        let results = provider.call("objective").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Parallel");
+        assert!(results[0].content.as_deref().unwrap().contains("line one"));
+        assert!(results[0].content.as_deref().unwrap().contains("line two"));
+        assert_eq!(results[0].published_date.as_deref(), Some("2026-01-01"));
+    }
+
+    #[tokio::test]
+    async fn parallel_search_surfaces_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(serde_json::json!({"message": "no key"})),
+            )
+            .mount(&server)
+            .await;
+        let provider = ParallelSearch::new("k".into(), server.uri(), 5);
+        let err = provider.call("q").await.err().unwrap();
+        assert!(format!("{err}").contains("401"), "{}", err);
+    }
+
+    #[tokio::test]
+    async fn fetch_converts_html_to_markdown() {
+        let server = MockServer::start().await;
+        let html = "<html><body><h1>Title</h1><p>hello <a href=\"x\">link</a></p></body></html>";
+        Mock::given(method("GET"))
+            .and(path("/page"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(html.as_bytes())
+                    .insert_header("content-type", "text/html; charset=utf-8"),
+            )
+            .mount(&server)
+            .await;
+
+        let tool = WebFetch::new(WebConfig::default());
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str(format!("{}/page", server.uri()))],
+            named: vec![],
+        };
+        let v = tool.call(args, &ctx).await.unwrap();
+        let Value::Struct(f) = v else {
+            panic!("expected struct")
+        };
+        let Value::Str(body) = &f.iter().find(|(k, _)| k == "body").unwrap().1 else {
+            panic!("body not str");
+        };
+        assert!(body.contains("# Title"), "h1 → markdown heading: {body}");
+        assert!(body.contains("hello"), "paragraph text preserved: {body}");
+        assert!(!body.contains("<html>"), "html tags stripped: {body}");
+    }
+
+    #[tokio::test]
+    async fn fetch_returns_raw_for_non_html() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(r#"{"key":"value"}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let tool = WebFetch::new(WebConfig::default());
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: vec![Value::Str(format!("{}/json", server.uri()))],
+            named: vec![],
+        };
+        let v = tool.call(args, &ctx).await.unwrap();
+        let Value::Struct(f) = v else {
+            panic!("expected struct")
+        };
+        let Value::Str(body) = &f.iter().find(|(k, _)| k == "body").unwrap().1 else {
+            panic!("body not str");
+        };
+        assert_eq!(
+            body, r#"{"key":"value"}"#,
+            "json returned raw, no conversion"
+        );
+    }
+
+    #[test]
+    fn build_search_provider_returns_none_for_disabled() {
+        assert!(build_search_provider(&SearchConfig::None).is_none());
+    }
+
+    #[test]
+    fn build_search_provider_tavily() {
+        let cfg = SearchConfig::Tavily {
+            api_key: None,
+            base_url: Some("https://api.tavily.com".into()),
+            max_results: Some(5),
+        };
+        let p = build_search_provider(&cfg).unwrap();
+        assert_eq!(p.name(), "tavily");
+    }
+
+    #[test]
+    fn build_search_provider_searxng() {
+        let cfg = SearchConfig::Searxng {
+            base_url: Some("http://localhost:8080".into()),
+            max_results: Some(10),
+        };
+        let p = build_search_provider(&cfg).unwrap();
+        assert_eq!(p.name(), "searxng");
+    }
+
+    #[test]
+    fn build_search_provider_tavily_uses_defaults_when_fields_missing() {
+        let cfg = SearchConfig::Tavily {
+            api_key: None,
+            base_url: None,
+            max_results: None,
+        };
+        let p = build_search_provider(&cfg).unwrap();
+        assert_eq!(p.name(), "tavily");
+    }
+
+    #[test]
+    fn default_search_config_is_tavily_keyless() {
+        let cfg = SearchConfig::default();
+        assert!(matches!(cfg, SearchConfig::Tavily { api_key: None, .. }));
+        assert!(build_search_provider(&cfg).is_some());
+    }
+
+    #[test]
+    fn search_config_deserializes_minimal_tavily() {
+        let toml = r#"
+[web.search]
+provider = "tavily"
+"#;
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(default)]
+            web: WebWrap,
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct WebWrap {
+            #[serde(default)]
+            search: Option<SearchConfig>,
+        }
+        let w: W = toml::from_str(toml).unwrap();
+        match w.web.search {
+            Some(SearchConfig::Tavily {
+                api_key: None,
+                base_url: None,
+                max_results: None,
+            }) => {}
+            other => panic!("expected minimal Tavily, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_config_deserializes_none() {
+        let toml = r#"
+[web.search]
+provider = "none"
+"#;
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(default)]
+            web: WebWrap,
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct WebWrap {
+            #[serde(default)]
+            search: Option<SearchConfig>,
+        }
+        let w: W = toml::from_str(toml).unwrap();
+        assert!(matches!(w.web.search, Some(SearchConfig::None)));
     }
 }

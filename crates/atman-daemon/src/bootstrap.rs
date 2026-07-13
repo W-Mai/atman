@@ -134,6 +134,9 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         &mut executor.tools,
         load_preview_config(opts.config_dir.as_deref()),
     );
+    let web_config = load_web_config(opts.config_dir.as_deref());
+    tools::register_web(&mut executor.tools, web_config.fetch);
+    tools::register_web_search(&mut executor.tools, &web_config.search);
     register_providers_from_env(&mut executor);
     if let Some(sandbox) =
         build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
@@ -512,6 +515,73 @@ pub fn parse_preview_config(
 
 pub fn default_config_dir() -> Result<PathBuf> {
     atman_runtime::storage::config_dir()
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WebConfig {
+    pub fetch: atman_runtime::tools::web::WebConfig,
+    pub search: atman_runtime::tools::web::SearchConfig,
+}
+
+pub fn load_web_config(config_dir: Option<&Path>) -> WebConfig {
+    let mut cfg = WebConfig::default();
+    let Some(dir) = config_dir else {
+        return cfg;
+    };
+    let path = dir.join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return cfg;
+    };
+    parse_web_config(&text, &mut cfg);
+    cfg
+}
+
+pub fn parse_web_config(text: &str, cfg: &mut WebConfig) {
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct RawWeb {
+        #[serde(default)]
+        max_bytes: Option<usize>,
+        #[serde(default)]
+        url_allowlist: Vec<String>,
+        #[serde(default)]
+        url_denylist: Vec<String>,
+    }
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct RawFile {
+        #[serde(default)]
+        web: RawWeb,
+    }
+    if let Ok(file) = toml::from_str::<RawFile>(text) {
+        if let Some(mb) = file.web.max_bytes {
+            cfg.fetch.max_bytes = mb;
+        }
+        if !file.web.url_allowlist.is_empty() {
+            cfg.fetch.url_allowlist = file.web.url_allowlist;
+        }
+        if !file.web.url_denylist.is_empty() {
+            cfg.fetch.url_denylist = file.web.url_denylist;
+        }
+    }
+    if let Ok(search) = parse_search_section(text) {
+        cfg.search = search;
+    }
+}
+
+fn parse_search_section(
+    text: &str,
+) -> Result<atman_runtime::tools::web::SearchConfig, toml::de::Error> {
+    #[derive(Debug, serde::Deserialize)]
+    struct Wrapper {
+        #[serde(default)]
+        web: WebWrapper,
+    }
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct WebWrapper {
+        #[serde(default)]
+        search: Option<atman_runtime::tools::web::SearchConfig>,
+    }
+    let w: Wrapper = toml::from_str(text)?;
+    Ok(w.web.search.unwrap_or_default())
 }
 
 pub fn default_data_dir() -> Result<PathBuf> {
