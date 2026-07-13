@@ -316,16 +316,57 @@ impl BgRegistry {
         &self,
         handle_str: &str,
         session_id: &str,
+        session_dir: Option<&std::path::Path>,
         cursor: usize,
         limit: usize,
     ) -> Result<Value, RuntimeError> {
-        let entry = self.lookup(handle_str, session_id)?;
-        let st = entry.status.lock().unwrap().clone();
-        let out = entry.output.lock().unwrap();
-        let (chunk, next, eof) = out.read_from(cursor, limit);
+        if let Ok(entry) = self.lookup(handle_str, session_id) {
+            let st = entry.status.lock().unwrap().clone();
+            let out = entry.output.lock().unwrap();
+            let (chunk, next, eof) = out.read_from(cursor, limit);
+            return Ok(Value::Struct(vec![
+                ("handle".into(), Value::Str(handle_str.into())),
+                ("status".into(), Value::Str(st.kind().into())),
+                (
+                    "chunk".into(),
+                    Value::Str(String::from_utf8_lossy(&chunk).into_owned()),
+                ),
+                ("cursor".into(), Value::Int(cursor as i64)),
+                ("next_cursor".into(), Value::Int(next as i64)),
+                ("eof".into(), Value::Bool(eof)),
+                ("truncated".into(), Value::Bool(out.truncated)),
+                ("live".into(), Value::Bool(true)),
+            ]));
+        }
+
+        let Some(dir) = session_dir else {
+            return Err(RuntimeError::ToolFailed(format!(
+                "bash: handle `{handle_str}` not found"
+            )));
+        };
+        let log_path = dir.join(format!("bg_{handle_str}.log"));
+        let data = std::fs::read(&log_path).map_err(|_| {
+            RuntimeError::ToolFailed(format!("bash: handle `{handle_str}` not found"))
+        })?;
+        if cursor >= data.len() {
+            return Ok(Value::Struct(vec![
+                ("handle".into(), Value::Str(handle_str.into())),
+                ("status".into(), Value::Str("exited".into())),
+                ("chunk".into(), Value::Str(String::new())),
+                ("cursor".into(), Value::Int(cursor as i64)),
+                ("next_cursor".into(), Value::Int(data.len() as i64)),
+                ("eof".into(), Value::Bool(true)),
+                ("truncated".into(), Value::Bool(false)),
+                ("live".into(), Value::Bool(false)),
+            ]));
+        }
+        let take = (data.len() - cursor).min(limit);
+        let chunk = data[cursor..cursor + take].to_vec();
+        let next = cursor + take;
+        let eof = next >= data.len();
         Ok(Value::Struct(vec![
             ("handle".into(), Value::Str(handle_str.into())),
-            ("status".into(), Value::Str(st.kind().into())),
+            ("status".into(), Value::Str("exited".into())),
             (
                 "chunk".into(),
                 Value::Str(String::from_utf8_lossy(&chunk).into_owned()),
@@ -333,7 +374,8 @@ impl BgRegistry {
             ("cursor".into(), Value::Int(cursor as i64)),
             ("next_cursor".into(), Value::Int(next as i64)),
             ("eof".into(), Value::Bool(eof)),
-            ("truncated".into(), Value::Bool(out.truncated)),
+            ("truncated".into(), Value::Bool(false)),
+            ("live".into(), Value::Bool(false)),
         ]))
     }
 
@@ -351,18 +393,31 @@ impl BgRegistry {
         self.entries.lock().unwrap().remove(handle_str);
     }
 
-    pub fn list(&self, session_id: &str) -> Value {
+    #[doc(hidden)]
+    pub fn clear_for_test(&self) {
+        self.entries.lock().unwrap().clear();
+    }
+
+    pub fn list(
+        &self,
+        session_id: &str,
+        session_dir: Option<&std::path::Path>,
+        all: bool,
+    ) -> Value {
         let entries = self.entries.lock().unwrap();
-        let items: Vec<Value> = entries
+        let mut live_handles: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut items: Vec<Value> = entries
             .iter()
             .filter(|(_, e)| e.session_id == session_id)
             .map(|(handle, entry)| {
+                live_handles.insert(handle.clone());
                 let st = entry.status.lock().unwrap().clone();
                 let out = entry.output.lock().unwrap();
                 let mut fields = vec![
                     ("handle".into(), Value::Str(handle.clone())),
                     ("status".into(), Value::Str(st.kind().into())),
                     ("started_at".into(), Value::Int(st.started_at())),
+                    ("live".into(), Value::Bool(true)),
                 ];
                 if let Some(ec) = st.exit_code() {
                     fields.push(("exit_code".into(), Value::Int(ec as i64)));
@@ -371,6 +426,44 @@ impl BgRegistry {
                 Value::Struct(fields)
             })
             .collect();
+
+        if all {
+            if let Some(dir) = session_dir {
+                if let Ok(rd) = std::fs::read_dir(dir) {
+                    for entry in rd.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        let Some(rest) = name
+                            .strip_prefix("bg_")
+                            .and_then(|s| s.strip_suffix(".log"))
+                        else {
+                            continue;
+                        };
+                        let handle: String = rest.to_string();
+                        if live_handles.contains(&handle) {
+                            continue;
+                        }
+                        let Ok(meta) = entry.metadata() else {
+                            continue;
+                        };
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        items.push(Value::Struct(vec![
+                            ("handle".into(), Value::Str(handle)),
+                            ("status".into(), Value::Str("exited".into())),
+                            ("started_at".into(), Value::Int(modified)),
+                            ("live".into(), Value::Bool(false)),
+                            ("bytes_total".into(), Value::Int(meta.len() as i64)),
+                        ]));
+                    }
+                }
+            }
+        }
+
         Value::List(items)
     }
 }
@@ -700,7 +793,13 @@ impl Tool for BashOutput {
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.output: registry not available".into())
             })?;
-            registry.output(&handle, &session_id, cursor, limit)
+            registry.output(
+                &handle,
+                &session_id,
+                ctx.session_dir.as_deref(),
+                cursor,
+                limit,
+            )
         })
     }
 }
@@ -759,21 +858,27 @@ impl Tool for BashList {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "List all background bash processes for the current session. Returns a list of {handle, status, started_at, exit_code?, bytes_total}.",
+            "List background bash processes for the current session. Default: only live processes. Pass all=true to include historical processes whose log files persist in session_dir (status=exited, live=false).",
         )
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "properties": {}})
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "all": {"type": "boolean", "description": "Include historical processes (default false)."}
+            }
+        })
     }
 
-    fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
+            let all = extract_optional_bool(&args, "all").unwrap_or(false);
             let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.list: registry not available".into())
             })?;
-            Ok(registry.list(&session_id))
+            Ok(registry.list(&session_id, ctx.session_dir.as_deref(), all))
         })
     }
 }
@@ -795,6 +900,13 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
 fn extract_optional_int(args: &ToolArgs, name: &str) -> Option<i64> {
     match args.named(name)? {
         Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn extract_optional_bool(args: &ToolArgs, name: &str) -> Option<bool> {
+    match args.named(name)? {
+        Value::Bool(b) => Some(*b),
         _ => None,
     }
 }

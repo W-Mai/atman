@@ -352,3 +352,77 @@ async fn bash_list_returns_all_session_handles() {
         "list should have at least 2 handles: {s}"
     );
 }
+
+#[tokio::test]
+async fn bash_list_all_includes_historical_log_files() {
+    let (ex, _bg) = make_executor_with_bg();
+    let session_dir = ex.tool_ctx.session_dir.clone().unwrap();
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let handle = "bg_test-session-fixed_99";
+    let log_path = session_dir.join(format!("bg_{handle}.log"));
+    std::fs::write(&log_path, "[out] historical_record\n").unwrap();
+
+    let list_src = r#"flow t() -> string {
+    contract { capabilities { shell: true } }
+    result = bash.list(all: true)
+    return to_json_string(result)
+}
+"#;
+    let file = parse_file(list_src).unwrap();
+    let v = ex.run(&file, "t", vec![]).await.unwrap();
+    let s = match v {
+        Value::Str(s) => s,
+        _ => panic!("expected str"),
+    };
+    assert!(
+        s.contains(handle),
+        "list(all=true) should include historical handle: {s}"
+    );
+    assert!(
+        s.contains("\"live\": false"),
+        "list(all=true) should mark historical as live=false: {s}"
+    );
+}
+
+#[tokio::test]
+async fn bash_output_reads_historical_log_file() {
+    let (ex, bg) = make_executor_with_bg();
+
+    let spawn_src = r#"flow t() -> string {
+    contract { capabilities { shell: true } }
+    h = bash.spawn(cmd: "echo persisted_output_line; sleep 0.5")
+    bash.exec(cmd: "sleep 0.6")
+    return h.handle
+}
+"#;
+    let file = parse_file(spawn_src).unwrap();
+    let handle = match ex.run(&file, "t", vec![]).await.unwrap() {
+        Value::Str(s) => s,
+        _ => panic!("expected str"),
+    };
+
+    bg.clear_for_test();
+
+    let read_src = format!(
+        r#"flow t() -> string {{
+    contract {{ capabilities {{ shell: true }} }}
+    o = bash.output(handle: "{handle}")
+    return to_json_string(o)
+}}
+"#
+    );
+    let file2 = parse_file(&read_src).unwrap();
+    let v = ex.run(&file2, "t", vec![]).await.unwrap();
+    let s = match v {
+        Value::Str(s) => s,
+        _ => panic!("expected str"),
+    };
+    assert!(
+        s.contains("persisted_output_line"),
+        "output should read from historical log file: {s}"
+    );
+    assert!(
+        s.contains("\"live\": false"),
+        "output should mark historical as live=false: {s}"
+    );
+}
