@@ -421,7 +421,7 @@ fn context_section<'a>(
         kv_line(
             "total",
             format!(
-                "in {} · out {}",
+                "↑{} · ↓{}",
                 format_count(ctx.tokens_in),
                 format_count(ctx.tokens_out)
             ),

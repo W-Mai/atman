@@ -1208,12 +1208,6 @@ pub fn render_workflow_panel_with_regions(
                 &mut pending_counter,
             );
         }
-        let footer_style = Style::default().fg(Color::DarkGray);
-        lines.push(format_workflow_stats_footer(
-            graph,
-            panel_width.min(120),
-            footer_style,
-        ));
         lines.push(Line::raw(""));
     }
     (lines, regions)
