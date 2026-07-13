@@ -374,6 +374,11 @@ async fn run_frames(
                                         app.toggle_workflow_node(panel_idx, &node_id);
                                     }
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(crate::app::OutputItem::Thinking { .. }) =
+                                        app.items.get(idx)
+                                {
+                                    app.toggle_thinking_expanded(idx);
+                                } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
                                         app.items.get(idx)
                                 {
@@ -382,6 +387,15 @@ async fn run_frames(
                                     } else {
                                         app.toggle_workflow_panel_expansion(idx);
                                     }
+                                }
+                            } else if let MouseEventKind::Moved = me.kind {
+                                if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(crate::app::OutputItem::Thinking { .. }) =
+                                        app.items.get(idx)
+                                {
+                                    app.set_hovered_thinking(Some(idx));
+                                } else {
+                                    app.set_hovered_thinking(None);
                                 }
                             }
                             interrupt_prompt = None;
@@ -2077,6 +2091,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             messages: &messages,
             animation_frame: app.animation_frame,
             panel_width: transcript_area.width,
+            hovered_thinking_idx: app.hovered_thinking_idx,
         };
         let animation_key = if app.has_running_workflow() {
             Some(app.animation_frame)

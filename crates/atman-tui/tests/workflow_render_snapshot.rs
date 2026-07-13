@@ -71,6 +71,7 @@ fn snapshot(width: u16, height: u16, boxed: bool) -> Buffer {
         messages: &[],
         animation_frame: 0,
         panel_width: width,
+        hovered_thinking_idx: None,
     };
     // SAFETY: env-var mutation guarded by ENV_LOCK.
     if !boxed {

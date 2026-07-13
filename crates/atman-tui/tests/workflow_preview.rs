@@ -91,6 +91,7 @@ fn render_boxed_to_string(root: WorkflowNode, width: u16) -> String {
         messages: &[],
         animation_frame: 0,
         panel_width: width,
+        hovered_thinking_idx: None,
     };
     let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx);
     lines
@@ -130,6 +131,7 @@ fn preview_collapsed_workflow_card() {
         messages: &[],
         animation_frame: 0,
         panel_width: 100,
+        hovered_thinking_idx: None,
     };
     let (lines, _ranges, _regions, _rows) =
         atman_tui::output::build_lines_with_ranges(&[item], 100, &ctx);

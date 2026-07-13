@@ -12,6 +12,7 @@ pub struct RenderCtx<'a> {
     pub messages: &'a [Message],
     pub animation_frame: u32,
     pub panel_width: u16,
+    pub hovered_thinking_idx: Option<usize>,
 }
 
 impl<'a> RenderCtx<'a> {
@@ -23,6 +24,7 @@ impl<'a> RenderCtx<'a> {
             messages: &[],
             animation_frame: 0,
             panel_width: 80,
+            hovered_thinking_idx: None,
         }
     }
 }
@@ -244,7 +246,19 @@ pub fn build_lines_with_ranges(
             all_lines.push(Line::from(""));
             cursor = cursor.saturating_add(1);
         }
-        let (item_lines, mut item_regions) = render_item_with_regions(item, ctx);
+        let is_hovered = ctx.hovered_thinking_idx == Some(idx);
+        let item_ctx = RenderCtx {
+            expanded_tools: ctx.expanded_tools,
+            messages: ctx.messages,
+            animation_frame: ctx.animation_frame,
+            panel_width: ctx.panel_width,
+            hovered_thinking_idx: if is_hovered && matches!(item, OutputItem::Thinking { .. }) {
+                Some(idx)
+            } else {
+                None
+            },
+        };
+        let (item_lines, mut item_regions) = render_item_with_regions(item, &item_ctx);
         let (rows, line_row_offsets) = wrap_row_offsets(&item_lines, width);
         ranges.push(ItemRange {
             item_index: idx,
@@ -779,12 +793,13 @@ fn render_thinking(
     text: &str,
     done: bool,
     expanded: bool,
+    hovered: bool,
     animation_frame: u32,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
-    let bg = t.code_bg;
+    let bg = if hovered { t.highlight_bg } else { t.code_bg };
     let header_style = Style::default()
         .fg(t.subtle_fg)
         .bg(bg)
@@ -947,7 +962,17 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             text,
             done,
             expanded,
-        } => render_thinking(text, *done, *expanded, ctx.animation_frame, ctx.panel_width),
+        } => {
+            let hovered = ctx.hovered_thinking_idx.is_some();
+            render_thinking(
+                text,
+                *done,
+                *expanded,
+                hovered,
+                ctx.animation_frame,
+                ctx.panel_width,
+            )
+        }
         OutputItem::StartupCard { .. } => Vec::new(),
         OutputItem::AssistantMd { md, streaming } => {
             render_assistant(md, *streaming, ctx.panel_width)
@@ -1401,8 +1426,8 @@ fn render_collapsed_workflow_card(
         r.end_row = r.end_row.saturating_add(card_body_start_row);
     }
     lines.extend(body_lines);
-    let bottom = format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)));
-    lines.push(Line::from(Span::styled(bottom, border_style)));
+    let bottom_line = format_workflow_stats_footer(graph, outer_width, border_style);
+    lines.push(bottom_line);
     lines.push(Line::raw(""));
     let card_rows = lines.len() as u16;
     regions.insert(

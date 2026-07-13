@@ -22,7 +22,7 @@ pub struct LlmRequest {
     pub thinking_enabled: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     pub input: u64,
     pub cached_input: u64,

@@ -539,6 +539,16 @@ pub enum TranscriptEntry {
         ok: bool,
         ts: Option<chrono::DateTime<chrono::Utc>>,
     },
+    LlmCall {
+        model: String,
+        usage: crate::provider::TokenUsage,
+        wallclock_ms: u64,
+        ttft_ms: Option<u64>,
+        tokens_per_second: Option<f64>,
+        run_id: Option<crate::event::FlowRunId>,
+        node_id: Option<String>,
+        ts: Option<chrono::DateTime<chrono::Utc>>,
+    },
 }
 
 fn replay_context_snapshot_from(path: &Path) -> ContextSnapshot {
@@ -857,6 +867,32 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let ok = v["status"]["kind"].as_str() == Some("ok");
                 let ts = parse_ts(v);
                 out.push(TranscriptEntry::FlowDone { run_id, ok, ts });
+            }
+            "llm_call" => {
+                let model = v["model"].as_str().unwrap_or("").to_string();
+                let usage: crate::provider::TokenUsage = v
+                    .get("usage")
+                    .and_then(|u| serde_json::from_value(u.clone()).ok())
+                    .unwrap_or_default();
+                let wallclock_ms = v["wallclock_ms"].as_u64().unwrap_or(0);
+                let ttft_ms = v["ttft_ms"].as_u64();
+                let tokens_per_second = v["tokens_per_second"].as_f64();
+                let run_id = v["run_id"]
+                    .as_str()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .map(crate::event::FlowRunId);
+                let node_id = v["node_id"].as_str().map(String::from);
+                let ts = parse_ts(v);
+                out.push(TranscriptEntry::LlmCall {
+                    model,
+                    usage,
+                    wallclock_ms,
+                    ttft_ms,
+                    tokens_per_second,
+                    run_id,
+                    node_id,
+                    ts,
+                });
             }
             _ => {}
         }

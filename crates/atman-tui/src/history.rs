@@ -179,6 +179,35 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     *ts,
                 );
             }
+            TranscriptEntry::LlmCall {
+                model,
+                usage,
+                wallclock_ms,
+                ttft_ms,
+                tokens_per_second,
+                run_id,
+                node_id,
+                ts,
+            } => {
+                let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
+                apply_workflow(
+                    &mut out,
+                    panel_idx,
+                    &StreamFrame::LlmCallStats {
+                        model: model.clone(),
+                        input_tokens: usage.input,
+                        output_tokens: usage.output,
+                        cache_read: usage.cached_input,
+                        cache_write: usage.cache_write,
+                        ttft_ms: ttft_ms.unwrap_or(0),
+                        tokens_per_second: tokens_per_second.unwrap_or(0.0),
+                        wallclock_ms: *wallclock_ms,
+                        run_id: run_id.as_ref().map(|r| r.0.to_string()),
+                        node_id: node_id.clone(),
+                    },
+                    *ts,
+                );
+            }
         }
     }
     out

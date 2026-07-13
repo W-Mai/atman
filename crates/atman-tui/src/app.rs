@@ -105,6 +105,7 @@ pub struct AppState {
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
     pub last_sidebar_rect: Option<ratatui::layout::Rect>,
     pub input_rect: Option<ratatui::layout::Rect>,
+    pub hovered_thinking_idx: Option<usize>,
     pub startup_intro: Option<StartupIntro>,
     pub form_modal: crate::form_modal::FormModal,
     pub animation_frame: u32,
@@ -220,6 +221,20 @@ impl AppState {
                 expanded_nodes.insert(node_id.to_string());
             }
             self.expanded_version = self.expanded_version.wrapping_add(1);
+        }
+    }
+
+    pub fn toggle_thinking_expanded(&mut self, item_idx: usize) {
+        if let Some(OutputItem::Thinking { expanded, .. }) = self.items.get_mut(item_idx) {
+            *expanded = !*expanded;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn set_hovered_thinking(&mut self, idx: Option<usize>) {
+        if self.hovered_thinking_idx != idx {
+            self.hovered_thinking_idx = idx;
+            self.items_version = self.items_version.wrapping_add(1);
         }
     }
 

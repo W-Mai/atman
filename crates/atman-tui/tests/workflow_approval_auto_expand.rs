@@ -67,6 +67,7 @@ fn render_boxed(root: WorkflowNode, width: u16) -> Vec<String> {
         messages: &[],
         animation_frame: 0,
         panel_width: width,
+        hovered_thinking_idx: None,
     };
     let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx);
     lines
