@@ -799,7 +799,14 @@ fn render_thinking(
 ) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
-    let bg = if hovered { t.highlight_bg } else { t.code_bg };
+    let bg = if hovered {
+        match t.mode {
+            crate::theme::ThemeMode::Dark => Color::Rgb(32, 34, 40),
+            crate::theme::ThemeMode::Light => Color::Rgb(232, 232, 236),
+        }
+    } else {
+        t.code_bg
+    };
     let header_style = Style::default()
         .fg(t.subtle_fg)
         .bg(bg)
