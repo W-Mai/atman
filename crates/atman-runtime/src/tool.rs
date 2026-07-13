@@ -92,6 +92,7 @@ pub struct ToolCtx {
     pub fs_access: crate::fs_access::FsAccessPolicy,
     pub lifecycle_fire_tx:
         Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
+    pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
 }
 
 impl ToolCtx {
@@ -201,6 +202,14 @@ impl ToolCtx {
 
     pub fn with_forms(mut self, forms: std::sync::Arc<crate::session::FormRegistry>) -> Self {
         self.forms = Some(forms);
+        self
+    }
+
+    pub fn with_bg_registry(
+        mut self,
+        registry: std::sync::Arc<crate::tools::bash_bg::BgRegistry>,
+    ) -> Self {
+        self.bg_registry = Some(registry);
         self
     }
 

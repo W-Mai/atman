@@ -130,6 +130,8 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     let fetch_rule = build_fetch_rule(&opts.project_root, opts.home_dir.as_deref()).await;
     tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
     tools::register_shell(&mut executor.tools);
+    let bg_registry = tools::register_bash_bg(&mut executor.tools);
+    executor.tool_ctx = executor.tool_ctx.clone().with_bg_registry(bg_registry);
     tools::register_preview(
         &mut executor.tools,
         load_preview_config(opts.config_dir.as_deref()),

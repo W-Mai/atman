@@ -4,6 +4,7 @@ use crate::tool::ToolRegistry;
 
 pub mod agent_ctrl;
 pub mod bash;
+pub mod bash_bg;
 pub mod form;
 pub mod fs;
 pub mod git;
@@ -64,6 +65,15 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
 
 pub fn register_shell(reg: &mut ToolRegistry) {
     reg.register(Arc::new(bash::BashExec));
+}
+
+pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {
+    let registry = Arc::new(bash_bg::BgRegistry::new());
+    reg.register(Arc::new(bash_bg::BashSpawn));
+    reg.register(Arc::new(bash_bg::BashStatus));
+    reg.register(Arc::new(bash_bg::BashOutput));
+    reg.register(Arc::new(bash_bg::BashKill));
+    registry
 }
 
 pub fn register_web(reg: &mut ToolRegistry, config: web::WebConfig) {
