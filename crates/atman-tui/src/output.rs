@@ -784,51 +784,74 @@ fn render_thinking(
 ) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
-    let style = Style::default().fg(t.subtle_fg).add_modifier(Modifier::DIM);
-    let bg_style = Style::default()
+    let bg = t.code_bg;
+    let header_style = Style::default()
         .fg(t.subtle_fg)
-        .bg(t.code_bg)
+        .bg(bg)
+        .add_modifier(Modifier::DIM);
+    let body_style = Style::default().fg(t.subtle_fg).bg(bg);
+    let hint_style = Style::default()
+        .fg(t.meta_fg)
+        .bg(bg)
         .add_modifier(Modifier::DIM);
     let glyph = if done {
         "✓"
     } else {
         spinner_char(animation_frame)
     };
-    let header = if done {
-        format!(" {glyph} thinking ")
-    } else {
-        format!(" {glyph} thinking… ")
-    };
+    let label = if done { "thinking" } else { "thinking…" };
     let target = panel_width.max(20) as usize;
+    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(Span::styled(header, style)));
+    lines.push(blank.clone());
+    let header_prefix = format!("  {glyph} {label} ");
+    let header_used = UnicodeWidthStr::width(header_prefix.as_str());
+    let header_pad = target.saturating_sub(header_used);
+    let mut header_spans = vec![Span::styled(header_prefix, header_style)];
+    if header_pad > 0 {
+        header_spans.push(Span::styled(" ".repeat(header_pad), header_style));
+    }
+    lines.push(Line::from(header_spans));
+    lines.push(blank.clone());
     let all_lines: Vec<&str> = text.lines().collect();
     let max_lines = if expanded {
         all_lines.len()
     } else {
-        8.min(all_lines.len())
+        6.min(all_lines.len())
     };
     for line in all_lines.iter().take(max_lines) {
         let line: &str = line;
-        let used = UnicodeWidthStr::width(line);
+        let indent = "    ";
+        let used = UnicodeWidthStr::width(indent) + UnicodeWidthStr::width(line);
         let pad = target.saturating_sub(used);
-        let mut spans = vec![Span::styled(line.to_string(), bg_style)];
+        let mut spans = vec![Span::styled(indent.to_string(), body_style)];
+        spans.push(Span::styled(line.to_string(), body_style));
         if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), bg_style));
+            spans.push(Span::styled(" ".repeat(pad), body_style));
         }
         lines.push(Line::from(spans));
     }
     if !expanded && all_lines.len() > max_lines {
-        lines.push(Line::from(Span::styled(
-            format!(
-                " ▼ {} more lines — click to expand",
-                all_lines.len() - max_lines
-            ),
-            style,
-        )));
-    } else if expanded && all_lines.len() > 8 {
-        lines.push(Line::from(Span::styled(" ▲ click to collapse", style)));
+        let hint = format!(
+            "    ▼ {} more lines — click to expand",
+            all_lines.len() - max_lines
+        );
+        let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, hint_style)];
+        if hint_pad > 0 {
+            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
+        }
+        lines.push(Line::from(spans));
+    } else if expanded && all_lines.len() > 6 {
+        let hint = "    ▲ click to collapse".to_string();
+        let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, hint_style)];
+        if hint_pad > 0 {
+            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
+        }
+        lines.push(Line::from(spans));
     }
+    lines.push(blank);
     lines
 }
 
