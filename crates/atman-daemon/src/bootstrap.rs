@@ -131,7 +131,13 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
     tools::register_shell(&mut executor.tools);
     let bg_registry = tools::register_bash_bg(&mut executor.tools);
-    executor.tool_ctx = executor.tool_ctx.clone().with_bg_registry(bg_registry);
+    let trust_config = load_trust_config(opts.config_dir.as_deref());
+    let sandbox_enabled = trust_config.mode.sandbox_enabled();
+    executor.tool_ctx = executor
+        .tool_ctx
+        .clone()
+        .with_bg_registry(bg_registry)
+        .with_trust(trust_config);
     tools::register_preview(
         &mut executor.tools,
         load_preview_config(opts.config_dir.as_deref()),
@@ -140,10 +146,12 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     tools::register_web(&mut executor.tools, web_config.fetch);
     tools::register_web_search(&mut executor.tools, &web_config.search);
     register_providers_from_env(&mut executor);
-    if let Some(sandbox) =
-        build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
-    {
-        executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
+    if sandbox_enabled {
+        if let Some(sandbox) =
+            build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
+        {
+            executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
+        }
     }
     let mcp_configs = load_mcp_configs(opts.config_dir.as_deref());
     let mcp_status_raw =
@@ -535,6 +543,38 @@ pub fn load_web_config(config_dir: Option<&Path>) -> WebConfig {
         return cfg;
     };
     parse_web_config(&text, &mut cfg);
+    cfg
+}
+
+pub fn load_trust_config(config_dir: Option<&Path>) -> atman_runtime::trust::TrustConfig {
+    let mut cfg = atman_runtime::trust::TrustConfig::default();
+    let Some(dir) = config_dir else {
+        return cfg;
+    };
+    let path = dir.join("config.toml");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return cfg;
+    };
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct RawFile {
+        #[serde(default)]
+        trust: RawTrust,
+    }
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct RawTrust {
+        #[serde(default)]
+        mode: Option<atman_runtime::trust::TrustMode>,
+        #[serde(default)]
+        theme: Option<atman_runtime::trust::Theme>,
+    }
+    if let Ok(file) = toml::from_str::<RawFile>(&text) {
+        if let Some(m) = file.trust.mode {
+            cfg.mode = m;
+        }
+        if let Some(t) = file.trust.theme {
+            cfg.theme = t;
+        }
+    }
     cfg
 }
 

@@ -59,7 +59,7 @@ impl Tool for HunkReview {
         Tier::One
     }
 
-    fn approval_level(&self) -> crate::tool::ApprovalLevel {
+    fn approval_level(&self, _args: &ToolArgs, _ctx: &ToolCtx) -> crate::tool::ApprovalLevel {
         crate::tool::ApprovalLevel::Auto
     }
 

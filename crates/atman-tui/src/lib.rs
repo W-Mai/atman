@@ -131,6 +131,7 @@ pub struct TuiHandle {
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub startup_intro: Option<app::StartupIntro>,
+    pub trust: atman_runtime::trust::TrustConfig,
 }
 
 impl TuiHandle {
@@ -157,6 +158,7 @@ impl TuiHandle {
             flow_names: Vec::new(),
             session: Some(session),
             startup_intro: None,
+            trust: atman_runtime::trust::TrustConfig::default(),
         }
     }
 }
@@ -189,7 +191,8 @@ async fn run_frames(
         .with_initial_items(std::mem::take(&mut handle.initial_items))
         .with_session_dir(handle.session_dir.clone())
         .with_flow_names(std::mem::take(&mut handle.flow_names))
-        .with_session(handle.session.clone());
+        .with_session(handle.session.clone())
+        .with_trust(handle.trust.clone());
     app.startup_intro = handle.startup_intro.take();
     if let Some(rx) = handle.context_rx.as_ref() {
         app.context = rx.borrow().clone();
@@ -208,6 +211,10 @@ async fn run_frames(
     }
     if let Some(rx) = handle.approvals_rx.as_ref() {
         app.pending_approvals = rx.borrow().clone();
+    }
+    if let Some(sess) = &app.session {
+        sess.approval()
+            .set_auto_ceiling(app.trust.mode.auto_ceiling());
     }
     let mut editor = InputEditor::default();
     if let Some(sess) = handle.session.as_ref() {
@@ -1178,6 +1185,12 @@ fn dispatch_palette_entry(
         PaletteEntryId::ShowHelp => {
             app.cheatsheet_open = true;
         }
+        PaletteEntryId::SetTrustMode => {
+            app.trust_mode_picker_open = true;
+        }
+        PaletteEntryId::SetTheme => {
+            app.theme_picker_open = true;
+        }
     }
 }
 
@@ -1626,6 +1639,67 @@ fn handle_key(
     if app.cheatsheet_open {
         match action {
             KeyAction::Escape | KeyAction::HelpModal => app.cheatsheet_open = false,
+            KeyAction::Quit => app.should_quit = true,
+            _ => {}
+        }
+        return;
+    }
+    if app.trust_mode_picker_open {
+        let modes = atman_runtime::trust::TrustMode::all();
+        let max = modes.len();
+        match action {
+            KeyAction::Escape => {
+                app.trust_mode_picker_open = false;
+            }
+            KeyAction::HistoryUp | KeyAction::CursorLeft => {
+                app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
+            }
+            KeyAction::HistoryDown | KeyAction::CursorRight => {
+                app.picker_selected = (app.picker_selected + 1) % max;
+            }
+            KeyAction::Submit | KeyAction::Char('\r') => {
+                let new_mode = modes[app.picker_selected.min(max - 1)];
+                let prev = app.trust.mode;
+                app.trust.mode = new_mode;
+                app.trust_mode_picker_open = false;
+                if new_mode != prev {
+                    if let Some(sess) = app.session.as_ref() {
+                        sess.approval().set_auto_ceiling(new_mode.auto_ceiling());
+                    }
+                    let display = app.trust.theme.display(new_mode);
+                    if let Some(warning) = new_mode.warning(&display) {
+                        app.push_note(&warning, app::NoteLevel::Warn);
+                    }
+                }
+            }
+            KeyAction::Quit => app.should_quit = true,
+            _ => {}
+        }
+        return;
+    }
+    if app.theme_picker_open {
+        let themes = [
+            atman_runtime::trust::Theme::Default,
+            atman_runtime::trust::Theme::Wuxia,
+            atman_runtime::trust::Theme::Animal,
+            atman_runtime::trust::Theme::Weather,
+            atman_runtime::trust::Theme::Drink,
+        ];
+        let max = themes.len();
+        match action {
+            KeyAction::Escape => {
+                app.theme_picker_open = false;
+            }
+            KeyAction::HistoryUp | KeyAction::CursorLeft => {
+                app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
+            }
+            KeyAction::HistoryDown | KeyAction::CursorRight => {
+                app.picker_selected = (app.picker_selected + 1) % max;
+            }
+            KeyAction::Submit | KeyAction::Char('\r') => {
+                app.trust.theme = themes[app.picker_selected.min(max - 1)];
+                app.theme_picker_open = false;
+            }
             KeyAction::Quit => app.should_quit = true,
             _ => {}
         }
@@ -2190,6 +2264,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             app.streaming,
             app.pending_below_rows(),
             scroll_row,
+            &app.trust,
         ),
         input_rect,
     );
@@ -2215,6 +2290,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.cheatsheet_open {
         completion::render_cheatsheet(f, area);
     }
+    if app.trust_mode_picker_open {
+        render_trust_mode_picker(f, area, app);
+    }
+    if app.theme_picker_open {
+        render_theme_picker(f, area, app);
+    }
     if app.palette.open {
         palette::render(f, area, &app.palette);
     }
@@ -2236,4 +2317,120 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
     }
+}
+
+fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {
+    use ratatui::layout::Alignment;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
+
+    let modes = atman_runtime::trust::TrustMode::all();
+    let items: Vec<ListItem> = modes
+        .iter()
+        .map(|&m| {
+            let d = app.trust.theme.display(m);
+            let color = match d.color {
+                atman_runtime::trust::ModeColor::Cyan => ratatui::style::Color::Cyan,
+                atman_runtime::trust::ModeColor::Green => ratatui::style::Color::Green,
+                atman_runtime::trust::ModeColor::Yellow => ratatui::style::Color::Yellow,
+                atman_runtime::trust::ModeColor::Red => ratatui::style::Color::Red,
+            };
+            let marker = if m == app.trust.mode {
+                "← current"
+            } else {
+                ""
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {} ", d.emoji), Style::default().fg(color)),
+                Span::styled(
+                    format!("{:<14}", d.name),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("  {}  ", d.description)),
+                Span::raw(marker),
+            ]))
+        })
+        .collect();
+
+    let h = items.len() as u16 + 4;
+    let w = 70u16.min(area.width);
+    let popup = ratatui::layout::Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Trust Mode — j/k select, Enter confirm, Esc cancel ")
+        .title_alignment(Alignment::Center);
+    let mut state = ListState::default();
+    state.select(Some(app.picker_selected.min(items.len() - 1)));
+    f.render_stateful_widget(
+        List::new(items).block(block).highlight_style(
+            Style::default()
+                .bg(ratatui::style::Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        popup,
+        &mut state,
+    );
+}
+
+fn render_theme_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {
+    use ratatui::layout::Alignment;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
+
+    let themes = [
+        ("default", "calm / steady / eager / reckless"),
+        ("wuxia", "守拙 / 行云 / 破竹 / 逍遥"),
+        ("animal", "🦔 hedgehog / 🐱 cat / 🐶 dog / 🦡 honey-badger"),
+        ("weather", "🌧 drizzle / ☀️ clear / ⛈ storm / 🌪 tornado"),
+        ("drink", "💧 water / ☕ coffee / ☕ espresso / 🧪 bleach"),
+    ];
+    let items: Vec<ListItem> = themes
+        .iter()
+        .map(|(id, desc)| {
+            let is_current = app.trust.theme.to_string() == *id;
+            let marker = if is_current { "  ← current" } else { "" };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {:<10}", id),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("  {}{}", desc, marker)),
+            ]))
+        })
+        .collect();
+
+    let h = items.len() as u16 + 4;
+    let w = 70u16.min(area.width);
+    let popup = ratatui::layout::Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(" Theme — j/k select, Enter confirm, Esc cancel ")
+        .title_alignment(Alignment::Center);
+    let mut state = ListState::default();
+    state.select(Some(app.picker_selected.min(items.len() - 1)));
+    f.render_stateful_widget(
+        List::new(items).block(block).highlight_style(
+            Style::default()
+                .bg(ratatui::style::Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        popup,
+        &mut state,
+    );
 }

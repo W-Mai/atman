@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
-use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
 pub struct FsRead;
@@ -154,6 +154,10 @@ impl Tool for FsWrite {
         Tier::Two
     }
 
+    fn approval_level(&self, args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
+        workspace_approval_level(args, ApprovalLevel::from_tier(self.tier()))
+    }
+
     fn description(&self) -> Option<&str> {
         Some(
             "Create a new file or rewrite an existing one from scratch. \
@@ -244,6 +248,10 @@ impl Tool for FsEdit {
 
     fn tier(&self) -> Tier {
         Tier::Two
+    }
+
+    fn approval_level(&self, args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
+        workspace_approval_level(args, ApprovalLevel::from_tier(self.tier()))
     }
 
     fn description(&self) -> Option<&str> {
@@ -550,6 +558,31 @@ fn extract_path(args: &ToolArgs, name: &str, pos: usize) -> Result<PathBuf, Runt
     }
 }
 
+fn path_in_workspace(path: &std::path::Path) -> bool {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => return false,
+        }
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    abs.starts_with(&cwd)
+}
+
+fn workspace_approval_level(
+    args: &ToolArgs,
+    fallback: crate::tool::ApprovalLevel,
+) -> crate::tool::ApprovalLevel {
+    match extract_path(args, "path", 0) {
+        Ok(p) if path_in_workspace(&p) => crate::tool::ApprovalLevel::Auto,
+        _ => fallback,
+    }
+}
+
 pub struct FsGrep;
 
 impl Tool for FsGrep {
@@ -559,6 +592,10 @@ impl Tool for FsGrep {
 
     fn tier(&self) -> Tier {
         Tier::One
+    }
+
+    fn approval_level(&self, args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
+        workspace_approval_level(args, ApprovalLevel::from_tier(self.tier()))
     }
 
     fn description(&self) -> Option<&str> {

@@ -884,7 +884,7 @@ async fn partition_and_gate(
     }
     // Parallel: serial awaits hid all but the first pending node from the UI.
     let gates = ready.iter().map(|r| {
-        let level = r.tool.approval_level();
+        let level = r.tool.approval_level(&r.call_args, ctx);
         request_approval(
             ctx,
             &r.id,
@@ -898,7 +898,7 @@ async fn partition_and_gate(
     let mut auto_batch = Vec::new();
     let mut serial_batch = Vec::new();
     for (r, outcome) in ready.into_iter().zip(outcomes) {
-        let level = r.tool.approval_level();
+        let level = r.tool.approval_level(&r.call_args, ctx);
         match outcome {
             ApprovalOutcome::Approve => {
                 let a = Approved {

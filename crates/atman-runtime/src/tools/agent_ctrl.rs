@@ -20,7 +20,7 @@ impl Tool for AgentSpawn {
         Tier::Two
     }
 
-    fn approval_level(&self) -> ApprovalLevel {
+    fn approval_level(&self, _args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
         ApprovalLevel::Approve
     }
 
@@ -276,7 +276,7 @@ async fn dispatch_child_tools(
     }
     // Parallel: serial awaits hid all but the first pending node from the UI.
     let gates = ready.iter().map(|r| {
-        let level = r.tool.approval_level();
+        let level = r.tool.approval_level(&r.call_args, ctx);
         request_approval(
             ctx,
             &r.id,

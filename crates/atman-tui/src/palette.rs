@@ -13,6 +13,8 @@ pub enum PaletteEntryId {
     SearchHistory,
     ToggleSidebar,
     ShowHelp,
+    SetTrustMode,
+    SetTheme,
 }
 
 impl PaletteEntryId {
@@ -24,6 +26,8 @@ impl PaletteEntryId {
         PaletteEntryId::CompactNow,
         PaletteEntryId::SearchHistory,
         PaletteEntryId::ToggleSidebar,
+        PaletteEntryId::SetTrustMode,
+        PaletteEntryId::SetTheme,
         PaletteEntryId::ShowHelp,
     ];
 
@@ -36,6 +40,8 @@ impl PaletteEntryId {
             PaletteEntryId::CompactNow => "Compact Transcript",
             PaletteEntryId::SearchHistory => "Search History",
             PaletteEntryId::ToggleSidebar => "Toggle Sidebar",
+            PaletteEntryId::SetTrustMode => "Set Trust Mode",
+            PaletteEntryId::SetTheme => "Set Theme",
             PaletteEntryId::ShowHelp => "Show Help",
         }
     }
@@ -51,6 +57,8 @@ impl PaletteEntryId {
             PaletteEntryId::CompactNow => "Force LLM-based compaction on the current transcript",
             PaletteEntryId::SearchHistory => "Full-text search past turns of this session",
             PaletteEntryId::ToggleSidebar => "Same as F2",
+            PaletteEntryId::SetTrustMode => "Switch trust level (calm/steady/eager/reckless)",
+            PaletteEntryId::SetTheme => "Switch display theme (default/wuxia/animal/weather/drink)",
             PaletteEntryId::ShowHelp => "Same as F1",
         }
     }

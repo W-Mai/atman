@@ -94,6 +94,7 @@ pub struct ToolCtx {
         Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
     pub session_id: Option<String>,
+    pub trust: Option<crate::trust::TrustConfig>,
 }
 
 impl ToolCtx {
@@ -219,6 +220,11 @@ impl ToolCtx {
         self
     }
 
+    pub fn with_trust(mut self, trust: crate::trust::TrustConfig) -> Self {
+        self.trust = Some(trust);
+        self
+    }
+
     pub fn note_read(&self, path: &std::path::Path) {
         if let Some(set) = &self.read_files
             && let Ok(mut lock) = set.lock()
@@ -251,7 +257,7 @@ impl ToolCtx {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn tier(&self) -> Tier;
-    fn approval_level(&self) -> ApprovalLevel {
+    fn approval_level(&self, _args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
         ApprovalLevel::from_tier(self.tier())
     }
     fn cancel_behavior(&self) -> CancelBehavior {

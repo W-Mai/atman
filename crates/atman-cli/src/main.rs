@@ -1628,6 +1628,7 @@ async fn cmd_repl_once(
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
             startup_intro: intro.clone(),
+            trust: atman_daemon::bootstrap::load_trust_config(config_dir().ok().as_deref()),
         };
         (
             Some(tokio::spawn(atman_tui::run_tui_ex(

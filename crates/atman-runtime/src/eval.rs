@@ -284,7 +284,7 @@ async fn dispatch_tool_call<'a>(
         });
     }
     let call_args = ToolArgs { positional, named };
-    let level = tool.approval_level();
+    let level = tool.approval_level(&call_args, &ctx_with_anchors);
     let gate = crate::approval::request_approval(
         &ctx_with_anchors,
         &tool_call_id,

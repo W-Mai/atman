@@ -100,6 +100,10 @@ pub struct AppState {
     pub flow_names: Vec<(String, String)>,
     pub expanded_tools: HashSet<String>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
+    pub trust: atman_runtime::trust::TrustConfig,
+    pub trust_mode_picker_open: bool,
+    pub theme_picker_open: bool,
+    pub picker_selected: usize,
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_node_regions: Vec<crate::output::NodeRegion>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
@@ -163,6 +167,11 @@ impl AppState {
 
     pub fn with_session(mut self, session: Option<std::sync::Arc<atman_runtime::Session>>) -> Self {
         self.session = session;
+        self
+    }
+
+    pub fn with_trust(mut self, trust: atman_runtime::trust::TrustConfig) -> Self {
+        self.trust = trust;
         self
     }
 

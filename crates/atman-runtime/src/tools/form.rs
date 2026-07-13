@@ -14,7 +14,7 @@ impl Tool for FormAsk {
         Tier::Zero
     }
 
-    fn approval_level(&self) -> ApprovalLevel {
+    fn approval_level(&self, _args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
         ApprovalLevel::Auto
     }
 

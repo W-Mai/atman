@@ -22,22 +22,37 @@ pub fn input_paragraph<'a>(
     streaming: bool,
     pending_below: u16,
     scroll_row: u16,
+    trust: &'a atman_runtime::trust::TrustConfig,
 ) -> Paragraph<'a> {
     let prompt_style = if streaming {
         Style::default().add_modifier(Modifier::DIM)
     } else {
         Style::default().add_modifier(Modifier::BOLD)
     };
+    let display = trust.display();
+    let mode_color = match display.color {
+        atman_runtime::trust::ModeColor::Cyan => Color::Cyan,
+        atman_runtime::trust::ModeColor::Green => Color::Green,
+        atman_runtime::trust::ModeColor::Yellow => Color::Yellow,
+        atman_runtime::trust::ModeColor::Red => Color::Red,
+    };
     let border_style = if streaming {
         Style::default().fg(Color::DarkGray)
     } else {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(mode_color)
     };
     let title = if pending_below > 0 {
-        format!(" atman  ↓ {pending_below} new ")
+        format!(
+            " atman · {} {}  ↓ {pending_below} new ",
+            display.emoji, display.name
+        )
     } else {
-        " atman ".to_string()
+        format!(" atman · {} {} ", display.emoji, display.name)
     };
+    let title_span = Span::styled(
+        title,
+        Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+    );
     let hint_line = Line::from(Span::styled(
         " shift+enter · newline · enter · send ",
         Style::default().fg(Color::DarkGray),
@@ -47,7 +62,7 @@ pub fn input_paragraph<'a>(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(title)
+        .title(title_span)
         .title_bottom(hint_line)
         .padding(ratatui::widgets::Padding::horizontal(1));
 
