@@ -1077,7 +1077,16 @@ fn format_workflow_stats_footer(
             parts.push(format!("in {}", format_count(total_in)));
             parts.push(format!("out {}", format_count(total_out)));
             if cache_read > 0 {
-                parts.push(format!("cache {}", format_count(cache_read)));
+                let hit_rate = if total_in > 0 {
+                    (cache_read as f64 / total_in as f64 * 100.0) as u64
+                } else {
+                    0
+                };
+                parts.push(format!(
+                    "cache {} ({}%)",
+                    format_count(cache_read),
+                    hit_rate
+                ));
             }
             if speed > 0.0 {
                 parts.push(format!("{:.0} tok/s", speed));
@@ -2297,7 +2306,17 @@ fn format_llm_stats_brief(stats: &atman_runtime::workflow::LlmStats) -> String {
     use crate::humanize::format_count;
     let mut parts = Vec::new();
     if stats.cache_read > 0 {
-        parts.push(format!("cache {}", format_count(stats.cache_read)));
+        let total_in = stats.input_tokens + stats.cache_read + stats.cache_write;
+        let hit_rate = if total_in > 0 {
+            (stats.cache_read as f64 / total_in as f64 * 100.0) as u64
+        } else {
+            0
+        };
+        parts.push(format!(
+            "cache {} ({}%)",
+            format_count(stats.cache_read),
+            hit_rate
+        ));
     }
     if stats.ttft_ms > 0 {
         parts.push(format!("ttft {}ms", stats.ttft_ms));

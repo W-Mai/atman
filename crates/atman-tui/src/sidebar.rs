@@ -430,10 +430,16 @@ fn context_section<'a>(
         kv_line(
             "cache",
             if ctx.cache_read > 0 || ctx.cache_write > 0 {
+                let hit_rate = if ctx.tokens_in > 0 {
+                    (ctx.cache_read as f64 / ctx.tokens_in as f64 * 100.0) as u64
+                } else {
+                    0
+                };
                 format!(
-                    "read {} · write {}",
+                    "read {} · write {} · {}%",
                     format_count(ctx.cache_read),
-                    format_count(ctx.cache_write)
+                    format_count(ctx.cache_write),
+                    hit_rate,
                 )
             } else {
                 "—".to_string()
