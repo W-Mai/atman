@@ -59,6 +59,17 @@ pub fn compute_input_rect(transcript: Rect, buf_lines: u16) -> Rect {
     input_rect_at(transcript, buf_lines, InputYAnchor::Bottom)
 }
 
+pub fn input_outer_width(transcript_width: u16) -> u16 {
+    (transcript_width * 3 / 4)
+        .clamp(50, 96)
+        .min(transcript_width)
+}
+
+pub fn input_content_width(transcript_width: u16) -> usize {
+    let outer = input_outer_width(transcript_width);
+    outer.saturating_sub(2 + 2 + 2) as usize
+}
+
 pub fn compute_input_rect_centered(transcript: Rect, buf_lines: u16) -> Rect {
     input_rect_at(transcript, buf_lines, InputYAnchor::Center)
 }

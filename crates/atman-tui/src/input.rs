@@ -84,6 +84,33 @@ pub fn display_width(input: &str) -> usize {
         .unwrap_or(0)
 }
 
+pub fn wrapped_line_count(input: &str, content_width: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    if content_width == 0 {
+        return input.split('\n').count().max(1);
+    }
+    let mut total = 0usize;
+    for row in input.split('\n') {
+        if row.is_empty() {
+            total += 1;
+            continue;
+        }
+        let mut cur_w = 0usize;
+        let mut rows_in_line = 1usize;
+        for ch in row.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cur_w + cw > content_width {
+                rows_in_line += 1;
+                cur_w = cw;
+            } else {
+                cur_w += cw;
+            }
+        }
+        total += rows_in_line;
+    }
+    total.max(1)
+}
+
 #[derive(Debug, Clone)]
 pub struct PastedEntry {
     pub placeholder: String,
@@ -671,5 +698,37 @@ mod tests {
         assert_eq!(display_width("hello"), 5);
         assert_eq!(display_width("你好"), 4);
         assert_eq!(display_width("a\n你好"), 4);
+    }
+
+    #[test]
+    fn wrapped_line_count_short_fits() {
+        assert_eq!(wrapped_line_count("hello", 50), 1);
+    }
+
+    #[test]
+    fn wrapped_line_count_wraps_long_ascii() {
+        let s = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh";
+        let n = wrapped_line_count(s, 10);
+        assert!(n > 1, "should wrap: {n}");
+    }
+
+    #[test]
+    fn wrapped_line_count_wraps_cjk() {
+        let s = "读取文件内容并做分析的一个非常长的中文标题名称";
+        let n = wrapped_line_count(s, 10);
+        assert!(n > 1, "CJK should wrap: {n}");
+    }
+
+    #[test]
+    fn wrapped_line_count_preserves_newlines() {
+        let s = "line one\nline two\nline three";
+        let n = wrapped_line_count(s, 50);
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn wrapped_line_count_empty_row_counts() {
+        assert_eq!(wrapped_line_count("a\n\nb", 50), 3);
+        assert_eq!(wrapped_line_count("", 50), 1);
     }
 }

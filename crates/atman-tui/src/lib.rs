@@ -2005,7 +2005,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
     let transcript_content = layout::compute_content_rect(l.transcript);
-    let total_input_lines = editor.buf().split('\n').count() as u16;
+    let content_w = layout::input_content_width(l.transcript.width);
+    let total_input_lines = crate::input::wrapped_line_count(editor.buf(), content_w) as u16;
     let input_buf_lines = total_input_lines.min(12);
     let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
     let cursor_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());

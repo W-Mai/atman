@@ -419,6 +419,96 @@ fn user_message_bg() -> Color {
     crate::theme::theme().user_msg_bg
 }
 
+const RIGHT_PAD: usize = 2;
+
+struct PaddedRow {
+    prefix: String,
+    body: String,
+}
+
+fn wrap_with_prefix(
+    text: &str,
+    target: usize,
+    first_prefix: &str,
+    cont_prefix: &str,
+) -> Vec<PaddedRow> {
+    use unicode_width::UnicodeWidthChar;
+    let prefix_w = unicode_width::UnicodeWidthStr::width(cont_prefix);
+    let body_w = target
+        .saturating_sub(prefix_w)
+        .saturating_sub(RIGHT_PAD)
+        .max(1);
+    let first_prefix_w = unicode_width::UnicodeWidthStr::width(first_prefix);
+    let first_body_w = target
+        .saturating_sub(first_prefix_w)
+        .saturating_sub(RIGHT_PAD)
+        .max(1);
+
+    let mut out = Vec::new();
+    let mut first_row = true;
+    for row in text.split('\n') {
+        let limit = if first_row { first_body_w } else { body_w };
+        if row.is_empty() {
+            let prefix = if first_row { first_prefix } else { cont_prefix };
+            out.push(PaddedRow {
+                prefix: prefix.to_string(),
+                body: String::new(),
+            });
+            first_row = false;
+            continue;
+        }
+        let mut cur = String::new();
+        let mut cur_w = 0usize;
+        for ch in row.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cur_w + cw > limit && !cur.is_empty() {
+                let prefix = if first_row { first_prefix } else { cont_prefix };
+                out.push(PaddedRow {
+                    prefix: prefix.to_string(),
+                    body: std::mem::take(&mut cur),
+                });
+                first_row = false;
+                cur_w = 0;
+            }
+            cur.push(ch);
+            cur_w += cw;
+        }
+        let prefix = if first_row { first_prefix } else { cont_prefix };
+        out.push(PaddedRow {
+            prefix: prefix.to_string(),
+            body: cur,
+        });
+        first_row = false;
+    }
+    if out.is_empty() {
+        out.push(PaddedRow {
+            prefix: first_prefix.to_string(),
+            body: String::new(),
+        });
+    }
+    out
+}
+
+fn line_with_right_pad(
+    prefix: &str,
+    body: &str,
+    target: usize,
+    prefix_style: Style,
+    body_style: Style,
+) -> Line<'static> {
+    use unicode_width::UnicodeWidthStr;
+    let used = UnicodeWidthStr::width(prefix) + UnicodeWidthStr::width(body);
+    let fill = target.saturating_sub(used);
+    let mut spans = vec![
+        Span::styled(prefix.to_string(), prefix_style),
+        Span::styled(body.to_string(), body_style),
+    ];
+    if fill > 0 {
+        spans.push(Span::styled(" ".repeat(fill), body_style));
+    }
+    Line::from(spans)
+}
+
 // The overlay is a self-contained composition rendered on top of the
 // transcript area. Content is laid out as:
 //   banner (8 rows)
@@ -835,6 +925,7 @@ fn render_thinking(
     }
     lines.push(Line::from(header_spans));
     lines.push(blank.clone());
+
     let all_lines: Vec<&str> = text.lines().collect();
     let max_lines = if expanded {
         all_lines.len()
@@ -842,16 +933,16 @@ fn render_thinking(
         6.min(all_lines.len())
     };
     for line in all_lines.iter().take(max_lines) {
-        let line: &str = line;
-        let indent = "    ";
-        let used = UnicodeWidthStr::width(indent) + UnicodeWidthStr::width(line);
-        let pad = target.saturating_sub(used);
-        let mut spans = vec![Span::styled(indent.to_string(), body_style)];
-        spans.push(Span::styled(line.to_string(), body_style));
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), body_style));
+        let rows = wrap_with_prefix(line, target, "    ", "    ");
+        for row in rows {
+            lines.push(line_with_right_pad(
+                &row.prefix,
+                &row.body,
+                target,
+                body_style,
+                body_style,
+            ));
         }
-        lines.push(Line::from(spans));
     }
     if !expanded && all_lines.len() > max_lines {
         let hint = format!(
@@ -894,7 +985,6 @@ fn render_assistant(md: &str, streaming: bool, panel_width: u16) -> Vec<Line<'st
 }
 
 fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let (glyph, fg, bg) = match level {
         NoteLevel::Info => ("·", Color::Cyan, t.note_info_bg),
@@ -911,29 +1001,22 @@ fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Lin
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
-    for (i, row) in cleaned.split('\n').enumerate() {
-        let prefix = if i == 0 {
-            format!(" {glyph} ")
-        } else {
-            "   ".into()
-        };
-        let used = UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(row);
-        let pad = target.saturating_sub(used);
-        let mut spans = vec![
-            Span::styled(prefix, glyph_style),
-            Span::styled(row.to_string(), body_style),
-        ];
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), body_style));
-        }
-        lines.push(Line::from(spans));
+    let first = format!(" {glyph} ");
+    let rows = wrap_with_prefix(cleaned, target, &first, "   ");
+    for row in rows {
+        lines.push(line_with_right_pad(
+            &row.prefix,
+            &row.body,
+            target,
+            glyph_style,
+            body_style,
+        ));
     }
     lines.push(blank);
     lines
 }
 
 fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
     let bg = user_message_bg();
     let prompt_style = Style::default()
         .fg(Color::Cyan)
@@ -944,19 +1027,15 @@ fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
-    for (i, row) in text.split('\n').enumerate() {
-        let prompt = if i == 0 { " ❯ " } else { "   " };
-        let row_owned = row.to_string();
-        let used = UnicodeWidthStr::width(prompt) + UnicodeWidthStr::width(row);
-        let pad = target.saturating_sub(used);
-        let mut spans = vec![
-            Span::styled(prompt.to_string(), prompt_style),
-            Span::styled(row_owned, body_style),
-        ];
-        if pad > 0 {
-            spans.push(Span::styled(" ".repeat(pad), body_style));
-        }
-        lines.push(Line::from(spans));
+    let rows = wrap_with_prefix(text, target, " ❯ ", "   ");
+    for row in rows {
+        lines.push(line_with_right_pad(
+            &row.prefix,
+            &row.body,
+            target,
+            prompt_style,
+            body_style,
+        ));
     }
     lines.push(blank);
     lines
@@ -1074,8 +1153,8 @@ fn format_workflow_stats_footer(
         if let Some((calls, total_in, total_out, cache_read, _cache_write, _ttft, speed)) = stats {
             let mut parts = Vec::new();
             parts.push(format!("{calls} calls"));
-            parts.push(format!("in {}", format_count(total_in)));
-            parts.push(format!("out {}", format_count(total_out)));
+            parts.push(format!("↑{}", format_count(total_in)));
+            parts.push(format!("↓{}", format_count(total_out)));
             if cache_read > 0 {
                 let hit_rate = if total_in > 0 {
                     (cache_read as f64 / total_in as f64 * 100.0) as u64
@@ -2319,7 +2398,7 @@ fn format_llm_stats_brief(stats: &atman_runtime::workflow::LlmStats) -> String {
         parts.push(format!("{:.0} tok/s", stats.tokens_per_second));
     }
     if stats.output_tokens > 0 {
-        parts.push(format!("out {}", format_count(stats.output_tokens)));
+        parts.push(format!("↓{}", format_count(stats.output_tokens)));
     }
     parts.join(" · ")
 }
@@ -2339,6 +2418,47 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>()
+    }
+
+    #[test]
+    fn user_turn_wraps_long_line_to_panel_width() {
+        let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj kkkkk";
+        let lines = render_user_turn(text, 30);
+        assert!(lines.len() > 3, "should wrap into multiple rows");
+        for (i, line) in lines.iter().enumerate() {
+            let w = unicode_width::UnicodeWidthStr::width(plain_line(line).as_str());
+            assert!(
+                w <= 30,
+                "line {i} width {w} exceeds panel 30: {:?}",
+                plain_line(line)
+            );
+        }
+    }
+
+    #[test]
+    fn user_turn_wraps_cjk_long_line() {
+        let text =
+            "读取文件内容并做分析的一个非常长的中文标题名称这样会超过宽度必须换行才行测试一下";
+        let lines = render_user_turn(text, 30);
+        assert!(lines.len() > 3, "CJK long line should wrap");
+        for (i, line) in lines.iter().enumerate() {
+            let w = unicode_width::UnicodeWidthStr::width(plain_line(line).as_str());
+            assert!(w <= 30, "CJK line {i} width {w} exceeds panel 30",);
+        }
+    }
+
+    #[test]
+    fn user_turn_preserves_explicit_newlines() {
+        let text = "line one\nline two\nline three";
+        let lines = render_user_turn(text, 60);
+        let count = lines
+            .iter()
+            .map(plain_line)
+            .filter(|s| {
+                s.contains("line one") || s.contains("line two") || s.contains("line three")
+            })
+            .count();
+        assert_eq!(count, 3, "three explicit lines expected");
     }
 
     fn spec<'a>(
@@ -2546,6 +2666,64 @@ mod tests {
                 "expected empty trailing line, got {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn thinking_wraps_long_line() {
+        let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj kkkkk lllll";
+        let lines = render_thinking(text, true, true, false, 0, 30);
+        assert!(
+            lines.len() > 6,
+            "should wrap into many rows: {}",
+            lines.len()
+        );
+        for (i, line) in lines.iter().enumerate() {
+            let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let w = unicode_width::UnicodeWidthStr::width(s.as_str());
+            assert!(w <= 30, "thinking line {i} width {w} > 30: {s:?}");
+        }
+    }
+
+    #[test]
+    fn thinking_wraps_cjk_long_line() {
+        let text =
+            "读取文件内容并做分析的一个非常长的中文标题名称这样会超过宽度必须换行才行测试一下看看";
+        let lines = render_thinking(text, true, true, false, 0, 30);
+        assert!(lines.len() > 6, "CJK thinking should wrap: {}", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let w = unicode_width::UnicodeWidthStr::width(s.as_str());
+            assert!(w <= 30, "CJK thinking line {i} width {w} > 30");
+        }
+    }
+
+    #[test]
+    fn system_note_wraps_long_line() {
+        let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj kkkkk lllll mmmmm";
+        let lines = render_system_note(text, NoteLevel::Info, 30);
+        assert!(lines.len() > 4, "should wrap: {}", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let w = unicode_width::UnicodeWidthStr::width(s.as_str());
+            assert!(w <= 30, "note line {i} width {w} > 30: {s:?}");
+        }
+    }
+
+    #[test]
+    fn user_turn_leaves_right_padding() {
+        let text = "short";
+        let lines = render_user_turn(text, 40);
+        let body_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.as_ref().contains("short")))
+            .expect("should find body line");
+        let s: String = body_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let w = unicode_width::UnicodeWidthStr::width(s.as_str());
+        assert_eq!(w, 40, "line should fill to target 40: {s:?}");
+        assert!(
+            s.ends_with("  "),
+            "line should end with >=2 trailing spaces (right pad): {s:?}"
+        );
     }
 
     #[test]
