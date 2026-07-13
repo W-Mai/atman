@@ -72,6 +72,13 @@ impl OpenAiProvider {
             max_tokens: self.max_tokens,
             messages: wire_messages,
             tools,
+            stream_options: if stream {
+                Some(StreamOptions {
+                    include_usage: true,
+                })
+            } else {
+                None
+            },
         }
     }
 
@@ -265,8 +272,11 @@ impl Provider for OpenAiProvider {
 
                 let mut stream = resp.bytes_stream().eventsource();
                 let mut acc_text = String::new();
+                let mut acc_thinking = String::new();
                 let mut cumulative = 0u64;
-                let mut final_completion_tokens: Option<u64> = None;
+                let mut final_usage: Option<OpenAiUsage> = None;
+                let mut resp_model: Option<String> = None;
+                let mut resp_id: Option<String> = None;
                 let mut partial_tool_calls: Vec<PartialToolCall> = Vec::new();
                 let mut stop_reason = StopReason::End;
                 while let Some(event) = tokio::select! {
@@ -296,6 +306,22 @@ impl Provider for OpenAiProvider {
                             text: content.to_string(),
                             cumulative_tokens: cumulative,
                         });
+                    }
+                    if let Some(reasoning) = parsed
+                        .pointer("/choices/0/delta/reasoning_content")
+                        .and_then(|v| v.as_str())
+                        && !reasoning.is_empty()
+                    {
+                        acc_thinking.push_str(reasoning);
+                        let _ = tx.send(NodeEvent::ThinkingChunk {
+                            text: reasoning.to_string(),
+                        });
+                    }
+                    if let Some(m) = parsed.get("model").and_then(|v| v.as_str()) {
+                        resp_model = Some(m.to_string());
+                    }
+                    if let Some(id) = parsed.get("id").and_then(|v| v.as_str()) {
+                        resp_id = Some(id.to_string());
                     }
                     if let Some(tcs) = parsed
                         .pointer("/choices/0/delta/tool_calls")
@@ -329,11 +355,11 @@ impl Provider for OpenAiProvider {
                     {
                         stop_reason = parse_stop_reason(reason);
                     }
-                    if let Some(usage) = parsed
-                        .pointer("/usage/completion_tokens")
-                        .and_then(|v| v.as_u64())
-                    {
-                        final_completion_tokens = Some(usage);
+                    if let Some(usage_obj) = parsed.get("usage") {
+                        if !usage_obj.is_null() {
+                            final_usage =
+                                serde_json::from_value::<OpenAiUsage>(usage_obj.clone()).ok();
+                        }
                     }
                 }
                 if cancel_for_task.is_cancelled() {
@@ -344,12 +370,21 @@ impl Provider for OpenAiProvider {
                         "openai cancelled mid-stream".into(),
                     ));
                 }
-                let total = final_completion_tokens.unwrap_or(cumulative);
+                let total = final_usage
+                    .as_ref()
+                    .and_then(|u| u.completion_tokens)
+                    .unwrap_or(cumulative);
                 let _ = tx.send(NodeEvent::LlmDone {
                     total_tokens: total,
                 });
 
                 let mut parts: Vec<MessagePart> = Vec::new();
+                if !acc_thinking.is_empty() {
+                    parts.push(MessagePart::Thinking {
+                        thinking: acc_thinking,
+                        signature: None,
+                    });
+                }
                 if !acc_text.is_empty() {
                     parts.push(MessagePart::Text { text: acc_text });
                 }
@@ -369,6 +404,37 @@ impl Provider for OpenAiProvider {
                     });
                 }
 
+                let token_usage = if let Some(u) = &final_usage {
+                    let cached = u
+                        .prompt_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.cached_tokens)
+                        .unwrap_or(0);
+                    let cache_write = u
+                        .prompt_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.cache_write_tokens)
+                        .unwrap_or(0);
+                    let cache_read = cached.max(u.prompt_cache_hit_tokens.unwrap_or(0));
+                    let reasoning = u
+                        .completion_tokens_details
+                        .as_ref()
+                        .and_then(|d| d.reasoning_tokens)
+                        .unwrap_or(0);
+                    TokenUsage {
+                        input: u.prompt_tokens.unwrap_or(0).saturating_sub(cache_read),
+                        cached_input: cache_read,
+                        output: u.completion_tokens.unwrap_or(0),
+                        cache_write,
+                        reasoning_tokens: reasoning,
+                    }
+                } else {
+                    TokenUsage {
+                        output: total,
+                        ..Default::default()
+                    }
+                };
+
                 Ok(AssistantMessage {
                     message: Message {
                         role: MessageRole::Assistant,
@@ -376,13 +442,10 @@ impl Provider for OpenAiProvider {
                         turn_id,
                     },
                     stop_reason,
-                    token_usage: TokenUsage {
-                        output: total,
-                        ..Default::default()
-                    },
+                    token_usage,
                     timing: CallTiming::default(),
-                    model: String::new(),
-                    response_id: None,
+                    model: resp_model.unwrap_or_default(),
+                    response_id: resp_id,
                 })
             },
         );
@@ -432,12 +495,30 @@ fn response_to_assistant(
             stop_reason = parse_stop_reason(&reason);
         }
     }
-    let usage = body.usage.map(|u| TokenUsage {
-        input: u.prompt_tokens.unwrap_or(0),
-        cached_input: 0,
-        output: u.completion_tokens.unwrap_or(0),
-        cache_write: 0,
-        ..Default::default()
+    let usage = body.usage.map(|u| {
+        let cached = u
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .unwrap_or(0);
+        let cache_write = u
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cache_write_tokens)
+            .unwrap_or(0);
+        let cache_read = cached.max(u.prompt_cache_hit_tokens.unwrap_or(0));
+        let reasoning = u
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
+            .unwrap_or(0);
+        TokenUsage {
+            input: u.prompt_tokens.unwrap_or(0).saturating_sub(cache_read),
+            cached_input: cache_read,
+            output: u.completion_tokens.unwrap_or(0),
+            cache_write,
+            reasoning_tokens: reasoning,
+        }
     });
     AssistantMessage {
         message: Message {
@@ -481,6 +562,13 @@ struct ChatCompletionsRequest {
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireToolSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize)]
@@ -559,6 +647,29 @@ struct OpenAiUsage {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<u64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    prompt_cache_miss_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+    #[serde(default)]
+    cache_write_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]

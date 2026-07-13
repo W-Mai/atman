@@ -32,7 +32,7 @@ fn make_panel_item() -> OutputItem {
             output_preview: None,
             children: Vec::new(),
             parallelism: Parallelism::Serial,
-        llm_stats: None,
+            llm_stats: None,
             approval: None,
         }],
         parallelism: Parallelism::Serial,
