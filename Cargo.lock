@@ -248,6 +248,7 @@ dependencies = [
  "git2",
  "htmd",
  "ignore",
+ "libc",
  "regex",
  "reqwest",
  "rusqlite",
