@@ -952,6 +952,99 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
     lines
 }
 
+fn aggregate_llm_stats(
+    nodes: &[atman_runtime::workflow::WorkflowNode],
+) -> Option<(usize, u64, u64, u64, u64, u64, f64)> {
+    let mut calls = 0usize;
+    let mut total_in = 0u64;
+    let mut total_out = 0u64;
+    let mut total_cache_read = 0u64;
+    let mut total_cache_write = 0u64;
+    let mut total_ttft_ms = 0u64;
+    let mut speed_sum = 0.0f64;
+    let mut speed_count = 0usize;
+    for n in nodes {
+        if let Some(s) = &n.llm_stats {
+            calls += 1;
+            total_in += s.input_tokens + s.cache_read + s.cache_write;
+            total_out += s.output_tokens;
+            total_cache_read += s.cache_read;
+            total_cache_write += s.cache_write;
+            total_ttft_ms += s.ttft_ms;
+            if s.tokens_per_second > 0.0 {
+                speed_sum += s.tokens_per_second;
+                speed_count += 1;
+            }
+        }
+        let child = aggregate_llm_stats(&n.children);
+        if let Some((c, i, o, cr, cw, ttft, sp)) = child {
+            calls += c;
+            total_in += i;
+            total_out += o;
+            total_cache_read += cr;
+            total_cache_write += cw;
+            total_ttft_ms += ttft;
+            speed_sum += sp;
+            speed_count += 1;
+        }
+    }
+    if calls == 0 {
+        return None;
+    }
+    let avg_speed = if speed_count > 0 {
+        speed_sum / speed_count as f64
+    } else {
+        0.0
+    };
+    Some((
+        calls,
+        total_in,
+        total_out,
+        total_cache_read,
+        total_cache_write,
+        total_ttft_ms,
+        avg_speed,
+    ))
+}
+
+fn format_workflow_stats_footer(
+    graph: &atman_runtime::workflow::WorkflowGraph,
+    outer_width: u16,
+    border_style: Style,
+) -> Line<'static> {
+    use crate::humanize::format_count;
+    let stats = aggregate_llm_stats(&graph.root);
+    let inner_w = (outer_width as usize).saturating_sub(2);
+    let bottom_text =
+        if let Some((calls, total_in, total_out, cache_read, _cache_write, _ttft, speed)) = stats {
+            let mut parts = Vec::new();
+            parts.push(format!("{calls} calls"));
+            parts.push(format!("in {}", format_count(total_in)));
+            parts.push(format!("out {}", format_count(total_out)));
+            if cache_read > 0 {
+                parts.push(format!("cache {}", format_count(cache_read)));
+            }
+            if speed > 0.0 {
+                parts.push(format!("{:.0} tok/s", speed));
+            }
+            let body = parts.join(" · ");
+            let body_w = unicode_width::UnicodeWidthStr::width(body.as_str());
+            let inner_w = (outer_width as usize).saturating_sub(2);
+            let prefix_w = unicode_width::UnicodeWidthStr::width("╰─ ");
+            let suffix_w = 1; // ╯
+            let dash_w = inner_w
+                .saturating_sub(prefix_w)
+                .saturating_sub(body_w)
+                .saturating_sub(suffix_w);
+            format!("╰─ {body}{}╯", "─".repeat(dash_w))
+        } else {
+            format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)))
+        };
+    let fill = inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(bottom_text.as_str()));
+    let _ = fill;
+    Line::from(Span::styled(bottom_text, border_style))
+}
+
 fn render_workflow_panel(
     graph: &atman_runtime::workflow::WorkflowGraph,
     expanded_nodes: &std::collections::HashSet<String>,
@@ -1051,6 +1144,12 @@ pub fn render_workflow_panel_with_regions(
                 &mut pending_counter,
             );
         }
+        let footer_style = Style::default().fg(Color::DarkGray);
+        lines.push(format_workflow_stats_footer(
+            graph,
+            panel_width.min(120),
+            footer_style,
+        ));
         lines.push(Line::raw(""));
     }
     (lines, regions)
