@@ -445,8 +445,26 @@ impl AppState {
                 }
             }
             StreamFrame::LlmDone { .. } => {
-                if let Some(OutputItem::AssistantMd { streaming, .. }) = self.items.last_mut() {
-                    *streaming = false;
+                let mut changed = false;
+                for item in self.items.iter_mut().rev() {
+                    let touched = match item {
+                        OutputItem::Thinking { done, .. } if !*done => {
+                            *done = true;
+                            true
+                        }
+                        OutputItem::AssistantMd { streaming, .. } if *streaming => {
+                            *streaming = false;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if touched {
+                        changed = true;
+                    } else {
+                        break;
+                    }
+                }
+                if changed {
                     self.items_version = self.items_version.wrapping_add(1);
                 }
                 self.streaming = false;
@@ -632,6 +650,94 @@ mod tests {
             _ => panic!(),
         }
         assert!(!app.streaming);
+    }
+
+    #[test]
+    fn llm_done_finalizes_thinking_without_text_chunks() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::ThinkingChunk { text: "hmm".into() });
+        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 5 });
+        assert_eq!(app.items.len(), 1);
+        match &app.items[0] {
+            OutputItem::Thinking { done, text, .. } => {
+                assert!(*done, "thinking must be finalized by LlmDone");
+                assert_eq!(text, "hmm");
+            }
+            _ => panic!("expected Thinking item"),
+        }
+    }
+
+    #[test]
+    fn llm_done_finalizes_thinking_then_tool_use_no_text() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::ThinkingChunk {
+            text: "thinking...".into(),
+        });
+        app.apply_stream_frame(StreamFrame::ToolUseStart {
+            tool: "fs.read".into(),
+            args_preview: "\"x\"".into(),
+            id: "tc1".into(),
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 5 });
+        match &app.items[0] {
+            OutputItem::Thinking { done, .. } => assert!(*done, "thinking stuck spinning"),
+            _ => panic!("expected Thinking"),
+        }
+    }
+
+    #[test]
+    fn llm_done_finalizes_text_then_thinking_both_unfinalized() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::LlmChunk {
+            text: "partial".into(),
+            model: "m".into(),
+        });
+        app.apply_stream_frame(StreamFrame::ThinkingChunk {
+            text: "rethink".into(),
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 9 });
+        match &app.items[0] {
+            OutputItem::AssistantMd { streaming, md } => {
+                assert!(!*streaming, "AssistantMd must be finalized");
+                assert_eq!(md, "partial");
+            }
+            _ => panic!("expected AssistantMd at items[0]"),
+        }
+        match &app.items[1] {
+            OutputItem::Thinking { done, text, .. } => {
+                assert!(*done, "Thinking must be finalized");
+                assert_eq!(text, "rethink");
+            }
+            _ => panic!("expected Thinking at items[1]"),
+        }
+    }
+
+    #[test]
+    fn llm_done_stops_at_first_finalized_item() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::LlmChunk {
+            text: "prev".into(),
+            model: "m".into(),
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 1 });
+        app.apply_stream_frame(StreamFrame::ThinkingChunk {
+            text: "new turn".into(),
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 2 });
+        match &app.items[0] {
+            OutputItem::AssistantMd { md, streaming } => {
+                assert_eq!(md, "prev");
+                assert!(!*streaming, "prev must stay finalized");
+            }
+            _ => panic!(),
+        }
+        match &app.items[1] {
+            OutputItem::Thinking { done, text, .. } => {
+                assert!(*done);
+                assert_eq!(text, "new turn");
+            }
+            _ => panic!(),
+        }
     }
 
     #[test]
