@@ -579,7 +579,9 @@ impl AppState {
                     ..
                 }) = existing
                 {
-                    *s = screen;
+                    if let Some(new_screen) = screen {
+                        *s = new_screen;
+                    }
                     ab.extend_from_slice(&bytes);
                     let now = Instant::now();
                     let should_bump = self
@@ -594,7 +596,15 @@ impl AppState {
                 } else {
                     self.push_item(OutputItem::Terminal {
                         handle,
-                        screen,
+                        screen: screen.unwrap_or_else(|| {
+                            atman_runtime::tools::term::TerminalScreen {
+                                rows: 0,
+                                cols: 0,
+                                cells: Vec::new(),
+                                cursor: None,
+                                alt_screen: false,
+                            }
+                        }),
                         accumulated_bytes: bytes,
                         mode: TerminalViewMode::Capture,
                         done: false,
@@ -1255,7 +1265,7 @@ mod terminal_stream_tests {
         app.apply_stream_frame(StreamFrame::TerminalChunk {
             handle: "term_s_0".into(),
             bytes: b"hi".to_vec(),
-            screen: screen.clone(),
+            screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
         });
         assert_eq!(app.items.len(), 1);
@@ -1278,13 +1288,13 @@ mod terminal_stream_tests {
         app.apply_stream_frame(StreamFrame::TerminalChunk {
             handle: "term_s_0".into(),
             bytes: b"hi".to_vec(),
-            screen: screen.clone(),
+            screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
         });
         app.apply_stream_frame(StreamFrame::TerminalChunk {
             handle: "term_s_0".into(),
             bytes: b" world".to_vec(),
-            screen: screen.clone(),
+            screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
         });
         assert_eq!(app.items.len(), 1, "should update existing, not create new");
@@ -1305,7 +1315,7 @@ mod terminal_stream_tests {
         app.apply_stream_frame(StreamFrame::TerminalChunk {
             handle: "term_s_0".into(),
             bytes: b"hi".to_vec(),
-            screen,
+            screen: Some(screen),
             state: TermStateSnapshot::Running,
         });
         app.apply_stream_frame(StreamFrame::TerminalExited {
@@ -1343,7 +1353,7 @@ mod terminal_e2e_tests {
         app.apply_stream_frame(StreamFrame::TerminalChunk {
             handle: "term_s_0".into(),
             bytes: b"hi".to_vec(),
-            screen: screen.clone(),
+            screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
         });
 

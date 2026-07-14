@@ -87,7 +87,7 @@ pub enum TermStateSnapshot {
     Killed,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalScreen {
     pub rows: u16,
     pub cols: u16,
@@ -96,7 +96,7 @@ pub struct TerminalScreen {
     pub alt_screen: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalCell {
     pub chars: String,
     pub fg: TerminalColor,
@@ -391,6 +391,7 @@ fn run_reader_loop(
     handle: String,
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
+    let mut last_screen: Option<TerminalScreen> = None;
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -402,6 +403,7 @@ fn run_reader_loop(
                     p.process(chunk);
                     snapshot_screen(&p)
                 };
+                let screen_changed = last_screen.as_ref() != Some(&screen);
                 let st = state.lock().expect("state poisoned").clone();
                 let _ = stream_tx.send(TermStreamEvent::Chunk {
                     bytes: chunk.to_vec(),
@@ -409,10 +411,16 @@ fn run_reader_loop(
                     state: st.clone(),
                 });
                 if let Some(tx) = &tui_stream_tx {
+                    let tui_screen = if screen_changed {
+                        last_screen = Some(screen.clone());
+                        Some(screen)
+                    } else {
+                        None
+                    };
                     let _ = tx.send(crate::stream::StreamFrame::TerminalChunk {
                         handle: handle.clone(),
                         bytes: chunk.to_vec(),
-                        screen,
+                        screen: tui_screen,
                         state: st.to_snapshot(),
                     });
                 }

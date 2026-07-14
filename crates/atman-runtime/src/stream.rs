@@ -106,7 +106,7 @@ pub enum StreamFrame {
     TerminalChunk {
         handle: String,
         bytes: Vec<u8>,
-        screen: crate::tools::term::TerminalScreen,
+        screen: Option<crate::tools::term::TerminalScreen>,
         state: crate::tools::term::TermStateSnapshot,
     },
     TerminalExited {
@@ -183,7 +183,7 @@ mod tests {
         let f = StreamFrame::TerminalChunk {
             handle: "term_s_0".into(),
             bytes: b"hi".to_vec(),
-            screen,
+            screen: Some(screen),
             state: crate::tools::term::TermStateSnapshot::Running,
         };
         let json = serde_json::to_string(&f).unwrap();
@@ -197,6 +197,7 @@ mod tests {
             } => {
                 assert_eq!(handle, "term_s_0");
                 assert_eq!(bytes, b"hi");
+                let screen = screen.expect("screen should be Some");
                 assert_eq!(screen.rows, 2);
                 assert_eq!(screen.cols, 3);
                 assert_eq!(screen.cells.len(), 6);
