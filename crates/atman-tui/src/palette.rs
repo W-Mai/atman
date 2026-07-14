@@ -12,55 +12,99 @@ pub enum PaletteEntryId {
     CompactNow,
     SearchHistory,
     ToggleSidebar,
-    ShowHelp,
     SetTrustMode,
-    SetTheme,
+    SetModeTheme,
+    ShowHelp,
 }
 
+pub struct PaletteEntry {
+    pub id: PaletteEntryId,
+    pub label: &'static str,
+    pub hint: &'static str,
+    pub keyword: &'static str,
+}
+
+pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
+    PaletteEntry {
+        id: PaletteEntryId::SwitchSession,
+        label: "Switch Session",
+        hint: "Pick a recent session to swap into",
+        keyword: "session switch swap",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::YankMode,
+        label: "Enter Yank Mode",
+        hint: "j/k select, Enter copies via OSC 52",
+        keyword: "yank copy clipboard",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::CopyLastMessage,
+        label: "Copy Last Assistant Message",
+        hint: "Push the last assistant text to the terminal clipboard",
+        keyword: "copy message clipboard",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::CopyLastTool,
+        label: "Copy Last Tool Result",
+        hint: "Push the last tool_result content to the clipboard",
+        keyword: "copy tool clipboard",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::CompactNow,
+        label: "Compact Transcript",
+        hint: "Force LLM-based compaction on the current transcript",
+        keyword: "compact compress",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::SearchHistory,
+        label: "Search History",
+        hint: "Full-text search past turns of this session",
+        keyword: "search history find",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::ToggleSidebar,
+        label: "Toggle Sidebar",
+        hint: "Same as F2",
+        keyword: "sidebar toggle panel",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::SetTrustMode,
+        label: "Set Trust Mode",
+        hint: "Switch trust level (calm/steady/eager/reckless)",
+        keyword: "trust mode eager deny approve allow reckless yolo",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::SetModeTheme,
+        label: "Set Mode Theme",
+        hint: "Switch display theme (default/wuxia/animal/weather/drink)",
+        keyword: "theme mode-theme appearance skin display wuxia animal weather drink",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::ShowHelp,
+        label: "Show Help",
+        hint: "Same as F1",
+        keyword: "help cheatsheet",
+    },
+];
+
 impl PaletteEntryId {
-    pub const ALL: &'static [PaletteEntryId] = &[
-        PaletteEntryId::SwitchSession,
-        PaletteEntryId::YankMode,
-        PaletteEntryId::CopyLastMessage,
-        PaletteEntryId::CopyLastTool,
-        PaletteEntryId::CompactNow,
-        PaletteEntryId::SearchHistory,
-        PaletteEntryId::ToggleSidebar,
-        PaletteEntryId::SetTrustMode,
-        PaletteEntryId::SetTheme,
-        PaletteEntryId::ShowHelp,
-    ];
+    pub fn all() -> Vec<PaletteEntryId> {
+        PALETTE_ENTRIES.iter().map(|e| e.id).collect()
+    }
+
+    pub fn entry(self) -> &'static PaletteEntry {
+        PALETTE_ENTRIES
+            .iter()
+            .find(|e| e.id == self)
+            .expect("PaletteEntryId not in PALETTE_ENTRIES")
+    }
 
     pub fn label(self) -> &'static str {
-        match self {
-            PaletteEntryId::SwitchSession => "Switch Session",
-            PaletteEntryId::YankMode => "Enter Yank Mode",
-            PaletteEntryId::CopyLastMessage => "Copy Last Assistant Message",
-            PaletteEntryId::CopyLastTool => "Copy Last Tool Result",
-            PaletteEntryId::CompactNow => "Compact Transcript",
-            PaletteEntryId::SearchHistory => "Search History",
-            PaletteEntryId::ToggleSidebar => "Toggle Sidebar",
-            PaletteEntryId::SetTrustMode => "Set Trust Mode",
-            PaletteEntryId::SetTheme => "Set Theme",
-            PaletteEntryId::ShowHelp => "Show Help",
-        }
+        self.entry().label
     }
 
     pub fn hint(self) -> &'static str {
-        match self {
-            PaletteEntryId::SwitchSession => "Pick a recent session to swap into",
-            PaletteEntryId::YankMode => "j/k select, Enter copies via OSC 52",
-            PaletteEntryId::CopyLastMessage => {
-                "Push the last assistant text to the terminal clipboard"
-            }
-            PaletteEntryId::CopyLastTool => "Push the last tool_result content to the clipboard",
-            PaletteEntryId::CompactNow => "Force LLM-based compaction on the current transcript",
-            PaletteEntryId::SearchHistory => "Full-text search past turns of this session",
-            PaletteEntryId::ToggleSidebar => "Same as F2",
-            PaletteEntryId::SetTrustMode => "Switch trust level (calm/steady/eager/reckless)",
-            PaletteEntryId::SetTheme => "Switch display theme (default/wuxia/animal/weather/drink)",
-            PaletteEntryId::ShowHelp => "Same as F1",
-        }
+        self.entry().hint
     }
 }
 
@@ -125,12 +169,14 @@ impl CommandPalette {
         let query = self.input.to_lowercase();
         let query = query.trim();
         self.filtered = if query.is_empty() {
-            PaletteEntryId::ALL.to_vec()
+            PaletteEntryId::all()
         } else {
-            PaletteEntryId::ALL
+            PALETTE_ENTRIES
                 .iter()
-                .copied()
-                .filter(|id| fuzzy_match(&id.label().to_lowercase(), query))
+                .filter(|e| {
+                    fuzzy_match(e.label.to_lowercase().as_str(), query) || fuzzy_match(e.keyword, query)
+                })
+                .map(|e| e.id)
                 .collect()
         };
         if self.selected >= self.filtered.len() {
@@ -242,7 +288,7 @@ mod tests {
         let mut p = CommandPalette::default();
         p.open();
         assert!(p.open);
-        assert_eq!(p.filtered.len(), PaletteEntryId::ALL.len());
+        assert_eq!(p.filtered.len(), PaletteEntryId::all().len());
         assert_eq!(p.selected, 0);
     }
 
@@ -258,7 +304,7 @@ mod tests {
             "yank should stay in filtered results: {:?}",
             p.filtered
         );
-        assert!(p.filtered.len() < PaletteEntryId::ALL.len());
+        assert!(p.filtered.len() < PaletteEntryId::all().len());
     }
 
     #[test]
@@ -268,7 +314,7 @@ mod tests {
         p.push_char('z');
         assert!(p.filtered.is_empty() || !p.filtered.is_empty());
         p.backspace();
-        assert_eq!(p.filtered.len(), PaletteEntryId::ALL.len());
+        assert_eq!(p.filtered.len(), PaletteEntryId::all().len());
     }
 
     #[test]
