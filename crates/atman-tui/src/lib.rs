@@ -245,14 +245,8 @@ async fn run_frames(
     intro_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let _reader_guard = ReaderGuard(reader_shutdown);
-    let mut last_draw = std::time::Instant::now();
-    let mut dirty = true;
     loop {
-        if dirty || last_draw.elapsed() >= std::time::Duration::from_millis(100) {
-            terminal.draw(|f| render_frame(f, &mut app, &editor))?;
-            last_draw = std::time::Instant::now();
-            dirty = false;
-        }
+        terminal.draw(|f| render_frame(f, &mut app, &editor))?;
 
         if app.should_quit {
             break;
@@ -268,11 +262,9 @@ async fn run_frames(
             }
             _ = animation_tick.tick(), if app.has_running_workflow() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
-                dirty = true;
             }
             _ = intro_tick.tick(), if app.startup_intro.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
-                dirty = true;
             }
 
             key = key_events.recv() => {
@@ -455,38 +447,17 @@ async fn run_frames(
                 }
                 if scroll_delta < 0 {
                     app.scroll_up((-scroll_delta) as u16);
-                    dirty = true;
                 } else if scroll_delta > 0 {
                     app.scroll_down(scroll_delta as u16);
-                    dirty = true;
                 }
             }
             frame = handle.stream_rx.recv() => {
                 match frame {
                     Ok(frame) => {
                         app.apply_stream_frame(frame);
-                        dirty = true;
-                        loop {
-                            match handle.stream_rx.try_recv() {
-                                Ok(f) => { app.apply_stream_frame(f); }
-                                Err(broadcast::error::TryRecvError::Empty) => break,
-                                Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                                    app.record_lag(n, std::time::Instant::now());
-                                }
-                                Err(broadcast::error::TryRecvError::Closed) => break,
-                            }
-                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         app.record_lag(n, std::time::Instant::now());
-                        #[allow(clippy::while_let_loop)]
-                        loop {
-                            match handle.stream_rx.try_recv() {
-                                Ok(f) => { app.apply_stream_frame(f); }
-                                Err(_) => break,
-                            }
-                        }
-                        dirty = true;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -495,19 +466,16 @@ async fn run_frames(
                 if let Some(n) = note {
                     let (text, level) = n.into_parts();
                     app.push_note(text, level);
-                    dirty = true;
                 }
             }
             _ = wait_goal_change(handle.goal_rx.as_mut()) => {
                 if let Some(rx) = handle.goal_rx.as_mut() {
                     app.goal = rx.borrow().clone();
-                    dirty = true;
                 }
             }
             _ = wait_context_change(handle.context_rx.as_mut()) => {
                 if let Some(rx) = handle.context_rx.as_mut() {
                     app.context = rx.borrow().clone();
-                    dirty = true;
                 }
             }
             _ = wait_attach_change(handle.attach_rx.as_mut()) => {
