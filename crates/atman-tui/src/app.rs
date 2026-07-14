@@ -1377,12 +1377,12 @@ mod terminal_e2e_tests {
             lines.len() > 2,
             "should render header + blank + screen rows"
         );
-        let header = lines[0]
+        let header = lines[1]
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
         assert!(header.contains("term_s_0"), "header should contain handle");
-        assert!(header.contains("Capture"), "should be Capture mode");
+        assert!(header.contains("capture"), "should be capture mode");
     }
 }
