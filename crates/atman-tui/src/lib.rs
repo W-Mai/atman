@@ -450,9 +450,27 @@ async fn run_frames(
                 match frame {
                     Ok(frame) => {
                         app.apply_stream_frame(frame);
+                        let mut drained = 0u32;
+                        loop {
+                            match handle.stream_rx.try_recv() {
+                                Ok(f) => {
+                                    app.apply_stream_frame(f);
+                                    drained += 1;
+                                    if drained >= 512 { break; }
+                                }
+                                Err(broadcast::error::TryRecvError::Empty) => break,
+                                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                    app.record_lag(n, std::time::Instant::now());
+                                }
+                                Err(broadcast::error::TryRecvError::Closed) => break,
+                            }
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         app.record_lag(n, std::time::Instant::now());
+                        while let Ok(f) = handle.stream_rx.try_recv() {
+                            app.apply_stream_frame(f);
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
