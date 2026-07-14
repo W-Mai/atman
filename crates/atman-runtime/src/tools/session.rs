@@ -29,8 +29,8 @@ impl Tool for SessionPush {
             "type": "object",
             "properties": {
                 "message": {
-                    "type": "message",
-                    "description": "The Message value to push (e.g. a tool_result from dispatch_all)."
+                    "type": "object",
+                    "description": "The Message value to push (e.g. a tool_result from dispatch_all). Pass the value returned by dispatch_all directly."
                 }
             },
             "required": ["message"]
