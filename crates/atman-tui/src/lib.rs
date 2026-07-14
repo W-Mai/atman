@@ -37,7 +37,7 @@ pub mod terminal_guard;
 pub mod theme;
 pub mod workflow_viewer_modal;
 
-use app::{AppState, NoteLevel};
+use app::{AppState, NoteLevel, OutputItem};
 use atman_runtime::stream::StreamFrame;
 use input::{InputEditor, input_paragraph};
 use keys::{KeyAction, map as map_key};
@@ -329,6 +329,14 @@ async fn run_frames(
                                 } else if over_todo {
                                     if up { app.todos_scroll = app.todos_scroll.saturating_sub(1); }
                                     else { app.todos_scroll = app.todos_scroll.saturating_add(1); }
+                                }
+                            } else if let Some(idx) = app.hit_test(me.column, me.row) {
+                                if matches!(app.items.get(idx), Some(OutputItem::Terminal { .. })) {
+                                    app.scroll_terminal(idx, matches!(me.kind, MouseEventKind::ScrollUp), 1);
+                                } else if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                    scroll_delta = scroll_delta.saturating_sub(3);
+                                } else {
+                                    scroll_delta = scroll_delta.saturating_add(3);
                                 }
                             } else if matches!(me.kind, MouseEventKind::ScrollUp) {
                                 scroll_delta = scroll_delta.saturating_sub(3);

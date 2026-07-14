@@ -328,6 +328,46 @@ impl AppState {
             .map(|r| r.item_index)
     }
 
+    pub fn scroll_terminal(&mut self, item_index: usize, up: bool, amount: u16) {
+        if let Some(OutputItem::Terminal {
+            screen,
+            scroll_offset,
+            ..
+        }) = self.items.get_mut(item_index)
+        {
+            let max_row = screen.rows;
+            let current_row = scroll_offset.map(|(r, _)| r).unwrap_or(0);
+            let new_row = if up {
+                current_row.saturating_sub(amount)
+            } else {
+                (current_row + amount).min(max_row.saturating_sub(1))
+            };
+            if new_row == 0 && !up {
+                *scroll_offset = None;
+            } else {
+                *scroll_offset = Some((new_row, 0));
+            }
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn toggle_terminal_mode(&mut self, item_index: usize) {
+        if let Some(OutputItem::Terminal { mode, .. }) = self.items.get_mut(item_index) {
+            *mode = match *mode {
+                TerminalViewMode::Capture => TerminalViewMode::Stream,
+                TerminalViewMode::Stream => TerminalViewMode::Capture,
+            };
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn toggle_terminal_expand(&mut self, item_index: usize) {
+        if let Some(OutputItem::Terminal { expanded, .. }) = self.items.get_mut(item_index) {
+            *expanded = !*expanded;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
     pub fn hit_test_node(&self, col: u16, row: u16) -> Option<(usize, String)> {
         let rect = self.last_transcript_rect?;
         if col < rect.x
