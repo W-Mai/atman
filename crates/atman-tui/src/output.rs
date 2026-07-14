@@ -293,6 +293,7 @@ enum ItemKind {
     Divider,
     WorkflowPanel,
     StartupCard,
+    Terminal,
 }
 
 impl ItemKind {
@@ -305,6 +306,7 @@ impl ItemKind {
             OutputItem::Divider => Self::Divider,
             OutputItem::WorkflowPanel { .. } => Self::WorkflowPanel,
             OutputItem::StartupCard { .. } => Self::StartupCard,
+            OutputItem::Terminal { .. } => Self::Terminal,
         }
     }
 
@@ -1081,6 +1083,23 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *started_at,
             *ended_at,
             ctx.animation_frame,
+            ctx.panel_width,
+        ),
+        OutputItem::Terminal {
+            handle,
+            screen,
+            accumulated_bytes,
+            mode,
+            done,
+            expanded,
+            scroll_offset: _,
+        } => render_terminal(
+            handle,
+            screen,
+            accumulated_bytes,
+            *mode,
+            *done,
+            *expanded,
             ctx.panel_width,
         ),
     };
@@ -2411,6 +2430,114 @@ pub fn empty_hint<'a>() -> Paragraph<'a> {
         .wrap(Wrap { trim: true })
 }
 
+fn render_terminal(
+    handle: &str,
+    screen: &atman_runtime::tools::term::TerminalScreen,
+    accumulated_bytes: &[u8],
+    mode: crate::app::TerminalViewMode,
+    done: bool,
+    expanded: bool,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let status_glyph = if done { "✓" } else { "◐" };
+    let mode_label = match mode {
+        crate::app::TerminalViewMode::Capture => "Capture",
+        crate::app::TerminalViewMode::Stream => "Stream",
+    };
+    let header = format!(
+        "  {status_glyph} terminal[{handle}] [{mode_label}] {cols}x{rows}",
+        cols = screen.cols,
+        rows = screen.rows
+    );
+    lines.push(Line::from(Span::styled(
+        header,
+        ratatui::style::Style::default()
+            .fg(ratatui::style::Color::Cyan)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    match mode {
+        crate::app::TerminalViewMode::Capture => {
+            let max_rows = if expanded {
+                screen.rows as usize
+            } else {
+                (screen.rows as usize).min(12)
+            };
+            for row in 0..max_rows.min(screen.rows as usize) {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                for col in 0..screen.cols as usize {
+                    let idx = row * screen.cols as usize + col;
+                    let cell = &screen.cells[idx];
+                    if !cell.chars.is_empty() {
+                        let mut style = ratatui::style::Style::default();
+                        if cell.bold {
+                            style = style.add_modifier(ratatui::style::Modifier::BOLD);
+                        }
+                        if cell.italic {
+                            style = style.add_modifier(ratatui::style::Modifier::ITALIC);
+                        }
+                        if cell.underline {
+                            style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+                        }
+                        if cell.inverse {
+                            style = style.add_modifier(ratatui::style::Modifier::REVERSED);
+                        }
+                        if cell.dim {
+                            style = style.add_modifier(ratatui::style::Modifier::DIM);
+                        }
+                        style = style.fg(cell_fg(cell)).bg(cell_bg(cell));
+                        spans.push(Span::styled(cell.chars.clone(), style));
+                    } else {
+                        spans.push(Span::raw(" "));
+                    }
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+        crate::app::TerminalViewMode::Stream => {
+            let text = String::from_utf8_lossy(accumulated_bytes).into_owned();
+            let all_lines: Vec<&str> = text.lines().collect();
+            let max_lines = if expanded {
+                all_lines.len()
+            } else {
+                all_lines.len().min(6)
+            };
+            let start = all_lines.len().saturating_sub(max_lines);
+            for line in &all_lines[start..] {
+                let truncated: String = line.chars().take(panel_width as usize).collect();
+                lines.push(Line::from(Span::raw(truncated)));
+            }
+            if !expanded && all_lines.len() > 6 {
+                lines.push(Line::from(Span::styled(
+                    format!("  ▼ {} more lines", all_lines.len() - 6),
+                    ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                )));
+            }
+        }
+    }
+    lines
+}
+
+fn cell_fg(cell: &atman_runtime::tools::term::TerminalCell) -> ratatui::style::Color {
+    use atman_runtime::tools::term::TerminalColor;
+    match cell.fg {
+        TerminalColor::Default => ratatui::style::Color::Reset,
+        TerminalColor::Idx(i) => ratatui::style::Color::Indexed(i),
+        TerminalColor::Rgb(r, g, b) => ratatui::style::Color::Rgb(r, g, b),
+    }
+}
+
+fn cell_bg(cell: &atman_runtime::tools::term::TerminalCell) -> ratatui::style::Color {
+    use atman_runtime::tools::term::TerminalColor;
+    match cell.bg {
+        TerminalColor::Default => ratatui::style::Color::Reset,
+        TerminalColor::Idx(i) => ratatui::style::Color::Indexed(i),
+        TerminalColor::Rgb(r, g, b) => ratatui::style::Color::Rgb(r, g, b),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2986,3 +3113,4 @@ mod tests {
         assert!(flat.contains("final"));
     }
 }
+

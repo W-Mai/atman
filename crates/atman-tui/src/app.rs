@@ -2,9 +2,16 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use atman_runtime::stream::StreamFrame;
+use atman_runtime::tools::term::TerminalScreen;
 use atman_runtime::workflow::WorkflowGraph;
 
 const LAG_COOLDOWN: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TerminalViewMode {
+    Stream,
+    Capture,
+}
 
 #[derive(Debug, Clone)]
 pub enum OutputItem {
@@ -36,6 +43,15 @@ pub enum OutputItem {
     StartupCard {
         version: String,
         recent: Vec<StartupSessionEntry>,
+    },
+    Terminal {
+        handle: String,
+        screen: TerminalScreen,
+        accumulated_bytes: Vec<u8>,
+        mode: TerminalViewMode,
+        done: bool,
+        expanded: bool,
+        scroll_offset: Option<(u16, u16)>,
     },
 }
 
@@ -506,7 +522,48 @@ impl AppState {
                     self.streaming = false;
                 }
             }
-            StreamFrame::TerminalChunk { .. } | StreamFrame::TerminalExited { .. } => {}
+            StreamFrame::TerminalChunk {
+                handle,
+                bytes,
+                screen,
+                state: _,
+            } => {
+                self.waiting_for_llm = false;
+                let existing = self.items.iter_mut().rev().find(|item| {
+                    matches!(item, OutputItem::Terminal { handle: h, done: false, .. } if h == &handle)
+                });
+                if let Some(OutputItem::Terminal {
+                    screen: s,
+                    accumulated_bytes: ab,
+                    ..
+                }) = existing
+                {
+                    *s = screen;
+                    ab.extend_from_slice(&bytes);
+                    self.items_version = self.items_version.wrapping_add(1);
+                    self.reset_lag_state();
+                } else {
+                    self.push_item(OutputItem::Terminal {
+                        handle,
+                        screen,
+                        accumulated_bytes: bytes,
+                        mode: TerminalViewMode::Capture,
+                        done: false,
+                        expanded: false,
+                        scroll_offset: None,
+                    });
+                    self.items_version = self.items_version.wrapping_add(1);
+                    self.reset_lag_state();
+                }
+            }
+            StreamFrame::TerminalExited { handle, .. } => {
+                if let Some(OutputItem::Terminal { done, .. }) = self.items.iter_mut().rev().find(
+                    |item| matches!(item, OutputItem::Terminal { handle: h, .. } if h == &handle),
+                ) {
+                    *done = true;
+                    self.items_version = self.items_version.wrapping_add(1);
+                }
+            }
             StreamFrame::Unknown => {}
         }
     }
