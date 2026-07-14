@@ -967,3 +967,69 @@ impl Tool for TermList {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_parse_roundtrip() {
+        let h = TermHandle {
+            session_id: "abc".into(),
+            local_id: 7,
+        };
+        assert_eq!(h.to_string(), "term_abc_7");
+        let back = TermHandle::parse("term_abc_7").unwrap();
+        assert_eq!(back, h);
+    }
+
+    #[test]
+    fn handle_parse_rejects_bad_format() {
+        assert!(TermHandle::parse("not_term").is_none());
+        assert!(TermHandle::parse("term_nosuffix").is_none());
+        assert!(TermHandle::parse("term_x_notnum").is_none());
+    }
+
+    #[test]
+    fn snapshot_screen_captures_text() {
+        let mut parser = vt100::Parser::new(3, 5, 0);
+        parser.process(b"hello");
+        let screen = snapshot_screen(&parser);
+        assert_eq!(screen.rows, 3);
+        assert_eq!(screen.cols, 5);
+        assert_eq!(screen.cells.len(), 15);
+        assert_eq!(screen.cells[0].chars, "h");
+        assert_eq!(screen.cells[4].chars, "o");
+    }
+
+    #[test]
+    fn registry_lookup_rejects_cross_session() {
+        let registry = Arc::new(TermRegistry::new());
+        let h = registry.next_handle("session_a");
+        let entry = Arc::new(TermEntry {
+            handle: h.clone(),
+            session_id: "session_a".into(),
+            pty_size: portable_pty::PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            parser: Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0))),
+            writer: Mutex::new(Box::new(std::io::sink())),
+            state: Arc::new(Mutex::new(TermState::Running {
+                pid: 0,
+                started_at: 0,
+            })),
+            stream_tx: broadcast::channel(STREAM_CHANNEL_CAPACITY).0,
+            log_path: std::env::temp_dir().join("term_test_dummy.log"),
+            reader_task: Mutex::new(None),
+            child: Mutex::new(None),
+            master: Mutex::new(None),
+            started_at: Instant::now(),
+        });
+        registry.insert(entry);
+        assert!(registry.lookup(&h.to_string(), "session_a").is_ok());
+        assert!(registry.lookup(&h.to_string(), "session_b").is_err());
+    }
+}
