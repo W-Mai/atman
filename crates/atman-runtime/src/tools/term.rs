@@ -729,16 +729,19 @@ impl Tool for TermInput {
         Tier::Four
     }
     fn description(&self) -> Option<&str> {
-        Some("Write text to a terminal's PTY. Use \\r for Enter, \\x03 for Ctrl+C.")
+        Some(
+            "Send input to a terminal's PTY. Pass `text` for literal text, or `key` for a special key. Keys: enter, tab, esc, backspace, up, down, left, right, ctrl+c, ctrl+d, ctrl+z.",
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
                 "handle": {"type": "string"},
-                "text": {"type": "string"}
+                "text": {"type": "string", "description": "Literal text to write. Do NOT use \\r or \\n here — use key:\"enter\" instead."},
+                "key": {"type": "string", "enum": ["enter", "tab", "esc", "backspace", "up", "down", "left", "right", "ctrl+c", "ctrl+d", "ctrl+z"]}
             },
-            "required": ["handle", "text"]
+            "required": ["handle"]
         })
     }
     fn call<'a>(
@@ -748,23 +751,52 @@ impl Tool for TermInput {
     ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
-            let text = extract_string(&args, "text", 1)?;
+            let text = extract_optional_string(&args, "text").unwrap_or_default();
+            let key = extract_optional_string(&args, "key");
             let registry = ctx.term_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("term.input: registry not available".into())
             })?;
             let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
             let entry = registry.lookup(&handle, &session_id)?;
+
+            let mut payload = text.into_bytes();
+            if let Some(k) = &key {
+                payload.extend_from_slice(&key_to_bytes(k));
+            }
+            if payload.is_empty() {
+                return Err(RuntimeError::ToolFailed(
+                    "term.input: provide at least one of `text` or `key`".into(),
+                ));
+            }
+
             let n = {
                 let mut w = entry.writer.lock().expect("writer poisoned");
-                w.write_all(text.as_bytes())
+                w.write_all(&payload)
                     .map_err(|e| RuntimeError::ToolFailed(format!("term.input write: {e}")))?;
-                text.len()
+                payload.len()
             };
             Ok(Value::Struct(vec![
                 ("ok".into(), Value::Bool(true)),
                 ("bytes_written".into(), Value::Int(n as i64)),
             ]))
         })
+    }
+}
+
+fn key_to_bytes(key: &str) -> Vec<u8> {
+    match key {
+        "enter" => vec![b'\r'],
+        "tab" => vec![b'\t'],
+        "esc" => vec![0x1b],
+        "backspace" => vec![0x7f],
+        "up" => vec![0x1b, b'[', b'A'],
+        "down" => vec![0x1b, b'[', b'B'],
+        "right" => vec![0x1b, b'[', b'C'],
+        "left" => vec![0x1b, b'[', b'D'],
+        "ctrl+c" => vec![0x03],
+        "ctrl+d" => vec![0x04],
+        "ctrl+z" => vec![0x1a],
+        _ => Vec::new(),
     }
 }
 
