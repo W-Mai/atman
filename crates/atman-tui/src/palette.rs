@@ -174,7 +174,8 @@ impl CommandPalette {
             PALETTE_ENTRIES
                 .iter()
                 .filter(|e| {
-                    fuzzy_match(e.label.to_lowercase().as_str(), query) || fuzzy_match(e.keyword, query)
+                    fuzzy_match(e.label.to_lowercase().as_str(), query)
+                        || fuzzy_match(e.keyword, query)
                 })
                 .map(|e| e.id)
                 .collect()

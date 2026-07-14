@@ -105,6 +105,9 @@ pub struct SessionPickerRow {
 pub enum TuiCommand {
     SetSidebar(sidebar::SidebarMode),
     OpenSessionSwitcher,
+    OpenTrustModePicker,
+    OpenThemePicker,
+    CycleOutside,
 }
 
 pub struct TuiHandle {
@@ -561,6 +564,20 @@ async fn run_frames(
                             let scope = crate::session_switcher::SessionScope::Project;
                             let rows = enumerate_session_rows(&app, scope);
                             app.session_switcher.open_with(rows, scope);
+                        }
+                        TuiCommand::OpenTrustModePicker => {
+                            app.trust_mode_picker_open = true;
+                        }
+                        TuiCommand::OpenThemePicker => {
+                            app.theme_picker_open = true;
+                        }
+                        TuiCommand::CycleOutside => {
+                            if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
+                                app.trust.outside = app.trust.outside.next();
+                                app.mark_items_dirty();
+                            } else {
+                                app.push_note("outside switch only available in eager mode", app::NoteLevel::Warn);
+                            }
                         }
                     }
                 }

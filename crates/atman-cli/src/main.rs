@@ -1671,6 +1671,31 @@ async fn cmd_repl_once(
         }
         if let Some(rest) = line.strip_prefix(':') {
             let trimmed = rest.trim();
+            if trimmed == "mode" || trimmed.starts_with("mode ") {
+                if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                    let _ = tx.send(atman_tui::TuiCommand::OpenTrustModePicker);
+                } else {
+                    reporter.info("[atman] :mode — switch trust level (available in TUI mode)");
+                }
+                continue;
+            }
+            if trimmed == "theme" || trimmed.starts_with("theme ") {
+                if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                    let _ = tx.send(atman_tui::TuiCommand::OpenThemePicker);
+                } else {
+                    reporter.info("[atman] :theme — switch display theme (available in TUI mode)");
+                }
+                continue;
+            }
+            if trimmed == "outside" || trimmed.starts_with("outside ") {
+                if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                    let _ = tx.send(atman_tui::TuiCommand::CycleOutside);
+                } else {
+                    reporter
+                        .info("[atman] :outside — cycle outside behavior (available in TUI mode)");
+                }
+                continue;
+            }
             if trimmed == "suggest" || trimmed.starts_with("suggest ") {
                 if let Err(e) = handle_suggest(&executor, &session, &mut input_rx, &reporter).await
                 {
@@ -2752,6 +2777,9 @@ fn handle_builtin(
                 ":exit | :quit        — leave REPL",
                 ":session             — print current session id",
                 ":cost                — cost summary for current session",
+                ":mode                — switch trust mode (calm/steady/eager/reckless)",
+                ":theme               — switch display theme (default/wuxia/animal/weather/drink)",
+                ":outside             — cycle outside behavior in eager mode (deny/approve/allow)",
                 ":attach <path>       — attach file to next turn",
                 ":attach clear|list   — manage pending attachments",
                 ":suggest             — ask meta-LLM for a reusable flow from recent turns",
