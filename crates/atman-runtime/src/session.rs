@@ -179,6 +179,7 @@ pub struct PendingApproval {
     pub level: crate::tool::ApprovalLevel,
     pub run_id: FlowRunId,
     pub emitted_at: chrono::DateTime<chrono::Utc>,
+    pub bypass_auto_ceiling: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -352,7 +353,7 @@ impl ApprovalRegistry {
         pending: PendingApproval,
     ) -> tokio::sync::oneshot::Receiver<ApprovalDecision> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if pending.level <= *self.auto_ceiling.lock().unwrap() {
+        if !pending.bypass_auto_ceiling && pending.level <= *self.auto_ceiling.lock().unwrap() {
             let _ = tx.send(ApprovalDecision::Approve);
             return rx;
         }
@@ -1848,6 +1849,7 @@ mod tests {
             level: crate::tool::ApprovalLevel::Auto,
             run_id: FlowRunId::now(),
             emitted_at: chrono::Utc::now(),
+            bypass_auto_ceiling: false,
         };
         let rx = reg.request(pending);
         let got = rx.blocking_recv().unwrap();
@@ -1867,6 +1869,7 @@ mod tests {
             level: crate::tool::ApprovalLevel::Approve,
             run_id: FlowRunId::now(),
             emitted_at: chrono::Utc::now(),
+            bypass_auto_ceiling: false,
         };
         let mut rx = reg.request(pending);
         assert_eq!(reg.list_pending().len(), 1);
@@ -1891,6 +1894,7 @@ mod tests {
                 level: crate::tool::ApprovalLevel::Dangerous,
                 run_id: FlowRunId::now(),
                 emitted_at: chrono::Utc::now(),
+                bypass_auto_ceiling: false,
             }));
         }
         assert_eq!(reg.list_pending().len(), 3);

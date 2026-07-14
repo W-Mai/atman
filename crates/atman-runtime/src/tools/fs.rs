@@ -727,6 +727,7 @@ async fn request_fs_write_approval(
         level: ApprovalLevel::Dangerous,
         run_id,
         emitted_at: chrono::Utc::now(),
+        bypass_auto_ceiling: false,
     };
     let rx = approval.request(pending);
     let run_id_for_emit = ctx.flow_run_id.clone();

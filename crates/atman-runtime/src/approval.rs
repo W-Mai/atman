@@ -13,6 +13,36 @@ pub fn level_str(level: ApprovalLevel) -> &'static str {
     }
 }
 
+fn should_force_manual_approval(ctx: &ToolCtx, tool_name: &str, args: &ToolArgs) -> bool {
+    use crate::trust::TrustMode;
+    let Some(trust) = &ctx.trust else {
+        return false;
+    };
+    if trust.mode == TrustMode::Reckless {
+        return false;
+    }
+    if !matches!(tool_name, "fs.write" | "fs.edit" | "fs.grep") {
+        return false;
+    }
+    let path = match args.named("path").or_else(|| args.positional(0).ok()) {
+        Some(crate::value::Value::Path(p)) => p.clone(),
+        Some(crate::value::Value::Str(s)) => std::path::PathBuf::from(s),
+        _ => return false,
+    };
+    let abs = if path.is_absolute() {
+        path
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(&path),
+            Err(_) => return true,
+        }
+    };
+    match std::env::current_dir() {
+        Ok(cwd) => !abs.starts_with(&cwd),
+        Err(_) => true,
+    }
+}
+
 pub async fn request_approval(
     ctx: &ToolCtx,
     id: &str,
@@ -26,6 +56,12 @@ pub async fn request_approval(
     };
     let Some(run_id) = ctx.flow_run_id.clone() else {
         return ApprovalOutcome::Approve;
+    };
+    let force_manual = should_force_manual_approval(ctx, name, call_args);
+    let effective_level = if force_manual {
+        ApprovalLevel::Dangerous
+    } else {
+        level
     };
     let args_preview: String = format!("{:?}", call_args.named)
         .chars()
@@ -44,9 +80,10 @@ pub async fn request_approval(
         tool_name: name.to_string(),
         args_preview: args_preview.clone(),
         preview: preview.clone(),
-        level,
+        level: effective_level,
         run_id: run_id.clone(),
         emitted_at: chrono::Utc::now(),
+        bypass_auto_ceiling: force_manual,
     };
     let rx = approval.request(pending);
     if let Some(sink) = ctx.events.as_ref() {

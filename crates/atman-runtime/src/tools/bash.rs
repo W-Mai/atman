@@ -306,6 +306,7 @@ async fn request_write_approval(ctx: &ToolCtx, cmd: &str, stderr: &str) -> Optio
         level: ApprovalLevel::Dangerous,
         run_id,
         emitted_at: chrono::Utc::now(),
+        bypass_auto_ceiling: false,
     };
     let rx = approval.request(pending);
     let run_id_for_emit = ctx.flow_run_id.clone();

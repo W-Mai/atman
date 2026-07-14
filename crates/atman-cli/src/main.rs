@@ -4058,6 +4058,7 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
             level: ApprovalLevel::Dangerous,
             run_id: FlowRunId::now(),
             emitted_at: chrono::Utc::now(),
+            bypass_auto_ceiling: false,
         }));
     }
 }
