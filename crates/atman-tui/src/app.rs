@@ -110,6 +110,7 @@ pub struct AppState {
     pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
     pub history_search: crate::history_search_modal::HistorySearchModal,
     pub workflow_viewer: crate::workflow_viewer_modal::WorkflowViewerModal,
+    pub terminal_viewer: crate::terminal_viewer_modal::TerminalViewerModal,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,
@@ -213,6 +214,14 @@ impl AppState {
 
     pub fn close_workflow_viewer(&mut self) {
         self.workflow_viewer.close();
+    }
+
+    pub fn open_terminal_viewer(&mut self, panel_item_index: usize) {
+        self.terminal_viewer.open(panel_item_index);
+    }
+
+    pub fn close_terminal_viewer(&mut self) {
+        self.terminal_viewer.close();
     }
 
     pub fn workflow_viewer_hit_test(&self, col: u16, row: u16) -> Option<(usize, String)> {

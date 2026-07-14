@@ -34,6 +34,7 @@ pub mod session_switcher;
 pub mod sidebar;
 pub mod status;
 pub mod terminal_guard;
+pub mod terminal_viewer_modal;
 pub mod theme;
 pub mod workflow_viewer_modal;
 
@@ -404,6 +405,15 @@ async fn run_frames(
                                         app.open_workflow_viewer(idx);
                                     } else {
                                         app.toggle_workflow_panel_expansion(idx);
+                                    }
+                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(crate::app::OutputItem::Terminal { .. }) =
+                                        app.items.get(idx)
+                                {
+                                    if me.modifiers.contains(KeyModifiers::SHIFT) {
+                                        app.open_terminal_viewer(idx);
+                                    } else {
+                                        app.toggle_terminal_expand(idx);
                                     }
                                 }
                             } else if let MouseEventKind::Moved = me.kind {
@@ -913,6 +923,43 @@ fn handle_workflow_viewer_key(action: &KeyAction, app: &mut AppState) {
         KeyAction::PageDown => app.workflow_viewer.scroll_down(page),
         KeyAction::CursorHome | KeyAction::Home => app.workflow_viewer.home(),
         KeyAction::CursorEnd | KeyAction::End => app.workflow_viewer.end(),
+        _ => {}
+    }
+}
+
+fn handle_terminal_viewer_key(action: &KeyAction, app: &mut AppState) {
+    let step: u16 = 3;
+    let page: u16 = 20;
+    let max_h = app
+        .items
+        .get(app.terminal_viewer.panel_item_index)
+        .and_then(|item| {
+            if let OutputItem::Terminal { screen, .. } = item {
+                Some(screen.cols)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    let max_v = app
+        .terminal_viewer
+        .last_inner_rect
+        .map(|r| r.height)
+        .unwrap_or(0);
+    match action {
+        KeyAction::Escape | KeyAction::Quit => app.close_terminal_viewer(),
+        KeyAction::CursorLeft | KeyAction::Char('h') => app.terminal_viewer.scroll_left(step),
+        KeyAction::CursorRight | KeyAction::Char('l') => {
+            app.terminal_viewer.scroll_right(step, max_h)
+        }
+        KeyAction::HistoryUp | KeyAction::ScrollUp | KeyAction::Char('k') => {
+            app.terminal_viewer.scroll_up(step)
+        }
+        KeyAction::HistoryDown | KeyAction::ScrollDown | KeyAction::Char('j') => {
+            app.terminal_viewer.scroll_down(step, max_v)
+        }
+        KeyAction::PageUp => app.terminal_viewer.scroll_up(page),
+        KeyAction::PageDown => app.terminal_viewer.scroll_down(page, max_v),
         _ => {}
     }
 }
@@ -1605,6 +1652,10 @@ fn handle_key(
     }
     if app.workflow_viewer.open {
         handle_workflow_viewer_key(&action, app);
+        return;
+    }
+    if app.terminal_viewer.open {
+        handle_terminal_viewer_key(&action, app);
         return;
     }
     if app.session_switcher.open {
@@ -2338,6 +2389,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.workflow_viewer.open {
         workflow_viewer_modal::render(f, area, app);
+    }
+    if app.terminal_viewer.open {
+        terminal_viewer_modal::render(f, area, app);
     }
     if app.form_modal.open {
         form_modal::render(f, area, &app.form_modal);

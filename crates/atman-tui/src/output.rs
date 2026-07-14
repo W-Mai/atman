@@ -423,12 +423,12 @@ fn user_message_bg() -> Color {
 
 const RIGHT_PAD: usize = 2;
 
-struct PaddedRow {
-    prefix: String,
-    body: String,
+pub struct PaddedRow {
+    pub prefix: String,
+    pub body: String,
 }
 
-fn wrap_with_prefix(
+pub fn wrap_with_prefix(
     text: &str,
     target: usize,
     first_prefix: &str,
@@ -491,7 +491,7 @@ fn wrap_with_prefix(
     out
 }
 
-fn line_with_right_pad(
+pub fn line_with_right_pad(
     prefix: &str,
     body: &str,
     target: usize,
@@ -2479,16 +2479,24 @@ fn render_terminal(
     let header_used = UnicodeWidthStr::width(header_prefix.as_str());
     let dims = format!("{}×{}", screen.cols, screen.rows);
     let dims_used = UnicodeWidthStr::width(dims.as_str());
-    let gap = 2;
+    let fs_btn = "⤢";
+    let fs_btn_used = UnicodeWidthStr::width(fs_btn);
+    let gap = 1;
     let header_pad = target
         .saturating_sub(header_used)
         .saturating_sub(dims_used)
-        .saturating_sub(gap);
+        .saturating_sub(fs_btn_used)
+        .saturating_sub(gap * 2);
     let mut header_spans = vec![Span::styled(header_prefix, header_style)];
     if header_pad > 0 {
         header_spans.push(Span::styled(" ".repeat(header_pad), header_style));
     }
     header_spans.push(Span::styled(dims, hint_style));
+    header_spans.push(Span::styled(" ".repeat(gap), header_style));
+    header_spans.push(Span::styled(
+        fs_btn.to_string(),
+        hint_style.add_modifier(Modifier::BOLD),
+    ));
     header_spans.push(Span::styled(" ".repeat(gap), header_style));
     lines.push(Line::from(header_spans));
     lines.push(blank.clone());
@@ -2510,7 +2518,7 @@ fn render_terminal(
                         break;
                     }
                     let cell = &screen.cells[idx];
-                    let cell_style = cell_style(cell, bg);
+                    let cs = cell_style_for_viewer(cell, bg);
                     let chars = if cell.chars.is_empty() {
                         " "
                     } else {
@@ -2518,7 +2526,7 @@ fn render_terminal(
                     };
                     let cw = UnicodeWidthStr::width(chars);
                     row_width += cw;
-                    spans.push(Span::styled(chars.to_string(), cell_style));
+                    spans.push(Span::styled(chars.to_string(), cs));
                 }
                 let pad = target
                     .saturating_sub(4)
@@ -2591,7 +2599,10 @@ fn render_terminal(
     lines
 }
 
-fn cell_style(cell: &atman_runtime::tools::term::TerminalCell, default_bg: Color) -> Style {
+pub fn cell_style_for_viewer(
+    cell: &atman_runtime::tools::term::TerminalCell,
+    default_bg: Color,
+) -> Style {
     let fg = cell_fg(cell);
     let bg = cell_bg(cell, default_bg);
     let mut style = Style::default().fg(fg).bg(bg);
