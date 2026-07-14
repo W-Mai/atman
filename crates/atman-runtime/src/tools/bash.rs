@@ -69,7 +69,10 @@ impl Tool for BashExec {
                     let deny = ctx
                         .trust
                         .as_ref()
-                        .map(|t| t.mode == crate::trust::TrustMode::EagerDeny)
+                        .map(|t| {
+                            t.mode != crate::trust::TrustMode::Reckless
+                                && t.outside == crate::trust::OutsideBehavior::Deny
+                        })
                         .unwrap_or(false);
                     if deny {
                         return Err(RuntimeError::ToolFailed(format!(

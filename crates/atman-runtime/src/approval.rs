@@ -44,21 +44,22 @@ pub async fn request_approval(
     level: ApprovalLevel,
     tool: Option<&dyn crate::tool::Tool>,
 ) -> ApprovalOutcome {
-    use crate::trust::TrustMode;
+    use crate::trust::{OutsideBehavior, TrustMode};
     let outside_workspace = is_outside_workspace(ctx, name, call_args);
     if outside_workspace {
         if let Some(trust) = &ctx.trust {
-            match trust.mode {
-                TrustMode::EagerDeny => {
-                    return ApprovalOutcome::Deny {
-                        reason: format!(
-                            "{name}: blocked — path outside workspace and mode is eager-deny"
-                        ),
-                    };
+            if trust.mode != TrustMode::Reckless {
+                match trust.outside {
+                    OutsideBehavior::Deny => {
+                        return ApprovalOutcome::Deny {
+                            reason: format!(
+                                "{name}: blocked — path outside workspace and outside=deny"
+                            ),
+                        };
+                    }
+                    OutsideBehavior::Allow => {}
+                    OutsideBehavior::Approve => {}
                 }
-                TrustMode::EagerApprove => {}
-                TrustMode::Reckless => {}
-                _ => {}
             }
         }
     }
@@ -72,7 +73,7 @@ pub async fn request_approval(
         && ctx
             .trust
             .as_ref()
-            .map(|t| !matches!(t.mode, TrustMode::Reckless | TrustMode::EagerDeny))
+            .map(|t| t.mode != TrustMode::Reckless && t.outside == OutsideBehavior::Approve)
             .unwrap_or(true);
     let effective_level = if force_manual {
         ApprovalLevel::Dangerous

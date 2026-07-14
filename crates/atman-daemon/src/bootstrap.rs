@@ -133,6 +133,7 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     let bg_registry = tools::register_bash_bg(&mut executor.tools);
     let trust_config = load_trust_config(opts.config_dir.as_deref());
     let sandbox_enabled = trust_config.mode.sandbox_enabled();
+    let sandbox_trust = trust_config.clone();
     executor.tool_ctx = executor
         .tool_ctx
         .clone()
@@ -147,8 +148,12 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     tools::register_web_search(&mut executor.tools, &web_config.search);
     register_providers_from_env(&mut executor);
     if sandbox_enabled {
-        if let Some(sandbox) =
-            build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
+        if let Some(sandbox) = build_sandbox(
+            &opts.project_root,
+            opts.config_dir.as_deref(),
+            &sandbox_trust,
+        )
+        .context("sandbox init")?
         {
             executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
         }
@@ -174,8 +179,12 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
 fn build_sandbox(
     project_root: &Path,
     config_dir: Option<&Path>,
+    trust: &atman_runtime::trust::TrustConfig,
 ) -> Result<Option<Arc<dyn atman_runtime::sandbox::Sandbox>>> {
-    let cfg = load_sandbox_config(config_dir);
+    let mut cfg = load_sandbox_config(config_dir);
+    if trust.mode.sandbox_enabled() && trust.mode.level() >= 3 {
+        cfg.allow_network = true;
+    }
     if !cfg.enabled {
         return Ok(None);
     }

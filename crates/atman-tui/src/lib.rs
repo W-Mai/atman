@@ -1188,7 +1188,7 @@ fn dispatch_palette_entry(
         PaletteEntryId::SetTrustMode => {
             app.trust_mode_picker_open = true;
         }
-        PaletteEntryId::SetTheme => {
+        PaletteEntryId::SetModeTheme => {
             app.theme_picker_open = true;
         }
     }
@@ -1805,7 +1805,10 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Tab => {
-            if editor.expand_paste_at_cursor() {
+            if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
+                app.trust.outside = app.trust.outside.next();
+                app.mark_items_dirty();
+            } else if editor.expand_paste_at_cursor() {
                 edited = true;
             }
             *interrupt_prompt = None;

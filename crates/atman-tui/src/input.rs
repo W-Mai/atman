@@ -54,8 +54,14 @@ pub fn input_paragraph<'a>(
         title,
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     );
+    let hint_right = if trust.mode == atman_runtime::trust::TrustMode::Eager {
+        let od = trust.outside_display();
+        format!(" outside: {} {} · Tab to cycle ", od.emoji, od.name)
+    } else {
+        " shift+enter · newline · enter · send ".to_string()
+    };
     let hint_line = Line::from(Span::styled(
-        " shift+enter · newline · enter · send ",
+        hint_right,
         Style::default().fg(Color::DarkGray),
     ))
     .right_aligned();
