@@ -656,6 +656,12 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(
         StreamKind::Stderr => "stderr",
     };
     let mut buf = String::new();
+    let mut log_file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&log_path)
+        .await
+        .ok();
     loop {
         buf.clear();
         match reader.read_line(&mut buf).await {
@@ -666,19 +672,12 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(
                     let mut out = output.lock().unwrap();
                     out.push(kind, data, max_output_bytes);
                 }
-                let mut file = match tokio::fs::OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(&log_path)
-                    .await
-                {
-                    Ok(f) => f,
-                    Err(_) => continue,
-                };
-                let _ = file.write_all(prefix).await;
-                let _ = file.write_all(data).await;
-                if !data.ends_with(b"\n") {
-                    let _ = file.write_all(b"\n").await;
+                if let Some(file) = log_file.as_mut() {
+                    let _ = file.write_all(prefix).await;
+                    let _ = file.write_all(data).await;
+                    if !data.ends_with(b"\n") {
+                        let _ = file.write_all(b"\n").await;
+                    }
                 }
                 if let Some(tx) = &stream_tx {
                     let _ = tx.send(crate::stream::StreamFrame::BashChunk {
