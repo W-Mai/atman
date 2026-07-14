@@ -11,6 +11,9 @@ pub const BUILTINS: &[(&str, &str)] = &[
     (":exit", "leave repl"),
     (":session", "print current session id"),
     (":cost", "cost summary hint"),
+    (":mode", "switch trust mode (calm/steady/eager/reckless)"),
+    (":theme", "switch display theme (default/wuxia/animal/weather/drink)"),
+    (":outside", "cycle outside behavior in eager (deny/approve/allow)"),
     (":attach", "attach file / list / clear"),
     (":suggest", "meta-LLM flow suggestion"),
     (":goal", "get / set / clear session goal"),
@@ -387,6 +390,9 @@ mod tests {
             (":help", "show help"),
             (":exit", "leave repl"),
             (":goal", "manage goal"),
+            (":mode", "switch trust mode"),
+            (":theme", "switch display theme"),
+            (":outside", "cycle outside behavior"),
         ]
     }
 
