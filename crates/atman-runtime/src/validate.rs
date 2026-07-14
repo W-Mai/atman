@@ -39,16 +39,8 @@ fn infer_node_kind(value: &Expr) -> Option<&'static str> {
     match value {
         Expr::Node(Node::Llm { .. }) => Some("llm"),
         Expr::Node(Node::ToolCall { path, .. }) => {
-            let name = path
-                .iter()
-                .map(|i| i.name.as_str())
-                .collect::<Vec<_>>()
-                .join(".");
-            if name == "bash.exec" {
-                Some("bash.exec")
-            } else {
-                Some("tool_call")
-            }
+            let _ = path;
+            Some("tool_call")
         }
         Expr::Node(Node::Fanout { .. }) => Some("fanout"),
         Expr::Node(Node::UserConfirm { .. }) => Some("user_confirm"),
@@ -63,7 +55,7 @@ fn watch_event_expected_kinds(event: &WatchEvent) -> &'static [&'static str] {
     match event {
         WatchEvent::Token { .. } => &["llm"],
         WatchEvent::TokensConsumed { .. } => &["llm"],
-        WatchEvent::Elapsed { .. } => &["llm", "bash.exec", "tool_call", "subflow", "fix_until"],
+        WatchEvent::Elapsed { .. } => &["llm", "tool_call", "subflow", "fix_until"],
     }
 }
 

@@ -12,7 +12,7 @@ async fn passes_immediately_on_first_iter_when_test_exits_zero() {
     {contract}
     result = fix_until_test_passes {{
         edit_flow: "noop"
-        test: bash.exec("true")
+        test: bash.spawn(block: true, cmd: "true")
         max_iters: 5
     }}
     return result.status
@@ -23,7 +23,10 @@ async fn passes_immediately_on_first_iter_when_test_exits_zero() {
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
+    );
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(matches!(&out, Value::Str(s) if s == "passed"));
 }
@@ -35,7 +38,7 @@ async fn gives_up_after_max_iters_when_test_never_passes() {
     {contract}
     result = fix_until_test_passes {{
         edit_flow: "noop"
-        test: bash.exec("false")
+        test: bash.spawn(block: true, cmd: "false")
         max_iters: 3
     }}
     return result.status
@@ -46,7 +49,10 @@ async fn gives_up_after_max_iters_when_test_never_passes() {
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
+    );
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(matches!(&out, Value::Str(s) if s == "gave_up"));
 }
@@ -64,7 +70,7 @@ async fn recovers_after_two_failures_then_passes() {
     {contract}
     result = fix_until_test_passes {{
         edit_flow: "noop"
-        test: bash.exec("{script}")
+        test: bash.spawn(block: true, cmd: "{script}")
         max_iters: 5
     }}
     return result.iters
@@ -76,7 +82,10 @@ async fn recovers_after_two_failures_then_passes() {
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
+    );
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(matches!(&out, Value::Int(3)), "want 3 iters, got {out:?}");
 }
@@ -88,7 +97,7 @@ async fn on_giveup_runs_when_max_iters_exhausted() {
     {contract}
     result = fix_until_test_passes {{
         edit_flow: "noop"
-        test: bash.exec("false")
+        test: bash.spawn(block: true, cmd: "false")
         max_iters: 2
         on_giveup: "fallback-triggered"
     }}
@@ -100,7 +109,10 @@ async fn on_giveup_runs_when_max_iters_exhausted() {
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
+    );
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(matches!(&out, Value::Str(s) if s == "fallback-triggered"));
 }
@@ -112,7 +124,7 @@ async fn iter_and_iters_variables_available_in_edit_and_giveup_scopes() {
     {contract}
     result = fix_until_test_passes {{
         edit_flow: iter
-        test: bash.exec("false")
+        test: bash.spawn(block: true, cmd: "false")
         max_iters: 3
         on_giveup: iters
     }}
@@ -124,7 +136,10 @@ async fn iter_and_iters_variables_available_in_edit_and_giveup_scopes() {
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
+    );
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(
         matches!(&out, Value::Int(3)),

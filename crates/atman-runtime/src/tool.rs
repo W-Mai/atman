@@ -93,6 +93,7 @@ pub struct ToolCtx {
     pub lifecycle_fire_tx:
         Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
+    pub term_registry: Option<std::sync::Arc<crate::tools::term::TermRegistry>>,
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,
 }
@@ -222,6 +223,14 @@ impl ToolCtx {
 
     pub fn with_trust(mut self, trust: crate::trust::TrustConfig) -> Self {
         self.trust = Some(trust);
+        self
+    }
+
+    pub fn with_term_registry(
+        mut self,
+        registry: std::sync::Arc<crate::tools::term::TermRegistry>,
+    ) -> Self {
+        self.term_registry = Some(registry);
         self
     }
 

@@ -44,11 +44,11 @@ const EDIT_FLOW: &str = r#"flow edit_and_verify(file: path, instruction: string,
 
     fs.write(file, edited.new_content)
 
-    check = bash.exec(verify_cmd)
+    check = bash.spawn(block: true, cmd: verify_cmd)
 
-    when check.exit != 0 {
+    when check.exit_code != 0 {
         fs.write(file, original)
-        return { status: "reverted", exit: check.exit }
+        return { status: "reverted", exit: check.exit_code }
     }
 
     return { status: "applied" }
@@ -65,7 +65,10 @@ async fn edit_and_verify_reverts_file_when_check_fails() {
     let file = parse_file(EDIT_FLOW).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
+    );
 
     let edit = Value::Struct(vec![
         ("new_content".into(), Value::Str("goodbye\n".into())),
@@ -109,7 +112,7 @@ const FIX_LOOP_FLOW: &str = r#"flow demo(target: path, script: string) -> string
     }
     result = fix_until_test_passes {
         edit_flow: llm { model: "mock", prompt: "fix" }
-        test: bash.exec(script)
+        test: bash.spawn(block: true, cmd: script)
         target: target
         max_iters: 5
         on_giveup: { status: "gave_up" }
@@ -132,7 +135,10 @@ async fn fix_until_test_passes_iterates_until_bash_check_passes() {
     let file = parse_file(FIX_LOOP_FLOW).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
+    );
     let edited_value = Value::Struct(vec![
         ("new_content".into(), Value::Str("edited\n".into())),
         ("rationale".into(), Value::Str("try again".into())),
@@ -172,7 +178,10 @@ async fn fix_until_test_passes_returns_gave_up_after_max_iters() {
     let file = parse_file(FIX_LOOP_FLOW).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
+    );
     let edited_value = Value::Struct(vec![
         ("new_content".into(), Value::Str("attempt\n".into())),
         ("rationale".into(), Value::Str("hopeful".into())),
@@ -209,7 +218,10 @@ async fn edit_and_verify_keeps_edit_when_check_passes() {
     let file = parse_file(EDIT_FLOW).unwrap();
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
-    tools::register_shell(&mut ex.tools);
+    let bg = tools::register_bash_bg(&mut ex.tools);
+    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
+        std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
+    );
 
     let edit = Value::Struct(vec![
         ("new_content".into(), Value::Str("goodbye\n".into())),

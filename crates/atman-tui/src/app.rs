@@ -506,6 +506,7 @@ impl AppState {
                     self.streaming = false;
                 }
             }
+            StreamFrame::TerminalChunk { .. } | StreamFrame::TerminalExited { .. } => {}
             StreamFrame::Unknown => {}
         }
     }

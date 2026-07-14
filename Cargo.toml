@@ -42,6 +42,8 @@ blake3     = "1"
 ignore     = "0.4"
 git2       = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
 terminal-colorsaurus = "1"
+portable-pty = "0.9"
+vt100       = "0.16"
 
 [profile.release]
 lto = "thin"

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::tool::ToolRegistry;
 
 pub mod agent_ctrl;
-pub mod bash;
 pub mod bash_bg;
 pub mod form;
 pub mod fs;
@@ -15,6 +14,7 @@ pub mod plan;
 pub mod preview;
 pub mod session;
 pub mod stdlib;
+pub mod term;
 pub mod test;
 pub mod web;
 
@@ -63,10 +63,6 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(session::SessionPush));
 }
 
-pub fn register_shell(reg: &mut ToolRegistry) {
-    reg.register(Arc::new(bash::BashExec));
-}
-
 pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {
     let registry = Arc::new(bash_bg::BgRegistry::new());
     reg.register(Arc::new(bash_bg::BashSpawn));
@@ -85,6 +81,17 @@ pub fn register_web_search(reg: &mut ToolRegistry, config: &web::SearchConfig) {
     if let Some(provider) = web::build_search_provider(config) {
         reg.register(Arc::new(web::WebSearch::new(provider)));
     }
+}
+
+pub fn register_terminal(reg: &mut ToolRegistry) -> Arc<term::TermRegistry> {
+    let registry = Arc::new(term::TermRegistry::new());
+    reg.register(Arc::new(term::TermSpawn));
+    reg.register(Arc::new(term::TermInput));
+    reg.register(Arc::new(term::TermCapture));
+    reg.register(Arc::new(term::TermResize));
+    reg.register(Arc::new(term::TermKill));
+    reg.register(Arc::new(term::TermList));
+    registry
 }
 
 pub fn register_preview(reg: &mut ToolRegistry, config: preview::PreviewConfig) {

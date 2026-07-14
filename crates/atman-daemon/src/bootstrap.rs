@@ -129,8 +129,9 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
 
     let fetch_rule = build_fetch_rule(&opts.project_root, opts.home_dir.as_deref()).await;
     tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
-    tools::register_shell(&mut executor.tools);
+    tools::register_bash_bg(&mut executor.tools);
     let bg_registry = tools::register_bash_bg(&mut executor.tools);
+    let term_registry = tools::register_terminal(&mut executor.tools);
     let trust_config = load_trust_config(opts.config_dir.as_deref());
     let sandbox_enabled = trust_config.mode.sandbox_enabled();
     let sandbox_trust = trust_config.clone();
@@ -138,6 +139,7 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         .tool_ctx
         .clone()
         .with_bg_registry(bg_registry)
+        .with_term_registry(term_registry)
         .with_trust(trust_config);
     tools::register_preview(
         &mut executor.tools,

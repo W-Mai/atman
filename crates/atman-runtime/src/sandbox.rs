@@ -3,6 +3,13 @@ use std::path::{Path, PathBuf};
 use crate::error::RuntimeError;
 use crate::tool::BoxFut;
 
+pub struct PtySpawnResult {
+    pub child: Box<dyn portable_pty::Child + Send + Sync>,
+    pub reader: Box<dyn std::io::Read + Send>,
+    pub writer: Box<dyn std::io::Write + Send>,
+    pub master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
 pub trait Sandbox: Send + Sync {
     fn spawn<'a>(
         &'a self,
@@ -18,6 +25,24 @@ pub trait Sandbox: Send + Sync {
         cwd: &'a Path,
     ) -> BoxFut<'a, Result<std::process::Output, RuntimeError>> {
         self.spawn(cmd, env, cwd)
+    }
+
+    fn spawn_pty<'a>(
+        &'a self,
+        cmd: &'a [&'a str],
+        env: &'a [(String, String)],
+        cwd: &'a Path,
+        pty_size: portable_pty::PtySize,
+    ) -> BoxFut<'a, Result<PtySpawnResult, RuntimeError>>;
+
+    fn spawn_pty_relaxed<'a>(
+        &'a self,
+        cmd: &'a [&'a str],
+        env: &'a [(String, String)],
+        cwd: &'a Path,
+        pty_size: portable_pty::PtySize,
+    ) -> BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
+        self.spawn_pty(cmd, env, cwd, pty_size)
     }
 
     fn is_available(&self) -> bool;
@@ -203,6 +228,101 @@ impl Sandbox for SandboxExec {
             output
         })
     }
+
+    fn spawn_pty<'a>(
+        &'a self,
+        cmd: &'a [&'a str],
+        env: &'a [(String, String)],
+        cwd: &'a Path,
+        pty_size: portable_pty::PtySize,
+    ) -> BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
+        Box::pin(async move {
+            if !self.is_available() {
+                return Err(RuntimeError::ToolFailed(
+                    "sandbox-exec not available on this host".into(),
+                ));
+            }
+            let profile = self.render_profile(cwd);
+            spawn_pty_with_profile("/usr/bin/sandbox-exec", &profile, cmd, env, cwd, pty_size)
+        })
+    }
+
+    fn spawn_pty_relaxed<'a>(
+        &'a self,
+        cmd: &'a [&'a str],
+        env: &'a [(String, String)],
+        cwd: &'a Path,
+        pty_size: portable_pty::PtySize,
+    ) -> BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
+        Box::pin(async move {
+            if !self.is_available() {
+                return Err(RuntimeError::ToolFailed(
+                    "sandbox-exec not available on this host".into(),
+                ));
+            }
+            let profile = render_template(
+                &self.relaxed_template,
+                &self.project_root,
+                cwd,
+                &self.extra_read,
+                &self.extra_write,
+                self.allow_network,
+            );
+            spawn_pty_with_profile("/usr/bin/sandbox-exec", &profile, cmd, env, cwd, pty_size)
+        })
+    }
+}
+
+fn spawn_pty_with_profile(
+    sandbox_exec: &str,
+    profile: &str,
+    cmd: &[&str],
+    env: &[(String, String)],
+    cwd: &Path,
+    pty_size: portable_pty::PtySize,
+) -> Result<PtySpawnResult, RuntimeError> {
+    let dir = std::env::temp_dir();
+    let profile_path = dir.join(format!("atman-sandbox-{}.sb", uuid::Uuid::new_v4()));
+    std::fs::write(&profile_path, profile)
+        .map_err(|e| RuntimeError::ToolFailed(format!("write .sb: {e}")))?;
+
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system
+        .openpty(pty_size)
+        .map_err(|e| RuntimeError::ToolFailed(format!("openpty: {e}")))?;
+
+    let mut builder = portable_pty::CommandBuilder::new(sandbox_exec);
+    builder.arg("-f");
+    builder.arg(&profile_path);
+    for arg in cmd {
+        builder.arg(arg);
+    }
+    builder.cwd(cwd);
+    for (k, v) in env {
+        builder.env(k, v);
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(builder)
+        .map_err(|e| RuntimeError::ToolFailed(format!("pty spawn: {e}")))?;
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| RuntimeError::ToolFailed(format!("pty reader: {e}")))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| RuntimeError::ToolFailed(format!("pty writer: {e}")))?;
+
+    let _ = std::fs::remove_file(&profile_path);
+
+    Ok(PtySpawnResult {
+        child,
+        reader,
+        writer,
+        master: pair.master,
+    })
 }
 
 pub const DEFAULT_PROFILE: &str = r#"(version 1)
@@ -215,10 +335,12 @@ pub const DEFAULT_PROFILE: &str = r#"(version 1)
 (allow file-write* (subpath "/tmp"))
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (subpath "/private/var/folders"))
-(allow file-write* (regex #"^/dev/(null|zero|tty|dtracehelper|urandom|random|stdout|stderr|fd/)"))
+(allow file-write* (regex #"^/dev/(null|zero|tty|dtracehelper|urandom|random|stdout|stderr|fd/|pts/)"))
+(allow file-write* (regex #"^/dev/ptmx"))
 (allow sysctl*)
 (allow mach*)
 (allow signal)
+(allow process-info* (target self))
 "#;
 
 pub const RELAXED_PROFILE: &str = r#"(version 1)
@@ -233,10 +355,12 @@ pub const RELAXED_PROFILE: &str = r#"(version 1)
 (allow file-write* (subpath "/tmp"))
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (subpath "/private/var/folders"))
-(allow file-write* (regex #"^/dev/(null|zero|tty|dtracehelper|urandom|random|stdout|stderr|fd/)"))
+(allow file-write* (regex #"^/dev/(null|zero|tty|dtracehelper|urandom|random|stdout|stderr|fd/|pts/)"))
+(allow file-write* (regex #"^/dev/ptmx"))
 (allow sysctl*)
 (allow mach*)
 (allow signal)
+(allow process-info* (target self))
 "#;
 
 #[cfg(test)]

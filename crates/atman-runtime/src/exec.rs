@@ -346,12 +346,6 @@ async fn eval_bind_with_watches(
     ctx: &EvalCtx<'_>,
     watches: &[&WatchDecl],
 ) -> Result<Value, RuntimeError> {
-    if let Expr::Node(Node::ToolCall { path, .. }) = expr {
-        let name: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
-        if name.join(".") == "bash.exec" {
-            return eval_bash_with_watches(expr, env, ctx, watches).await;
-        }
-    }
     let Expr::Node(Node::Llm { kwargs }) = expr else {
         return Ok(eval_expr(expr, env, ctx).await);
     };
@@ -645,82 +639,6 @@ async fn run_streaming_once<'a>(
         Ok(am) => StreamOutcome::Done(crate::provider::assistant_message_to_value(&am)),
         Err(e) => StreamOutcome::Done(Value::Err(e)),
     }
-}
-
-async fn eval_bash_with_watches(
-    expr: &Expr,
-    env: &mut Env,
-    ctx: &EvalCtx<'_>,
-    watches: &[&WatchDecl],
-) -> Result<Value, RuntimeError> {
-    let rules = collect_watch_rules(watches);
-    let (tx, mut rx) = tokio::sync::broadcast::channel::<String>(1024);
-    let cancel = ctx.tool_ctx.cancel.child_token();
-    let mut child_ctx = ctx.tool_ctx.clone().with_stdout_broadcast(tx.clone());
-    child_ctx.cancel = cancel.clone();
-
-    let cancel_for_watch = cancel.clone();
-    let patterns: Vec<String> = rules.token_matches.iter().map(|(p, _)| p.clone()).collect();
-    let watcher = if !patterns.is_empty() {
-        Some(tokio::spawn(async move {
-            let mut window = String::new();
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel_for_watch.cancelled() => break None,
-                    line = rx.recv() => {
-                        let Ok(line) = line else { break None };
-                        window.push_str(&line);
-                        window.push('\n');
-                        if window.len() > 4096 {
-                            let drop = window.len() - 4096;
-                            window.drain(..drop);
-                        }
-                        if let Some(p) = patterns.iter().find(|p| window.contains(p.as_str())) {
-                            let hit = format!("token match: {p}");
-                            cancel_for_watch.cancel();
-                            break Some(hit);
-                        }
-                    }
-                }
-            }
-        }))
-    } else {
-        None
-    };
-
-    let ctx_snap = child_ctx.clone();
-    let new_ctx = EvalCtx {
-        tools: ctx.tools,
-        tool_ctx: &ctx_snap,
-        providers: ctx.providers,
-        flows: ctx.flows,
-        contract: ctx.contract,
-        events: ctx.events,
-        turn_id: ctx.turn_id.clone(),
-        flow_run_id: ctx.flow_run_id.clone(),
-        session: ctx.session,
-        flow_cancel: ctx.flow_cancel.clone(),
-        safety: ctx.safety,
-        current_node_id: ctx.current_node_id.clone(),
-    };
-    let value = eval_expr(expr, env, &new_ctx).await;
-    drop(tx);
-    drop(ctx_snap);
-
-    let abort_reason = if let Some(handle) = watcher {
-        cancel.cancel();
-        handle.await.ok().flatten()
-    } else {
-        None
-    };
-    if let Some(reason) = abort_reason {
-        return Ok(Value::Err(RuntimeError::Aborted(reason)));
-    }
-    if let Value::Err(RuntimeError::Cancelled(_)) = &value {
-        return Ok(value);
-    }
-    Ok(value)
 }
 
 async fn poll_injection(

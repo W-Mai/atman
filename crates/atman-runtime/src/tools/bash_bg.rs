@@ -107,6 +107,10 @@ impl BgStatus {
             _ => None,
         }
     }
+
+    fn is_finished(&self) -> bool {
+        !matches!(self, Self::Running { .. })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -687,9 +691,9 @@ impl Tool for BashSpawn {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Spawn a shell command in the background via `sh -c`. Returns immediately with a \
-             handle. Use bash.status / bash.output / bash.kill to manage it. Default timeout \
-             30min, max 24h. Flow contract must declare capabilities.shell = true.",
+            "Spawn a shell command via `sh -c`. block=false (default) returns immediately with \
+             a handle for async polling. block=true waits for exit (or block_timeout_ms) and \
+             returns stdout/stderr/exit_code. Flow contract must declare capabilities.shell = true.",
         )
     }
 
@@ -698,7 +702,9 @@ impl Tool for BashSpawn {
             "type": "object",
             "properties": {
                 "cmd": {"type": "string", "description": "Shell command line."},
-                "timeout_ms": {"type": "integer", "description": "Timeout in ms. Default 1800000 (30min). 0 = no timeout."},
+                "block": {"type": "boolean", "default": false, "description": "If true, wait for process to exit before returning."},
+                "block_timeout_ms": {"type": "integer", "description": "Only with block=true. Max wait. 0 = no timeout. Default 30000."},
+                "timeout_ms": {"type": "integer", "description": "Process kill timeout in ms. Default 1800000 (30min). 0 = no timeout."},
                 "max_output_bytes": {"type": "integer", "description": "Max combined output bytes. Default 10485760 (10MB)."}
             },
             "required": ["cmd"]
@@ -708,6 +714,19 @@ impl Tool for BashSpawn {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let cmd = extract_string(&args, "cmd", 0)?;
+            let block = args
+                .named("block")
+                .and_then(|v| {
+                    if let Value::Bool(b) = v {
+                        Some(*b)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false);
+            let block_timeout_ms = extract_optional_int(&args, "block_timeout_ms")
+                .map(|v| v as u64)
+                .unwrap_or(30_000);
             let timeout_ms = extract_optional_int(&args, "timeout_ms").map(|v| v as u64);
             let max_output = extract_optional_int(&args, "max_output_bytes")
                 .map(|v| v as u64)
@@ -715,7 +734,64 @@ impl Tool for BashSpawn {
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.spawn: registry not available".into())
             })?;
-            registry.spawn(cmd, timeout_ms, max_output, ctx)
+            let handle_str = registry.spawn(cmd, timeout_ms, max_output, ctx)?;
+
+            if !block {
+                return Ok(handle_str);
+            }
+
+            let handle_s = handle_str
+                .field("handle")
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| {
+                    RuntimeError::ToolFailed("bash.spawn: missing handle field".into())
+                })?;
+            let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
+
+            let deadline = if block_timeout_ms == 0 {
+                None
+            } else {
+                Some(tokio::time::Instant::now() + Duration::from_millis(block_timeout_ms))
+            };
+            loop {
+                let entry = registry.lookup(&handle_s, &session_id)?;
+                let finished = {
+                    let st = entry.status.lock().unwrap();
+                    st.is_finished()
+                };
+                if finished {
+                    break;
+                }
+                if let Some(d) = deadline {
+                    if tokio::time::Instant::now() >= d {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            let entry = registry.lookup(&handle_s, &session_id)?;
+            let st = entry.status.lock().unwrap().clone();
+            let out = entry.output.lock().unwrap();
+            let combined = String::from_utf8_lossy(&out.combined).into_owned();
+            Ok(Value::Struct(vec![
+                ("handle".into(), Value::Str(handle_s)),
+                ("status".into(), Value::Str(st.kind().into())),
+                (
+                    "exit_code".into(),
+                    st.exit_code()
+                        .map(|c| Value::Int(c as i64))
+                        .unwrap_or(Value::Unit),
+                ),
+                ("output".into(), Value::Str(combined)),
+                ("bytes_total".into(), Value::Int(out.total_bytes as i64)),
+            ]))
         })
     }
 }

@@ -1321,10 +1321,13 @@ async fn eval_fix_until_test_passes<'a>(
         if test_v.is_err() {
             return test_v;
         }
-        let exit = test_v.field("exit").and_then(|v| match v {
-            Value::Int(n) => Some(*n),
-            _ => None,
-        });
+        let exit = test_v
+            .field("exit_code")
+            .or_else(|| test_v.field("exit"))
+            .and_then(|v| match v {
+                Value::Int(n) => Some(*n),
+                _ => None,
+            });
         last_test_result = Some(test_v.clone());
         if let Some(0) = exit {
             return Value::Struct(vec![
@@ -1335,6 +1338,7 @@ async fn eval_fix_until_test_passes<'a>(
         }
         let stderr_tail = test_v
             .field("stderr_tail")
+            .or_else(|| test_v.field("output"))
             .and_then(|v| match v {
                 Value::Str(s) => Some(s.clone()),
                 _ => None,

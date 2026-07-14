@@ -103,6 +103,16 @@ pub enum StreamFrame {
         tool_use_id: String,
         reason: String,
     },
+    TerminalChunk {
+        handle: String,
+        bytes: Vec<u8>,
+        screen: crate::tools::term::TerminalScreen,
+        state: crate::tools::term::TermStateSnapshot,
+    },
+    TerminalExited {
+        handle: String,
+        exit_code: Option<i32>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -149,5 +159,71 @@ mod tests {
         let payload = r#""SomeFutureFrame""#;
         let back: StreamFrame = serde_json::from_str(payload).unwrap();
         assert!(matches!(back, StreamFrame::Unknown));
+    }
+
+    #[test]
+    fn terminal_chunk_round_trips() {
+        let screen = crate::tools::term::TerminalScreen {
+            rows: 2,
+            cols: 3,
+            cells: vec![
+                crate::tools::term::TerminalCell {
+                    chars: "A".into(),
+                    ..Default::default()
+                },
+                crate::tools::term::TerminalCell::default(),
+                crate::tools::term::TerminalCell::default(),
+                crate::tools::term::TerminalCell::default(),
+                crate::tools::term::TerminalCell::default(),
+                crate::tools::term::TerminalCell::default(),
+            ],
+            cursor: Some((0, 0)),
+            alt_screen: false,
+        };
+        let f = StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: b"hi".to_vec(),
+            screen,
+            state: crate::tools::term::TermStateSnapshot::Running,
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: StreamFrame = serde_json::from_str(&json).unwrap();
+        match back {
+            StreamFrame::TerminalChunk {
+                handle,
+                bytes,
+                screen,
+                state,
+            } => {
+                assert_eq!(handle, "term_s_0");
+                assert_eq!(bytes, b"hi");
+                assert_eq!(screen.rows, 2);
+                assert_eq!(screen.cols, 3);
+                assert_eq!(screen.cells.len(), 6);
+                assert_eq!(screen.cells[0].chars, "A");
+                assert!(matches!(
+                    state,
+                    crate::tools::term::TermStateSnapshot::Running
+                ));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn terminal_exited_round_trips() {
+        let f = StreamFrame::TerminalExited {
+            handle: "term_s_1".into(),
+            exit_code: Some(0),
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: StreamFrame = serde_json::from_str(&json).unwrap();
+        match back {
+            StreamFrame::TerminalExited { handle, exit_code } => {
+                assert_eq!(handle, "term_s_1");
+                assert_eq!(exit_code, Some(0));
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

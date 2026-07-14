@@ -2133,6 +2133,8 @@ fn render_stream_frame(
         | StreamFrame::ToolPendingApproval { .. }
         | StreamFrame::ToolApproved { .. }
         | StreamFrame::ToolDenied { .. }
+        | StreamFrame::TerminalChunk { .. }
+        | StreamFrame::TerminalExited { .. }
         | StreamFrame::Unknown => {}
     }
 }
@@ -2919,7 +2921,9 @@ async fn handle_suggest(
         return Ok(());
     }
 
-    let has_shell = dsl_src.contains("bash.exec") || dsl_src.contains("shell.");
+    let has_shell = dsl_src.contains("bash.spawn")
+        || dsl_src.contains("term.spawn")
+        || dsl_src.contains("shell.");
     reporter.info(format!("[atman] suggested flow `{flow_name}`:"));
     reporter.info(format!("---\n{dsl_src}\n---"));
     if has_shell {
