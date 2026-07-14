@@ -334,10 +334,11 @@ impl AppState {
     }
 
     pub fn refresh_popup(&mut self, editor_buf: &str) {
+        let builtins = crate::completion::builtins();
         let candidates = crate::completion::compute_candidates(
             editor_buf,
             &self.flow_names,
-            crate::completion::BUILTINS,
+            &builtins,
             crate::completion::INTERJECTIONS,
             self.streaming,
         );

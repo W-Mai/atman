@@ -6,23 +6,12 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 pub const POPUP_MAX_ROWS: u16 = 8;
 pub const POPUP_MAX_WIDTH: u16 = 60;
 
-pub const BUILTINS: &[(&str, &str)] = &[
-    (":help", "show help"),
-    (":exit", "leave repl"),
-    (":session", "print current session id"),
-    (":cost", "cost summary hint"),
-    (":mode", "switch trust mode (calm/steady/eager/reckless)"),
-    (":theme", "switch display theme (default/wuxia/animal/weather/drink)"),
-    (":outside", "cycle outside behavior in eager (deny/approve/allow)"),
-    (":attach", "attach file / list / clear"),
-    (":suggest", "meta-LLM flow suggestion"),
-    (":goal", "get / set / clear session goal"),
-    (":sessions", "list recent sessions"),
-    (":sidebar", "sidebar on / off / auto"),
-    (":todo", "list / done <id> / cancel <id> / clear"),
-    (":rename", "set / clear this session's title"),
-    (":compact", "compact transcript now"),
-];
+pub fn builtins() -> Vec<(&'static str, &'static str)> {
+    atman_runtime::meta_commands::META_COMMANDS
+        .iter()
+        .map(|c| (c.name, c.desc))
+        .collect()
+}
 
 pub const INTERJECTIONS: &[(&str, &str)] = &[
     ("!nudge", "queue nudge to next chunk boundary"),
@@ -125,13 +114,9 @@ pub fn compute_candidates(
             .collect(),
         ':' => builtins
             .iter()
-            .filter(|(name, _)| {
-                name.trim_start_matches(':')
-                    .to_ascii_lowercase()
-                    .starts_with(&query_lower)
-            })
+            .filter(|(name, _)| name.to_ascii_lowercase().starts_with(&query_lower))
             .map(|(name, hint)| CompletionItem {
-                insert: format!("{name} "),
+                insert: format!(":{name} "),
                 hint: hint.to_string(),
             })
             .collect(),
@@ -305,7 +290,7 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(crate::theme::theme().accent))
         .title(" atman keybindings — Esc / F1 to close ");
-    let body = vec![
+    let mut body = vec![
         Line::from(section("Editing")),
         kv("← / →", "move cursor"),
         kv("↑ / ↓", "move line ↑↓, or history at ends"),
@@ -346,7 +331,12 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
         kv("F1", "this cheatsheet"),
         kv("F2 / :sidebar", "toggle sidebar"),
         kv("Ctrl+P", "command palette"),
+        Line::from(""),
+        Line::from(section("Meta Commands")),
     ];
+    for cmd in atman_runtime::meta_commands::META_COMMANDS {
+        body.push(kv(cmd.usage, cmd.desc));
+    }
     let p = Paragraph::new(body)
         .block(block)
         .wrap(Wrap { trim: false })
@@ -386,14 +376,10 @@ mod tests {
     }
 
     fn builtins() -> Vec<(&'static str, &'static str)> {
-        vec![
-            (":help", "show help"),
-            (":exit", "leave repl"),
-            (":goal", "manage goal"),
-            (":mode", "switch trust mode"),
-            (":theme", "switch display theme"),
-            (":outside", "cycle outside behavior"),
-        ]
+        atman_runtime::meta_commands::META_COMMANDS
+            .iter()
+            .map(|c| (c.name, c.desc))
+            .collect()
     }
 
     fn interjections() -> Vec<(&'static str, &'static str)> {

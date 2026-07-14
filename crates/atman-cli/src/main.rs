@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod init;
+// meta_commands now in atman_runtime
 mod migrate_source;
 mod repl_completer;
 mod suggest;
@@ -1671,70 +1672,94 @@ async fn cmd_repl_once(
         }
         if let Some(rest) = line.strip_prefix(':') {
             let trimmed = rest.trim();
-            if trimmed == "mode" || trimmed.starts_with("mode ") {
-                if let Some(tx) = cmd_tx_for_repl.as_ref() {
-                    let _ = tx.send(atman_tui::TuiCommand::OpenTrustModePicker);
-                } else {
-                    reporter.info("[atman] :mode — switch trust level (available in TUI mode)");
-                }
+            let Some(mc) = atman_runtime::meta_commands::match_command(trimmed) else {
+                reporter.error(format!("unknown `:{trimmed}` — try `:help`"));
                 continue;
-            }
-            if trimmed == "theme" || trimmed.starts_with("theme ") {
-                if let Some(tx) = cmd_tx_for_repl.as_ref() {
-                    let _ = tx.send(atman_tui::TuiCommand::OpenThemePicker);
-                } else {
-                    reporter.info("[atman] :theme — switch display theme (available in TUI mode)");
-                }
-                continue;
-            }
-            if trimmed == "outside" || trimmed.starts_with("outside ") {
-                if let Some(tx) = cmd_tx_for_repl.as_ref() {
-                    let _ = tx.send(atman_tui::TuiCommand::CycleOutside);
-                } else {
-                    reporter
-                        .info("[atman] :outside — cycle outside behavior (available in TUI mode)");
-                }
-                continue;
-            }
-            if trimmed == "suggest" || trimmed.starts_with("suggest ") {
-                if let Err(e) = handle_suggest(&executor, &session, &mut input_rx, &reporter).await
-                {
-                    reporter.error(format!("[atman] :suggest: {e}"));
-                }
-                continue;
-            }
-            if trimmed == "goal" || trimmed.starts_with("goal ") || trimmed == "goal clear" {
-                handle_goal_builtin(trimmed, &session, &reporter);
-                continue;
-            }
-            if trimmed == "sessions" {
-                if let Some(tx) = cmd_tx_for_repl.as_ref() {
-                    let _ = tx.send(atman_tui::TuiCommand::OpenSessionSwitcher);
-                } else {
-                    match list_recent_sessions(&data_dir()?, 20) {
-                        Ok(rows) => print_sessions_table(&rows, &reporter),
-                        Err(e) => reporter.error(format!("[atman] :sessions: {e}")),
+            };
+            match mc.name {
+                "mode" => {
+                    if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                        let _ = tx.send(atman_tui::TuiCommand::OpenTrustModePicker);
+                    } else {
+                        reporter.info("[atman] :mode — switch trust level (available in TUI mode)");
                     }
                 }
-                continue;
-            }
-            if trimmed == "sidebar" || trimmed.starts_with("sidebar ") {
-                let arg = trimmed.strip_prefix("sidebar").unwrap_or("").trim();
-                handle_sidebar_builtin(arg, cmd_tx_for_repl.as_ref(), &reporter);
-                continue;
-            }
-            if trimmed == "todo" || trimmed.starts_with("todo ") {
-                let arg = trimmed.strip_prefix("todo").unwrap_or("").trim();
-                handle_todo_builtin(arg, &session, &reporter).await;
-                continue;
-            }
-            if trimmed == "rename" || trimmed.starts_with("rename ") || trimmed == "rename clear" {
-                let arg = trimmed.strip_prefix("rename").unwrap_or("").trim();
-                handle_rename_builtin(arg, &session, &reporter);
-                continue;
-            }
-            if !handle_builtin(trimmed, sid.as_str(), &mut pending, &session, &reporter) {
-                break;
+                "mode-theme" => {
+                    if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                        let _ = tx.send(atman_tui::TuiCommand::OpenThemePicker);
+                    } else {
+                        reporter.info(
+                            "[atman] :mode-theme — switch display theme (available in TUI mode)",
+                        );
+                    }
+                }
+                "outside" => {
+                    if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                        let _ = tx.send(atman_tui::TuiCommand::CycleOutside);
+                    } else {
+                        reporter.info(
+                            "[atman] :outside — cycle outside behavior (available in TUI mode)",
+                        );
+                    }
+                }
+                "suggest" => {
+                    if let Err(e) =
+                        handle_suggest(&executor, &session, &mut input_rx, &reporter).await
+                    {
+                        reporter.error(format!("[atman] :suggest: {e}"));
+                    }
+                }
+                "goal" => {
+                    handle_goal_builtin(trimmed, &session, &reporter);
+                }
+                "sessions" => {
+                    if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                        let _ = tx.send(atman_tui::TuiCommand::OpenSessionSwitcher);
+                    } else {
+                        match list_recent_sessions(&data_dir()?, 20) {
+                            Ok(rows) => print_sessions_table(&rows, &reporter),
+                            Err(e) => reporter.error(format!("[atman] :sessions: {e}")),
+                        }
+                    }
+                }
+                "sidebar" => {
+                    let arg = trimmed.strip_prefix("sidebar").unwrap_or("").trim();
+                    handle_sidebar_builtin(arg, cmd_tx_for_repl.as_ref(), &reporter);
+                }
+                "todo" => {
+                    let arg = trimmed.strip_prefix("todo").unwrap_or("").trim();
+                    handle_todo_builtin(arg, &session, &reporter).await;
+                }
+                "rename" => {
+                    let arg = trimmed.strip_prefix("rename").unwrap_or("").trim();
+                    handle_rename_builtin(arg, &session, &reporter);
+                }
+                "help" => {
+                    for line in atman_runtime::meta_commands::help_lines() {
+                        reporter.info(line);
+                    }
+                }
+                "exit" => break,
+                "session" => {
+                    reporter.info(format!("session_id: {sid}"));
+                }
+                "cost" => {
+                    reporter.error(format!(
+                        "(hint) run `atman cost {sid}` in another shell for now"
+                    ));
+                }
+                "compact" => {
+                    handle_compact_builtin(&session, &reporter);
+                }
+                "attach" => {
+                    let arg = trimmed.strip_prefix("attach").unwrap_or("").trim();
+                    handle_attach_builtin(arg, &mut pending, &session, &reporter);
+                }
+                "copy" => {
+                    let arg = trimmed.strip_prefix("copy").unwrap_or("").trim();
+                    handle_copy_builtin(arg, &session, &reporter);
+                }
+                _ => {}
             }
             continue;
         }
@@ -2723,108 +2748,43 @@ fn handle_goal_builtin(cmd: &str, session: &Session, reporter: &Reporter) {
     }
 }
 
-fn handle_builtin(
-    cmd: &str,
-    sid: &str,
+fn handle_attach_builtin(
+    arg: &str,
     pending: &mut PendingUserMessage,
     session: &Session,
     reporter: &Reporter,
-) -> bool {
-    if let Some(rest) = cmd.strip_prefix("attach") {
-        let arg = rest.trim();
-        match arg {
-            "" => {
-                reporter.error(":attach <path>  |  :attach clear  |  :attach list");
-                return true;
-            }
-            "clear" => {
-                pending.attachments.clear();
-                session.set_attach_count(0);
-                reporter.info("[atman] pending attachments cleared");
-                return true;
-            }
-            "list" => {
-                if pending.attachments.is_empty() {
-                    reporter.info("[atman] no pending attachments");
-                } else {
-                    for (i, p) in pending.attachments.iter().enumerate() {
-                        reporter.info(format!("  {i}: {}", p.display()));
-                    }
+) {
+    match arg {
+        "" => {
+            reporter.error(":attach <path>  |  :attach clear  |  :attach list");
+        }
+        "clear" => {
+            pending.attachments.clear();
+            session.set_attach_count(0);
+            reporter.info("[atman] pending attachments cleared");
+        }
+        "list" => {
+            if pending.attachments.is_empty() {
+                reporter.info("[atman] no pending attachments");
+            } else {
+                for (i, p) in pending.attachments.iter().enumerate() {
+                    reporter.info(format!("  {i}: {}", p.display()));
                 }
-                return true;
-            }
-            path => {
-                let expanded = std::path::PathBuf::from(path);
-                if !expanded.exists() {
-                    reporter.error(format!(":attach: file not found: {}", expanded.display()));
-                    return true;
-                }
-                pending.attachments.push(expanded.clone());
-                session.set_attach_count(pending.attachments.len());
-                reporter.info(format!(
-                    "[atman] attached {} (pending count: {})",
-                    expanded.display(),
-                    pending.attachments.len()
-                ));
-                return true;
             }
         }
-    }
-    match cmd {
-        "help" => {
-            for line in [
-                ":help                — show this",
-                ":exit | :quit        — leave REPL",
-                ":session             — print current session id",
-                ":cost                — cost summary for current session",
-                ":mode                — switch trust mode (calm/steady/eager/reckless)",
-                ":theme               — switch display theme (default/wuxia/animal/weather/drink)",
-                ":outside             — cycle outside behavior in eager mode (deny/approve/allow)",
-                ":attach <path>       — attach file to next turn",
-                ":attach clear|list   — manage pending attachments",
-                ":suggest             — ask meta-LLM for a reusable flow from recent turns",
-                ":goal                — show current session goal",
-                ":goal <text>         — set session goal (auto-injected into every llm system prompt)",
-                ":goal clear          — erase session goal",
-                ":sessions            — list recent sessions on disk (newest first)",
-                ":sidebar on|off|auto — toggle right sidebar",
-                ":todo list           — show current todos",
-                ":todo done <id>      — mark todo done (uuid or list index)",
-                ":todo cancel <id>    — mark todo cancelled",
-                ":todo clear          — remove all todos",
-                ":copy last-message   — push last assistant text to terminal clipboard (OSC 52)",
-                ":copy last-tool      — push last tool_result text to terminal clipboard",
-                ":compact             — force auto-compact the transcript now",
-                "",
-                "resume a prior session: exit, then run `atman --continue <session_id>`",
-                "@./path or @/abs     — inline attach in bare input",
-            ] {
-                reporter.info(line);
+        path => {
+            let expanded = std::path::PathBuf::from(path);
+            if !expanded.exists() {
+                reporter.error(format!(":attach: file not found: {}", expanded.display()));
+                return;
             }
-            true
-        }
-        "exit" | "quit" => false,
-        "session" => {
-            reporter.info(format!("session_id: {sid}"));
-            true
-        }
-        "cost" => {
-            reporter.error(format!(
-                "(hint) run `atman cost {sid}` in another shell for now"
+            pending.attachments.push(expanded.clone());
+            session.set_attach_count(pending.attachments.len());
+            reporter.info(format!(
+                "[atman] attached {} (pending count: {})",
+                expanded.display(),
+                pending.attachments.len()
             ));
-            true
-        }
-        "compact" => {
-            handle_compact_builtin(session, reporter);
-            true
-        }
-        other => {
-            if let Some(rest) = other.strip_prefix("copy") {
-                handle_copy_builtin(rest.trim(), session, reporter);
-                return true;
-            }
-            reporter.error(format!("unknown builtin `:{other}` — try `:help`"));
-            true
         }
     }
 }
