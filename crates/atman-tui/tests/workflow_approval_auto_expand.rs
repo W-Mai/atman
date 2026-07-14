@@ -69,7 +69,7 @@ fn render_boxed(root: WorkflowNode, width: u16) -> Vec<String> {
         panel_width: width,
         hovered_thinking_idx: None,
     };
-    let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx);
+    let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx, &mut Vec::new(), None);
     lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())

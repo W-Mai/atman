@@ -232,7 +232,12 @@ pub fn build_lines_with_ranges(
     items: &[OutputItem],
     width: u16,
     ctx: &RenderCtx<'_>,
+    item_cache: &mut Vec<Option<ItemCacheEntry>>,
+    animation_frame: Option<u32>,
 ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u16) {
+    if item_cache.len() < items.len() {
+        item_cache.resize(items.len(), None);
+    }
     let mut all_lines: Vec<Line<'static>> = Vec::with_capacity(items.len() * 3);
     let mut ranges: Vec<ItemRange> = Vec::with_capacity(items.len());
     let mut node_regions: Vec<NodeRegion> = Vec::new();
@@ -247,18 +252,26 @@ pub fn build_lines_with_ranges(
             cursor = cursor.saturating_add(1);
         }
         let is_hovered = ctx.hovered_thinking_idx == Some(idx);
-        let item_ctx = RenderCtx {
-            expanded_tools: ctx.expanded_tools,
-            messages: ctx.messages,
-            animation_frame: ctx.animation_frame,
-            panel_width: ctx.panel_width,
-            hovered_thinking_idx: if is_hovered && matches!(item, OutputItem::Thinking { .. }) {
-                Some(idx)
-            } else {
-                None
-            },
+        let content_hash = item_content_hash(item, is_hovered, ctx.expanded_tools, animation_frame);
+        let cached = item_cache[idx].take();
+        let (item_lines, mut item_regions) = if let Some(entry) = cached.as_ref()
+            && entry.content_hash == content_hash
+        {
+            (entry.lines.clone(), Vec::new())
+        } else {
+            let item_ctx = RenderCtx {
+                expanded_tools: ctx.expanded_tools,
+                messages: ctx.messages,
+                animation_frame: ctx.animation_frame,
+                panel_width: ctx.panel_width,
+                hovered_thinking_idx: if is_hovered && matches!(item, OutputItem::Thinking { .. }) {
+                    Some(idx)
+                } else {
+                    None
+                },
+            };
+            render_item_with_regions(item, &item_ctx)
         };
-        let (item_lines, mut item_regions) = render_item_with_regions(item, &item_ctx);
         let (rows, line_row_offsets) = wrap_row_offsets(&item_lines, width);
         ranges.push(ItemRange {
             item_index: idx,
@@ -276,12 +289,116 @@ pub fn build_lines_with_ranges(
         }
         node_regions.extend(item_regions);
         cursor = cursor.saturating_add(rows);
-        all_lines.extend(item_lines);
+        all_lines.extend(item_lines.clone());
+        item_cache[idx] = Some(ItemCacheEntry {
+            content_hash,
+            lines: item_lines,
+        });
         if !matches!(kind, ItemKind::StartupCard) {
             prev_kind = Some(kind);
         }
     }
     (all_lines, ranges, node_regions, cursor)
+}
+
+fn item_content_hash(
+    item: &OutputItem,
+    hovered: bool,
+    _expanded_tools: &std::collections::HashSet<String>,
+    animation_frame: Option<u32>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut buf = String::new();
+    match item {
+        OutputItem::UserTurn { text } => {
+            0u8.hash(&mut h);
+            text.hash(&mut h);
+        }
+        OutputItem::Thinking {
+            text,
+            done,
+            expanded,
+        } => {
+            1u8.hash(&mut h);
+            text.hash(&mut h);
+            done.hash(&mut h);
+            expanded.hash(&mut h);
+            hovered.hash(&mut h);
+        }
+        OutputItem::AssistantMd { md, streaming } => {
+            2u8.hash(&mut h);
+            md.hash(&mut h);
+            streaming.hash(&mut h);
+        }
+        OutputItem::SystemNote { text, level } => {
+            3u8.hash(&mut h);
+            text.hash(&mut h);
+            format!("{:?}", level).hash(&mut h);
+        }
+        OutputItem::Divider => 4u8.hash(&mut h),
+        OutputItem::WorkflowPanel {
+            turn_index,
+            graph,
+            expanded_nodes,
+            panel_expanded,
+            started_at,
+            ended_at,
+        } => {
+            5u8.hash(&mut h);
+            turn_index.hash(&mut h);
+            buf.clear();
+            use std::fmt::Write;
+            let _ = write!(buf, "{:?}", graph);
+            buf.hash(&mut h);
+            buf.clear();
+            let _ = write!(buf, "{:?}", expanded_nodes);
+            buf.hash(&mut h);
+            panel_expanded.hash(&mut h);
+            started_at.hash(&mut h);
+            ended_at.hash(&mut h);
+            animation_frame.hash(&mut h);
+        }
+        OutputItem::StartupCard { version, recent } => {
+            6u8.hash(&mut h);
+            version.hash(&mut h);
+            recent.len().hash(&mut h);
+        }
+        OutputItem::Terminal {
+            handle,
+            screen,
+            accumulated_bytes,
+            mode,
+            done,
+            expanded,
+            scroll_offset,
+        } => {
+            7u8.hash(&mut h);
+            handle.hash(&mut h);
+            buf.clear();
+            use std::fmt::Write;
+            let _ = write!(buf, "{:?}", screen);
+            buf.hash(&mut h);
+            accumulated_bytes.hash(&mut h);
+            format!("{:?}", mode).hash(&mut h);
+            done.hash(&mut h);
+            expanded.hash(&mut h);
+            scroll_offset.hash(&mut h);
+        }
+        OutputItem::Bash {
+            handle,
+            output,
+            done,
+            expanded,
+        } => {
+            8u8.hash(&mut h);
+            handle.hash(&mut h);
+            output.hash(&mut h);
+            done.hash(&mut h);
+            expanded.hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,6 +494,13 @@ pub struct LayoutCache {
     ranges: Vec<ItemRange>,
     node_regions: Vec<NodeRegion>,
     total_rows: u16,
+    item_cache: Vec<Option<ItemCacheEntry>>,
+}
+
+#[derive(Clone)]
+pub struct ItemCacheEntry {
+    content_hash: u64,
+    lines: Vec<Line<'static>>,
 }
 
 impl LayoutCache {
@@ -387,8 +511,14 @@ impl LayoutCache {
         ctx: &RenderCtx<'_>,
     ) -> (&[Line<'static>], &[ItemRange], &[NodeRegion], u16) {
         if self.key != Some(key) {
-            let (lines, ranges, node_regions, total) =
-                build_lines_with_ranges(items, key.width, ctx);
+            self.item_cache.resize(items.len(), None);
+            let (lines, ranges, node_regions, total) = build_lines_with_ranges(
+                items,
+                key.width,
+                ctx,
+                &mut self.item_cache,
+                key.animation_frame,
+            );
             self.lines = lines;
             self.ranges = ranges;
             self.node_regions = node_regions;
@@ -3161,7 +3291,7 @@ mod tests {
             OutputItem::Divider,
         ];
         let (_lines, ranges, _regions, total) =
-            build_lines_with_ranges(&items, 80, &RenderCtx::empty());
+            build_lines_with_ranges(&items, 80, &RenderCtx::empty(), &mut Vec::new(), None);
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].item_index, 0);
         assert_eq!(ranges[1].item_index, 1);
@@ -3172,7 +3302,7 @@ mod tests {
     #[test]
     fn build_lines_with_ranges_empty_items_returns_empty_vecs() {
         let (lines, ranges, _regions, total) =
-            build_lines_with_ranges(&[], 80, &RenderCtx::empty());
+            build_lines_with_ranges(&[], 80, &RenderCtx::empty(), &mut Vec::new(), None);
         assert!(lines.is_empty());
         assert!(ranges.is_empty());
         assert_eq!(total, 0);

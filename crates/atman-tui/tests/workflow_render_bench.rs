@@ -126,11 +126,11 @@ fn run_bench(node_count: usize, iterations: u32) -> (f64, usize) {
         panel_width: 120,
         hovered_thinking_idx: None,
     };
-    let (lines, _, _, _) = build_lines_with_ranges(&items, 120, &ctx);
+    let (lines, _, _, _) = build_lines_with_ranges(&items, 120, &ctx, &mut Vec::new(), None);
     let line_count = lines.len();
     let start = Instant::now();
     for _ in 0..iterations {
-        let _ = build_lines_with_ranges(&items, 120, &ctx);
+        let _ = build_lines_with_ranges(&items, 120, &ctx, &mut Vec::new(), None);
     }
     let ms = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
     (ms, line_count)

@@ -65,7 +65,8 @@ fn build_boxed(root: WorkflowNode, width: u16) -> Vec<NodeRegion> {
         panel_width: width,
         hovered_thinking_idx: None,
     };
-    let (_lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], width, &ctx);
+    let (_lines, _ranges, regions, _rows) =
+        build_lines_with_ranges(&[item], width, &ctx, &mut Vec::new(), None);
     regions
 }
 

@@ -89,7 +89,8 @@ fn build_panel(
     };
     // SAFETY: env-var mutation guarded by LEGACY_LOCK across parallel tests.
     unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
-    let (lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], width, &ctx);
+    let (lines, _ranges, regions, _rows) =
+        build_lines_with_ranges(&[item], width, &ctx, &mut Vec::new(), None);
     unsafe { std::env::remove_var("ATMAN_LEGACY_WORKFLOW") };
     let flat: Vec<String> = lines
         .iter()
@@ -124,7 +125,8 @@ fn boxed_wide_terminal_lays_fanout_branches_horizontally() {
         panel_width: 200,
         hovered_thinking_idx: None,
     };
-    let (lines, _ranges, regions, _rows) = build_lines_with_ranges(&[item], 200, &ctx);
+    let (lines, _ranges, regions, _rows) =
+        build_lines_with_ranges(&[item], 200, &ctx, &mut Vec::new(), None);
     let flat: Vec<String> = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -174,7 +176,8 @@ fn boxed_narrow_terminal_keeps_fanout_vertical() {
         panel_width: 80,
         hovered_thinking_idx: None,
     };
-    let (lines, _ranges, _regions, _rows) = build_lines_with_ranges(&[item], 80, &ctx);
+    let (lines, _ranges, _regions, _rows) =
+        build_lines_with_ranges(&[item], 80, &ctx, &mut Vec::new(), None);
     let flat: Vec<String> = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())

@@ -77,7 +77,7 @@ fn snapshot(width: u16, height: u16, boxed: bool) -> Buffer {
     if !boxed {
         unsafe { std::env::set_var("ATMAN_LEGACY_WORKFLOW", "1") };
     }
-    let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx);
+    let (lines, _, _, _) = build_lines_with_ranges(&[item], width, &ctx, &mut Vec::new(), None);
     if !boxed {
         unsafe { std::env::remove_var("ATMAN_LEGACY_WORKFLOW") };
     }
