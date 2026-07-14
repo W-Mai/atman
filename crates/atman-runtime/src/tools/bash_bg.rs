@@ -662,6 +662,8 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(
         .open(&log_path)
         .await
         .ok();
+    let mut last_tui_send: Option<std::time::Instant> = None;
+    const TUI_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
     loop {
         buf.clear();
         match reader.read_line(&mut buf).await {
@@ -680,11 +682,18 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(
                     }
                 }
                 if let Some(tx) = &stream_tx {
-                    let _ = tx.send(crate::stream::StreamFrame::BashChunk {
-                        handle: handle.clone(),
-                        kind: kind_str.to_string(),
-                        line: buf.clone(),
-                    });
+                    let now = std::time::Instant::now();
+                    let can_send = last_tui_send
+                        .map(|t| now.duration_since(t) >= TUI_MIN_INTERVAL)
+                        .unwrap_or(true);
+                    if can_send {
+                        let _ = tx.send(crate::stream::StreamFrame::BashChunk {
+                            handle: handle.clone(),
+                            kind: kind_str.to_string(),
+                            line: buf.clone(),
+                        });
+                        last_tui_send = Some(now);
+                    }
                 }
             }
             Err(_) => break,

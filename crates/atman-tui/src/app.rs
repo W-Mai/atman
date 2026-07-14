@@ -384,6 +384,13 @@ impl AppState {
         }
     }
 
+    pub fn toggle_bash_expand(&mut self, item_index: usize) {
+        if let Some(OutputItem::Bash { expanded, .. }) = self.items.get_mut(item_index) {
+            *expanded = !*expanded;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
     pub fn hit_test_node(&self, col: u16, row: u16) -> Option<(usize, String)> {
         let rect = self.last_transcript_rect?;
         if col < rect.x
@@ -585,6 +592,7 @@ impl AppState {
                 state: _,
             } => {
                 self.waiting_for_llm = false;
+                self.follow_tail = true;
                 let existing = self.items.iter_mut().rev().find(|item| {
                     matches!(item, OutputItem::Terminal { handle: h, done: false, .. } if h == &handle)
                 });
@@ -640,6 +648,7 @@ impl AppState {
             }
             StreamFrame::BashChunk { handle, kind, line } => {
                 self.waiting_for_llm = false;
+                self.follow_tail = true;
                 let existing = self.items.iter_mut().rev().find(|item| {
                     matches!(item, OutputItem::Bash { handle: h, done: false, .. } if h == &handle)
                 });
