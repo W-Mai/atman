@@ -608,15 +608,7 @@ impl AppState {
                         *s = new_screen;
                     }
                     ab.extend_from_slice(&bytes);
-                    let now = Instant::now();
-                    let should_bump = self
-                        .terminal_throttle
-                        .map(|t| now.duration_since(t) >= Duration::from_millis(33))
-                        .unwrap_or(true);
-                    if should_bump {
-                        self.items_version = self.items_version.wrapping_add(1);
-                        self.terminal_throttle = Some(now);
-                    }
+                    self.items_version = self.items_version.wrapping_add(1);
                     self.reset_lag_state();
                 } else {
                     self.push_item(OutputItem::Terminal {
@@ -658,15 +650,7 @@ impl AppState {
                 if let Some(OutputItem::Bash { output, .. }) = existing {
                     output.push_str(prefix);
                     output.push_str(&line);
-                    let now = Instant::now();
-                    let should_bump = self
-                        .terminal_throttle
-                        .map(|t| now.duration_since(t) >= Duration::from_millis(33))
-                        .unwrap_or(true);
-                    if should_bump {
-                        self.items_version = self.items_version.wrapping_add(1);
-                        self.terminal_throttle = Some(now);
-                    }
+                    self.items_version = self.items_version.wrapping_add(1);
                     self.reset_lag_state();
                 } else {
                     let mut output = String::new();
