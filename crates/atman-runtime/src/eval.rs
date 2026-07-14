@@ -1694,40 +1694,72 @@ fn parse_error_kind_list(
 
 fn sanitize_tool_pairs(messages: Vec<crate::message::Message>) -> Vec<crate::message::Message> {
     use crate::message::{Message, MessagePart, MessageRole};
-    let mut pending: Vec<String> = Vec::new();
+    use std::collections::HashMap;
+    let mut result_by_id: HashMap<String, Message> = HashMap::new();
     for m in &messages {
         for p in &m.parts {
-            if let MessagePart::ToolUse { id, .. } = p {
-                pending.push(id.clone());
-            }
-        }
-        for p in &m.parts {
             if let MessagePart::ToolResult { tool_use_id, .. } = p {
-                pending.retain(|id| id != tool_use_id);
+                result_by_id
+                    .entry(tool_use_id.clone())
+                    .or_insert_with(|| Message {
+                        role: MessageRole::Tool,
+                        parts: vec![p.clone()],
+                        turn_id: m.turn_id.clone(),
+                    });
             }
         }
     }
-    if pending.is_empty() {
-        return messages;
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len() + 4);
+    for m in &messages {
+        let uses: Vec<String> = m
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                MessagePart::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let is_pure_result = m
+            .parts
+            .iter()
+            .all(|p| matches!(p, MessagePart::ToolResult { .. }));
+        if is_pure_result {
+            continue;
+        }
+        out.push(m.clone());
+        if !uses.is_empty() {
+            let next_has_all = match out.len().checked_sub(1) {
+                Some(_) => false,
+                None => false,
+            };
+            let _ = next_has_all;
+            let mut filler_parts: Vec<MessagePart> = Vec::new();
+            for u in &uses {
+                if let Some(rm) = result_by_id.get(u) {
+                    if let Some(MessagePart::ToolResult { tool_use_id, content, is_error }) =
+                        rm.parts.first()
+                    {
+                        filler_parts.push(MessagePart::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: content.clone(),
+                            is_error: *is_error,
+                        });
+                    }
+                } else {
+                    filler_parts.push(MessagePart::ToolResult {
+                        tool_use_id: u.clone(),
+                        content: "[tool execution interrupted — no result captured]".into(),
+                        is_error: true,
+                    });
+                }
+            }
+            out.push(Message {
+                role: MessageRole::Tool,
+                parts: filler_parts,
+                turn_id: m.turn_id.clone(),
+            });
+        }
     }
-    let turn_id = messages
-        .last()
-        .map(|m| m.turn_id.clone())
-        .unwrap_or_else(crate::event::TurnId::now);
-    let filler: Vec<Message> = pending
-        .iter()
-        .map(|id| Message {
-            role: MessageRole::Tool,
-            parts: vec![MessagePart::ToolResult {
-                tool_use_id: id.clone(),
-                content: "[tool execution interrupted — no result captured]".into(),
-                is_error: true,
-            }],
-            turn_id: turn_id.clone(),
-        })
-        .collect();
-    let mut out = messages;
-    out.extend(filler);
     out
 }
 
