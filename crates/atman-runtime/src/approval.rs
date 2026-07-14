@@ -13,14 +13,7 @@ pub fn level_str(level: ApprovalLevel) -> &'static str {
     }
 }
 
-fn should_force_manual_approval(ctx: &ToolCtx, tool_name: &str, args: &ToolArgs) -> bool {
-    use crate::trust::TrustMode;
-    let Some(trust) = &ctx.trust else {
-        return false;
-    };
-    if trust.mode == TrustMode::Reckless {
-        return false;
-    }
+fn is_outside_workspace(_ctx: &ToolCtx, tool_name: &str, args: &ToolArgs) -> bool {
     if !matches!(tool_name, "fs.write" | "fs.edit" | "fs.grep") {
         return false;
     }
@@ -51,13 +44,36 @@ pub async fn request_approval(
     level: ApprovalLevel,
     tool: Option<&dyn crate::tool::Tool>,
 ) -> ApprovalOutcome {
+    use crate::trust::TrustMode;
+    let outside_workspace = is_outside_workspace(ctx, name, call_args);
+    if outside_workspace {
+        if let Some(trust) = &ctx.trust {
+            match trust.mode {
+                TrustMode::EagerDeny => {
+                    return ApprovalOutcome::Deny {
+                        reason: format!(
+                            "{name}: blocked — path outside workspace and mode is eager-deny"
+                        ),
+                    };
+                }
+                TrustMode::EagerApprove => {}
+                TrustMode::Reckless => {}
+                _ => {}
+            }
+        }
+    }
     let Some(approval) = &ctx.approval else {
         return ApprovalOutcome::Approve;
     };
     let Some(run_id) = ctx.flow_run_id.clone() else {
         return ApprovalOutcome::Approve;
     };
-    let force_manual = should_force_manual_approval(ctx, name, call_args);
+    let force_manual = outside_workspace
+        && ctx
+            .trust
+            .as_ref()
+            .map(|t| !matches!(t.mode, TrustMode::Reckless | TrustMode::EagerDeny))
+            .unwrap_or(true);
     let effective_level = if force_manual {
         ApprovalLevel::Dangerous
     } else {

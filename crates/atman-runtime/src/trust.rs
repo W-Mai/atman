@@ -1,12 +1,13 @@
 use crate::tool::ApprovalLevel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum TrustMode {
     Calm,
     #[default]
     Steady,
-    Eager,
+    EagerApprove,
+    EagerDeny,
     Reckless,
 }
 
@@ -15,7 +16,7 @@ impl TrustMode {
         match self {
             Self::Calm => ApprovalLevel::Auto,
             Self::Steady => ApprovalLevel::Approve,
-            Self::Eager | Self::Reckless => ApprovalLevel::Dangerous,
+            Self::EagerApprove | Self::EagerDeny | Self::Reckless => ApprovalLevel::Dangerous,
         }
     }
 
@@ -27,31 +28,50 @@ impl TrustMode {
         match self {
             Self::Calm => 1,
             Self::Steady => 2,
-            Self::Eager => 3,
-            Self::Reckless => 4,
+            Self::EagerApprove => 3,
+            Self::EagerDeny => 4,
+            Self::Reckless => 5,
         }
     }
 
     pub fn needs_warning(self) -> bool {
-        matches!(self, Self::Eager | Self::Reckless)
+        matches!(self, Self::EagerApprove | Self::EagerDeny | Self::Reckless)
     }
 
     pub fn warning(self, display: &ModeDisplay) -> Option<String> {
         match self {
-            Self::Eager => Some(format!(
-                "⚠ {} mode: sandbox still guards malicious paths, but shell commands and network access no longer need per-step confirmation. Make sure you trust the current working directory.",
+            Self::EagerApprove => Some(format!(
+                "⚠ {} mode: sandbox guards bash/network. Workspace-internal ops auto-approved. \
+                 Operations touching outside the workspace (fs writes, sandbox-blocked bash) \
+                 will prompt for approval. Make sure you trust the current working directory.",
+                display.name
+            )),
+            Self::EagerDeny => Some(format!(
+                "⚠ {} mode: sandbox guards bash/network. Workspace-internal ops auto-approved. \
+                 Operations touching outside the workspace are denied outright — no prompt. \
+                 The agent cannot escape the workspace without you switching modes.",
                 display.name
             )),
             Self::Reckless => Some(format!(
-                "⚠ {} mode: sandbox is off. The agent can read/write outside the workspace, run arbitrary commands, and access the network — all without confirmation. Make sure you understand the risk.\n\nRecommended only for one-off / sandbox projects, not for production repos or directories with sensitive data.",
+                "⚠ {} mode: sandbox is off. The agent can read/write outside the workspace, \
+                 run arbitrary commands, and access the network — all without confirmation. \
+                 Make sure you understand the risk.\n\n\
+                 Recommended only for one-off / sandbox projects, not for production repos \
+                 or directories with sensitive data.",
                 display.name
             )),
             _ => None,
         }
     }
 
-    pub fn all() -> [TrustMode; 4] {
-        [Self::Calm, Self::Steady, Self::Eager, Self::Reckless]
+    pub fn all() -> [TrustMode; 5] {
+        [
+            Self::Calm,
+            Self::Steady,
+            Self::EagerApprove,
+            Self::EagerDeny,
+            Self::Reckless,
+        ]
     }
 }
 
@@ -61,8 +81,9 @@ impl std::str::FromStr for TrustMode {
         match s.to_ascii_lowercase().as_str() {
             "calm" | "1" => Ok(Self::Calm),
             "steady" | "2" | "default" => Ok(Self::Steady),
-            "eager" | "3" => Ok(Self::Eager),
-            "reckless" | "yolo" | "4" => Ok(Self::Reckless),
+            "eager-approve" | "eager" | "3" => Ok(Self::EagerApprove),
+            "eager-deny" | "4" => Ok(Self::EagerDeny),
+            "reckless" | "yolo" | "5" => Ok(Self::Reckless),
             other => Err(format!("unknown trust mode `{other}`")),
         }
     }
@@ -110,6 +131,7 @@ pub enum ModeColor {
     Cyan,
     Green,
     Yellow,
+    Orange,
     Red,
 }
 
@@ -136,11 +158,17 @@ impl Theme {
                 color: ModeColor::Green,
                 description: "free inside workspace, confirm outside",
             },
-            (Theme::Default, TrustMode::Eager) => ModeDisplay {
+            (Theme::Default, TrustMode::EagerApprove) => ModeDisplay {
                 name: "eager",
                 emoji: "⚡",
                 color: ModeColor::Yellow,
-                description: "sandbox guards, no per-step confirm",
+                description: "auto inside, prompt outside",
+            },
+            (Theme::Default, TrustMode::EagerDeny) => ModeDisplay {
+                name: "strict-eager",
+                emoji: "🔒",
+                color: ModeColor::Orange,
+                description: "auto inside, deny outside",
             },
             (Theme::Default, TrustMode::Reckless) => ModeDisplay {
                 name: "reckless",
@@ -161,11 +189,17 @@ impl Theme {
                 color: ModeColor::Green,
                 description: "行云流水，任意所至",
             },
-            (Theme::Wuxia, TrustMode::Eager) => ModeDisplay {
+            (Theme::Wuxia, TrustMode::EagerApprove) => ModeDisplay {
                 name: "破竹",
                 emoji: "🎋",
                 color: ModeColor::Yellow,
                 description: "势如破竹，迎刃而解",
+            },
+            (Theme::Wuxia, TrustMode::EagerDeny) => ModeDisplay {
+                name: "画地为牢",
+                emoji: "⛩️",
+                color: ModeColor::Orange,
+                description: "画地为牢，不出此界",
             },
             (Theme::Wuxia, TrustMode::Reckless) => ModeDisplay {
                 name: "逍遥",
@@ -186,11 +220,17 @@ impl Theme {
                 color: ModeColor::Green,
                 description: "roams its territory, wary of strangers",
             },
-            (Theme::Animal, TrustMode::Eager) => ModeDisplay {
+            (Theme::Animal, TrustMode::EagerApprove) => ModeDisplay {
                 name: "dog",
                 emoji: "🐶",
                 color: ModeColor::Yellow,
                 description: "fence guards, charges ahead",
+            },
+            (Theme::Animal, TrustMode::EagerDeny) => ModeDisplay {
+                name: "turtle",
+                emoji: "🐢",
+                color: ModeColor::Orange,
+                description: "stays in its shell, won't leave",
             },
             (Theme::Animal, TrustMode::Reckless) => ModeDisplay {
                 name: "honey-badger",
@@ -211,11 +251,17 @@ impl Theme {
                 color: ModeColor::Green,
                 description: "clear sky, normal pace",
             },
-            (Theme::Weather, TrustMode::Eager) => ModeDisplay {
+            (Theme::Weather, TrustMode::EagerApprove) => ModeDisplay {
                 name: "storm",
                 emoji: "⛈",
                 color: ModeColor::Yellow,
                 description: "storm, coat on, push forward",
+            },
+            (Theme::Weather, TrustMode::EagerDeny) => ModeDisplay {
+                name: "fog",
+                emoji: "🌫",
+                color: ModeColor::Orange,
+                description: "fog, can't see beyond arm's reach",
             },
             (Theme::Weather, TrustMode::Reckless) => ModeDisplay {
                 name: "tornado",
@@ -236,11 +282,17 @@ impl Theme {
                 color: ModeColor::Green,
                 description: "normal kick",
             },
-            (Theme::Drink, TrustMode::Eager) => ModeDisplay {
+            (Theme::Drink, TrustMode::EagerApprove) => ModeDisplay {
                 name: "espresso",
                 emoji: "☕",
                 color: ModeColor::Yellow,
                 description: "double shot, go fast",
+            },
+            (Theme::Drink, TrustMode::EagerDeny) => ModeDisplay {
+                name: "lock-in",
+                emoji: "🍺",
+                color: ModeColor::Orange,
+                description: "stays at the bar, no leaving",
             },
             (Theme::Drink, TrustMode::Reckless) => ModeDisplay {
                 name: "bleach",
@@ -274,7 +326,14 @@ mod tests {
     fn auto_ceiling_maps_correctly() {
         assert_eq!(TrustMode::Calm.auto_ceiling(), ApprovalLevel::Auto);
         assert_eq!(TrustMode::Steady.auto_ceiling(), ApprovalLevel::Approve);
-        assert_eq!(TrustMode::Eager.auto_ceiling(), ApprovalLevel::Dangerous);
+        assert_eq!(
+            TrustMode::EagerApprove.auto_ceiling(),
+            ApprovalLevel::Dangerous
+        );
+        assert_eq!(
+            TrustMode::EagerDeny.auto_ceiling(),
+            ApprovalLevel::Dangerous
+        );
         assert_eq!(TrustMode::Reckless.auto_ceiling(), ApprovalLevel::Dangerous);
     }
 
@@ -282,26 +341,28 @@ mod tests {
     fn sandbox_disabled_only_for_reckless() {
         assert!(TrustMode::Calm.sandbox_enabled());
         assert!(TrustMode::Steady.sandbox_enabled());
-        assert!(TrustMode::Eager.sandbox_enabled());
+        assert!(TrustMode::EagerApprove.sandbox_enabled());
+        assert!(TrustMode::EagerDeny.sandbox_enabled());
         assert!(!TrustMode::Reckless.sandbox_enabled());
     }
 
     #[test]
-    fn needs_warning_only_for_eager_and_reckless() {
+    fn needs_warning_for_eager_and_reckless() {
         assert!(!TrustMode::Calm.needs_warning());
         assert!(!TrustMode::Steady.needs_warning());
-        assert!(TrustMode::Eager.needs_warning());
+        assert!(TrustMode::EagerApprove.needs_warning());
+        assert!(TrustMode::EagerDeny.needs_warning());
         assert!(TrustMode::Reckless.needs_warning());
     }
 
     #[test]
     fn warning_text_includes_mode_name() {
         let cfg = TrustConfig {
-            mode: TrustMode::Eager,
+            mode: TrustMode::EagerApprove,
             theme: Theme::Default,
         };
         let display = cfg.display();
-        let warning = TrustMode::Eager.warning(&display).unwrap();
+        let warning = TrustMode::EagerApprove.warning(&display).unwrap();
         assert!(warning.contains("eager"));
 
         let cfg2 = TrustConfig {
@@ -336,14 +397,25 @@ mod tests {
     fn mode_from_str_parses_all_variants() {
         assert_eq!("calm".parse::<TrustMode>().unwrap(), TrustMode::Calm);
         assert_eq!("steady".parse::<TrustMode>().unwrap(), TrustMode::Steady);
-        assert_eq!("eager".parse::<TrustMode>().unwrap(), TrustMode::Eager);
+        assert_eq!(
+            "eager".parse::<TrustMode>().unwrap(),
+            TrustMode::EagerApprove
+        );
+        assert_eq!(
+            "eager-approve".parse::<TrustMode>().unwrap(),
+            TrustMode::EagerApprove
+        );
+        assert_eq!(
+            "eager-deny".parse::<TrustMode>().unwrap(),
+            TrustMode::EagerDeny
+        );
         assert_eq!(
             "reckless".parse::<TrustMode>().unwrap(),
             TrustMode::Reckless
         );
         assert_eq!("yolo".parse::<TrustMode>().unwrap(), TrustMode::Reckless);
         assert_eq!("1".parse::<TrustMode>().unwrap(), TrustMode::Calm);
-        assert_eq!("4".parse::<TrustMode>().unwrap(), TrustMode::Reckless);
+        assert_eq!("5".parse::<TrustMode>().unwrap(), TrustMode::Reckless);
         assert!("unknown".parse::<TrustMode>().is_err());
     }
 
@@ -385,6 +457,8 @@ mod tests {
         assert!(d.description.contains("拙"));
         let d = Theme::Wuxia.display(TrustMode::Steady);
         assert!(d.description.contains("行云"));
+        let d = Theme::Wuxia.display(TrustMode::EagerDeny);
+        assert!(d.description.contains("画地"));
     }
 
     #[test]
@@ -403,5 +477,14 @@ mod tests {
                 d.description
             );
         }
+    }
+
+    #[test]
+    fn five_levels_ordered() {
+        assert_eq!(TrustMode::Calm.level(), 1);
+        assert_eq!(TrustMode::Steady.level(), 2);
+        assert_eq!(TrustMode::EagerApprove.level(), 3);
+        assert_eq!(TrustMode::EagerDeny.level(), 4);
+        assert_eq!(TrustMode::Reckless.level(), 5);
     }
 }

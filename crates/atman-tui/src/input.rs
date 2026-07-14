@@ -34,6 +34,7 @@ pub fn input_paragraph<'a>(
         atman_runtime::trust::ModeColor::Cyan => Color::Cyan,
         atman_runtime::trust::ModeColor::Green => Color::Green,
         atman_runtime::trust::ModeColor::Yellow => Color::Yellow,
+        atman_runtime::trust::ModeColor::Orange => Color::Rgb(208, 135, 22),
         atman_runtime::trust::ModeColor::Red => Color::Red,
     };
     let border_style = if streaming {

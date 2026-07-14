@@ -2334,6 +2334,7 @@ fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect,
                 atman_runtime::trust::ModeColor::Cyan => ratatui::style::Color::Cyan,
                 atman_runtime::trust::ModeColor::Green => ratatui::style::Color::Green,
                 atman_runtime::trust::ModeColor::Yellow => ratatui::style::Color::Yellow,
+                atman_runtime::trust::ModeColor::Orange => ratatui::style::Color::Rgb(208, 135, 22),
                 atman_runtime::trust::ModeColor::Red => ratatui::style::Color::Red,
             };
             let marker = if m == app.trust.mode {

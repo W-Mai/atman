@@ -66,6 +66,16 @@ impl Tool for BashExec {
                 }
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 if stderr.contains("Operation not permitted") || stderr.contains("denied") {
+                    let deny = ctx
+                        .trust
+                        .as_ref()
+                        .map(|t| t.mode == crate::trust::TrustMode::EagerDeny)
+                        .unwrap_or(false);
+                    if deny {
+                        return Err(RuntimeError::ToolFailed(format!(
+                            "bash.exec: sandbox blocked (cmd: {cmd}): {stderr}"
+                        )));
+                    }
                     match request_write_approval(ctx, &cmd, &stderr).await {
                         Some(true) => {
                             let output = sandbox
