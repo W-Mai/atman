@@ -466,14 +466,9 @@ async fn run_frames(
                     Ok(frame) => {
                         app.apply_stream_frame(frame);
                         dirty = true;
-                        let mut drained = 0u32;
                         loop {
                             match handle.stream_rx.try_recv() {
-                                Ok(f) => {
-                                    app.apply_stream_frame(f);
-                                    drained += 1;
-                                    if drained >= 512 { break; }
-                                }
+                                Ok(f) => { app.apply_stream_frame(f); }
                                 Err(broadcast::error::TryRecvError::Empty) => break,
                                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
                                     app.record_lag(n, std::time::Instant::now());
@@ -484,10 +479,10 @@ async fn run_frames(
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         app.record_lag(n, std::time::Instant::now());
-                        let mut drained = 0u32;
-                        while drained < 512 {
+                        #[allow(clippy::while_let_loop)]
+                        loop {
                             match handle.stream_rx.try_recv() {
-                                Ok(f) => { app.apply_stream_frame(f); drained += 1; }
+                                Ok(f) => { app.apply_stream_frame(f); }
                                 Err(_) => break,
                             }
                         }

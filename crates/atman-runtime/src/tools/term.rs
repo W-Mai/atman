@@ -392,8 +392,6 @@ fn run_reader_loop(
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
     let mut last_screen: Option<TerminalScreen> = None;
-    let mut last_tui_send: Option<std::time::Instant> = None;
-    const TUI_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -413,25 +411,18 @@ fn run_reader_loop(
                     state: st.clone(),
                 });
                 if let Some(tx) = &tui_stream_tx {
-                    let now = std::time::Instant::now();
-                    let can_send = last_tui_send
-                        .map(|t| now.duration_since(t) >= TUI_MIN_INTERVAL)
-                        .unwrap_or(true);
-                    if can_send {
-                        let tui_screen = if screen_changed {
-                            last_screen = Some(screen.clone());
-                            Some(screen)
-                        } else {
-                            None
-                        };
-                        let _ = tx.send(crate::stream::StreamFrame::TerminalChunk {
-                            handle: handle.clone(),
-                            bytes: chunk.to_vec(),
-                            screen: tui_screen,
-                            state: st.to_snapshot(),
-                        });
-                        last_tui_send = Some(now);
-                    }
+                    let tui_screen = if screen_changed {
+                        last_screen = Some(screen.clone());
+                        Some(screen)
+                    } else {
+                        None
+                    };
+                    let _ = tx.send(crate::stream::StreamFrame::TerminalChunk {
+                        handle: handle.clone(),
+                        bytes: chunk.to_vec(),
+                        screen: tui_screen,
+                        state: st.to_snapshot(),
+                    });
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,

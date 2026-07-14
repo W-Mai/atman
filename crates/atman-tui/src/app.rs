@@ -498,7 +498,15 @@ impl AppState {
                 self.waiting_for_llm = false;
                 if let Some(OutputItem::Thinking { text: t, .. }) = self.items.last_mut() {
                     t.push_str(&text);
-                    self.items_version = self.items_version.wrapping_add(1);
+                    let now = Instant::now();
+                    let should_bump = self
+                        .terminal_throttle
+                        .map(|tm| now.duration_since(tm) >= Duration::from_millis(33))
+                        .unwrap_or(true);
+                    if should_bump {
+                        self.items_version = self.items_version.wrapping_add(1);
+                        self.terminal_throttle = Some(now);
+                    }
                     self.streaming = true;
                     self.reset_lag_state();
                 } else {
@@ -508,6 +516,8 @@ impl AppState {
                         expanded: false,
                     });
                     self.streaming = true;
+                    self.terminal_throttle = Some(Instant::now());
+                    self.items_version = self.items_version.wrapping_add(1);
                 }
             }
             StreamFrame::LlmChunk { text, .. } => {
@@ -522,7 +532,15 @@ impl AppState {
                     && *streaming
                 {
                     md.push_str(&text);
-                    self.items_version = self.items_version.wrapping_add(1);
+                    let now = Instant::now();
+                    let should_bump = self
+                        .terminal_throttle
+                        .map(|t| now.duration_since(t) >= Duration::from_millis(33))
+                        .unwrap_or(true);
+                    if should_bump {
+                        self.items_version = self.items_version.wrapping_add(1);
+                        self.terminal_throttle = Some(now);
+                    }
                     self.streaming = true;
                     self.reset_lag_state();
                 } else {
@@ -531,6 +549,8 @@ impl AppState {
                         streaming: true,
                     });
                     self.streaming = true;
+                    self.terminal_throttle = Some(Instant::now());
+                    self.items_version = self.items_version.wrapping_add(1);
                 }
             }
             StreamFrame::LlmDone { .. } => {
