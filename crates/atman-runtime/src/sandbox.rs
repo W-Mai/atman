@@ -315,8 +315,6 @@ fn spawn_pty_with_profile(
         .take_writer()
         .map_err(|e| RuntimeError::ToolFailed(format!("pty writer: {e}")))?;
 
-    let _ = std::fs::remove_file(&profile_path);
-
     Ok(PtySpawnResult {
         child,
         reader,

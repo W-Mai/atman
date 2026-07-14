@@ -1318,3 +1318,61 @@ mod terminal_stream_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod terminal_e2e_tests {
+    use super::*;
+    use crate::output::{LayoutCache, LayoutKey, RenderCtx};
+    use atman_runtime::tools::term::{TermStateSnapshot, TerminalCell, TerminalScreen};
+
+    #[test]
+    fn full_pipeline_terminal_chunk_to_rendered_lines() {
+        let mut app = AppState::new("s".into(), None);
+        let screen = TerminalScreen {
+            rows: 2,
+            cols: 5,
+            cells: {
+                let mut v = vec![TerminalCell::default(); 10];
+                v[0].chars = "h".into();
+                v[1].chars = "i".into();
+                v
+            },
+            cursor: Some((0, 2)),
+            alt_screen: false,
+        };
+        app.apply_stream_frame(StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: b"hi".to_vec(),
+            screen: screen.clone(),
+            state: TermStateSnapshot::Running,
+        });
+
+        let cache_key = LayoutKey {
+            items_version: app.items_version,
+            expanded_version: app.expanded_version,
+            width: 80,
+            animation_frame: None,
+        };
+        let empty_set = std::collections::HashSet::new();
+        let ctx = RenderCtx {
+            expanded_tools: &empty_set,
+            messages: &[],
+            panel_width: 80,
+            hovered_thinking_idx: None,
+            animation_frame: 0,
+        };
+        let mut cache = LayoutCache::default();
+        let (lines, _ranges, _regions, _total) = cache.get_or_build(cache_key, &app.items, &ctx);
+        assert!(
+            lines.len() > 2,
+            "should render header + blank + screen rows"
+        );
+        let header = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(header.contains("term_s_0"), "header should contain handle");
+        assert!(header.contains("Capture"), "should be Capture mode");
+    }
+}
