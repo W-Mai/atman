@@ -949,7 +949,7 @@ impl Session {
             sink = sink.with_redactor(r);
         }
         let (injection_tx, _) = broadcast::channel(32);
-        let (stream_tx, _) = broadcast::channel(256);
+        let (stream_tx, _) = broadcast::channel(1024);
         let (context_watch, context_rx) = watch::channel(ContextSnapshot::default());
         let (goal_watch, goal_rx) = watch::channel(None);
         let (attach_watch, attach_rx) = watch::channel(0);
@@ -1039,7 +1039,7 @@ impl Session {
             crate::model_registry::model_info(&initial_context.model).context_budget;
         let initial_goal = load_goal(&dir);
         let (injection_tx, _) = broadcast::channel(32);
-        let (stream_tx, _) = broadcast::channel(256);
+        let (stream_tx, _) = broadcast::channel(1024);
         let (context_watch, context_rx) = watch::channel(initial_context);
         let (goal_watch, goal_rx) = watch::channel(initial_goal);
         let (attach_watch, attach_rx) = watch::channel(0);
@@ -1080,7 +1080,7 @@ impl Session {
 
     pub fn open_ephemeral() -> Self {
         let (injection_tx, _) = broadcast::channel(32);
-        let (stream_tx, _) = broadcast::channel(256);
+        let (stream_tx, _) = broadcast::channel(1024);
         let (context_watch, context_rx) = watch::channel(ContextSnapshot::default());
         let (goal_watch, goal_rx) = watch::channel(None);
         let (attach_watch, attach_rx) = watch::channel(0);
