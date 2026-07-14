@@ -132,6 +132,7 @@ pub struct AppState {
     pub deny_arm: Option<std::time::Instant>,
     pub items_version: u64,
     pub expanded_version: u64,
+    pub terminal_throttle: Option<Instant>,
     pub layout_cache: crate::output::LayoutCache,
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
@@ -580,7 +581,15 @@ impl AppState {
                 {
                     *s = screen;
                     ab.extend_from_slice(&bytes);
-                    self.items_version = self.items_version.wrapping_add(1);
+                    let now = Instant::now();
+                    let should_bump = self
+                        .terminal_throttle
+                        .map(|t| now.duration_since(t) >= Duration::from_millis(33))
+                        .unwrap_or(true);
+                    if should_bump {
+                        self.items_version = self.items_version.wrapping_add(1);
+                        self.terminal_throttle = Some(now);
+                    }
                     self.reset_lag_state();
                 } else {
                     self.push_item(OutputItem::Terminal {
