@@ -48,6 +48,15 @@ pub fn is_plan_related(msg: &Message) -> bool {
     false
 }
 
+pub fn has_tool_use_or_result(msg: &Message) -> bool {
+    msg.parts.iter().any(|p| {
+        matches!(
+            p,
+            MessagePart::ToolUse { .. } | MessagePart::ToolResult { .. }
+        )
+    })
+}
+
 pub fn is_compaction_summary(msg: &Message) -> bool {
     if !matches!(msg.role, MessageRole::System) {
         return false;
@@ -70,7 +79,8 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
     let mut cur_tokens: u64 = 0;
     for (i, msg) in messages.iter().enumerate().take(tail).skip(head) {
         let is_barrier = (matches!(msg.role, MessageRole::System) && !is_compaction_summary(msg))
-            || is_plan_related(msg);
+            || is_plan_related(msg)
+            || has_tool_use_or_result(msg);
         if is_barrier {
             if let Some(start) = cur_start.take()
                 && i - start >= 3
@@ -655,6 +665,25 @@ mod tests {
         assert!(
             range.start >= 3,
             "must start after the plain system barrier, got {range:?}"
+        );
+    }
+
+    #[test]
+    fn find_compact_range_treats_tool_use_as_barrier() {
+        let msgs = vec![
+            user(&"x".repeat(3000)),
+            assistant_with_tool_use("thinking", "fs.read", serde_json::json!({"path": "/tmp"})),
+            tool_result("call_1", "file content", false),
+            user(&"a".repeat(3000)),
+            assistant(&"b".repeat(3000)),
+            user(&"c".repeat(3000)),
+            assistant(&"d".repeat(3000)),
+            user("tail"),
+        ];
+        let range = find_compact_range(&msgs, 500).expect("expected range");
+        assert!(
+            range.start >= 3,
+            "must start after the tool_use/tool_result pair, got {range:?}"
         );
     }
 }
