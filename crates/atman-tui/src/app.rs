@@ -53,6 +53,12 @@ pub enum OutputItem {
         expanded: bool,
         scroll_offset: Option<(u16, u16)>,
     },
+    Bash {
+        handle: String,
+        output: String,
+        done: bool,
+        expanded: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -628,6 +634,49 @@ impl AppState {
                 if let Some(OutputItem::Terminal { done, .. }) = self.items.iter_mut().rev().find(
                     |item| matches!(item, OutputItem::Terminal { handle: h, .. } if h == &handle),
                 ) {
+                    *done = true;
+                    self.items_version = self.items_version.wrapping_add(1);
+                }
+            }
+            StreamFrame::BashChunk { handle, kind, line } => {
+                self.waiting_for_llm = false;
+                let existing = self.items.iter_mut().rev().find(|item| {
+                    matches!(item, OutputItem::Bash { handle: h, done: false, .. } if h == &handle)
+                });
+                let prefix = if kind == "stderr" { "[err] " } else { "" };
+                if let Some(OutputItem::Bash { output, .. }) = existing {
+                    output.push_str(prefix);
+                    output.push_str(&line);
+                    let now = Instant::now();
+                    let should_bump = self
+                        .terminal_throttle
+                        .map(|t| now.duration_since(t) >= Duration::from_millis(33))
+                        .unwrap_or(true);
+                    if should_bump {
+                        self.items_version = self.items_version.wrapping_add(1);
+                        self.terminal_throttle = Some(now);
+                    }
+                    self.reset_lag_state();
+                } else {
+                    let mut output = String::new();
+                    output.push_str(prefix);
+                    output.push_str(&line);
+                    self.push_item(OutputItem::Bash {
+                        handle,
+                        output,
+                        done: false,
+                        expanded: false,
+                    });
+                    self.items_version = self.items_version.wrapping_add(1);
+                    self.reset_lag_state();
+                }
+            }
+            StreamFrame::BashExited { handle, .. } => {
+                if let Some(OutputItem::Bash { done, .. }) =
+                    self.items.iter_mut().rev().find(
+                        |item| matches!(item, OutputItem::Bash { handle: h, .. } if h == &handle),
+                    )
+                {
                     *done = true;
                     self.items_version = self.items_version.wrapping_add(1);
                 }

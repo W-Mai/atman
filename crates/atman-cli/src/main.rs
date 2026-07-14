@@ -2135,6 +2135,8 @@ fn render_stream_frame(
         | StreamFrame::ToolDenied { .. }
         | StreamFrame::TerminalChunk { .. }
         | StreamFrame::TerminalExited { .. }
+        | StreamFrame::BashChunk { .. }
+        | StreamFrame::BashExited { .. }
         | StreamFrame::Unknown => {}
     }
 }

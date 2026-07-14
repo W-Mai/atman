@@ -245,6 +245,8 @@ impl BgRegistry {
         let handle_str_for_task = handle_str.clone();
         let status_for_task = status.clone();
         let log_path_for_return = log_path.clone();
+        let stream_tx = ctx.stream_tx.clone();
+        let handle_for_task = handle_str.clone();
         tokio::spawn(async move {
             run_bg_process(
                 handle_str_for_task,
@@ -257,6 +259,8 @@ impl BgRegistry {
                 control_rx,
                 cancel,
                 registry,
+                stream_tx,
+                handle_for_task,
             )
             .await;
         });
@@ -493,6 +497,8 @@ async fn run_bg_process(
     mut control_rx: mpsc::Receiver<BgControl>,
     cancel: CancellationToken,
     registry: Arc<BgRegistry>,
+    stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    handle_for_stream: String,
 ) {
     let started_at = now_ms();
     let mut command = tokio::process::Command::new("sh");
@@ -526,23 +532,31 @@ async fn run_bg_process(
     let stdout_reader = stdout.map(|s| {
         let output = output.clone();
         let log_path = log_path.clone();
+        let stx = stream_tx.clone();
+        let h = handle_for_stream.clone();
         tokio::spawn(read_stream(
             BufReader::new(s),
             output,
             log_path,
             StreamKind::Stdout,
             max_output_bytes,
+            stx,
+            h,
         ))
     });
     let stderr_reader = stderr.map(|s| {
         let output = output.clone();
         let log_path = log_path.clone();
+        let stx = stream_tx.clone();
+        let h = handle_for_stream.clone();
         tokio::spawn(read_stream(
             BufReader::new(s),
             output,
             log_path,
             StreamKind::Stderr,
             max_output_bytes,
+            stx,
+            h,
         ))
     });
 
@@ -630,10 +644,16 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(
     log_path: std::path::PathBuf,
     kind: StreamKind,
     max_output_bytes: u64,
+    stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    handle: String,
 ) {
     let prefix: &[u8] = match kind {
         StreamKind::Stdout => b"[out] ",
         StreamKind::Stderr => b"[err] ",
+    };
+    let kind_str = match kind {
+        StreamKind::Stdout => "stdout",
+        StreamKind::Stderr => "stderr",
     };
     let mut buf = String::new();
     loop {
@@ -659,6 +679,13 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(
                 let _ = file.write_all(data).await;
                 if !data.ends_with(b"\n") {
                     let _ = file.write_all(b"\n").await;
+                }
+                if let Some(tx) = &stream_tx {
+                    let _ = tx.send(crate::stream::StreamFrame::BashChunk {
+                        handle: handle.clone(),
+                        kind: kind_str.to_string(),
+                        line: buf.clone(),
+                    });
                 }
             }
             Err(_) => break,

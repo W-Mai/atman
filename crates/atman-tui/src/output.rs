@@ -294,6 +294,7 @@ enum ItemKind {
     WorkflowPanel,
     StartupCard,
     Terminal,
+    Bash,
 }
 
 impl ItemKind {
@@ -307,6 +308,7 @@ impl ItemKind {
             OutputItem::WorkflowPanel { .. } => Self::WorkflowPanel,
             OutputItem::StartupCard { .. } => Self::StartupCard,
             OutputItem::Terminal { .. } => Self::Terminal,
+            OutputItem::Bash { .. } => Self::Bash,
         }
     }
 
@@ -1103,6 +1105,12 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             ctx.animation_frame,
             ctx.panel_width,
         ),
+        OutputItem::Bash {
+            handle,
+            output,
+            done,
+            expanded,
+        } => render_bash(handle, output, *done, *expanded, ctx.panel_width),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
     lines
@@ -2429,6 +2437,89 @@ pub fn empty_hint<'a>() -> Paragraph<'a> {
     Paragraph::new("plain text → agent · :help for builtins · Ctrl+C to interrupt")
         .style(Style::default().fg(Color::DarkGray))
         .wrap(Wrap { trim: true })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_bash(
+    handle: &str,
+    output: &str,
+    done: bool,
+    expanded: bool,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let t = crate::theme::theme();
+    let bg = t.code_bg;
+    let header_style = Style::default()
+        .fg(t.subtle_fg)
+        .bg(bg)
+        .add_modifier(Modifier::DIM);
+    let body_style = Style::default().fg(t.subtle_fg).bg(bg);
+    let hint_style = Style::default()
+        .fg(t.meta_fg)
+        .bg(bg)
+        .add_modifier(Modifier::DIM);
+
+    let glyph = if done { "✓" } else { spinner_char(0) };
+    let label = if done {
+        format!("bash[{handle}]")
+    } else {
+        format!("bash[{handle}]…")
+    };
+
+    let target = panel_width.max(20) as usize;
+    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(blank.clone());
+
+    let header_prefix = format!("  {glyph} {label} ");
+    let header_used = UnicodeWidthStr::width(header_prefix.as_str());
+    let header_pad = target.saturating_sub(header_used);
+    let mut header_spans = vec![Span::styled(header_prefix, header_style)];
+    if header_pad > 0 {
+        header_spans.push(Span::styled(" ".repeat(header_pad), header_style));
+    }
+    lines.push(Line::from(header_spans));
+    lines.push(blank.clone());
+
+    let all_lines: Vec<&str> = output.lines().collect();
+    let max_lines = if expanded {
+        all_lines.len()
+    } else {
+        all_lines.len().min(8)
+    };
+    let start = all_lines.len().saturating_sub(max_lines);
+    for line in &all_lines[start..] {
+        let rows = wrap_with_prefix(line, target, "    ", "    ");
+        for row in rows {
+            lines.push(line_with_right_pad(
+                &row.prefix,
+                &row.body,
+                target,
+                body_style,
+                body_style,
+            ));
+        }
+    }
+    if !expanded && all_lines.len() > 8 {
+        let hint = format!("    ▼ {} more lines — click to expand", all_lines.len() - 8);
+        let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, hint_style)];
+        if hint_pad > 0 {
+            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
+        }
+        lines.push(Line::from(spans));
+    } else if expanded && all_lines.len() > 8 {
+        let hint = "    ▲ click to collapse".to_string();
+        let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, hint_style)];
+        if hint_pad > 0 {
+            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(blank);
+    lines
 }
 
 #[allow(clippy::too_many_arguments)]

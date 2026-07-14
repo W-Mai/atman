@@ -113,6 +113,15 @@ pub enum StreamFrame {
         handle: String,
         exit_code: Option<i32>,
     },
+    BashChunk {
+        handle: String,
+        kind: String,
+        line: String,
+    },
+    BashExited {
+        handle: String,
+        exit_code: Option<i32>,
+    },
     #[serde(other)]
     Unknown,
 }
