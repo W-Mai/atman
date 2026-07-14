@@ -34,7 +34,7 @@ fn request_with_tools() -> LlmRequest {
                 }),
             },
             atman_runtime::tool::ToolSpec {
-                name: "bash.exec".into(),
+                name: "bash.spawn".into(),
                 description: None,
                 input_schema: serde_json::json!({"type": "object"}),
             },
@@ -51,11 +51,11 @@ fn anthropic_wire_body_carries_tools_with_input_schema() {
     let tools = body["tools"].as_array().expect("tools array present");
     assert_eq!(tools.len(), 2);
     let first = &tools[0];
-    assert_eq!(first["name"].as_str(), Some("fs.list"));
+    assert_eq!(first["name"].as_str(), Some("fs_list"));
     assert_eq!(first["description"].as_str(), Some("list a directory"));
     assert!(first["input_schema"]["properties"]["path"].is_object());
     let second = &tools[1];
-    assert_eq!(second["name"].as_str(), Some("bash.exec"));
+    assert_eq!(second["name"].as_str(), Some("bash_spawn"));
     assert!(second.get("description").is_none(), "second: {second}");
 }
 

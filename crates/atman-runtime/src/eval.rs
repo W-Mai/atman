@@ -1736,8 +1736,11 @@ fn sanitize_tool_pairs(messages: Vec<crate::message::Message>) -> Vec<crate::mes
             let mut filler_parts: Vec<MessagePart> = Vec::new();
             for u in &uses {
                 if let Some(rm) = result_by_id.get(u) {
-                    if let Some(MessagePart::ToolResult { tool_use_id, content, is_error }) =
-                        rm.parts.first()
+                    if let Some(MessagePart::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    }) = rm.parts.first()
                     {
                         filler_parts.push(MessagePart::ToolResult {
                             tool_use_id: tool_use_id.clone(),

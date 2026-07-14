@@ -59,7 +59,7 @@ impl AnthropicProvider {
             .tools
             .iter()
             .map(|t| WireTool {
-                name: t.name.clone(),
+                name: name_to_provider(&t.name),
                 description: t.description.clone(),
                 input_schema: t.input_schema.clone(),
             })
@@ -102,6 +102,19 @@ impl AnthropicProvider {
     }
 }
 
+fn name_to_provider(flow_name: &str) -> String {
+    flow_name.replace('.', "_")
+}
+
+fn name_from_provider(native: &str, tools: &[crate::tool::ToolSpec]) -> String {
+    for t in tools {
+        if name_to_provider(&t.name) == native {
+            return t.name.clone();
+        }
+    }
+    native.to_string()
+}
+
 fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
     let role = match m.role {
         MessageRole::User => "user",
@@ -140,7 +153,7 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
             }
             MessagePart::ToolUse { id, name, input } => ContentPart::ToolUse {
                 id: id.clone(),
-                name: name.clone(),
+                name: name_to_provider(name),
                 input: input.clone(),
             },
             MessagePart::Thinking {
@@ -208,13 +221,18 @@ impl Provider for AnthropicProvider {
                     "anthropic http {status}: {body_text}"
                 )));
             };
-            Ok(response_to_assistant(body, next_turn_id_from_req(&req)))
+            Ok(response_to_assistant(
+                body,
+                next_turn_id_from_req(&req),
+                &req.tools,
+            ))
         })
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let request = self.build_request(&req, true);
         let turn_id = next_turn_id_from_req(&req);
+        let tools: Vec<crate::tool::ToolSpec> = req.tools.clone();
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
@@ -405,7 +423,7 @@ impl Provider for AnthropicProvider {
                     };
                     parts.push(MessagePart::ToolUse {
                         id: pu.id,
-                        name: pu.name,
+                        name: name_from_provider(&pu.name, &tools),
                         input,
                     });
                 }
@@ -446,6 +464,7 @@ struct PartialToolUse {
 fn response_to_assistant(
     body: MessagesResponse,
     turn_id: crate::event::TurnId,
+    tools: &[crate::tool::ToolSpec],
 ) -> AssistantMessage {
     let mut parts: Vec<MessagePart> = Vec::new();
     for block in body.content {
@@ -458,9 +477,11 @@ fn response_to_assistant(
                 thinking,
                 signature,
             }),
-            ContentBlock::ToolUse { id, name, input } => {
-                parts.push(MessagePart::ToolUse { id, name, input })
-            }
+            ContentBlock::ToolUse { id, name, input } => parts.push(MessagePart::ToolUse {
+                id,
+                name: name_from_provider(&name, tools),
+                input,
+            }),
             ContentBlock::Other => {}
         }
     }
