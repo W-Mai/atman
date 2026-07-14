@@ -301,6 +301,22 @@ pub fn build_lines_with_ranges(
     (all_lines, ranges, node_regions, cursor)
 }
 
+fn str_fp(s: &str) -> (usize, [u8; 8], [u8; 8]) {
+    let len = s.len();
+    let head: [u8; 8] = s
+        .as_bytes()
+        .get(..8)
+        .unwrap_or(&[])
+        .try_into()
+        .unwrap_or([0; 8]);
+    let tail: [u8; 8] = if len > 8 {
+        s.as_bytes()[len - 8..].try_into().unwrap_or([0; 8])
+    } else {
+        [0; 8]
+    };
+    (len, head, tail)
+}
+
 fn item_content_hash(
     item: &OutputItem,
     hovered: bool,
@@ -313,7 +329,7 @@ fn item_content_hash(
     match item {
         OutputItem::UserTurn { text } => {
             0u8.hash(&mut h);
-            text.hash(&mut h);
+            str_fp(text).hash(&mut h);
         }
         OutputItem::Thinking {
             text,
@@ -321,19 +337,22 @@ fn item_content_hash(
             expanded,
         } => {
             1u8.hash(&mut h);
-            text.hash(&mut h);
+            str_fp(text).hash(&mut h);
             done.hash(&mut h);
             expanded.hash(&mut h);
             hovered.hash(&mut h);
+            if !done {
+                animation_frame.hash(&mut h);
+            }
         }
         OutputItem::AssistantMd { md, streaming } => {
             2u8.hash(&mut h);
-            md.hash(&mut h);
+            str_fp(md).hash(&mut h);
             streaming.hash(&mut h);
         }
         OutputItem::SystemNote { text, level } => {
             3u8.hash(&mut h);
-            text.hash(&mut h);
+            str_fp(text).hash(&mut h);
             format!("{:?}", level).hash(&mut h);
         }
         OutputItem::Divider => 4u8.hash(&mut h),
@@ -350,10 +369,10 @@ fn item_content_hash(
             buf.clear();
             use std::fmt::Write;
             let _ = write!(buf, "{:?}", graph);
-            buf.hash(&mut h);
+            str_fp(&buf).hash(&mut h);
             buf.clear();
             let _ = write!(buf, "{:?}", expanded_nodes);
-            buf.hash(&mut h);
+            str_fp(&buf).hash(&mut h);
             panel_expanded.hash(&mut h);
             started_at.hash(&mut h);
             ended_at.hash(&mut h);
@@ -378,8 +397,8 @@ fn item_content_hash(
             buf.clear();
             use std::fmt::Write;
             let _ = write!(buf, "{:?}", screen);
-            buf.hash(&mut h);
-            accumulated_bytes.hash(&mut h);
+            str_fp(&buf).hash(&mut h);
+            str_fp(std::str::from_utf8(accumulated_bytes).unwrap_or("")).hash(&mut h);
             format!("{:?}", mode).hash(&mut h);
             done.hash(&mut h);
             expanded.hash(&mut h);
@@ -393,7 +412,7 @@ fn item_content_hash(
         } => {
             8u8.hash(&mut h);
             handle.hash(&mut h);
-            output.hash(&mut h);
+            str_fp(output).hash(&mut h);
             done.hash(&mut h);
             expanded.hash(&mut h);
         }
