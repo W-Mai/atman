@@ -317,6 +317,7 @@ impl TermRegistry {
         session_id: String,
         session_dir: PathBuf,
         pty_result: crate::sandbox::PtySpawnResult,
+        tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     ) -> Result<(TermHandle, Arc<TermEntry>), RuntimeError> {
         let handle = self.next_handle(&session_id);
         let handle_str = handle.to_string();
@@ -361,8 +362,17 @@ impl TermRegistry {
         });
 
         let reader = pty_result.reader;
+        let handle_for_loop = handle_str.clone();
         let join = tokio::task::spawn_blocking(move || {
-            run_reader_loop(reader, parser, state, stream_tx, log_file);
+            run_reader_loop(
+                reader,
+                parser,
+                state,
+                stream_tx,
+                log_file,
+                tui_stream_tx,
+                handle_for_loop,
+            );
         });
         *entry.reader_task.lock().expect("reader_task poisoned") = Some(join);
 
@@ -377,6 +387,8 @@ fn run_reader_loop(
     state: Arc<Mutex<TermState>>,
     stream_tx: broadcast::Sender<TermStreamEvent>,
     mut log_file: std::fs::File,
+    tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    handle: String,
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
     loop {
@@ -393,9 +405,17 @@ fn run_reader_loop(
                 let st = state.lock().expect("state poisoned").clone();
                 let _ = stream_tx.send(TermStreamEvent::Chunk {
                     bytes: chunk.to_vec(),
-                    screen,
-                    state: st,
+                    screen: screen.clone(),
+                    state: st.clone(),
                 });
+                if let Some(tx) = &tui_stream_tx {
+                    let _ = tx.send(crate::stream::StreamFrame::TerminalChunk {
+                        handle: handle.clone(),
+                        bytes: chunk.to_vec(),
+                        screen,
+                        state: st.to_snapshot(),
+                    });
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
@@ -411,6 +431,9 @@ fn run_reader_loop(
         };
     }
     let _ = stream_tx.send(TermStreamEvent::Exited { exit_code });
+    if let Some(tx) = &tui_stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::TerminalExited { handle, exit_code });
+    }
 }
 
 use std::io::Write;
@@ -589,7 +612,14 @@ async fn spawn_impl(
         spawn_pty_direct(&cmd_args, &env_refs, &cwd, pty_size)?
     };
 
-    let (handle, entry) = registry.spawn_entry(rows, cols, session_id, session_dir, pty_result)?;
+    let (handle, entry) = registry.spawn_entry(
+        rows,
+        cols,
+        session_id,
+        session_dir,
+        pty_result,
+        ctx.stream_tx.clone(),
+    )?;
 
     let screen = entry.snapshot();
     let state = entry.current_state();

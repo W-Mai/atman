@@ -2539,6 +2539,89 @@ fn cell_bg(cell: &atman_runtime::tools::term::TerminalCell) -> ratatui::style::C
 }
 
 #[cfg(test)]
+mod terminal_render_tests {
+    use super::*;
+    use crate::app::TerminalViewMode;
+    use atman_runtime::tools::term::{TerminalCell, TerminalScreen};
+
+    fn screen(rows: u16, cols: u16, text: &str) -> TerminalScreen {
+        let mut cells = vec![TerminalCell::default(); rows as usize * cols as usize];
+        for (i, ch) in text.chars().enumerate() {
+            if i < cells.len() {
+                cells[i].chars = ch.to_string();
+            }
+        }
+        TerminalScreen {
+            rows,
+            cols,
+            cells,
+            cursor: None,
+            alt_screen: false,
+        }
+    }
+
+    #[test]
+    fn render_terminal_capture_produces_header_and_cells() {
+        let scr = screen(2, 5, "hello");
+        let lines = render_terminal(
+            "term_s_0",
+            &scr,
+            &[],
+            TerminalViewMode::Capture,
+            false,
+            false,
+            80,
+        );
+        assert!(
+            lines.len() >= 3,
+            "should have header + blank + at least 1 row"
+        );
+        let header = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(
+            header.contains("term_s_0"),
+            "header should contain handle: {header}"
+        );
+        assert!(
+            header.contains("Capture"),
+            "header should contain mode: {header}"
+        );
+    }
+
+    #[test]
+    fn render_terminal_stream_shows_accumulated_text() {
+        let scr = screen(1, 5, "");
+        let bytes = b"line1
+line2
+";
+        let lines = render_terminal(
+            "term_s_0",
+            &scr,
+            bytes,
+            TerminalViewMode::Stream,
+            true,
+            false,
+            80,
+        );
+        let rendered: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+            .collect::<String>();
+        assert!(
+            rendered.contains("line1"),
+            "stream should show line1: {rendered}"
+        );
+        assert!(
+            rendered.contains("line2"),
+            "stream should show line2: {rendered}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -1232,3 +1232,89 @@ mod tests {
         assert_eq!(stmt.children[0].id, "tool:r1:tu_1");
     }
 }
+
+#[cfg(test)]
+mod terminal_stream_tests {
+    use super::*;
+    use atman_runtime::tools::term::{TermStateSnapshot, TerminalScreen};
+
+    fn dummy_screen() -> TerminalScreen {
+        TerminalScreen {
+            rows: 2,
+            cols: 3,
+            cells: vec![atman_runtime::tools::term::TerminalCell::default(); 6],
+            cursor: None,
+            alt_screen: false,
+        }
+    }
+
+    #[test]
+    fn terminal_chunk_creates_output_item() {
+        let mut app = AppState::new("s".into(), None);
+        let screen = dummy_screen();
+        app.apply_stream_frame(StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: b"hi".to_vec(),
+            screen: screen.clone(),
+            state: TermStateSnapshot::Running,
+        });
+        assert_eq!(app.items.len(), 1);
+        match &app.items[0] {
+            OutputItem::Terminal {
+                handle, mode, done, ..
+            } => {
+                assert_eq!(handle, "term_s_0");
+                assert_eq!(*mode, TerminalViewMode::Capture);
+                assert!(!*done);
+            }
+            _ => panic!("expected Terminal item"),
+        }
+    }
+
+    #[test]
+    fn terminal_chunk_updates_existing_item() {
+        let mut app = AppState::new("s".into(), None);
+        let screen = dummy_screen();
+        app.apply_stream_frame(StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: b"hi".to_vec(),
+            screen: screen.clone(),
+            state: TermStateSnapshot::Running,
+        });
+        app.apply_stream_frame(StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: b" world".to_vec(),
+            screen: screen.clone(),
+            state: TermStateSnapshot::Running,
+        });
+        assert_eq!(app.items.len(), 1, "should update existing, not create new");
+        match &app.items[0] {
+            OutputItem::Terminal {
+                accumulated_bytes, ..
+            } => {
+                assert_eq!(accumulated_bytes, b"hi world");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn terminal_exited_marks_done() {
+        let mut app = AppState::new("s".into(), None);
+        let screen = dummy_screen();
+        app.apply_stream_frame(StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: b"hi".to_vec(),
+            screen,
+            state: TermStateSnapshot::Running,
+        });
+        app.apply_stream_frame(StreamFrame::TerminalExited {
+            handle: "term_s_0".into(),
+            exit_code: Some(0),
+        });
+        match &app.items[0] {
+            OutputItem::Terminal { done, .. } => assert!(*done),
+            _ => panic!(),
+        }
+    }
+}
