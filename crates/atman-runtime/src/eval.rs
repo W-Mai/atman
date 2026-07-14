@@ -897,9 +897,10 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
             for attempt in 0..=retry_count {
+                let sanitized_messages = sanitize_tool_pairs(final_messages.clone());
                 let req = crate::provider::LlmRequest {
                     model: model.clone(),
-                    messages: final_messages.clone(),
+                    messages: sanitized_messages,
                     system: system.clone(),
                     input: input.clone(),
                     schema: None,
@@ -1691,6 +1692,45 @@ fn parse_error_kind_list(
     Ok(out)
 }
 
+fn sanitize_tool_pairs(messages: Vec<crate::message::Message>) -> Vec<crate::message::Message> {
+    use crate::message::{Message, MessagePart, MessageRole};
+    let mut pending: Vec<String> = Vec::new();
+    for m in &messages {
+        for p in &m.parts {
+            if let MessagePart::ToolUse { id, .. } = p {
+                pending.push(id.clone());
+            }
+        }
+        for p in &m.parts {
+            if let MessagePart::ToolResult { tool_use_id, .. } = p {
+                pending.retain(|id| id != tool_use_id);
+            }
+        }
+    }
+    if pending.is_empty() {
+        return messages;
+    }
+    let turn_id = messages
+        .last()
+        .map(|m| m.turn_id.clone())
+        .unwrap_or_else(crate::event::TurnId::now);
+    let filler: Vec<Message> = pending
+        .iter()
+        .map(|id| Message {
+            role: MessageRole::Tool,
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id: id.clone(),
+                content: "[tool execution interrupted — no result captured]".into(),
+                is_error: true,
+            }],
+            turn_id: turn_id.clone(),
+        })
+        .collect();
+    let mut out = messages;
+    out.extend(filler);
+    out
+}
+
 pub fn truncate_prompt_to_budget(prompt: String, budget_tokens: u64) -> String {
     truncate_prompt_to_budget_tracked(prompt, budget_tokens).0
 }
@@ -2374,5 +2414,75 @@ flow parent(x: Int) -> Int {
             .filter(|e| matches!(e, crate::event::Event::FlowNodeEnd { .. }))
             .count();
         assert_eq!(ends, 3);
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+    use crate::message::{Message, MessagePart, MessageRole};
+
+    #[test]
+    fn sanitize_fills_missing_tool_results() {
+        let turn = crate::event::TurnId::now();
+        let msgs = vec![
+            Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "call_orphan".into(),
+                    name: "bash.exec".into(),
+                    input: serde_json::json!({}),
+                }],
+                turn_id: turn.clone(),
+            },
+            Message {
+                role: MessageRole::User,
+                parts: vec![MessagePart::Text {
+                    text: "user interrupt".into(),
+                }],
+                turn_id: turn.clone(),
+            },
+        ];
+        let out = sanitize_tool_pairs(msgs);
+        let has_filler = out.iter().any(|m| {
+            m.parts.iter().any(|p| {
+                matches!(p, MessagePart::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "call_orphan")
+            })
+        });
+        assert!(
+            has_filler,
+            "should append error tool_result for orphan tool_use"
+        );
+    }
+
+    #[test]
+    fn sanitize_noop_when_pairs_complete() {
+        let turn = crate::event::TurnId::now();
+        let msgs = vec![
+            Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "call_ok".into(),
+                    name: "bash.exec".into(),
+                    input: serde_json::json!({}),
+                }],
+                turn_id: turn.clone(),
+            },
+            Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "call_ok".into(),
+                    content: "done".into(),
+                    is_error: false,
+                }],
+                turn_id: turn.clone(),
+            },
+        ];
+        let out = sanitize_tool_pairs(msgs);
+        assert_eq!(
+            out.len(),
+            2,
+            "no filler should be added when pairs complete"
+        );
     }
 }
