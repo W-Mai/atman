@@ -1582,8 +1582,9 @@ impl Session {
         };
         let mut guard = self.messages.lock().unwrap();
         let before = guard.clone();
-        let budget = crate::model_registry::model_info(&self.last_model()).context_budget;
-        let range = find_compact_range(&before, budget)?;
+        let info = crate::model_registry::model_info(&self.last_model());
+        let threshold = info.compact_threshold_tokens();
+        let range = find_compact_range(&before, threshold)?;
         let turn_id = before
             .get(range.start)
             .map(|m| m.turn_id.clone())
