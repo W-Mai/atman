@@ -59,6 +59,21 @@ pub enum OutputItem {
         done: bool,
         expanded: bool,
     },
+    CompactionSummary {
+        summary: String,
+        before_tokens: u64,
+        after_tokens: u64,
+        compacted_count: usize,
+    },
+}
+
+impl OutputItem {
+    pub fn handle(&self) -> Option<&str> {
+        match self {
+            OutputItem::Terminal { handle, .. } | OutputItem::Bash { handle, .. } => Some(handle),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -702,6 +717,19 @@ impl AppState {
                         self.items_version = self.items_version.wrapping_add(1);
                     }
                 }
+            }
+            StreamFrame::CompactionSummary {
+                summary,
+                before_tokens,
+                after_tokens,
+                compacted_count,
+            } => {
+                self.push_item(OutputItem::CompactionSummary {
+                    summary,
+                    before_tokens,
+                    after_tokens,
+                    compacted_count,
+                });
             }
             StreamFrame::Unknown => {}
         }

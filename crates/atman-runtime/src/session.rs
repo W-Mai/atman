@@ -1620,10 +1620,18 @@ impl Session {
             after_tokens,
             compacted_range_start: range.start as u64,
             compacted_range_end: range.end.saturating_sub(1) as u64,
-            summary_text: Some(summary),
+            summary_text: Some(summary.clone()),
             replacement_msg_seq: Some(replacement_seq),
             ts,
         });
+        let _ = self
+            .stream_tx
+            .send(crate::stream::StreamFrame::CompactionSummary {
+                summary,
+                before_tokens,
+                after_tokens,
+                compacted_count: range.end - range.start,
+            });
         self.refresh_window_snapshot();
         let checkpoint_messages = self.messages.lock().unwrap().clone();
         let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);

@@ -122,6 +122,12 @@ pub enum StreamFrame {
         handle: String,
         exit_code: Option<i32>,
     },
+    CompactionSummary {
+        summary: String,
+        before_tokens: u64,
+        after_tokens: u64,
+        compacted_count: usize,
+    },
     #[serde(other)]
     Unknown,
 }

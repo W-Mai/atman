@@ -414,6 +414,18 @@ fn item_content_hash(
             done.hash(&mut h);
             expanded.hash(&mut h);
         }
+        OutputItem::CompactionSummary {
+            summary,
+            before_tokens,
+            after_tokens,
+            compacted_count,
+        } => {
+            9u8.hash(&mut h);
+            str_fp(summary).hash(&mut h);
+            before_tokens.hash(&mut h);
+            after_tokens.hash(&mut h);
+            compacted_count.hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -429,6 +441,7 @@ enum ItemKind {
     StartupCard,
     Terminal,
     Bash,
+    CompactionSummary,
 }
 
 impl ItemKind {
@@ -443,6 +456,7 @@ impl ItemKind {
             OutputItem::StartupCard { .. } => Self::StartupCard,
             OutputItem::Terminal { .. } => Self::Terminal,
             OutputItem::Bash { .. } => Self::Bash,
+            OutputItem::CompactionSummary { .. } => Self::CompactionSummary,
         }
     }
 
@@ -1418,6 +1432,18 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             done,
             expanded,
         } => render_bash(handle, output, *done, *expanded, ctx.panel_width),
+        OutputItem::CompactionSummary {
+            summary,
+            before_tokens,
+            after_tokens,
+            compacted_count,
+        } => render_compaction_summary(
+            summary,
+            *before_tokens,
+            *after_tokens,
+            *compacted_count,
+            ctx.panel_width,
+        ),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
     lines
@@ -3722,4 +3748,57 @@ mod tests {
         );
         assert!(flat.contains("final"));
     }
+}
+
+fn render_compaction_summary(
+    summary: &str,
+    before_tokens: u64,
+    after_tokens: u64,
+    compacted_count: usize,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let t = crate::theme::theme();
+    let bg = t.code_bg;
+    let header_style = Style::default()
+        .fg(Color::Yellow)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(t.subtle_fg).bg(bg);
+    let _hint_style = Style::default()
+        .fg(t.meta_fg)
+        .bg(bg)
+        .add_modifier(Modifier::DIM);
+
+    let target = panel_width.max(20) as usize;
+    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(blank.clone());
+
+    let stats = format!(
+        " ✓ compacted {compacted_count} messages · {before_tokens} → {after_tokens} tokens "
+    );
+    let stats_used = UnicodeWidthStr::width(stats.as_str());
+    let stats_pad = target.saturating_sub(stats_used);
+    let mut header_spans = vec![Span::styled(stats, header_style)];
+    if stats_pad > 0 {
+        header_spans.push(Span::styled(" ".repeat(stats_pad), header_style));
+    }
+    lines.push(Line::from(header_spans));
+    lines.push(blank.clone());
+
+    for line in summary.lines().take(50) {
+        let rows = wrap_with_prefix(line, target, "  ", "  ");
+        for row in rows {
+            lines.push(line_with_right_pad(
+                &row.prefix,
+                &row.body,
+                target,
+                body_style,
+                body_style,
+            ));
+        }
+    }
+    lines.push(blank);
+    lines
 }
