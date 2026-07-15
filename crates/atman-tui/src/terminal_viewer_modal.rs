@@ -6,6 +6,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use crate::app::{AppState, OutputItem, TerminalViewMode};
 use crate::output::NodeRegion;
 
+const PAD: u16 = 2;
+
 #[derive(Default, Debug)]
 pub struct TerminalViewerModal {
     pub open: bool,
@@ -61,8 +63,16 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
         return;
     };
 
-    let modal_w = (area.width * 9 / 10).clamp(80, area.width.saturating_sub(4).max(80));
-    let modal_h = (area.height * 9 / 10).clamp(20, area.height.saturating_sub(2).max(20));
+    let t = crate::theme::theme();
+    let bg = t.code_bg;
+
+    let pty_cols = screen.cols.max(1);
+    let pty_rows = screen.rows.max(1);
+
+    let border_w: u16 = 2;
+    let border_h: u16 = 2;
+    let modal_w = (pty_cols + PAD * 2 + border_w).min(area.width.saturating_sub(2));
+    let modal_h = (pty_rows + PAD * 2 + border_h).min(area.height.saturating_sub(1));
     let x = area.x + area.width.saturating_sub(modal_w) / 2;
     let y = area.y + area.height.saturating_sub(modal_h) / 2;
     let modal_area = Rect {
@@ -81,8 +91,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
     };
     let title = format!(
         " {glyph} terminal[{handle}] {mode_label} {cols}×{rows} · Esc close · j/k scroll ",
-        cols = screen.cols,
-        rows = screen.rows,
+        cols = pty_cols,
+        rows = pty_rows,
     );
     let block = Block::default()
         .borders(Borders::ALL)
@@ -98,41 +108,72 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
     f.render_widget(block, modal_area);
     app.terminal_viewer.last_inner_rect = Some(inner);
 
-    let lines = match mode {
-        TerminalViewMode::Capture => render_capture_full(&screen, inner.width, inner.height),
-        TerminalViewMode::Stream => render_stream_full(&accumulated_bytes, inner.width),
+    let pad_style = Style::default().bg(bg);
+    for _ in 0..PAD.min(inner.height) {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " ".repeat(inner.width as usize),
+                pad_style,
+            ))),
+            inner,
+        );
+    }
+
+    let content_area = Rect {
+        x: inner.x + PAD.min(inner.width / 2),
+        y: inner.y + PAD.min(inner.height / 2),
+        width: pty_cols.min(inner.width.saturating_sub(PAD * 2)),
+        height: pty_rows.min(inner.height.saturating_sub(PAD * 2)),
     };
 
-    let total_rows = lines.len() as u16;
-    let visible_rows = inner.height;
-    let max_v = total_rows.saturating_sub(visible_rows);
-    if app.terminal_viewer.v_offset > max_v {
-        app.terminal_viewer.v_offset = max_v;
-    }
+    if content_area.width > 0 && content_area.height > 0 {
+        f.render_widget(Clear, content_area);
+        let content_bg = Paragraph::new(
+            std::iter::repeat_n(
+                Line::from(Span::styled(
+                    " ".repeat(content_area.width as usize),
+                    pad_style,
+                )),
+                content_area.height as usize,
+            )
+            .collect::<Vec<_>>(),
+        );
+        f.render_widget(content_bg, content_area);
 
-    let total_cols = screen.cols;
-    let visible_cols = inner.width;
-    let max_h = total_cols.saturating_sub(visible_cols);
-    if app.terminal_viewer.h_offset > max_h {
-        app.terminal_viewer.h_offset = max_h;
-    }
+        let lines = match mode {
+            TerminalViewMode::Capture => render_capture_full(&screen, content_area.width),
+            TerminalViewMode::Stream => render_stream_full(&accumulated_bytes, content_area.width),
+        };
 
-    let p = Paragraph::new(lines).scroll((app.terminal_viewer.v_offset, 0));
-    f.render_widget(p, inner);
+        let total_rows = lines.len() as u16;
+        let visible_rows = content_area.height;
+        let max_v = total_rows.saturating_sub(visible_rows);
+        if app.terminal_viewer.v_offset > max_v {
+            app.terminal_viewer.v_offset = max_v;
+        }
+        let max_h = pty_cols.saturating_sub(content_area.width);
+        if app.terminal_viewer.h_offset > max_h {
+            app.terminal_viewer.h_offset = max_h;
+        }
+
+        let p = Paragraph::new(lines).scroll((app.terminal_viewer.v_offset, 0));
+        f.render_widget(p, content_area);
+    }
 }
 
 fn render_capture_full(
     screen: &atman_runtime::tools::term::TerminalScreen,
-    _width: u16,
-    _height: u16,
+    width: u16,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg = t.code_bg;
-    let body_style = Style::default().fg(t.subtle_fg).bg(bg);
+    let pad_style = Style::default().bg(bg);
     let cols = screen.cols as usize;
+    let target = width as usize;
     let mut lines = Vec::with_capacity(screen.rows as usize);
     for row in 0..screen.rows as usize {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(cols + 1);
+        let mut row_w = 0usize;
         for col in 0..cols {
             let idx = row * cols + col;
             if idx >= screen.cells.len() {
@@ -145,12 +186,18 @@ fn render_capture_full(
             } else {
                 &cell.chars
             };
+            let cw = unicode_width::UnicodeWidthStr::width(chars);
+            row_w += cw;
             spans.push(Span::styled(chars.to_string(), cell_style));
+        }
+        let pad = target.saturating_sub(row_w);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), pad_style));
         }
         lines.push(Line::from(spans));
     }
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled(" ", body_style)));
+        lines.push(Line::from(Span::styled(" ".repeat(target), pad_style)));
     }
     lines
 }
