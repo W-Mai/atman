@@ -48,15 +48,6 @@ pub fn is_plan_related(msg: &Message) -> bool {
     false
 }
 
-pub fn has_tool_use_or_result(msg: &Message) -> bool {
-    msg.parts.iter().any(|p| {
-        matches!(
-            p,
-            MessagePart::ToolUse { .. } | MessagePart::ToolResult { .. }
-        )
-    })
-}
-
 pub fn is_compaction_summary(msg: &Message) -> bool {
     if !matches!(msg.role, MessageRole::System) {
         return false;
@@ -69,60 +60,52 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
     if total <= budget || messages.len() < 4 {
         return None;
     }
-    let head = 0usize;
-    let tail = messages.len().saturating_sub(2);
-    if tail <= head + 2 {
+    let start = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, m)| is_compaction_summary(m))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let end = messages.len().saturating_sub(2);
+    if end < start + 2 {
         return None;
     }
-    let mut best: Option<CompactRange> = None;
-    let mut cur_start: Option<usize> = None;
-    let mut cur_tokens: u64 = 0;
-    for (i, msg) in messages.iter().enumerate().take(tail).skip(head) {
-        let is_barrier = (matches!(msg.role, MessageRole::System) && !is_compaction_summary(msg))
-            || is_plan_related(msg)
-            || has_tool_use_or_result(msg);
-        if is_barrier {
-            if let Some(start) = cur_start.take()
-                && i - start >= 3
-            {
-                let range = CompactRange {
-                    start,
-                    end: i,
-                    tokens_saved_estimate: cur_tokens,
-                };
-                if best
-                    .as_ref()
-                    .is_none_or(|b| range.tokens_saved_estimate > b.tokens_saved_estimate)
-                {
-                    best = Some(range);
+    let tokens_saved: u64 = messages[start..end]
+        .iter()
+        .map(estimate_tokens_for_message)
+        .sum();
+    Some(CompactRange {
+        start,
+        end,
+        tokens_saved_estimate: tokens_saved,
+    })
+}
+
+pub fn filter_orphan_tool_messages(messages: &mut Vec<Message>) {
+    let use_ids: std::collections::HashSet<String> = messages
+        .iter()
+        .flat_map(|m| {
+            m.parts.iter().filter_map(|p| match p {
+                MessagePart::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+    let mut seen_results: std::collections::HashSet<String> = std::collections::HashSet::new();
+    messages.retain(|m| {
+        for p in &m.parts {
+            if let MessagePart::ToolResult { tool_use_id, .. } = p {
+                if !use_ids.contains(tool_use_id) {
+                    return false;
+                }
+                if !seen_results.insert(tool_use_id.clone()) {
+                    return false;
                 }
             }
-            cur_start = None;
-            cur_tokens = 0;
-            continue;
         }
-        if cur_start.is_none() {
-            cur_start = Some(i);
-            cur_tokens = 0;
-        }
-        cur_tokens += estimate_tokens_for_message(msg);
-    }
-    if let Some(start) = cur_start
-        && tail - start >= 3
-    {
-        let range = CompactRange {
-            start,
-            end: tail,
-            tokens_saved_estimate: cur_tokens,
-        };
-        if best
-            .as_ref()
-            .is_none_or(|b| range.tokens_saved_estimate > b.tokens_saved_estimate)
-        {
-            best = Some(range);
-        }
-    }
-    best
+        true
+    });
 }
 
 pub fn find_compact_summaries(messages: &[Message]) -> Vec<CompactSummary> {
@@ -206,8 +189,9 @@ pub async fn maybe_auto_compact(
         );
         return;
     };
-    let slice = &msgs[range.start..range.end];
-    let summary = match generate_llm_summary(slice, model, providers).await {
+    let mut filtered: Vec<Message> = msgs[range.start..range.end].to_vec();
+    filter_orphan_tool_messages(&mut filtered);
+    let summary = match generate_llm_summary(&filtered, model, providers).await {
         Ok(text) => text,
         Err(err) => {
             session.emit_compact_warning(
@@ -225,7 +209,8 @@ pub async fn maybe_auto_compact(
         }
     };
     let final_summary =
-        match request_review_if_enabled(session, forced, slice, &range, current, summary).await {
+        match request_review_if_enabled(session, forced, &filtered, &range, current, summary).await
+        {
             ReviewOutcome::Commit(s) => s,
             ReviewOutcome::Rejected => {
                 session.push_system_note(
@@ -307,7 +292,41 @@ fn format_slice_for_preview(slice: &[Message]) -> String {
     out.chars().take(16_000).collect()
 }
 
-const SUMMARY_SYSTEM_PROMPT: &str = "You are summarizing a slice of an ongoing conversation so a future model can continue without losing context. Write 200-400 words focused on: key facts and decisions (files touched, tools invoked, verdicts reached); open threads (unfinished tasks, unresolved questions); what the user asked and what the assistant delivered. Rules: no code fences; include file, function, library, package names verbatim; write in past tense first-person from the assistant's perspective (\"I investigated foo.rs, decided to...\"); no speculation, only what actually happened in the transcript.";
+const SUMMARY_SYSTEM_PROMPT: &str = r#"You are an anchored context summarization assistant for coding sessions.
+
+Summarize the conversation history below. If a <previous-summary> block is included, treat it as the current anchored summary — update it by preserving still-true details, removing stale details, and merging in new facts.
+
+Output exactly this Markdown structure:
+
+## Objective
+- [what the user is trying to accomplish]
+
+## Important Details
+- [constraints, decisions and why, key facts, user preferences]
+- [include exact file paths, function names, library/package names, error strings, commands, URLs]
+
+## Work State
+### Completed
+- [finished work, verified facts, changes made]
+### Active
+- [current work, partial changes, investigation state]
+### Blocked
+- [blockers, failing commands, unknowns]
+
+## Next Move
+1. [immediate concrete action]
+2. [next action if known]
+
+## Relevant Files
+- [file path: why it matters, key changes made]
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, symbols, commands, error strings, and identifiers.
+- Do not exclude information that might be important for continuing the work.
+- Do not mention the summary process or that context was compacted.
+- Respond in the same language as the conversation."#;
 
 async fn generate_llm_summary(
     slice: &[Message],
@@ -344,10 +363,10 @@ fn format_slice_for_summary(slice: &[Message]) -> String {
     for (i, msg) in slice.iter().enumerate() {
         let role = msg.role.as_str();
         let body = serialize_message_for_summary(msg);
-        let truncated: String = body.chars().take(2000).collect();
+        let truncated: String = body.chars().take(4000).collect();
         out.push_str(&format!("[{i}] {role}: {truncated}\n\n"));
     }
-    out.chars().take(60_000).collect()
+    out.chars().take(120_000).collect()
 }
 
 fn serialize_message_for_summary(msg: &Message) -> String {
@@ -358,7 +377,7 @@ fn serialize_message_for_summary(msg: &Message) -> String {
                 parts.push(text.clone());
             }
             MessagePart::Thinking { thinking, .. } => {
-                let truncated: String = thinking.chars().take(500).collect();
+                let truncated: String = thinking.chars().take(1000).collect();
                 parts.push(format!("[thinking: {truncated}]"));
             }
             MessagePart::ToolUse { name, input, .. } => {
@@ -367,7 +386,7 @@ fn serialize_message_for_summary(msg: &Message) -> String {
                 } else {
                     input.to_string()
                 };
-                let truncated: String = input_str.chars().take(800).collect();
+                let truncated: String = input_str.chars().take(2000).collect();
                 parts.push(format!("[tool_call: {name}({truncated})]"));
             }
             MessagePart::ToolResult {
@@ -375,7 +394,7 @@ fn serialize_message_for_summary(msg: &Message) -> String {
                 is_error,
                 tool_use_id,
             } => {
-                let truncated: String = content.chars().take(1000).collect();
+                let truncated: String = content.chars().take(3000).collect();
                 let marker = if *is_error { "ERROR" } else { "ok" };
                 let id_short: String = tool_use_id.chars().take(12).collect();
                 parts.push(format!("[tool_result {id_short}… {marker}: {truncated}]"));
@@ -438,45 +457,6 @@ mod tests {
     fn find_compact_returns_none_for_short_history() {
         let msgs = vec![user(&"x".repeat(9000))];
         assert!(find_compact_range(&msgs, 100).is_none());
-    }
-
-    #[test]
-    fn find_compact_targets_middle_run_of_at_least_3() {
-        let msgs = vec![
-            system("keep-system-head"),
-            user(&"x".repeat(5000)),
-            assistant(&"y".repeat(5000)),
-            user(&"z".repeat(5000)),
-            assistant(&"w".repeat(5000)),
-            user("tail-user"),
-            assistant("tail-assistant"),
-        ];
-        let range = find_compact_range(&msgs, 500).expect("expected compact range");
-        assert!(range.start >= 1, "system head must be preserved");
-        assert!(
-            range.end <= msgs.len() - 2,
-            "last 2 messages must be preserved"
-        );
-        assert!(range.end - range.start >= 3, "range must cover >= 3 msgs");
-    }
-
-    #[test]
-    fn find_compact_skips_system_boundary() {
-        let msgs = vec![
-            user(&"x".repeat(3000)),
-            assistant(&"y".repeat(3000)),
-            system("mid-system-break"),
-            user(&"a".repeat(3000)),
-            assistant(&"b".repeat(3000)),
-            user(&"c".repeat(3000)),
-            assistant(&"d".repeat(3000)),
-            user("tail"),
-        ];
-        let range = find_compact_range(&msgs, 500).expect("expected range");
-        assert!(
-            range.start >= 3,
-            "must start after mid-system, got {range:?}"
-        );
     }
 
     #[test]
@@ -595,7 +575,7 @@ mod tests {
 
     #[test]
     fn format_slice_for_summary_truncates_long_tool_input() {
-        let long_input = serde_json::json!({"content": "x".repeat(2000)});
+        let long_input = serde_json::json!({"content": "x".repeat(5000)});
         let slice = vec![assistant_with_tool_use("check", "fs.write", long_input)];
         let out = format_slice_for_summary(&slice);
         let tool_call_line = out
@@ -603,7 +583,7 @@ mod tests {
             .find(|l| l.contains("tool_call"))
             .unwrap_or_else(|| panic!("no tool_call line in {out}"));
         assert!(
-            tool_call_line.chars().count() < 1200,
+            tool_call_line.chars().count() < 2200,
             "tool_call line not truncated: {tool_call_line}"
         );
     }
@@ -650,40 +630,71 @@ mod tests {
     }
 
     #[test]
-    fn find_compact_range_still_treats_plain_system_as_barrier() {
+    fn find_compact_starts_from_last_summary() {
         let msgs = vec![
-            user(&"x".repeat(3000)),
-            assistant(&"y".repeat(3000)),
-            system("plain system break"),
-            user(&"a".repeat(3000)),
-            assistant(&"b".repeat(3000)),
-            user(&"c".repeat(3000)),
-            assistant(&"d".repeat(3000)),
-            user("tail"),
+            user("a"),
+            assistant("b"),
+            system(
+                "[atman: compacted 2 messages]\nsummary 1\n[atman:compact seq_start=0 seq_end=1 count=2]",
+            ),
+            user("c"),
+            assistant("d"),
+            user("e"),
         ];
-        let range = find_compact_range(&msgs, 500).expect("expected range");
-        assert!(
-            range.start >= 3,
-            "must start after the plain system barrier, got {range:?}"
-        );
+        let range = find_compact_range(&msgs, 10).expect("expected range");
+        assert_eq!(range.start, 2, "should start from last summary");
+        assert_eq!(range.end, 4, "should end at len-2");
     }
 
     #[test]
-    fn find_compact_range_treats_tool_use_as_barrier() {
+    fn find_compact_starts_from_zero_without_summary() {
         let msgs = vec![
-            user(&"x".repeat(3000)),
-            assistant_with_tool_use("thinking", "fs.read", serde_json::json!({"path": "/tmp"})),
-            tool_result("call_1", "file content", false),
-            user(&"a".repeat(3000)),
-            assistant(&"b".repeat(3000)),
-            user(&"c".repeat(3000)),
-            assistant(&"d".repeat(3000)),
-            user("tail"),
+            user("a"),
+            assistant("b"),
+            user("c"),
+            assistant("d"),
+            user("e"),
         ];
-        let range = find_compact_range(&msgs, 500).expect("expected range");
-        assert!(
-            range.start >= 3,
-            "must start after the tool_use/tool_result pair, got {range:?}"
-        );
+        let range = find_compact_range(&msgs, 10).expect("expected range");
+        assert_eq!(range.start, 0, "should start from 0 without summary");
+        assert_eq!(range.end, 3, "should end at len-2");
+    }
+
+    #[test]
+    fn filter_orphan_tool_messages_removes_orphan_results() {
+        use crate::message::{Message, MessagePart, MessageRole};
+        let turn = TurnId::now();
+        let msgs = vec![
+            Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "orphan".into(),
+                    content: "no matching use".into(),
+                    is_error: false,
+                }],
+                turn_id: turn.clone(),
+            },
+            Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "call_1".into(),
+                    name: "fs.read".into(),
+                    input: serde_json::json!({}),
+                }],
+                turn_id: turn.clone(),
+            },
+            Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+                turn_id: turn,
+            },
+        ];
+        let mut filtered = msgs;
+        filter_orphan_tool_messages(&mut filtered);
+        assert_eq!(filtered.len(), 2, "orphan result should be removed");
     }
 }
