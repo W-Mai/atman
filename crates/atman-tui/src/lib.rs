@@ -387,6 +387,10 @@ async fn run_frames(
                                         == crate::output::COLLAPSED_CARD_FULLSCREEN_KEY
                                     {
                                         app.open_workflow_viewer(panel_idx);
+                                    } else if node_id
+                                        == crate::output::TERMINAL_FULLSCREEN_KEY
+                                    {
+                                        app.open_terminal_viewer(panel_idx);
                                     } else if node_id.is_empty() {
                                         app.toggle_workflow_panel_expansion(panel_idx);
                                     } else {
@@ -410,11 +414,7 @@ async fn run_frames(
                                     && let Some(crate::app::OutputItem::Terminal { .. }) =
                                         app.items.get(idx)
                                 {
-                                    if me.modifiers.contains(KeyModifiers::SHIFT) {
-                                        app.open_terminal_viewer(idx);
-                                    } else {
-                                        app.toggle_terminal_expand(idx);
-                                    }
+                                    app.toggle_terminal_expand(idx);
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::Bash { .. }) =
                                         app.items.get(idx)

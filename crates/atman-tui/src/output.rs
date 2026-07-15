@@ -506,7 +506,23 @@ pub fn render_item_with_regions(
             ctx.panel_width,
         )
     } else {
-        (render_item(item, ctx), Vec::new())
+        let lines = render_item(item, ctx);
+        let regions = if matches!(item, OutputItem::Terminal { .. } | OutputItem::Bash { .. })
+            && lines.len() >= 2
+        {
+            let panel_width = ctx.panel_width as usize;
+            vec![NodeRegion {
+                panel_item_index: 0,
+                path_key: TERMINAL_FULLSCREEN_KEY.to_string(),
+                start_row: 1,
+                end_row: 2,
+                col_start: panel_width.saturating_sub(6) as u16,
+                col_end: panel_width as u16,
+            }]
+        } else {
+            Vec::new()
+        };
+        (lines, regions)
     }
 }
 
@@ -1714,6 +1730,7 @@ fn collect_stats(nodes: &[atman_runtime::workflow::WorkflowNode], acc: &mut Work
 }
 
 pub const COLLAPSED_CARD_FULLSCREEN_KEY: &str = "__collapsed_card_fullscreen__";
+pub const TERMINAL_FULLSCREEN_KEY: &str = "__terminal_fullscreen__";
 
 fn collect_all_leaves(
     nodes: &[atman_runtime::workflow::WorkflowNode],
