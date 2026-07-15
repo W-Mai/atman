@@ -328,7 +328,7 @@ fn item_content_hash(
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let mut buf = String::new();
+    let _buf = String::new();
     match item {
         OutputItem::UserTurn { text } => {
             0u8.hash(&mut h);
@@ -369,13 +369,8 @@ fn item_content_hash(
         } => {
             5u8.hash(&mut h);
             turn_index.hash(&mut h);
-            buf.clear();
-            use std::fmt::Write;
-            let _ = write!(buf, "{:?}", graph);
-            str_fp(&buf).hash(&mut h);
-            buf.clear();
-            let _ = write!(buf, "{:?}", expanded_nodes);
-            str_fp(&buf).hash(&mut h);
+            graph.root.len().hash(&mut h);
+            expanded_nodes.len().hash(&mut h);
             panel_expanded.hash(&mut h);
             started_at.hash(&mut h);
             ended_at.hash(&mut h);
@@ -397,11 +392,10 @@ fn item_content_hash(
         } => {
             7u8.hash(&mut h);
             handle.hash(&mut h);
-            buf.clear();
-            use std::fmt::Write;
-            let _ = write!(buf, "{:?}", screen);
-            str_fp(&buf).hash(&mut h);
-            str_fp(std::str::from_utf8(accumulated_bytes).unwrap_or("")).hash(&mut h);
+            screen.rows.hash(&mut h);
+            screen.cols.hash(&mut h);
+            screen.alt_screen.hash(&mut h);
+            accumulated_bytes.len().hash(&mut h);
             format!("{:?}", mode).hash(&mut h);
             done.hash(&mut h);
             expanded.hash(&mut h);
