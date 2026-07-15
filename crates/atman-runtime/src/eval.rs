@@ -1063,6 +1063,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             if let Some(fb) = fallback_expr {
                 return eval_expr(fb, env, ctx).await;
             }
+            if let Some(session) = ctx.session {
+                crate::compaction::maybe_auto_compact(session, &model, ctx.providers).await;
+            }
             Value::Err(last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into())))
         }
         Node::UserConfirm { msg } => {
