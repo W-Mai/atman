@@ -502,14 +502,14 @@ impl Tool for TermSpawn {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Spawn a PTY-backed shell. Interactive TUI apps (vim/top/ssh) run inside. Returns handle + initial screen. Use term.input/capture/resize/kill to manage.",
+            "Spawn a PTY-backed interactive terminal. Supports TUI apps (vim, top, ssh, codex).\nReturns handle + state + dimensions. Does NOT return screen content — use\nterm.capture to read the screen.\n\nTypical flow:\n1. term.spawn(cmd: \"your command\", rows: 24, cols: 80)\n2. term.input(handle: \"...\", text: \"ls -la\") or key: \"enter\"\n3. term.capture(handle: \"...\") — returns screen as text by default\n4. Repeat 2-3 as needed\n5. term.kill(handle: \"...\")",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "cmd": {"type": "string", "description": "Command to run. Omit for bare shell."},
+                "cmd": {"type": "string"},
                 "rows": {"type": "integer", "default": 24},
                 "cols": {"type": "integer", "default": 80},
                 "cwd": {"type": "string"},
@@ -629,11 +629,9 @@ async fn spawn_impl(
         ctx.stream_tx.clone(),
     )?;
 
-    let screen = entry.snapshot();
     let state = entry.current_state();
     Ok(Value::Struct(vec![
         ("handle".into(), Value::Str(handle.to_string())),
-        ("screen".into(), screen_to_value(&screen)),
         ("state".into(), state_to_value(&state)),
         ("rows".into(), Value::Int(rows as i64)),
         ("cols".into(), Value::Int(cols as i64)),
@@ -768,7 +766,7 @@ impl Tool for TermInput {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Send input to a terminal's PTY. Pass `text` for literal text, or `key` for a special key. Keys: enter, tab, esc, backspace, up, down, left, right, ctrl+c, ctrl+d, ctrl+z.",
+            "Send input to a terminal's PTY. Use `text` for literal text, or `key` for\nspecial keys (enter, tab, esc, backspace, up, down, left, right, ctrl+c,\nctrl+d, ctrl+z). Use key: \"enter\" to submit a command, not text: \"\\r\".",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -848,7 +846,7 @@ impl Tool for TermCapture {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Snapshot the current terminal screen. format=text returns plain text; format=screen returns full cell grid.",
+            "Read the terminal screen. Default returns plain text (format: \"text\").\nUse start_row/end_row to read only part of the screen — e.g. last 5 rows\nto check the prompt or command output without wasting context.\n\nBest practices:\n- After sending a command, capture to see the result.\n- Use start_row/end_row to read only the relevant part (e.g. last 10 rows).\n- format: \"screen\" returns full cell data with colors/styles — rarely needed,\n  only use when you need to inspect TUI layout or colors.\n- Default format: \"text\" is sufficient for most cases (reading command output,\n  checking prompts, seeing error messages).",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -856,7 +854,9 @@ impl Tool for TermCapture {
             "type": "object",
             "properties": {
                 "handle": {"type": "string"},
-                "format": {"type": "string", "enum": ["text", "screen"], "default": "text"}
+                "format": {"type": "string", "enum": ["text", "screen"], "default": "text"},
+                "start_row": {"type": "integer", "default": 0, "description": "Start row (0-based). Default 0."},
+                "end_row": {"type": "integer", "description": "End row (exclusive). Default: full height."}
             },
             "required": ["handle"]
         })
@@ -875,6 +875,12 @@ impl Tool for TermCapture {
             let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
             let entry = registry.lookup(&handle, &session_id)?;
             let screen = entry.snapshot();
+            let start_row = extract_optional_int(&args, "start_row")
+                .unwrap_or(0)
+                .clamp(0, screen.rows as i64) as u16;
+            let end_row = extract_optional_int(&args, "end_row")
+                .unwrap_or(screen.rows as i64)
+                .clamp(start_row as i64, screen.rows as i64) as u16;
             let state = entry.current_state();
             let mut fields = vec![
                 ("handle".into(), Value::Str(handle.clone())),
@@ -883,10 +889,33 @@ impl Tool for TermCapture {
                 ("cols".into(), Value::Int(screen.cols as i64)),
             ];
             if format == "screen" {
-                fields.push(("screen".into(), screen_to_value(&screen)));
+                let cols = screen.cols as usize;
+                let start = start_row as usize * cols;
+                let end = end_row as usize * cols;
+                let cursor = screen.cursor.and_then(|(row, col)| {
+                    (start_row..end_row)
+                        .contains(&row)
+                        .then_some((row - start_row, col))
+                });
+                let partial_screen = TerminalScreen {
+                    rows: end_row - start_row,
+                    cols: screen.cols,
+                    cells: screen.cells[start..end].to_vec(),
+                    cursor,
+                    alt_screen: screen.alt_screen,
+                };
+                fields[2] = ("rows".into(), Value::Int(partial_screen.rows as i64));
+                fields.push(("screen".into(), screen_to_value(&partial_screen)));
             } else {
                 let parser = entry.parser.lock().expect("parser poisoned");
-                fields.push(("text".into(), Value::Str(parser.screen().contents())));
+                let text = parser
+                    .screen()
+                    .rows(0, screen.cols)
+                    .skip(start_row as usize)
+                    .take((end_row - start_row) as usize)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                fields.push(("text".into(), Value::Str(text)));
             }
             Ok(Value::Struct(fields))
         })

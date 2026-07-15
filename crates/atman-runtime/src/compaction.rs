@@ -71,15 +71,35 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
     if end < start + 2 {
         return None;
     }
-    let tokens_saved: u64 = messages[start..end]
-        .iter()
-        .map(estimate_tokens_for_message)
-        .sum();
-    Some(CompactRange {
-        start,
-        end,
-        tokens_saved_estimate: tokens_saved,
-    })
+    let mut best: Option<CompactRange> = None;
+    let mut idx = start;
+    while idx < end {
+        while idx < end && is_plan_related(&messages[idx]) {
+            idx += 1;
+        }
+        let segment_start = idx;
+        while idx < end && !is_plan_related(&messages[idx]) {
+            idx += 1;
+        }
+        if idx >= segment_start + 2 {
+            let tokens_saved = messages[segment_start..idx]
+                .iter()
+                .map(estimate_tokens_for_message)
+                .sum();
+            let candidate = CompactRange {
+                start: segment_start,
+                end: idx,
+                tokens_saved_estimate: tokens_saved,
+            };
+            if best
+                .as_ref()
+                .is_none_or(|range| candidate.tokens_saved_estimate > range.tokens_saved_estimate)
+            {
+                best = Some(candidate);
+            }
+        }
+    }
+    best
 }
 
 pub fn filter_orphan_tool_messages(messages: &mut Vec<Message>) {
