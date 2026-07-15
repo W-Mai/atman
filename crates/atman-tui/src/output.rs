@@ -680,11 +680,16 @@ impl LayoutCache {
         }
 
         self.key = Some(key);
-        self.lines = visible_lines.clone();
-        self.ranges = visible_ranges.clone();
-        self.node_regions = visible_regions.clone();
         self.total_rows = total_rows;
         (visible_lines, visible_ranges, visible_regions, total_rows)
+    }
+
+    pub fn take_cached(&mut self) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>) {
+        (
+            std::mem::take(&mut self.lines),
+            std::mem::take(&mut self.ranges),
+            std::mem::take(&mut self.node_regions),
+        )
     }
 
     pub fn cached_total_rows(&self) -> u16 {

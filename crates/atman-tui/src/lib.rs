@@ -2240,14 +2240,14 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         f.render_widget(ratatui::widgets::Clear, l.transcript);
         f.render_widget(output::empty_hint(), transcript_area);
     } else {
-        let messages = app
-            .session
-            .as_ref()
-            .map(|s| s.messages())
-            .unwrap_or_default();
+        let messages_lock = app.session.as_ref().map(|s| s.messages_handle());
+        let messages_guard = messages_lock.as_ref().and_then(|h| h.lock().ok());
+        let empty_messages: Vec<atman_runtime::message::Message> = Vec::new();
+        let messages: &[atman_runtime::message::Message] =
+            messages_guard.as_deref().unwrap_or(&empty_messages);
         let ctx = output::RenderCtx {
             expanded_tools: &app.expanded_tools,
-            messages: &messages,
+            messages,
             animation_frame: app.animation_frame,
             panel_width: transcript_area.width,
             hovered_thinking_idx: app.hovered_thinking_idx,
@@ -2276,8 +2276,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             scroll_before,
             effective_viewport,
         );
-        app.last_item_ranges = ranges.clone();
-        app.last_node_regions = node_regions.clone();
+        app.last_item_ranges = ranges;
+        app.last_node_regions = node_regions;
         app.layout_cache = cache;
         app.resolve_scroll(total_rows, effective_viewport);
         let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
