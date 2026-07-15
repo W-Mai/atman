@@ -289,13 +289,14 @@ pub fn build_lines_with_ranges(
             r.start_row = cursor.saturating_add(wrapped_start);
             r.end_row = cursor.saturating_add(wrapped_end);
         }
-        node_regions.extend(item_regions);
+        node_regions.extend(item_regions.iter().cloned());
         cursor = cursor.saturating_add(rows);
         all_lines.extend(item_lines.clone());
         item_cache[idx] = Some(ItemCacheEntry {
             content_hash,
             lines: Arc::from(item_lines),
             rows,
+            regions: item_regions,
         });
         if !matches!(kind, ItemKind::StartupCard) {
             prev_kind = Some(kind);
@@ -521,6 +522,7 @@ pub struct ItemCacheEntry {
     content_hash: u64,
     lines: Arc<[Line<'static>]>,
     rows: u16,
+    regions: Vec<NodeRegion>,
 }
 
 impl LayoutCache {
@@ -580,12 +582,13 @@ impl LayoutCache {
                     None
                 },
             };
-            let (item_lines, _) = render_item_with_regions(item, &item_ctx);
+            let (item_lines, item_regions) = render_item_with_regions(item, &item_ctx);
             let (new_rows, _) = wrap_row_offsets(&item_lines, key.width);
             self.item_cache[idx] = Some(ItemCacheEntry {
                 content_hash,
                 lines: Arc::from(item_lines),
                 rows: new_rows,
+                regions: item_regions,
             });
             self.item_rows[idx] = new_rows;
             // Incremental total_rows adjustment
@@ -641,12 +644,13 @@ impl LayoutCache {
                 panel_width: ctx.panel_width,
                 hovered_thinking_idx: None,
             };
-            let (item_lines, _) = render_item_with_regions(item, &item_ctx);
+            let (item_lines, item_regions) = render_item_with_regions(item, &item_ctx);
             let (rows, _) = wrap_row_offsets(&item_lines, key.width);
             self.item_cache[idx] = Some(ItemCacheEntry {
                 content_hash,
                 lines: Arc::from(item_lines),
                 rows,
+                regions: item_regions,
             });
             self.item_rows[idx] = rows;
         }
@@ -654,7 +658,7 @@ impl LayoutCache {
         // Build visible lines: only clone items in [vis_top, vis_bot)
         let mut visible_lines: Vec<Line<'static>> = Vec::new();
         let mut visible_ranges: Vec<ItemRange> = Vec::new();
-        let visible_regions: Vec<NodeRegion> = Vec::new();
+        let mut visible_regions: Vec<NodeRegion> = Vec::new();
         cursor = 0;
         for (idx, _) in items.iter().enumerate() {
             let entry = match self.item_cache[idx].as_ref() {
@@ -677,6 +681,16 @@ impl LayoutCache {
                 start_row: start,
                 end_row: end,
             });
+            for r in &entry.regions {
+                visible_regions.push(NodeRegion {
+                    panel_item_index: idx,
+                    path_key: r.path_key.clone(),
+                    start_row: r.start_row.saturating_add(start),
+                    end_row: r.end_row.saturating_add(start),
+                    col_start: r.col_start,
+                    col_end: r.col_end,
+                });
+            }
         }
 
         self.key = Some(key);
