@@ -1603,6 +1603,7 @@ pub fn render_workflow_panel_with_regions(
                 animation_frame,
                 running,
                 &mut pending_counter,
+                None,
             );
         }
         lines.push(Line::raw(""));
@@ -1802,6 +1803,15 @@ fn render_collapsed_workflow_card(
             visible.insert(path[..i].to_vec());
         }
     }
+    let visible_str: std::collections::HashSet<String> = visible
+        .iter()
+        .map(|p| {
+            p.iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect();
     let mut visible_nodes: Vec<(&atman_runtime::workflow::WorkflowNode, Vec<usize>)> = Vec::new();
     collect_visible_nodes(&graph.root, &visible, &mut Vec::new(), &mut visible_nodes);
     let top_level: Vec<&atman_runtime::workflow::WorkflowNode> = visible_nodes
@@ -1828,6 +1838,7 @@ fn render_collapsed_workflow_card(
             animation_frame,
             running,
             &mut pending_counter,
+            Some(&visible_str),
         );
     }
     apply_lens_fade(&mut body_lines);
@@ -2131,6 +2142,7 @@ fn append_workflow_node_boxed(
     animation_frame: u32,
     flow_running: bool,
     pending_counter: &mut u8,
+    visible_paths: Option<&std::collections::HashSet<String>>,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
     let depth = ancestor_last.len() as u16;
@@ -2281,6 +2293,11 @@ fn append_workflow_node_boxed(
     }
     for (i, child) in node.children.iter().enumerate() {
         let child_path = format!("{path}/{i}");
+        if let Some(vp) = visible_paths {
+            if !vp.contains(&child_path) {
+                continue;
+            }
+        }
         let child_is_last = i + 1 == child_count;
         append_workflow_node_boxed(
             out,
@@ -2294,6 +2311,7 @@ fn append_workflow_node_boxed(
             animation_frame,
             flow_running,
             pending_counter,
+            visible_paths,
         );
     }
 }
@@ -2336,6 +2354,7 @@ fn append_fanout_horizontal_boxed(
             animation_frame,
             flow_running,
             pending_counter,
+            None,
         );
         per_branch_lines.push(b_lines);
         per_branch_regions.push(b_regions);
