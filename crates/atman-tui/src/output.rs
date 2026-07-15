@@ -540,8 +540,10 @@ impl LayoutCache {
         }
 
         // Bottom-up: walk from last item backwards, rendering/caching only
-        // items needed to fill viewport_rows + scroll_offset. No full scan.
-        let budget = viewport_rows.saturating_add(scroll_offset);
+        const PRELOAD_ROWS: u16 = 20;
+        let budget = viewport_rows
+            .saturating_add(scroll_offset)
+            .saturating_add(PRELOAD_ROWS);
         let mut accumulated: u16 = 0;
         let mut start_idx = items.len();
 
