@@ -2264,17 +2264,19 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             animation_frame: animation_key,
         };
         let mut cache = std::mem::take(&mut app.layout_cache);
-        let (lines, ranges, node_regions, total_rows) =
-            cache.get_or_build(cache_key, &app.items, &ctx);
-        app.last_item_ranges = ranges.to_vec();
-        app.last_node_regions = node_regions.to_vec();
-        let lines_owned = lines.to_vec();
+        let scroll_before = app.scroll_offset;
+        let (lines, ranges, node_regions, total_rows) = cache.get_or_build(
+            cache_key,
+            &app.items,
+            &ctx,
+            scroll_before,
+            effective_viewport,
+        );
+        app.last_item_ranges = ranges.clone();
+        app.last_node_regions = node_regions.clone();
         app.layout_cache = cache;
         app.resolve_scroll(total_rows, effective_viewport);
-        // No .wrap(): WordWrapper reflows every line 0..scroll.y each frame.
-        // Truncator (no-wrap) skips lazily, trading long-line wrap for speed.
-        let paragraph =
-            ratatui::widgets::Paragraph::new(lines_owned).scroll((app.scroll_offset, 0));
+        let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
         f.render_widget(paragraph, transcript_area);
     }
     if let Some(area) = sidebar_rect {

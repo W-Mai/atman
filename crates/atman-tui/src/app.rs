@@ -1425,7 +1425,8 @@ mod terminal_e2e_tests {
             animation_frame: 0,
         };
         let mut cache = LayoutCache::default();
-        let (lines, _ranges, _regions, _total) = cache.get_or_build(cache_key, &app.items, &ctx);
+        let (lines, _ranges, _regions, _total) =
+            cache.get_or_build(cache_key, &app.items, &ctx, 0, 50);
         assert!(
             lines.len() > 2,
             "should render header + blank + screen rows"

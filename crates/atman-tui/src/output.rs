@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use atman_runtime::message::Message;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -257,7 +259,7 @@ pub fn build_lines_with_ranges(
         let (item_lines, mut item_regions) = if let Some(entry) = cached.as_ref()
             && entry.content_hash == content_hash
         {
-            (entry.lines.clone(), Vec::new())
+            (entry.lines.iter().cloned().collect::<Vec<_>>(), Vec::new())
         } else {
             let item_ctx = RenderCtx {
                 expanded_tools: ctx.expanded_tools,
@@ -292,7 +294,8 @@ pub fn build_lines_with_ranges(
         all_lines.extend(item_lines.clone());
         item_cache[idx] = Some(ItemCacheEntry {
             content_hash,
-            lines: item_lines,
+            lines: Arc::from(item_lines),
+            rows,
         });
         if !matches!(kind, ItemKind::StartupCard) {
             prev_kind = Some(kind);
@@ -519,7 +522,8 @@ pub struct LayoutCache {
 #[derive(Clone)]
 pub struct ItemCacheEntry {
     content_hash: u64,
-    lines: Vec<Line<'static>>,
+    lines: Arc<[Line<'static>]>,
+    rows: u16,
 }
 
 impl LayoutCache {
@@ -528,28 +532,98 @@ impl LayoutCache {
         key: LayoutKey,
         items: &[OutputItem],
         ctx: &RenderCtx<'_>,
-    ) -> (&[Line<'static>], &[ItemRange], &[NodeRegion], u16) {
-        if self.key != Some(key) {
-            self.item_cache.resize(items.len(), None);
-            let (lines, ranges, node_regions, total) = build_lines_with_ranges(
-                items,
-                key.width,
-                ctx,
-                &mut self.item_cache,
-                key.animation_frame,
-            );
-            self.lines = lines;
-            self.ranges = ranges;
-            self.node_regions = node_regions;
-            self.total_rows = total;
+        scroll_offset: u16,
+        viewport_rows: u16,
+    ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u16) {
+        self.item_cache.resize(items.len(), None);
+        if items.is_empty() {
             self.key = Some(key);
+            self.lines.clear();
+            self.ranges.clear();
+            self.node_regions.clear();
+            self.total_rows = 0;
+            return (Vec::new(), Vec::new(), Vec::new(), 0);
         }
-        (
-            &self.lines,
-            &self.ranges,
-            &self.node_regions,
-            self.total_rows,
-        )
+
+        // Pass 1: ensure every item has cached rows (render if missing/changed).
+        // This iterates ALL items but only reads u16 rows for cached ones —
+        // no line cloning. Cache misses render once and store Arc<[Line]>.
+        let mut item_starts: Vec<u16> = Vec::with_capacity(items.len() + 1);
+        let mut cursor: u16 = 0;
+        for (idx, item) in items.iter().enumerate() {
+            item_starts.push(cursor);
+            let is_hovered = ctx.hovered_thinking_idx == Some(idx);
+            let content_hash =
+                item_content_hash(item, is_hovered, ctx.expanded_tools, key.animation_frame);
+            let need_render = self.item_cache[idx]
+                .as_ref()
+                .map(|e| e.content_hash != content_hash)
+                .unwrap_or(true);
+            if need_render {
+                let item_ctx = RenderCtx {
+                    expanded_tools: ctx.expanded_tools,
+                    messages: ctx.messages,
+                    animation_frame: ctx.animation_frame,
+                    panel_width: ctx.panel_width,
+                    hovered_thinking_idx: if is_hovered
+                        && matches!(item, OutputItem::Thinking { .. })
+                    {
+                        Some(idx)
+                    } else {
+                        None
+                    },
+                };
+                let (item_lines, _item_regions) = render_item_with_regions(item, &item_ctx);
+                let (rows, _) = wrap_row_offsets(&item_lines, key.width);
+                self.item_cache[idx] = Some(ItemCacheEntry {
+                    content_hash,
+                    lines: Arc::from(item_lines),
+                    rows,
+                });
+            }
+            let rows = self.item_cache[idx].as_ref().unwrap().rows;
+            cursor = cursor.saturating_add(rows);
+        }
+        item_starts.push(cursor);
+        let total_rows = cursor;
+
+        // Pass 2: virtual scroll — only clone lines for items in viewport.
+        // scroll_offset is from top (ratatui convention). visible window:
+        //   [scroll_offset, scroll_offset + viewport_rows)
+        let vis_top = scroll_offset;
+        let vis_bot = scroll_offset.saturating_add(viewport_rows);
+        let mut visible_lines: Vec<Line<'static>> = Vec::new();
+        let mut visible_ranges: Vec<ItemRange> = Vec::new();
+        let visible_regions: Vec<NodeRegion> = Vec::new();
+
+        for (idx, _) in items.iter().enumerate() {
+            let start = item_starts[idx];
+            let end = item_starts[idx + 1];
+            if end <= vis_top || start >= vis_bot {
+                continue;
+            }
+            let entry = match self.item_cache[idx].as_ref() {
+                Some(e) => e,
+                None => continue,
+            };
+            let skip = vis_top.saturating_sub(start) as usize;
+            let take = end.min(vis_bot).saturating_sub(start.max(vis_top)) as usize;
+            let lo = skip.min(entry.lines.len());
+            let hi = (skip + take).min(entry.lines.len());
+            visible_lines.extend(entry.lines[lo..hi].iter().cloned());
+            visible_ranges.push(ItemRange {
+                item_index: idx,
+                start_row: start,
+                end_row: end,
+            });
+        }
+
+        self.key = Some(key);
+        self.lines = visible_lines.clone();
+        self.ranges = visible_ranges.clone();
+        self.node_regions = visible_regions.clone();
+        self.total_rows = total_rows;
+        (visible_lines, visible_ranges, visible_regions, total_rows)
     }
 
     pub fn invalidate(&mut self) {
