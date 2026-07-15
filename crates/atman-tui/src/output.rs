@@ -511,6 +511,9 @@ pub struct LayoutCache {
     node_regions: Vec<NodeRegion>,
     total_rows: u16,
     item_cache: Vec<Option<ItemCacheEntry>>,
+    cached_total_rows: u16,
+    item_rows: Vec<u16>,
+    cached_items_len: usize,
 }
 
 #[derive(Clone)]
@@ -529,8 +532,11 @@ impl LayoutCache {
         scroll_offset: u16,
         viewport_rows: u16,
     ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u16) {
-        self.item_cache.resize(items.len(), None);
         if items.is_empty() {
+            self.item_cache.clear();
+            self.item_rows.clear();
+            self.cached_total_rows = 0;
+            self.cached_items_len = 0;
             self.key = Some(key);
             self.lines.clear();
             self.ranges.clear();
@@ -539,9 +545,18 @@ impl LayoutCache {
             return (Vec::new(), Vec::new(), Vec::new(), 0);
         }
 
-        // Full scan: ensure every item is cached (render if needed), sum rows.
-        // No line cloning — only reads u16 rows + stores Arc<[Line]> on miss.
-        let mut total_rows: u16 = 0;
+        // Resize caches if item count changed
+        if items.len() != self.cached_items_len {
+            let old_len = self.item_rows.len();
+            self.item_cache.resize(items.len(), None);
+            self.item_rows.resize(items.len(), 0);
+            // New items have rows=0, will be rendered below
+            self.cached_items_len = items.len();
+            let _ = old_len;
+        }
+
+        // Incremental update: only render items whose content_hash changed.
+        // Adjust cached_total_rows by the row delta.
         for (idx, item) in items.iter().enumerate() {
             let is_hovered = ctx.hovered_thinking_idx == Some(idx);
             let content_hash =
@@ -550,39 +565,97 @@ impl LayoutCache {
                 .as_ref()
                 .map(|e| e.content_hash != content_hash)
                 .unwrap_or(true);
-            if need_render {
-                let item_ctx = RenderCtx {
-                    expanded_tools: ctx.expanded_tools,
-                    messages: ctx.messages,
-                    animation_frame: ctx.animation_frame,
-                    panel_width: ctx.panel_width,
-                    hovered_thinking_idx: if is_hovered
-                        && matches!(item, OutputItem::Thinking { .. })
-                    {
-                        Some(idx)
-                    } else {
-                        None
-                    },
-                };
-                let (item_lines, _) = render_item_with_regions(item, &item_ctx);
-                let (rows, _) = wrap_row_offsets(&item_lines, key.width);
-                self.item_cache[idx] = Some(ItemCacheEntry {
-                    content_hash,
-                    lines: Arc::from(item_lines),
-                    rows,
-                });
+            if !need_render {
+                continue;
             }
-            let rows = self.item_cache[idx].as_ref().unwrap().rows;
-            total_rows = total_rows.saturating_add(rows);
+            let old_rows = self.item_rows[idx];
+            let item_ctx = RenderCtx {
+                expanded_tools: ctx.expanded_tools,
+                messages: ctx.messages,
+                animation_frame: ctx.animation_frame,
+                panel_width: ctx.panel_width,
+                hovered_thinking_idx: if is_hovered && matches!(item, OutputItem::Thinking { .. }) {
+                    Some(idx)
+                } else {
+                    None
+                },
+            };
+            let (item_lines, _) = render_item_with_regions(item, &item_ctx);
+            let (new_rows, _) = wrap_row_offsets(&item_lines, key.width);
+            self.item_cache[idx] = Some(ItemCacheEntry {
+                content_hash,
+                lines: Arc::from(item_lines),
+                rows: new_rows,
+            });
+            self.item_rows[idx] = new_rows;
+            // Incremental total_rows adjustment
+            self.cached_total_rows = self
+                .cached_total_rows
+                .saturating_sub(old_rows)
+                .saturating_add(new_rows);
         }
 
-        // Virtual scroll: absolute coordinates. Only clone lines in viewport.
-        let vis_top = total_rows.saturating_sub(scroll_offset.saturating_add(viewport_rows));
-        let vis_bot = total_rows.saturating_sub(scroll_offset);
+        let total_rows = self.cached_total_rows;
+
+        // Virtual scroll: absolute coordinates. vis_top from top.
+        let vis_top = scroll_offset;
+        let vis_bot = scroll_offset.saturating_add(viewport_rows);
+
+        // Two-pass: first pass walks from vis_top backwards to preload
+        // PRELOAD_BLOCKS items above viewport. Second pass clones only
+        // viewport lines.
+        const PRELOAD_BLOCKS: usize = 3;
+
+        // Find the item index where vis_top falls, and preload above it
+        let mut cursor: u16 = 0;
+        let mut vis_start_idx: usize = 0;
+        for (idx, _) in items.iter().enumerate() {
+            let rows = self.item_rows[idx];
+            let end = cursor.saturating_add(rows);
+            if end > vis_top {
+                vis_start_idx = idx;
+                break;
+            }
+            cursor = end;
+            vis_start_idx = idx + 1;
+        }
+
+        // Ensure preloaded items above vis_start_idx are cached
+        let preload_start = vis_start_idx.saturating_sub(PRELOAD_BLOCKS);
+        for (idx, item) in items
+            .iter()
+            .enumerate()
+            .skip(preload_start)
+            .take(vis_start_idx.saturating_sub(preload_start))
+        {
+            if self.item_cache[idx].is_some() {
+                continue;
+            }
+            let is_hovered = ctx.hovered_thinking_idx == Some(idx);
+            let content_hash =
+                item_content_hash(item, is_hovered, ctx.expanded_tools, key.animation_frame);
+            let item_ctx = RenderCtx {
+                expanded_tools: ctx.expanded_tools,
+                messages: ctx.messages,
+                animation_frame: ctx.animation_frame,
+                panel_width: ctx.panel_width,
+                hovered_thinking_idx: None,
+            };
+            let (item_lines, _) = render_item_with_regions(item, &item_ctx);
+            let (rows, _) = wrap_row_offsets(&item_lines, key.width);
+            self.item_cache[idx] = Some(ItemCacheEntry {
+                content_hash,
+                lines: Arc::from(item_lines),
+                rows,
+            });
+            self.item_rows[idx] = rows;
+        }
+
+        // Build visible lines: only clone items in [vis_top, vis_bot)
         let mut visible_lines: Vec<Line<'static>> = Vec::new();
         let mut visible_ranges: Vec<ItemRange> = Vec::new();
         let visible_regions: Vec<NodeRegion> = Vec::new();
-        let mut cursor: u16 = 0;
+        cursor = 0;
         for (idx, _) in items.iter().enumerate() {
             let entry = match self.item_cache[idx].as_ref() {
                 Some(e) => e,
@@ -605,13 +678,17 @@ impl LayoutCache {
                 end_row: end,
             });
         }
-        let _ = viewport_rows;
+
         self.key = Some(key);
         self.lines = visible_lines.clone();
         self.ranges = visible_ranges.clone();
         self.node_regions = visible_regions.clone();
         self.total_rows = total_rows;
         (visible_lines, visible_ranges, visible_regions, total_rows)
+    }
+
+    pub fn cached_total_rows(&self) -> u16 {
+        self.cached_total_rows
     }
 
     pub fn invalidate(&mut self) {

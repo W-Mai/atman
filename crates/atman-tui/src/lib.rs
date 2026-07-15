@@ -2264,7 +2264,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             animation_frame: animation_key,
         };
         let mut cache = std::mem::take(&mut app.layout_cache);
-        let scroll_before = app.scroll_offset;
+        let scroll_before = if app.follow_tail {
+            cache.cached_total_rows().saturating_sub(effective_viewport)
+        } else {
+            app.scroll_offset
+        };
         let (lines, ranges, node_regions, total_rows) = cache.get_or_build(
             cache_key,
             &app.items,
