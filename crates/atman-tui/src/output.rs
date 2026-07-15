@@ -540,16 +540,19 @@ impl LayoutCache {
         }
 
         // Bottom-up: walk from last item backwards, rendering/caching only
-        const PRELOAD_ROWS: u16 = 20;
-        let budget = viewport_rows
-            .saturating_add(scroll_offset)
-            .saturating_add(PRELOAD_ROWS);
+        const PRELOAD_ITEMS: usize = 3;
+        let budget = viewport_rows.saturating_add(scroll_offset);
         let mut accumulated: u16 = 0;
         let mut start_idx = items.len();
 
+        let mut budget_met_at: Option<usize> = None;
         for idx in (0..items.len()).rev() {
-            if accumulated >= budget {
-                break;
+            if let Some(stop) = budget_met_at {
+                if stop - idx > PRELOAD_ITEMS {
+                    break;
+                }
+            } else if accumulated >= budget {
+                budget_met_at = Some(idx);
             }
             let item = &items[idx];
             let is_hovered = ctx.hovered_thinking_idx == Some(idx);
