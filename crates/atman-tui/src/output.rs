@@ -1710,22 +1710,20 @@ fn leaf_is_running(nodes: &[atman_runtime::workflow::WorkflowNode], path: &[usiz
     )
 }
 
-fn filter_tree_for_lens(
-    nodes: &[atman_runtime::workflow::WorkflowNode],
+fn collect_visible_nodes<'a>(
+    nodes: &'a [atman_runtime::workflow::WorkflowNode],
     visible: &std::collections::HashSet<Vec<usize>>,
     path: &mut Vec<usize>,
-) -> Vec<atman_runtime::workflow::WorkflowNode> {
-    let mut out = Vec::new();
+    out: &mut Vec<(&'a atman_runtime::workflow::WorkflowNode, Vec<usize>)>,
+) {
     for (i, n) in nodes.iter().enumerate() {
         path.push(i);
         if visible.contains(path) {
-            let mut clone = n.clone();
-            clone.children = filter_tree_for_lens(&n.children, visible, path);
-            out.push(clone);
+            out.push((n, path.clone()));
+            collect_visible_nodes(&n.children, visible, path, out);
         }
         path.pop();
     }
-    out
 }
 
 fn render_collapsed_workflow_card(
@@ -1804,12 +1802,18 @@ fn render_collapsed_workflow_card(
             visible.insert(path[..i].to_vec());
         }
     }
-    let filtered = filter_tree_for_lens(&graph.root, &visible, &mut Vec::new());
+    let mut visible_nodes: Vec<(&atman_runtime::workflow::WorkflowNode, Vec<usize>)> = Vec::new();
+    collect_visible_nodes(&graph.root, &visible, &mut Vec::new(), &mut visible_nodes);
+    let top_level: Vec<&atman_runtime::workflow::WorkflowNode> = visible_nodes
+        .iter()
+        .filter(|(_, p)| p.len() == 1)
+        .map(|(n, _)| *n)
+        .collect();
     let mut body_lines: Vec<Line<'static>> = Vec::new();
     let mut regions: Vec<NodeRegion> = Vec::new();
     let mut pending_counter: u8 = 0;
-    let child_count = filtered.len();
-    for (i, node) in filtered.iter().enumerate() {
+    let child_count = top_level.len();
+    for (i, node) in top_level.iter().enumerate() {
         let path = format!("{i}");
         let is_last = i + 1 == child_count;
         append_workflow_node_boxed(
