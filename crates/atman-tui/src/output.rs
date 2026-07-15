@@ -539,22 +539,10 @@ impl LayoutCache {
             return (Vec::new(), Vec::new(), Vec::new(), 0);
         }
 
-        // Bottom-up: walk from last item backwards, rendering/caching only
-        const PRELOAD_ITEMS: usize = 3;
-        let budget = viewport_rows.saturating_add(scroll_offset);
-        let mut accumulated: u16 = 0;
-        let mut start_idx = items.len();
-
-        let mut budget_met_at: Option<usize> = None;
-        for idx in (0..items.len()).rev() {
-            if let Some(stop) = budget_met_at {
-                if stop - idx > PRELOAD_ITEMS {
-                    break;
-                }
-            } else if accumulated >= budget {
-                budget_met_at = Some(idx);
-            }
-            let item = &items[idx];
+        // Full scan: ensure every item is cached (render if needed), sum rows.
+        // No line cloning — only reads u16 rows + stores Arc<[Line]> on miss.
+        let mut total_rows: u16 = 0;
+        for (idx, item) in items.iter().enumerate() {
             let is_hovered = ctx.hovered_thinking_idx == Some(idx);
             let content_hash =
                 item_content_hash(item, is_hovered, ctx.expanded_tools, key.animation_frame);
@@ -576,7 +564,7 @@ impl LayoutCache {
                         None
                     },
                 };
-                let (item_lines, _item_regions) = render_item_with_regions(item, &item_ctx);
+                let (item_lines, _) = render_item_with_regions(item, &item_ctx);
                 let (rows, _) = wrap_row_offsets(&item_lines, key.width);
                 self.item_cache[idx] = Some(ItemCacheEntry {
                     content_hash,
@@ -585,52 +573,39 @@ impl LayoutCache {
                 });
             }
             let rows = self.item_cache[idx].as_ref().unwrap().rows;
-            start_idx = idx;
-            accumulated = accumulated.saturating_add(rows);
+            total_rows = total_rows.saturating_add(rows);
         }
 
-        // Build visible lines: from start_idx to end, skip scroll_offset from top.
+        // Virtual scroll: absolute coordinates. Only clone lines in viewport.
+        let vis_top = total_rows.saturating_sub(scroll_offset.saturating_add(viewport_rows));
+        let vis_bot = total_rows.saturating_sub(scroll_offset);
         let mut visible_lines: Vec<Line<'static>> = Vec::new();
         let mut visible_ranges: Vec<ItemRange> = Vec::new();
         let visible_regions: Vec<NodeRegion> = Vec::new();
-        let mut skip_from_top = scroll_offset;
-        let mut abs_row = accumulated.saturating_sub(budget);
-
-        for idx in start_idx..items.len() {
+        let mut cursor: u16 = 0;
+        for (idx, _) in items.iter().enumerate() {
             let entry = match self.item_cache[idx].as_ref() {
                 Some(e) => e,
                 None => continue,
             };
-            let item_rows = entry.rows;
-            let item_start = abs_row;
-            let item_end = abs_row.saturating_add(item_rows);
-            abs_row = item_end;
-
-            if skip_from_top >= item_rows {
-                skip_from_top = skip_from_top.saturating_sub(item_rows);
+            let start = cursor;
+            let end = cursor.saturating_add(entry.rows);
+            cursor = end;
+            if end <= vis_top || start >= vis_bot {
                 continue;
             }
-            let skip = skip_from_top as usize;
-            skip_from_top = 0;
+            let skip = vis_top.saturating_sub(start) as usize;
+            let take = end.min(vis_bot).saturating_sub(start.max(vis_top)) as usize;
             let lo = skip.min(entry.lines.len());
-            visible_lines.extend(entry.lines[lo..].iter().cloned());
+            let hi = (skip + take).min(entry.lines.len());
+            visible_lines.extend(entry.lines[lo..hi].iter().cloned());
             visible_ranges.push(ItemRange {
                 item_index: idx,
-                start_row: item_start,
-                end_row: item_end,
+                start_row: start,
+                end_row: end,
             });
         }
-
-        // total_rows: use cached value if available, otherwise estimate.
-        // For follow_tail (scroll=0) this is fine. For scroll-up, we only
-        // know rows for items we've seen — approximate is OK, resolve_scroll
-        // clamps.
-        let total_rows = if scroll_offset == 0 {
-            accumulated
-        } else {
-            self.total_rows.max(accumulated)
-        };
-
+        let _ = viewport_rows;
         self.key = Some(key);
         self.lines = visible_lines.clone();
         self.ranges = visible_ranges.clone();
