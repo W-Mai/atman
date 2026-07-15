@@ -144,6 +144,9 @@ pub struct AppState {
     pub last_total_rows: u16,
     pub last_viewport_rows: u16,
     pub mouse_captured: bool,
+    pub handle_index: std::collections::HashMap<String, usize>,
+    pub running_workflow_count: u32,
+    pub last_workflow_panel_idx: Option<usize>,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
@@ -321,9 +324,7 @@ impl AppState {
     }
 
     pub fn has_running_workflow(&self) -> bool {
-        self.items
-            .iter()
-            .any(|item| matches!(item, OutputItem::WorkflowPanel { ended_at: None, .. }))
+        self.running_workflow_count > 0
     }
 
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
@@ -471,7 +472,27 @@ impl AppState {
         }
     }
 
+    fn find_item_by_handle(&self, handle: &str) -> Option<usize> {
+        let idx = *self.handle_index.get(handle)?;
+        if idx < self.items.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
     pub fn push_item(&mut self, item: OutputItem) {
+        let idx = self.items.len();
+        match &item {
+            OutputItem::Terminal { handle, .. } | OutputItem::Bash { handle, .. } => {
+                self.handle_index.insert(handle.clone(), idx);
+            }
+            OutputItem::WorkflowPanel { ended_at: None, .. } => {
+                self.running_workflow_count = self.running_workflow_count.saturating_add(1);
+                self.last_workflow_panel_idx = Some(idx);
+            }
+            _ => {}
+        }
         self.items.push(item);
         self.items_version = self.items_version.wrapping_add(1);
         self.reset_lag_state();
@@ -595,9 +616,13 @@ impl AppState {
             } => {
                 self.waiting_for_llm = false;
                 self.follow_tail = true;
-                let existing = self.items.iter_mut().rev().find(|item| {
-                    matches!(item, OutputItem::Terminal { handle: h, done: false, .. } if h == &handle)
-                });
+                let existing = self
+                    .find_item_by_handle(&handle)
+                    .and_then(|idx| match &self.items[idx] {
+                        OutputItem::Terminal { done: false, .. } => Some(idx),
+                        _ => None,
+                    })
+                    .and_then(|idx| self.items.get_mut(idx));
                 if let Some(OutputItem::Terminal {
                     screen: s,
                     accumulated_bytes: ab,
@@ -633,19 +658,23 @@ impl AppState {
                 }
             }
             StreamFrame::TerminalExited { handle, .. } => {
-                if let Some(OutputItem::Terminal { done, .. }) = self.items.iter_mut().rev().find(
-                    |item| matches!(item, OutputItem::Terminal { handle: h, .. } if h == &handle),
-                ) {
-                    *done = true;
-                    self.items_version = self.items_version.wrapping_add(1);
+                if let Some(idx) = self.find_item_by_handle(&handle) {
+                    if let Some(OutputItem::Terminal { done, .. }) = self.items.get_mut(idx) {
+                        *done = true;
+                        self.items_version = self.items_version.wrapping_add(1);
+                    }
                 }
             }
             StreamFrame::BashChunk { handle, kind, line } => {
                 self.waiting_for_llm = false;
                 self.follow_tail = true;
-                let existing = self.items.iter_mut().rev().find(|item| {
-                    matches!(item, OutputItem::Bash { handle: h, done: false, .. } if h == &handle)
-                });
+                let existing = self
+                    .find_item_by_handle(&handle)
+                    .and_then(|idx| match &self.items[idx] {
+                        OutputItem::Bash { done: false, .. } => Some(idx),
+                        _ => None,
+                    })
+                    .and_then(|idx| self.items.get_mut(idx));
                 let prefix = if kind == "stderr" { "[err] " } else { "" };
                 if let Some(OutputItem::Bash { output, .. }) = existing {
                     output.push_str(prefix);
@@ -667,13 +696,11 @@ impl AppState {
                 }
             }
             StreamFrame::BashExited { handle, .. } => {
-                if let Some(OutputItem::Bash { done, .. }) =
-                    self.items.iter_mut().rev().find(
-                        |item| matches!(item, OutputItem::Bash { handle: h, .. } if h == &handle),
-                    )
-                {
-                    *done = true;
-                    self.items_version = self.items_version.wrapping_add(1);
+                if let Some(idx) = self.find_item_by_handle(&handle) {
+                    if let Some(OutputItem::Bash { done, .. }) = self.items.get_mut(idx) {
+                        *done = true;
+                        self.items_version = self.items_version.wrapping_add(1);
+                    }
                 }
             }
             StreamFrame::Unknown => {}
@@ -727,13 +754,13 @@ impl AppState {
     }
 
     pub fn close_current_workflow_panel(&mut self) {
-        for it in self.items.iter_mut().rev() {
-            if let OutputItem::WorkflowPanel { ended_at, .. } = it {
+        if let Some(idx) = self.last_workflow_panel_idx {
+            if let Some(OutputItem::WorkflowPanel { ended_at, .. }) = self.items.get_mut(idx) {
                 if ended_at.is_none() {
                     *ended_at = Some(Instant::now());
                     self.items_version = self.items_version.wrapping_add(1);
+                    self.running_workflow_count = self.running_workflow_count.saturating_sub(1);
                 }
-                return;
             }
         }
     }
