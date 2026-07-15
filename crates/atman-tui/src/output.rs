@@ -539,13 +539,17 @@ impl LayoutCache {
             return (Vec::new(), Vec::new(), Vec::new(), 0);
         }
 
-        // Pass 1: ensure every item has cached rows (render if missing/changed).
-        // This iterates ALL items but only reads u16 rows for cached ones —
-        // no line cloning. Cache misses render once and store Arc<[Line]>.
-        let mut item_starts: Vec<u16> = Vec::with_capacity(items.len() + 1);
-        let mut cursor: u16 = 0;
-        for (idx, item) in items.iter().enumerate() {
-            item_starts.push(cursor);
+        // Bottom-up: walk from last item backwards, rendering/caching only
+        // items needed to fill viewport_rows + scroll_offset. No full scan.
+        let budget = viewport_rows.saturating_add(scroll_offset);
+        let mut accumulated: u16 = 0;
+        let mut start_idx = items.len();
+
+        for idx in (0..items.len()).rev() {
+            if accumulated >= budget {
+                break;
+            }
+            let item = &items[idx];
             let is_hovered = ctx.hovered_thinking_idx == Some(idx);
             let content_hash =
                 item_content_hash(item, is_hovered, ctx.expanded_tools, key.animation_frame);
@@ -576,41 +580,51 @@ impl LayoutCache {
                 });
             }
             let rows = self.item_cache[idx].as_ref().unwrap().rows;
-            cursor = cursor.saturating_add(rows);
+            start_idx = idx;
+            accumulated = accumulated.saturating_add(rows);
         }
-        item_starts.push(cursor);
-        let total_rows = cursor;
 
-        // Pass 2: virtual scroll — only clone lines for items in viewport.
-        // scroll_offset is from top (ratatui convention). visible window:
-        //   [scroll_offset, scroll_offset + viewport_rows)
-        let vis_top = scroll_offset;
-        let vis_bot = scroll_offset.saturating_add(viewport_rows);
+        // Build visible lines: from start_idx to end, skip scroll_offset from top.
         let mut visible_lines: Vec<Line<'static>> = Vec::new();
         let mut visible_ranges: Vec<ItemRange> = Vec::new();
         let visible_regions: Vec<NodeRegion> = Vec::new();
+        let mut skip_from_top = scroll_offset;
+        let mut abs_row = accumulated.saturating_sub(budget);
 
-        for (idx, _) in items.iter().enumerate() {
-            let start = item_starts[idx];
-            let end = item_starts[idx + 1];
-            if end <= vis_top || start >= vis_bot {
-                continue;
-            }
+        for idx in start_idx..items.len() {
             let entry = match self.item_cache[idx].as_ref() {
                 Some(e) => e,
                 None => continue,
             };
-            let skip = vis_top.saturating_sub(start) as usize;
-            let take = end.min(vis_bot).saturating_sub(start.max(vis_top)) as usize;
+            let item_rows = entry.rows;
+            let item_start = abs_row;
+            let item_end = abs_row.saturating_add(item_rows);
+            abs_row = item_end;
+
+            if skip_from_top >= item_rows {
+                skip_from_top = skip_from_top.saturating_sub(item_rows);
+                continue;
+            }
+            let skip = skip_from_top as usize;
+            skip_from_top = 0;
             let lo = skip.min(entry.lines.len());
-            let hi = (skip + take).min(entry.lines.len());
-            visible_lines.extend(entry.lines[lo..hi].iter().cloned());
+            visible_lines.extend(entry.lines[lo..].iter().cloned());
             visible_ranges.push(ItemRange {
                 item_index: idx,
-                start_row: start,
-                end_row: end,
+                start_row: item_start,
+                end_row: item_end,
             });
         }
+
+        // total_rows: use cached value if available, otherwise estimate.
+        // For follow_tail (scroll=0) this is fine. For scroll-up, we only
+        // know rows for items we've seen — approximate is OK, resolve_scroll
+        // clamps.
+        let total_rows = if scroll_offset == 0 {
+            accumulated
+        } else {
+            self.total_rows.max(accumulated)
+        };
 
         self.key = Some(key);
         self.lines = visible_lines.clone();
