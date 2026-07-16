@@ -209,6 +209,17 @@ pub async fn maybe_auto_compact(
         );
         return;
     };
+    let _ = session
+        .stream_tx()
+        .send(crate::stream::StreamFrame::CompactionSummary {
+            phase: crate::stream::CompactionPhase::Running,
+            range_start: range.start,
+            range_end: range.end.saturating_sub(1),
+            summary: String::new(),
+            before_tokens: current,
+            after_tokens: 0,
+            compacted_count: range.end - range.start,
+        });
     let mut filtered: Vec<Message> = msgs[range.start..range.end].to_vec();
     filter_orphan_tool_messages(&mut filtered);
     let summary = match generate_llm_summary(&filtered, model, providers).await {

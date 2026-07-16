@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use atman_runtime::stream::CompactionPhase;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::tools::term::TerminalScreen;
 use atman_runtime::workflow::WorkflowGraph;
@@ -67,10 +68,14 @@ pub enum OutputItem {
         expanded: bool,
     },
     CompactionSummary {
+        phase: CompactionPhase,
+        range_start: usize,
+        range_end: usize,
         summary: String,
         before_tokens: u64,
         after_tokens: u64,
         compacted_count: usize,
+        expanded: bool,
     },
 }
 
@@ -421,6 +426,14 @@ impl AppState {
         }
     }
 
+    pub fn toggle_compaction_summary_expand(&mut self, item_index: usize) {
+        if let Some(OutputItem::CompactionSummary { expanded, .. }) = self.items.get_mut(item_index)
+        {
+            *expanded = !*expanded;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
     pub fn hit_test_node(&self, col: u16, row: u16) -> Option<(usize, String)> {
         let rect = self.last_transcript_rect?;
         if col < rect.x
@@ -747,17 +760,48 @@ impl AppState {
                 });
             }
             StreamFrame::CompactionSummary {
+                phase,
+                range_start,
+                range_end,
                 summary,
                 before_tokens,
                 after_tokens,
                 compacted_count,
             } => {
-                self.push_item(OutputItem::CompactionSummary {
-                    summary,
-                    before_tokens,
-                    after_tokens,
-                    compacted_count,
-                });
+                if let Some(OutputItem::CompactionSummary {
+                    phase: current_phase,
+                    range_start: current_start,
+                    range_end: current_end,
+                    summary: current_summary,
+                    before_tokens: current_before,
+                    after_tokens: current_after,
+                    compacted_count: current_count,
+                    expanded,
+                }) = self.items.last_mut()
+                    && *current_start == range_start
+                    && *current_end == range_end
+                {
+                    *current_phase = phase;
+                    *current_summary = summary;
+                    *current_before = before_tokens;
+                    *current_after = after_tokens;
+                    *current_count = compacted_count;
+                    if matches!(phase, CompactionPhase::Finished) {
+                        *expanded = false;
+                    }
+                    self.items_version = self.items_version.wrapping_add(1);
+                } else {
+                    self.push_item(OutputItem::CompactionSummary {
+                        phase,
+                        range_start,
+                        range_end,
+                        summary,
+                        before_tokens,
+                        after_tokens,
+                        compacted_count,
+                        expanded: false,
+                    });
+                }
             }
             StreamFrame::Unknown => {}
         }
@@ -1039,6 +1083,52 @@ mod tests {
         assert!(app.is_tool_expanded("x"));
         app.toggle_tool_expansion("x");
         assert!(!app.is_tool_expanded("x"));
+    }
+
+    #[test]
+    fn compaction_summary_frames_mutate_same_item() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::CompactionSummary {
+            phase: CompactionPhase::Running,
+            range_start: 2,
+            range_end: 8,
+            summary: String::new(),
+            before_tokens: 100,
+            after_tokens: 0,
+            compacted_count: 7,
+        });
+        app.apply_stream_frame(StreamFrame::CompactionSummary {
+            phase: CompactionPhase::Finished,
+            range_start: 2,
+            range_end: 8,
+            summary: "## Objective\n- keep it short".into(),
+            before_tokens: 100,
+            after_tokens: 40,
+            compacted_count: 7,
+        });
+
+        assert_eq!(app.items.len(), 1);
+        match &app.items[0] {
+            OutputItem::CompactionSummary {
+                phase,
+                range_start,
+                range_end,
+                summary,
+                before_tokens,
+                after_tokens,
+                compacted_count,
+                ..
+            } => {
+                assert!(matches!(phase, CompactionPhase::Finished));
+                assert_eq!(*range_start, 2);
+                assert_eq!(*range_end, 8);
+                assert!(summary.contains("Objective"));
+                assert_eq!(*before_tokens, 100);
+                assert_eq!(*after_tokens, 40);
+                assert_eq!(*compacted_count, 7);
+            }
+            _ => panic!("expected compaction summary item"),
+        }
     }
 
     #[test]

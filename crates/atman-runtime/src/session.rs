@@ -499,6 +499,15 @@ pub enum TranscriptEntry {
         message: Message,
         flow_run_id: Option<String>,
     },
+    CompactionSummary {
+        range_start: usize,
+        range_end: usize,
+        compacted_count: usize,
+        before_tokens: u64,
+        after_tokens: u64,
+        summary: String,
+        ts: Option<chrono::DateTime<chrono::Utc>>,
+    },
     DiffPreview {
         title: String,
         old_content: Option<String>,
@@ -664,6 +673,22 @@ fn parse_ts(v: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
+fn parse_compaction_message(message: &Message) -> Option<(usize, usize, usize, String)> {
+    let text = message.text_concat();
+    let footer = crate::compaction::find_compact_summaries(std::slice::from_ref(message))
+        .into_iter()
+        .next()?;
+    let footer_marker = "[atman:compact ";
+    let footer_start = text.rfind(footer_marker)?;
+    let body = text[..footer_start].trim_end().to_string();
+    Some((
+        footer.seq_start as usize,
+        footer.seq_end as usize,
+        footer.count,
+        body,
+    ))
+}
+
 fn parse_json_lines(text: &str) -> Vec<serde_json::Value> {
     text.lines()
         .filter_map(|line| {
@@ -728,6 +753,9 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
     };
     let values = parse_json_lines(&text);
     let patches = collect_attachment_patches(&values);
+    let has_compaction_summary_event = values
+        .iter()
+        .any(|v| v["type"].as_str() == Some("compaction_summary"));
     let mut out = Vec::new();
     let mut msg_indices: Vec<usize> = Vec::new();
     for v in &values {
@@ -742,6 +770,26 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     {
                         apply_attachment_patches(&mut msg, ps);
                     }
+                    if crate::compaction::is_compaction_summary(&msg)
+                        && let Some((range_start, range_end, compacted_count, summary)) =
+                            parse_compaction_message(&msg)
+                    {
+                        let flow_run_id = v["flow_run_id"].as_str().map(String::from);
+                        out.push(TranscriptEntry::Message {
+                            message: msg.clone(),
+                            flow_run_id,
+                        });
+                        out.push(TranscriptEntry::CompactionSummary {
+                            range_start,
+                            range_end,
+                            compacted_count,
+                            before_tokens: 0,
+                            after_tokens: 0,
+                            summary,
+                            ts: parse_ts(v),
+                        });
+                        continue;
+                    }
                     let flow_run_id = v["flow_run_id"].as_str().map(String::from);
                     msg_indices.push(out.len());
                     out.push(TranscriptEntry::Message {
@@ -751,6 +799,9 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 }
             }
             "context_compact" => {
+                if has_compaction_summary_event {
+                    continue;
+                }
                 let has_summary = v.get("summary_text").is_some();
                 let has_replacement = v.get("replacement_msg_seq").is_some();
                 if !has_summary && !has_replacement {
@@ -758,6 +809,19 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 }
                 let range_start = v["compacted_range_start"].as_u64().unwrap_or(0) as usize;
                 let range_end = v["compacted_range_end"].as_u64().unwrap_or(0) as usize;
+                let compacted_count = range_end.saturating_sub(range_start) + 1;
+                if let Some(summary) = v.get("summary_text").and_then(|s| s.as_str()) {
+                    out.push(TranscriptEntry::CompactionSummary {
+                        range_start,
+                        range_end,
+                        compacted_count,
+                        before_tokens: v["before_tokens"].as_u64().unwrap_or(0),
+                        after_tokens: v["after_tokens"].as_u64().unwrap_or(0),
+                        summary: summary.to_string(),
+                        ts: parse_ts(v),
+                    });
+                    continue;
+                }
                 if range_start > range_end || range_end >= msg_indices.len() {
                     continue;
                 }
@@ -782,6 +846,17 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                             ordinal_out_idx.saturating_sub(removed_count.saturating_sub(1));
                     }
                 }
+            }
+            "compaction_summary" => {
+                out.push(TranscriptEntry::CompactionSummary {
+                    range_start: v["range_start"].as_u64().unwrap_or(0) as usize,
+                    range_end: v["range_end"].as_u64().unwrap_or(0) as usize,
+                    compacted_count: v["compacted_count"].as_u64().unwrap_or(0) as usize,
+                    before_tokens: v["before_tokens"].as_u64().unwrap_or(0),
+                    after_tokens: v["after_tokens"].as_u64().unwrap_or(0),
+                    summary: v["summary"].as_str().unwrap_or("").to_string(),
+                    ts: parse_ts(v),
+                });
             }
             "diff_preview" => {
                 out.push(TranscriptEntry::DiffPreview {
@@ -1603,6 +1678,7 @@ impl Session {
             .get(range.start)
             .map(|m| m.turn_id.clone())
             .unwrap_or_else(TurnId::now);
+        let before_tokens = estimate_tokens_for_messages(&before);
         let footer = format!(
             "\n\n[atman:compact seq_start={} seq_end={} count={}]",
             range.start,
@@ -1611,7 +1687,6 @@ impl Session {
         );
         let annotated = format!("{summary}{footer}");
         let after = replace_range_with_summary(&before, &range, annotated.clone(), turn_id.clone());
-        let before_tokens = estimate_tokens_for_messages(&before);
         let after_tokens = estimate_tokens_for_messages(&after);
         let replacement_msg = after
             .get(range.start)
@@ -1639,9 +1714,23 @@ impl Session {
             replacement_msg_seq: Some(replacement_seq),
             ts,
         });
+        self.sink.emit(Event::CompactionSummary {
+            seq: 0,
+            session_id: self.id.to_string(),
+            range_start: range.start as u64,
+            range_end: range.end.saturating_sub(1) as u64,
+            compacted_count: range.end - range.start,
+            before_tokens,
+            after_tokens,
+            summary: summary.clone(),
+            ts,
+        });
         let _ = self
             .stream_tx
             .send(crate::stream::StreamFrame::CompactionSummary {
+                phase: crate::stream::CompactionPhase::Finished,
+                range_start: range.start,
+                range_end: range.end.saturating_sub(1),
                 summary,
                 before_tokens,
                 after_tokens,

@@ -257,6 +257,7 @@ pub(crate) fn extract_ts(event: &Event) -> String {
         | Event::AssistantMsg { ts, .. }
         | Event::ToolResultMsg { ts, .. }
         | Event::DiffPreview { ts, .. }
+        | Event::CompactionSummary { ts, .. }
         | Event::SystemMsg { ts, .. }
         | Event::UserInject { ts, .. }
         | Event::ContentFilterHit { ts, .. }
@@ -289,6 +290,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::AssistantMsg { .. } => "assistant_msg",
         Event::ToolResultMsg { .. } => "tool_result_msg",
         Event::DiffPreview { .. } => "diff_preview",
+        Event::CompactionSummary { .. } => "compaction_summary",
         Event::SystemMsg { .. } => "system_msg",
         Event::UserInject { .. } => "user_inject",
         Event::ContentFilterHit { .. } => "content_filter_hit",
@@ -383,7 +385,8 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             turn_id.as_ref().map(|t| t.0.to_string()),
             flow_run_id.as_ref().map(|r| r.0.to_string()),
         ),
-        Event::LlmCall { .. }
+        Event::CompactionSummary { .. }
+        | Event::LlmCall { .. }
         | Event::ContextCompact { .. }
         | Event::Checkpoint { .. }
         | Event::PendingPrompt { .. }
@@ -398,6 +401,7 @@ pub(crate) fn extract_text_content(event: &Event) -> Option<String> {
         | Event::ToolResultMsg { message, .. }
         | Event::SystemMsg { message, .. } => Some(message.text_concat()),
         Event::WatchWarn { message, .. } => Some(message.clone()),
+        Event::CompactionSummary { summary, .. } => Some(summary.clone()),
         Event::AttachmentDegraded {
             file_basename,
             reason,

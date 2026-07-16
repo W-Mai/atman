@@ -81,6 +81,40 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     expanded: false,
                 });
             }
+            TranscriptEntry::CompactionSummary {
+                range_start,
+                range_end,
+                compacted_count,
+                before_tokens,
+                after_tokens,
+                summary,
+                ..
+            } => {
+                if matches!(
+                    out.last(),
+                    Some(OutputItem::CompactionSummary {
+                        phase: atman_runtime::stream::CompactionPhase::Finished,
+                        range_start: last_start,
+                        range_end: last_end,
+                        summary: last_summary,
+                        ..
+                    }) if *last_start == *range_start
+                        && *last_end == *range_end
+                        && last_summary == summary
+                ) {
+                    continue;
+                }
+                out.push(OutputItem::CompactionSummary {
+                    phase: atman_runtime::stream::CompactionPhase::Finished,
+                    range_start: *range_start,
+                    range_end: *range_end,
+                    summary: summary.clone(),
+                    before_tokens: *before_tokens,
+                    after_tokens: *after_tokens,
+                    compacted_count: *compacted_count,
+                    expanded: false,
+                });
+            }
             TranscriptEntry::FlowGraph {
                 run_id, graph, ts, ..
             } => {
@@ -275,8 +309,33 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>) {
                 }
             }
         }
-        MessageRole::Tool | MessageRole::System => {}
+        MessageRole::Tool => {}
+        MessageRole::System => {
+            if let Some(summary) = parse_compaction_summary(msg) {
+                out.push(summary);
+            }
+        }
     }
+}
+
+fn parse_compaction_summary(msg: &Message) -> Option<OutputItem> {
+    let text = msg.text_concat();
+    let footer = atman_runtime::compaction::find_compact_summaries(std::slice::from_ref(msg))
+        .into_iter()
+        .next()?;
+    let footer_marker = "[atman:compact ";
+    let footer_start = text.rfind(footer_marker)?;
+    let body = text[..footer_start].trim_end().to_string();
+    Some(OutputItem::CompactionSummary {
+        phase: atman_runtime::stream::CompactionPhase::Finished,
+        range_start: footer.seq_start as usize,
+        range_end: footer.seq_end as usize,
+        summary: body,
+        before_tokens: 0,
+        after_tokens: 0,
+        compacted_count: footer.count,
+        expanded: false,
+    })
 }
 
 pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {

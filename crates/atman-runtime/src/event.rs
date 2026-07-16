@@ -120,6 +120,18 @@ pub enum Event {
         unified_diff: Option<String>,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    CompactionSummary {
+        #[serde(default)]
+        seq: u64,
+        session_id: String,
+        range_start: u64,
+        range_end: u64,
+        compacted_count: usize,
+        before_tokens: u64,
+        after_tokens: u64,
+        summary: String,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
     SystemMsg {
         #[serde(default)]
         seq: u64,
@@ -311,6 +323,7 @@ impl Event {
             | Event::AssistantMsg { seq, .. }
             | Event::ToolResultMsg { seq, .. }
             | Event::DiffPreview { seq, .. }
+            | Event::CompactionSummary { seq, .. }
             | Event::SystemMsg { seq, .. }
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
@@ -343,6 +356,7 @@ impl Event {
             | Event::AssistantMsg { seq, .. }
             | Event::ToolResultMsg { seq, .. }
             | Event::DiffPreview { seq, .. }
+            | Event::CompactionSummary { seq, .. }
             | Event::SystemMsg { seq, .. }
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
@@ -684,5 +698,46 @@ mod tests {
             ev.set_seq(77);
             assert_eq!(ev.seq(), 77);
         }
+    }
+
+    #[test]
+    fn compaction_summary_serializes_all_fields() {
+        let ev = Event::CompactionSummary {
+            seq: 9,
+            session_id: "sess".into(),
+            range_start: 2,
+            range_end: 8,
+            compacted_count: 7,
+            before_tokens: 1000,
+            after_tokens: 250,
+            summary: "gist".into(),
+            ts: chrono::Utc::now(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["type"], "compaction_summary");
+        assert_eq!(v["session_id"], "sess");
+        assert_eq!(v["range_start"], 2);
+        assert_eq!(v["range_end"], 8);
+        assert_eq!(v["compacted_count"], 7);
+        assert_eq!(v["before_tokens"], 1000);
+        assert_eq!(v["after_tokens"], 250);
+        assert_eq!(v["summary"], "gist");
+    }
+
+    #[test]
+    fn seq_and_set_seq_cover_compaction_summary() {
+        let mut ev = Event::CompactionSummary {
+            seq: 0,
+            session_id: "sess".into(),
+            range_start: 0,
+            range_end: 1,
+            compacted_count: 2,
+            before_tokens: 10,
+            after_tokens: 3,
+            summary: String::new(),
+            ts: chrono::Utc::now(),
+        };
+        ev.set_seq(123);
+        assert_eq!(ev.seq(), 123);
     }
 }

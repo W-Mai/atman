@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionPhase {
+    Running,
+    Finished,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamFrame {
     LlmChunk {
@@ -129,6 +136,9 @@ pub enum StreamFrame {
         unified_diff: Option<String>,
     },
     CompactionSummary {
+        phase: CompactionPhase,
+        range_start: usize,
+        range_end: usize,
         summary: String,
         before_tokens: u64,
         after_tokens: u64,
@@ -244,6 +254,36 @@ mod tests {
             StreamFrame::TerminalExited { handle, exit_code } => {
                 assert_eq!(handle, "term_s_1");
                 assert_eq!(exit_code, Some(0));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn compaction_summary_round_trips() {
+        let f = StreamFrame::CompactionSummary {
+            phase: CompactionPhase::Running,
+            range_start: 3,
+            range_end: 11,
+            summary: String::new(),
+            before_tokens: 42,
+            after_tokens: 0,
+            compacted_count: 8,
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: StreamFrame = serde_json::from_str(&json).unwrap();
+        match back {
+            StreamFrame::CompactionSummary {
+                phase,
+                range_start,
+                range_end,
+                compacted_count,
+                ..
+            } => {
+                assert_eq!(phase, CompactionPhase::Running);
+                assert_eq!(range_start, 3);
+                assert_eq!(range_end, 11);
+                assert_eq!(compacted_count, 8);
             }
             _ => panic!("wrong variant"),
         }

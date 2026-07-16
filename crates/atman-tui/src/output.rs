@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use atman_runtime::message::Message;
+use atman_runtime::stream::CompactionPhase;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
@@ -90,6 +91,19 @@ pub struct BoxSpec<'a> {
     pub kind_glyph: &'a str,
     pub label: &'a str,
     pub approval_hotkey: Option<u8>,
+}
+
+struct CompactionSummaryRender<'a> {
+    phase: CompactionPhase,
+    range_start: usize,
+    range_end: usize,
+    summary: &'a str,
+    before_tokens: u64,
+    after_tokens: u64,
+    compacted_count: usize,
+    expanded: bool,
+    animation_frame: u32,
+    panel_width: u16,
 }
 
 pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
@@ -415,16 +429,27 @@ fn item_content_hash(
             expanded.hash(&mut h);
         }
         OutputItem::CompactionSummary {
+            phase,
+            range_start,
+            range_end,
             summary,
             before_tokens,
             after_tokens,
             compacted_count,
+            expanded,
         } => {
             9u8.hash(&mut h);
+            phase.hash(&mut h);
+            range_start.hash(&mut h);
+            range_end.hash(&mut h);
             str_fp(summary).hash(&mut h);
             before_tokens.hash(&mut h);
             after_tokens.hash(&mut h);
             compacted_count.hash(&mut h);
+            expanded.hash(&mut h);
+            if matches!(phase, CompactionPhase::Running) {
+                animation_frame.hash(&mut h);
+            }
         }
         OutputItem::DiffPreview {
             title,
@@ -1472,17 +1497,26 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             ctx.panel_width,
         ),
         OutputItem::CompactionSummary {
+            phase,
+            range_start,
+            range_end,
             summary,
             before_tokens,
             after_tokens,
             compacted_count,
-        } => render_compaction_summary(
+            expanded,
+        } => render_compaction_summary(CompactionSummaryRender {
+            phase: *phase,
+            range_start: *range_start,
+            range_end: *range_end,
             summary,
-            *before_tokens,
-            *after_tokens,
-            *compacted_count,
-            ctx.panel_width,
-        ),
+            before_tokens: *before_tokens,
+            after_tokens: *after_tokens,
+            compacted_count: *compacted_count,
+            expanded: *expanded,
+            animation_frame: ctx.animation_frame,
+            panel_width: ctx.panel_width,
+        }),
         OutputItem::DiffPreview {
             title,
             old_content,
@@ -4287,13 +4321,19 @@ mod tests {
     }
 }
 
-fn render_compaction_summary(
-    summary: &str,
-    before_tokens: u64,
-    after_tokens: u64,
-    compacted_count: usize,
-    panel_width: u16,
-) -> Vec<Line<'static>> {
+fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'static>> {
+    let CompactionSummaryRender {
+        phase,
+        range_start,
+        range_end,
+        summary,
+        before_tokens,
+        after_tokens,
+        compacted_count,
+        expanded,
+        animation_frame,
+        panel_width,
+    } = render;
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let bg = t.code_bg;
@@ -4302,7 +4342,7 @@ fn render_compaction_summary(
         .bg(bg)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(t.subtle_fg).bg(bg);
-    let _hint_style = Style::default()
+    let hint_style = Style::default()
         .fg(t.meta_fg)
         .bg(bg)
         .add_modifier(Modifier::DIM);
@@ -4312,9 +4352,15 @@ fn render_compaction_summary(
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
 
-    let stats = format!(
-        " ✓ compacted {compacted_count} messages · {before_tokens} → {after_tokens} tokens "
-    );
+    let stats = match phase {
+        CompactionPhase::Running => format!(
+            " {} 正在压缩 {range_start}..{range_end} 条消息... ",
+            spinner_char(animation_frame)
+        ),
+        CompactionPhase::Finished => {
+            format!(" ✓ 已压缩 {compacted_count} 条消息 · {before_tokens} → {after_tokens} tokens ")
+        }
+    };
     let stats_used = UnicodeWidthStr::width(stats.as_str());
     let stats_pad = target.saturating_sub(stats_used);
     let mut header_spans = vec![Span::styled(stats, header_style)];
@@ -4324,8 +4370,29 @@ fn render_compaction_summary(
     lines.push(Line::from(header_spans));
     lines.push(blank.clone());
 
-    for line in summary.lines().take(50) {
-        let rows = wrap_with_prefix(line, target, "  ", "  ");
+    if matches!(phase, CompactionPhase::Running) {
+        lines.push(line_with_right_pad(
+            "  ",
+            "summary generation in progress",
+            target,
+            body_style,
+            body_style,
+        ));
+        lines.push(blank);
+        return lines;
+    }
+
+    let rendered = crate::markdown::render_markdown_with_width(summary, panel_width);
+    let total = rendered.len();
+    let visible = if expanded { total } else { total.min(12) };
+    for line in rendered.into_iter().take(visible) {
+        let body = line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
+        let rows = wrap_with_prefix(&body, target, "  ", "  ");
         for row in rows {
             lines.push(line_with_right_pad(
                 &row.prefix,
@@ -4335,6 +4402,23 @@ fn render_compaction_summary(
                 body_style,
             ));
         }
+    }
+    if !expanded && total > visible {
+        let hint = format!("  ▼ {} more lines — click to expand", total - visible);
+        let pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, hint_style)];
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), hint_style));
+        }
+        lines.push(Line::from(spans));
+    } else if expanded && total > 12 {
+        let hint = "  ▲ click to collapse".to_string();
+        let pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, hint_style)];
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), hint_style));
+        }
+        lines.push(Line::from(spans));
     }
     lines.push(blank);
     lines

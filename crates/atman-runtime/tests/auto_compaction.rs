@@ -105,6 +105,12 @@ async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
     assert!(replacement_seq.is_some());
     let has_system_msg = events.iter().any(|e| matches!(e, Event::SystemMsg { .. }));
     assert!(has_system_msg, "expected a paired SystemMsg event");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::CompactionSummary { .. })),
+        "expected a durable CompactionSummary event"
+    );
 }
 
 async fn setup_review_env() -> (
