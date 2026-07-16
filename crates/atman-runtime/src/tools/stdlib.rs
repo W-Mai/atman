@@ -1000,23 +1000,13 @@ fn emit_diff_preview_if_relevant(ctx: &ToolCtx, tool_name: &str, value: &Value) 
                     .and_then(|s| s.split(':').next())
                     .map(|s| s.trim_end_matches(')').to_string())
             });
-            let old = value_struct_string(value, "old_content");
-            let new = value_struct_string(value, "new_content");
-            if old.is_some() || new.is_some() {
-                Some((path.unwrap_or_default(), old, new, None))
-            } else {
-                None
-            }
+            let diff = value_struct_string(value, "diff");
+            diff.map(|d| (path.unwrap_or_default(), None, None, Some(d)))
         }
         "fs.write" => {
             let path = value_struct_string(value, "path").unwrap_or_default();
-            let old = value_struct_string(value, "old_content");
-            let new = value_struct_string(value, "new_content");
-            if old.is_some() || new.is_some() {
-                Some((path, old, new, None))
-            } else {
-                None
-            }
+            let diff = value_struct_string(value, "diff");
+            diff.map(|d| (path, None, None, Some(d)))
         }
         "git.diff" => {
             let Some(diff) = value_struct_string(value, "diff") else {

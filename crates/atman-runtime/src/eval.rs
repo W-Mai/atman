@@ -363,12 +363,12 @@ fn prepare_diff_preview(name: &str, args: &ToolArgs) -> Option<DiffPreviewData> 
         "fs.write" => {
             let path = tool_arg_path(args, "path", 0)?;
             let content = tool_arg_string(args, "content", 1)?;
-            Some((
-                path.display().to_string(),
-                std::fs::read_to_string(&path).ok(),
-                Some(content),
-                None,
-            ))
+            let path_str = path.display().to_string();
+            let diff = match std::fs::read_to_string(&path).ok() {
+                Some(old) => crate::tools::fs::unified_diff_preview(&path_str, &old, &content),
+                None => format!("+++ {path_str}\n{content}"),
+            };
+            Some((path_str, None, None, Some(diff)))
         }
         "fs.edit" => {
             let path = tool_arg_path(args, "path", 0)?;
@@ -381,7 +381,9 @@ fn prepare_diff_preview(name: &str, args: &ToolArgs) -> Option<DiffPreviewData> 
             } else {
                 old.replacen(&old_string, &new_string, 1)
             };
-            Some((path.display().to_string(), Some(old), Some(new), None))
+            let path_str = path.display().to_string();
+            let diff = crate::tools::fs::unified_diff_preview(&path_str, &old, &new);
+            Some((path_str, None, None, Some(diff)))
         }
         _ => None,
     }

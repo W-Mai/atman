@@ -216,12 +216,17 @@ impl Tool for FsWrite {
                 })?;
             let canonical = canonicalize_or_owned(&path);
             ctx.note_read(&canonical);
+            let path_str = path.display().to_string();
+            let diff_patch = match &old_content {
+                Some(old) => unified_diff_preview(&path_str, old, &content),
+                None => format!("+++ {path_str}\n{content}"),
+            };
             if let Some(tx) = &ctx.stream_tx {
                 let _ = tx.send(StreamFrame::DiffPreview {
-                    title: path.display().to_string(),
-                    old_content: old_content.clone(),
-                    new_content: Some(content.clone()),
-                    unified_diff: None,
+                    title: path_str,
+                    old_content: None,
+                    new_content: None,
+                    unified_diff: Some(diff_patch.clone()),
                 });
             }
             Ok(Value::Struct(vec![
@@ -230,11 +235,7 @@ impl Tool for FsWrite {
                     "approval".into(),
                     Value::Str(if approved { "approved" } else { "auto" }.into()),
                 ),
-                (
-                    "old_content".into(),
-                    old_content.clone().map(Value::Str).unwrap_or(Value::Unit),
-                ),
-                ("new_content".into(), Value::Str(content)),
+                ("diff".into(), Value::Str(diff_patch)),
             ]))
         })
     }
@@ -401,12 +402,14 @@ impl Tool for FsEdit {
                         path.display()
                     ))
                 })?;
+            let path_str = path.display().to_string();
+            let diff_patch = unified_diff_preview(&path_str, &content, &updated);
             if let Some(tx) = &ctx.stream_tx {
                 let _ = tx.send(StreamFrame::DiffPreview {
-                    title: path.display().to_string(),
-                    old_content: Some(content.clone()),
-                    new_content: Some(updated.clone()),
-                    unified_diff: None,
+                    title: path_str,
+                    old_content: None,
+                    new_content: None,
+                    unified_diff: Some(diff_patch.clone()),
                 });
             }
             let replaced = if replace_all { match_lines.len() } else { 1 };
@@ -424,14 +427,13 @@ impl Tool for FsEdit {
                     Value::Str(if approved { "approved" } else { "auto" }.into()),
                 ),
                 ("path".into(), Value::Str(path.display().to_string())),
-                ("old_content".into(), Value::Str(content)),
-                ("new_content".into(), Value::Str(updated)),
+                ("diff".into(), Value::Str(diff_patch)),
             ]))
         })
     }
 }
 
-fn unified_diff_preview(path: &str, before: &str, after: &str) -> String {
+pub(crate) fn unified_diff_preview(path: &str, before: &str, after: &str) -> String {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(before, after);
     let mut out = format!("--- {path}\n+++ {path}\n");
