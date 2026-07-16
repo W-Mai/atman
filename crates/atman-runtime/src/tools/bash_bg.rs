@@ -635,7 +635,18 @@ async fn run_bg_process(
         let _ = tokio::time::timeout(IO_DRAIN_TIMEOUT, r).await;
     }
 
+    let exit_code = match &final_status {
+        BgStatus::Exited { exit_code, .. } => Some(*exit_code),
+        _ => None,
+    };
     *status.lock().unwrap() = final_status;
+
+    if let Some(tx) = &stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::BashExited {
+            handle: handle_for_stream,
+            exit_code,
+        });
+    }
 }
 
 async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(

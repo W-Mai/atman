@@ -1447,7 +1447,14 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             output,
             done,
             expanded,
-        } => render_bash(handle, output, *done, *expanded, ctx.panel_width),
+        } => render_bash(
+            handle,
+            output,
+            *done,
+            *expanded,
+            ctx.animation_frame,
+            ctx.panel_width,
+        ),
         OutputItem::CompactionSummary {
             summary,
             before_tokens,
@@ -2818,6 +2825,7 @@ fn render_bash(
     output: &str,
     done: bool,
     expanded: bool,
+    animation_frame: u32,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
@@ -2833,7 +2841,11 @@ fn render_bash(
         .bg(bg)
         .add_modifier(Modifier::DIM);
 
-    let glyph = if done { "✓" } else { spinner_char(0) };
+    let glyph = if done {
+        "✓"
+    } else {
+        spinner_char(animation_frame)
+    };
     let label = if done {
         format!("bash[{handle}]")
     } else {
