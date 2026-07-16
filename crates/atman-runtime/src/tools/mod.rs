@@ -7,6 +7,7 @@ pub mod bash_bg;
 pub mod form;
 pub mod fs;
 pub mod git;
+pub mod git_ops;
 pub mod hunk;
 pub mod memory;
 pub mod memory_stubs;
@@ -55,6 +56,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(stdlib::ListAll));
     reg.register(Arc::new(stdlib::ListReduce));
     reg.register(Arc::new(git::GitDiff));
+    reg.register(Arc::new(git_ops::GitStatus));
     reg.register(Arc::new(test::TestRun));
     reg.register(Arc::new(hunk::FsEdit));
     reg.register(Arc::new(hunk::HunkApply));
@@ -63,6 +65,12 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(form::FormAsk));
     reg.register(Arc::new(session::SessionPush));
     reg.register(Arc::new(sleep::Sleep));
+}
+
+pub fn register_git_ops(reg: &mut ToolRegistry) {
+    reg.register(Arc::new(git_ops::GitCommit));
+    reg.register(Arc::new(git_ops::GitBranch));
+    reg.register(Arc::new(git_ops::GitPush));
 }
 
 pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {
