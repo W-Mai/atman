@@ -523,6 +523,23 @@ impl Tool for MemorySpecStatus {
     fn tier(&self) -> Tier {
         Tier::Zero
     }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Return progress counters for a named spec feature. Use it to check the current phase, update count, and deviation count before continuing spec-driven work.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "feature": {"type": "string", "description": "Spec feature name to inspect."}
+            },
+            "required": ["feature"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let feature = required_string(&args, "feature")?;
@@ -551,6 +568,25 @@ impl Tool for MemorySpecUpdate {
     fn tier(&self) -> Tier {
         Tier::One
     }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Append a progress entry for a spec feature and phase. Use it to persist research, design, implementation, or verification notes as spec work advances.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "feature": {"type": "string", "description": "Spec feature name to update."},
+                "phase": {"type": "string", "description": "Spec phase or section name, such as research, design, implementation, or verification."},
+                "content": {"type": "string", "description": "Progress entry content to append."}
+            },
+            "required": ["feature", "phase", "content"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let feature = required_string(&args, "feature")?;
@@ -577,6 +613,26 @@ impl Tool for MemorySpecDeviate {
     fn tier(&self) -> Tier {
         Tier::One
     }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Record an intentional deviation from a spec section. Use it when implementation differs from the written plan and the delta plus reason must be preserved.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "feature": {"type": "string", "description": "Spec feature name that owns the deviation."},
+                "section": {"type": "string", "description": "Spec section or decision being changed."},
+                "delta": {"type": "string", "description": "What changed from the spec."},
+                "reason": {"type": "string", "description": "Why the deviation is necessary."}
+            },
+            "required": ["feature", "section", "delta", "reason"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let feature = required_string(&args, "feature")?;
@@ -604,6 +660,21 @@ impl Tool for MemoryFetchConfessions {
 
     fn tier(&self) -> Tier {
         Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Fetch past confession records about rule violations, optionally filtered by trigger text. Use it to recall prior mistakes and mitigations before repeating risky work.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "trigger": {"type": "string", "description": "Optional trigger substring to search for; omit to list all confession records."}
+            }
+        })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {

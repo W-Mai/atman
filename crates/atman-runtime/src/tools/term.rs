@@ -935,6 +935,9 @@ impl Tool for TermResize {
     fn tier(&self) -> Tier {
         Tier::Four
     }
+    fn description(&self) -> Option<&str> {
+        Some("Resize a terminal's PTY dimensions. Sends SIGWINCH to the child process.")
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -982,6 +985,9 @@ impl Tool for TermKill {
     fn tier(&self) -> Tier {
         Tier::Four
     }
+    fn description(&self) -> Option<&str> {
+        Some("Kill a terminal process. The terminal handle remains in the registry for history.")
+    }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -1026,6 +1032,9 @@ impl Tool for TermList {
     }
     fn tier(&self) -> Tier {
         Tier::Four
+    }
+    fn description(&self) -> Option<&str> {
+        Some("List all terminal handles in the current session.")
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({

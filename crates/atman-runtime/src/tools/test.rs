@@ -16,6 +16,25 @@ impl Tool for TestRun {
         Tier::Two
     }
 
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Run tests with auto-detected framework (cargo/npm/pytest/go). Returns exit code, stdout/stderr tail, duration, timed_out flag. Use scope to filter (e.g. scope: 'integration' for cargo).",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "cwd": {"type": "string", "description": "Working directory to run tests in. Defaults to the current process directory."},
+                "framework": {"type": "string", "enum": ["cargo", "npm", "pytest", "go"], "description": "Optional framework override. Auto-detected from project files when omitted."},
+                "scope": {"type": "string", "description": "Optional framework-specific test filter or path, such as 'integration' for cargo."},
+                "timeout_ms": {"type": "integer", "default": 300000, "description": "Maximum runtime in milliseconds before returning timed_out=true."},
+                "tail_lines": {"type": "integer", "default": 80, "description": "Number of stdout/stderr lines to include from the end of each stream."}
+            }
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let cwd = extract_optional_path(&args, "cwd")

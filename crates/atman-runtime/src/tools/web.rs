@@ -523,6 +523,22 @@ impl Tool for WebSearch {
         Tier::Three
     }
 
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Search the web with the configured search provider and return result titles, URLs, snippets, and optional metadata. Use it when you need current external information or candidate pages to fetch.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query text."}
+            },
+            "required": ["query"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let query = extract_string(&args, "query", 0)?;
@@ -558,6 +574,22 @@ impl Tool for WebFetch {
 
     fn tier(&self) -> Tier {
         Tier::Three
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Fetch a URL subject to configured allow/deny policy and return status, content type, body, and truncation status. HTML responses are converted to markdown for easier reading.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "HTTP or HTTPS URL to fetch."}
+            },
+            "required": ["url"]
+        })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {

@@ -121,6 +121,31 @@ impl Tool for PreviewPush {
         Tier::One
     }
 
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Push markdown, mermaid, HTML, image, or diff content to the local preview server for browser review. Use it when the user asks to see a rendered artifact, diagram, diff, or audit page.",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Preview topic id to group related blocks."},
+                "title": {"type": "string", "description": "Human-readable topic title."},
+                "kind": {"type": "string", "enum": ["markdown", "mermaid", "html", "image", "diff"], "default": "markdown", "description": "Block type to render."},
+                "content": {"type": "string", "description": "Block content. Required for markdown, mermaid, and HTML; optional for image and diff when their specific fields are supplied."},
+                "image_base64": {"type": "string", "description": "Base64 image data for kind=image."},
+                "image_path": {"type": "string", "description": "Local image path for kind=image."},
+                "media_type": {"type": "string", "description": "Optional MIME type for image_base64, such as image/png."},
+                "raw_diff": {"type": "string", "description": "Raw patch text for kind=diff."},
+                "commit_sha": {"type": "string", "description": "Commit SHA for kind=diff commit mode. Requires repo_path."},
+                "repo_path": {"type": "string", "description": "Repository path for kind=diff commit mode. Requires commit_sha."}
+            },
+            "required": ["topic", "title"]
+        })
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let topic = extract_string(&args, "topic", 0)?;
