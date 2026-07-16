@@ -1538,8 +1538,13 @@ fn render_diff_preview(
         lines.extend(body);
         push_diff_fold_hint(&mut lines, expanded, total, 15, target, hint_style);
     } else if let Some(diff) = unified_diff {
-        let body = render_unified_diff_rows(diff, expanded, target, bg);
-        let total = diff.lines().count();
+        let (cells, lang) = parse_unified_diff_to_dual(diff);
+        let total = cells.len();
+        let first_change = cells.iter().position(|(l, r)| {
+            !matches!(l.kind, DiffCellKind::Normal | DiffCellKind::Empty)
+                || !matches!(r.kind, DiffCellKind::Normal | DiffCellKind::Empty)
+        });
+        let (body, _) = render_diff_cell_rows(&cells, &lang, expanded, target, bg, first_change);
         lines.extend(body);
         push_diff_fold_hint(&mut lines, expanded, total, 15, target, hint_style);
     }
@@ -1590,6 +1595,46 @@ enum DiffCellKind {
     Empty,
 }
 
+fn render_diff_cell_rows(
+    rows: &[(DiffCell, DiffCell)],
+    lang: &str,
+    expanded: bool,
+    target: usize,
+    bg: Color,
+    first_change: Option<usize>,
+) -> (Vec<Line<'static>>, usize) {
+    let total = rows.len();
+    let sep = " │ ";
+    let sep_w = 3usize;
+    let left_w = target.saturating_sub(sep_w) / 2;
+    let right_w = target.saturating_sub(sep_w).saturating_sub(left_w);
+    let sep_style = Style::default().fg(Color::DarkGray).bg(bg);
+    let mut out;
+    if expanded || total <= 15 {
+        out = Vec::with_capacity(total);
+        for (left, right) in rows {
+            let mut spans = render_diff_side(left, left_w, lang, bg);
+            spans.push(Span::styled(sep.to_string(), sep_style));
+            spans.extend(render_diff_side(right, right_w, lang, bg));
+            out.push(Line::from(spans));
+        }
+    } else {
+        // Collapsed: center window around first change.
+        let fc = first_change.unwrap_or(0);
+        let radius = 7usize;
+        let start = fc.saturating_sub(radius).min(total.saturating_sub(15));
+        let end = (start + 15).min(total);
+        out = Vec::with_capacity(15);
+        for (left, right) in rows[start..end].iter() {
+            let mut spans = render_diff_side(left, left_w, lang, bg);
+            spans.push(Span::styled(sep.to_string(), sep_style));
+            spans.extend(render_diff_side(right, right_w, lang, bg));
+            out.push(Line::from(spans));
+        }
+    }
+    (out, total)
+}
+
 fn render_dual_diff_rows(
     title: &str,
     old: &str,
@@ -1598,11 +1643,18 @@ fn render_dual_diff_rows(
     target: usize,
     bg: Color,
 ) -> (Vec<Line<'static>>, usize) {
-    let lang = language_from_title(title);
+    let mut lang = language_from_title(title);
+    // Fallback: try to extract language from `// *.ext` header in content.
+    if lang.is_empty() {
+        if let Some(detected) = detect_lang_from_content(old) {
+            lang = detected;
+        }
+    }
     let old_lines = content_lines(old);
     let new_lines = content_lines(new);
     let diff = similar::TextDiff::from_lines(old, new);
     let mut rows: Vec<(DiffCell, DiffCell)> = Vec::new();
+    let mut first_change: Option<usize> = None;
     for op in diff.ops() {
         match *op {
             similar::DiffOp::Equal {
@@ -1620,6 +1672,9 @@ fn render_dual_diff_rows(
             similar::DiffOp::Delete {
                 old_index, old_len, ..
             } => {
+                if first_change.is_none() {
+                    first_change = Some(rows.len());
+                }
                 for i in 0..old_len {
                     rows.push((
                         diff_cell(&old_lines, old_index + i, DiffCellKind::Delete),
@@ -1630,6 +1685,9 @@ fn render_dual_diff_rows(
             similar::DiffOp::Insert {
                 new_index, new_len, ..
             } => {
+                if first_change.is_none() {
+                    first_change = Some(rows.len());
+                }
                 for i in 0..new_len {
                     rows.push((
                         empty_cell(),
@@ -1643,6 +1701,9 @@ fn render_dual_diff_rows(
                 new_index,
                 new_len,
             } => {
+                if first_change.is_none() {
+                    first_change = Some(rows.len());
+                }
                 let len = old_len.max(new_len);
                 for i in 0..len {
                     rows.push((
@@ -1661,20 +1722,149 @@ fn render_dual_diff_rows(
             }
         }
     }
-    let total = rows.len();
-    let take = if expanded { total } else { total.min(15) };
-    let sep_w = 1usize;
-    let left_w = target.saturating_sub(sep_w) / 2;
-    let right_w = target.saturating_sub(sep_w).saturating_sub(left_w);
-    let sep_style = Style::default().fg(Color::DarkGray).bg(bg);
-    let mut out = Vec::with_capacity(take);
-    for (left, right) in rows.into_iter().take(take) {
-        let mut spans = render_diff_side(&left, left_w, &lang, bg);
-        spans.push(Span::styled("│".to_string(), sep_style));
-        spans.extend(render_diff_side(&right, right_w, &lang, bg));
-        out.push(Line::from(spans));
+    render_diff_cell_rows(&rows, &lang, expanded, target, bg, first_change)
+}
+
+/// Parse a unified diff into side-by-side cell pairs and detect language from
+/// the `diff --git a/xxx.ext` header line.
+fn parse_unified_diff_to_dual(diff: &str) -> (Vec<(DiffCell, DiffCell)>, String) {
+    let mut rows = Vec::new();
+    let mut lang = String::new();
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            if lang.is_empty() {
+                if let Some(ext) = line
+                    .split('.')
+                    .next_back()
+                    .and_then(|s| s.split_whitespace().next())
+                {
+                    lang = ext_to_lang(ext).to_string();
+                }
+            }
+            continue;
+        }
+        if line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("\\ ")
+        {
+            continue;
+        }
+        if line.starts_with("@@") {
+            if let Some((os, ns)) = parse_hunk_header(line) {
+                old_line = os;
+                new_line = ns;
+            }
+            continue;
+        }
+        if line.starts_with(' ') || line.is_empty() {
+            let text = if line.is_empty() {
+                ""
+            } else {
+                line.strip_prefix(' ').unwrap_or(line)
+            };
+            rows.push((
+                DiffCell {
+                    line_no: Some(old_line),
+                    text: text.to_string(),
+                    kind: DiffCellKind::Normal,
+                },
+                DiffCell {
+                    line_no: Some(new_line),
+                    text: text.to_string(),
+                    kind: DiffCellKind::Normal,
+                },
+            ));
+            old_line += 1;
+            new_line += 1;
+        } else if line.starts_with('-') {
+            rows.push((
+                DiffCell {
+                    line_no: Some(old_line),
+                    text: line.strip_prefix('-').unwrap_or(line).to_string(),
+                    kind: DiffCellKind::Delete,
+                },
+                empty_cell(),
+            ));
+            old_line += 1;
+        } else if line.starts_with('+') {
+            rows.push((
+                empty_cell(),
+                DiffCell {
+                    line_no: Some(new_line),
+                    text: line.strip_prefix('+').unwrap_or(line).to_string(),
+                    kind: DiffCellKind::Insert,
+                },
+            ));
+            new_line += 1;
+        }
     }
-    (out, total)
+    (rows, lang)
+}
+
+/// Parse `@@ -old_start,old_count +new_start,new_count @@` and return
+/// `(old_start, new_start)`.
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once('+')?;
+    let rest = rest.strip_prefix('+')?;
+    let old_start = old_part.split(',').next()?.parse::<usize>().ok()?;
+    let new_start = rest
+        .split(',')
+        .next()?
+        .split_whitespace()
+        .next()?
+        .parse::<usize>()
+        .ok()?;
+    Some((old_start, new_start))
+}
+
+/// Map a file extension to a highlight language name.
+fn ext_to_lang(ext: &str) -> &str {
+    match ext {
+        "rs" => "rust",
+        "py" => "python",
+        "js" => "javascript",
+        "ts" => "typescript",
+        "tsx" => "tsx",
+        "jsx" => "jsx",
+        "md" => "markdown",
+        "toml" => "toml",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "html" => "html",
+        "css" => "css",
+        "sh" => "bash",
+        other => other,
+    }
+}
+
+fn detect_lang_from_content(content: &str) -> Option<String> {
+    let first_line = content.lines().next()?;
+    let header = first_line.strip_prefix("// ")?;
+    std::path::Path::new(header)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| match ext {
+            "rs" => "rust",
+            "py" => "python",
+            "js" => "javascript",
+            "ts" => "typescript",
+            "tsx" => "tsx",
+            "jsx" => "jsx",
+            "md" => "markdown",
+            "toml" => "toml",
+            "json" => "json",
+            "yaml" | "yml" => "yaml",
+            "html" => "html",
+            "css" => "css",
+            "sh" => "bash",
+            other => other,
+        })
+        .map(String::from)
 }
 
 fn content_lines(s: &str) -> Vec<String> {
@@ -1725,46 +1915,6 @@ fn render_diff_side(cell: &DiffCell, width: usize, lang: &str, bg: Color) -> Vec
     spans
 }
 
-fn render_unified_diff_rows(
-    diff: &str,
-    expanded: bool,
-    target: usize,
-    bg: Color,
-) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
-    let all_lines: Vec<&str> = diff.lines().collect();
-    let max = if expanded {
-        all_lines.len()
-    } else {
-        all_lines.len().min(15)
-    };
-    all_lines
-        .into_iter()
-        .take(max)
-        .map(|line| {
-            let style = if line.starts_with("@@") {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD)
-            } else if line.starts_with('+') {
-                Style::default().fg(Color::Green).bg(bg)
-            } else if line.starts_with('-') {
-                Style::default().fg(Color::Red).bg(bg)
-            } else {
-                Style::default().bg(bg)
-            };
-            let shown = truncate_to_width(line, target);
-            let used = UnicodeWidthStr::width(shown.as_str());
-            let mut spans = vec![Span::styled(shown, style)];
-            if target > used {
-                spans.push(Span::styled(" ".repeat(target - used), style));
-            }
-            Line::from(spans)
-        })
-        .collect()
-}
-
 fn language_from_title(title: &str) -> String {
     std::path::Path::new(title)
         .extension()
@@ -1787,21 +1937,6 @@ fn language_from_title(title: &str) -> String {
         })
         .unwrap_or("")
         .to_string()
-}
-
-fn truncate_to_width(s: &str, max_w: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let w = ch.width().unwrap_or(0);
-        if used + w > max_w {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out
 }
 
 fn truncate_spans_with_bg(
