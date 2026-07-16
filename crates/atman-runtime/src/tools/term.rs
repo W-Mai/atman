@@ -630,11 +630,16 @@ async fn spawn_impl(
     )?;
 
     let state = entry.current_state();
+    let text = {
+        let parser = entry.parser.lock().expect("parser poisoned");
+        parser.screen().contents()
+    };
     Ok(Value::Struct(vec![
         ("handle".into(), Value::Str(handle.to_string())),
         ("state".into(), state_to_value(&state)),
         ("rows".into(), Value::Int(rows as i64)),
         ("cols".into(), Value::Int(cols as i64)),
+        ("text".into(), Value::Str(text)),
     ]))
 }
 
