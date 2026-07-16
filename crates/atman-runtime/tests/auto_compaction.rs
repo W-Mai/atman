@@ -35,6 +35,158 @@ async fn compact_messages_replaces_middle_span() {
 }
 
 #[tokio::test]
+async fn compact_messages_refreshes_window_from_compacted_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = Session::open(tmp.path()).unwrap();
+    build_long_history(&session, 20);
+    session.record_llm_call("llama-3b", 50_000, 0, 0, 0, None, None);
+
+    let result = session
+        .compact_messages("test summary".into())
+        .expect("expected compaction");
+
+    assert_eq!(session.last_input_tokens(), 0);
+    assert_eq!(
+        session.subscribe_context().borrow().window_tokens,
+        result.after_tokens
+    );
+    assert_ne!(result.after_tokens, 50_000);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workflow_second_llm_waits_for_compacted_session_history() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use atman_dsl::parse::parse_file;
+    use atman_runtime::error::RuntimeError;
+    use atman_runtime::event::{NodeEvent, Observable};
+    use atman_runtime::message::{MessagePart, MessageRole};
+    use atman_runtime::provider::{
+        AssistantMessage, CallTiming, LlmRequest, Provider, StopReason, TokenUsage,
+    };
+    use atman_runtime::tool::BoxFut;
+    use atman_runtime::{Executor, Value, tools};
+
+    struct CompactingProvider {
+        calls: AtomicUsize,
+        normal_calls: AtomicUsize,
+        second_call_tokens: std::sync::Mutex<Option<u64>>,
+    }
+
+    impl Provider for CompactingProvider {
+        fn name(&self) -> &str {
+            "workflow-compact"
+        }
+
+        fn call<'a>(
+            &'a self,
+            req: LlmRequest,
+        ) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
+            Box::pin(async move { self.reply(req).await })
+        }
+
+        fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
+            let (tx, events) = tokio::sync::broadcast::channel(4);
+            let result = self.reply_sync(req);
+            let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
+                Box::pin(async move {
+                    let _ = tx.send(NodeEvent::LlmDone { total_tokens: 0 });
+                    result
+                });
+            Observable {
+                output,
+                events,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            }
+        }
+    }
+
+    impl CompactingProvider {
+        async fn reply(&self, req: LlmRequest) -> Result<AssistantMessage, RuntimeError> {
+            self.reply_sync(req)
+        }
+
+        fn reply_sync(&self, req: LlmRequest) -> Result<AssistantMessage, RuntimeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let normal_idx = req
+                .system
+                .is_none()
+                .then(|| self.normal_calls.fetch_add(1, Ordering::SeqCst));
+            let input_tokens =
+                atman_runtime::compaction::estimate_tokens_for_messages(&req.messages);
+            if normal_idx == Some(1) {
+                *self.second_call_tokens.lock().unwrap() = Some(input_tokens);
+                assert!(
+                    input_tokens < 6_400,
+                    "second workflow LLM saw uncompacted history: {input_tokens} tokens"
+                );
+            }
+            let turn_id = req
+                .messages
+                .first()
+                .map(|m| m.turn_id.clone())
+                .unwrap_or_else(TurnId::now);
+            Ok(AssistantMessage {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    parts: vec![MessagePart::Text {
+                        text: normal_idx.map_or_else(|| "summary".into(), |i| format!("reply {i}")),
+                    }],
+                    turn_id,
+                },
+                stop_reason: StopReason::End,
+                token_usage: TokenUsage {
+                    input: if normal_idx == Some(0) {
+                        50_000
+                    } else {
+                        input_tokens
+                    },
+                    output: 1,
+                    ..Default::default()
+                },
+                timing: CallTiming::default(),
+                model: String::new(),
+                response_id: None,
+            })
+        }
+    }
+
+    let provider = Arc::new(CompactingProvider {
+        calls: AtomicUsize::new(0),
+        normal_calls: AtomicUsize::new(0),
+        second_call_tokens: std::sync::Mutex::new(None),
+    });
+    let session = Session::open_ephemeral();
+    build_long_history(&session, 20);
+
+    let mut ex = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&mut ex.tools);
+    ex.providers.register(provider.clone());
+    let file = parse_file(
+        r#"flow start() -> string {
+    first = llm { model: "llama-workflow-compact" context: session }
+    second = llm { model: "llama-workflow-compact" context: session }
+    return text_concat(second)
+}"#,
+    )
+    .unwrap();
+
+    let turn_id = TurnId::now();
+    session.begin_turn(Message::user_text(turn_id.clone(), "run"));
+    let out = ex
+        .run_in_turn(&file, "start", vec![], Some(turn_id), Some(&session))
+        .await
+        .unwrap();
+    session.end_turn();
+
+    assert!(matches!(out, Value::Str(s) if s == "reply 1"));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.normal_calls.load(Ordering::SeqCst), 2);
+    assert!(provider.second_call_tokens.lock().unwrap().is_some());
+}
+
+#[tokio::test]
 async fn compact_messages_returns_none_below_budget() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Session::open(tmp.path()).unwrap();

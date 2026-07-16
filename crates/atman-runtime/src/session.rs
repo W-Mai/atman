@@ -1367,6 +1367,11 @@ impl Session {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    fn clear_last_input_tokens(&self) {
+        self.last_input_tokens
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn refresh_window_snapshot(&self) {
         let provider_tokens = self.last_input_tokens();
         let estimated = crate::compaction::estimate_tokens_for_messages(&self.messages());
@@ -1736,6 +1741,7 @@ impl Session {
                 after_tokens,
                 compacted_count: range.end - range.start,
             });
+        self.clear_last_input_tokens();
         self.refresh_window_snapshot();
         let checkpoint_messages = self.messages.lock().unwrap().clone();
         let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
