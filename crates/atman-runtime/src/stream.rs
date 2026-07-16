@@ -122,6 +122,12 @@ pub enum StreamFrame {
         handle: String,
         exit_code: Option<i32>,
     },
+    DiffPreview {
+        title: String,
+        old_content: Option<String>,
+        new_content: Option<String>,
+        unified_diff: Option<String>,
+    },
     CompactionSummary {
         summary: String,
         before_tokens: u64,

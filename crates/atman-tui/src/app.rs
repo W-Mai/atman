@@ -59,6 +59,13 @@ pub enum OutputItem {
         done: bool,
         expanded: bool,
     },
+    DiffPreview {
+        title: String,
+        old_content: Option<String>,
+        new_content: Option<String>,
+        unified_diff: Option<String>,
+        expanded: bool,
+    },
     CompactionSummary {
         summary: String,
         before_tokens: u64,
@@ -407,6 +414,13 @@ impl AppState {
         }
     }
 
+    pub fn toggle_diff_preview_expand(&mut self, item_index: usize) {
+        if let Some(OutputItem::DiffPreview { expanded, .. }) = self.items.get_mut(item_index) {
+            *expanded = !*expanded;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
     pub fn hit_test_node(&self, col: u16, row: u16) -> Option<(usize, String)> {
         let rect = self.last_transcript_rect?;
         if col < rect.x
@@ -717,6 +731,20 @@ impl AppState {
                         self.items_version = self.items_version.wrapping_add(1);
                     }
                 }
+            }
+            StreamFrame::DiffPreview {
+                title,
+                old_content,
+                new_content,
+                unified_diff,
+            } => {
+                self.push_item(OutputItem::DiffPreview {
+                    title,
+                    old_content,
+                    new_content,
+                    unified_diff,
+                    expanded: false,
+                });
             }
             StreamFrame::CompactionSummary {
                 summary,

@@ -67,6 +67,20 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 }
                 flatten_message(msg, &mut out);
             }
+            TranscriptEntry::DiffPreview {
+                title,
+                old_content,
+                new_content,
+                unified_diff,
+            } => {
+                out.push(OutputItem::DiffPreview {
+                    title: title.clone(),
+                    old_content: old_content.clone(),
+                    new_content: new_content.clone(),
+                    unified_diff: unified_diff.clone(),
+                    expanded: false,
+                });
+            }
             TranscriptEntry::FlowGraph {
                 run_id, graph, ts, ..
             } => {

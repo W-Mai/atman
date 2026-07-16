@@ -420,6 +420,11 @@ async fn run_frames(
                                         app.items.get(idx)
                                 {
                                     app.toggle_bash_expand(idx);
+                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(crate::app::OutputItem::DiffPreview { .. }) =
+                                        app.items.get(idx)
+                                {
+                                    app.toggle_diff_preview_expand(idx);
                                 }
                             } else if let MouseEventKind::Moved = me.kind {
                                 if let Some(idx) = app.hit_test(me.column, me.row)

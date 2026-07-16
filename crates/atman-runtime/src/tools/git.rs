@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::error::RuntimeError;
 use crate::git;
+use crate::stream::StreamFrame;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -36,7 +37,7 @@ impl Tool for GitDiff {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let range = extract_string(&args, "range", 0)?;
             let paths = extract_string_list(&args, "paths", 1).unwrap_or_default();
@@ -47,6 +48,14 @@ impl Tool for GitDiff {
             };
             let out = git::diff_range(&cwd, &range, &paths)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.diff: {e}")))?;
+            if let Some(tx) = &ctx.stream_tx {
+                let _ = tx.send(StreamFrame::DiffPreview {
+                    title: format!("git diff {range}"),
+                    old_content: None,
+                    new_content: None,
+                    unified_diff: Some(out.body.clone()),
+                });
+            }
             Ok(Value::Struct(vec![
                 ("diff".into(), Value::Str(out.body)),
                 (

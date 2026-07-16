@@ -1,13 +1,122 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use git2::{BranchType, Repository, Status, StatusOptions};
+use git2::{BranchType, DiffFormat, Repository, Status, StatusOptions};
 
 use crate::error::RuntimeError;
+use crate::stream::StreamFrame;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
 pub struct GitStatus;
+
+pub struct GitShow;
+
+impl Tool for GitShow {
+    fn name(&self) -> &str {
+        "git.show"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Show the patch introduced by one commit.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "sha": {"type": "string", "description": "Commit SHA or rev."},
+                "cwd": {"type": "string", "description": "Optional working dir; defaults to current process directory."}
+            },
+            "required": ["sha"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let sha = extract_string(&args, "sha", 0)?;
+            let cwd = extract_cwd(&args, "git.show cwd")?;
+            let repo = Repository::open(&cwd)
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.show: {e}")))?;
+            let object = repo
+                .revparse_single(&sha)
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.show rev: {e}")))?;
+            let commit = object
+                .peel_to_commit()
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.show commit: {e}")))?;
+            let new_tree = commit
+                .tree()
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.show tree: {e}")))?;
+            let old_tree = if commit.parent_count() == 0 {
+                None
+            } else {
+                Some(
+                    commit
+                        .parent(0)
+                        .and_then(|p| p.tree())
+                        .map_err(|e| RuntimeError::ToolFailed(format!("git.show parent: {e}")))?,
+                )
+            };
+            let diff = repo
+                .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.show diff: {e}")))?;
+            let mut files = Vec::new();
+            diff.foreach(
+                &mut |delta, _| {
+                    let path = delta
+                        .new_file()
+                        .path()
+                        .or_else(|| delta.old_file().path())
+                        .map(|p| p.to_string_lossy().into_owned());
+                    if let Some(path) = path
+                        && !files.contains(&path)
+                    {
+                        files.push(path);
+                    }
+                    true
+                },
+                None,
+                None,
+                None,
+            )
+            .map_err(|e| RuntimeError::ToolFailed(format!("git.show files: {e}")))?;
+            let mut body = String::new();
+            diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+                match line.origin() {
+                    'F' | 'H' => body.push_str(&String::from_utf8_lossy(line.content())),
+                    '+' | '-' | ' ' => {
+                        body.push(line.origin());
+                        body.push_str(&String::from_utf8_lossy(line.content()));
+                    }
+                    _ => body.push_str(&String::from_utf8_lossy(line.content())),
+                }
+                true
+            })
+            .map_err(|e| RuntimeError::ToolFailed(format!("git.show patch: {e}")))?;
+            let resolved = commit.id().to_string();
+            if let Some(tx) = &ctx.stream_tx {
+                let _ = tx.send(StreamFrame::DiffPreview {
+                    title: format!("git show {sha}"),
+                    old_content: None,
+                    new_content: None,
+                    unified_diff: Some(body.clone()),
+                });
+            }
+            Ok(Value::Struct(vec![
+                ("sha".into(), Value::Str(resolved)),
+                ("diff".into(), Value::Str(body)),
+                (
+                    "files".into(),
+                    Value::List(files.into_iter().map(Value::Str).collect()),
+                ),
+            ]))
+        })
+    }
+}
 
 impl Tool for GitStatus {
     fn name(&self) -> &str {

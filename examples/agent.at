@@ -13,7 +13,7 @@ flow agent_loop(messages: list, iteration: int) -> string {
     reply = llm {
         model: "smart"
         messages: messages
-        tools: [fs.read, fs.write, fs.edit, fs.list, bash.exec, hunk.review, hunk.apply, memory.confess]
+        tools: [fs.read, fs.write, fs.edit, fs.list, bash.exec, hunk.review, hunk.apply, git.diff, git.show, memory.confess]
     }
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {

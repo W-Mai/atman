@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::error::RuntimeError;
+use crate::stream::StreamFrame;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -207,6 +208,7 @@ impl Tool for FsWrite {
                     }
                 }
             }
+            let old_content = tokio::fs::read_to_string(&path).await.ok();
             tokio::fs::write(&path, content.as_bytes())
                 .await
                 .map_err(|e| {
@@ -214,6 +216,14 @@ impl Tool for FsWrite {
                 })?;
             let canonical = canonicalize_or_owned(&path);
             ctx.note_read(&canonical);
+            if let Some(tx) = &ctx.stream_tx {
+                let _ = tx.send(StreamFrame::DiffPreview {
+                    title: path.display().to_string(),
+                    old_content,
+                    new_content: Some(content.clone()),
+                    unified_diff: None,
+                });
+            }
             Ok(Value::Struct(vec![
                 ("path".into(), Value::Path(path)),
                 (
@@ -386,6 +396,14 @@ impl Tool for FsEdit {
                         path.display()
                     ))
                 })?;
+            if let Some(tx) = &ctx.stream_tx {
+                let _ = tx.send(StreamFrame::DiffPreview {
+                    title: path.display().to_string(),
+                    old_content: Some(content.clone()),
+                    new_content: Some(updated.clone()),
+                    unified_diff: None,
+                });
+            }
             let replaced = if replace_all { match_lines.len() } else { 1 };
             let first_line = match_lines[0];
             Ok(Value::Struct(vec![

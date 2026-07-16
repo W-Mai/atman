@@ -290,6 +290,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "serde_json",
+ "similar",
  "syntect",
  "tempfile",
  "terminal-colorsaurus",

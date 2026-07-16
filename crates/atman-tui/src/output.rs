@@ -426,6 +426,20 @@ fn item_content_hash(
             after_tokens.hash(&mut h);
             compacted_count.hash(&mut h);
         }
+        OutputItem::DiffPreview {
+            title,
+            old_content,
+            new_content,
+            unified_diff,
+            expanded,
+        } => {
+            10u8.hash(&mut h);
+            title.hash(&mut h);
+            old_content.as_deref().map(str_fp).hash(&mut h);
+            new_content.as_deref().map(str_fp).hash(&mut h);
+            unified_diff.as_deref().map(str_fp).hash(&mut h);
+            expanded.hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -442,6 +456,7 @@ enum ItemKind {
     Terminal,
     Bash,
     CompactionSummary,
+    DiffPreview,
 }
 
 impl ItemKind {
@@ -457,6 +472,7 @@ impl ItemKind {
             OutputItem::Terminal { .. } => Self::Terminal,
             OutputItem::Bash { .. } => Self::Bash,
             OutputItem::CompactionSummary { .. } => Self::CompactionSummary,
+            OutputItem::DiffPreview { .. } => Self::DiffPreview,
         }
     }
 
@@ -1467,9 +1483,366 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *compacted_count,
             ctx.panel_width,
         ),
+        OutputItem::DiffPreview {
+            title,
+            old_content,
+            new_content,
+            unified_diff,
+            expanded,
+        } => render_diff_preview(
+            title,
+            old_content.as_deref(),
+            new_content.as_deref(),
+            unified_diff.as_deref(),
+            *expanded,
+            ctx.panel_width,
+        ),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
     lines
+}
+
+fn render_diff_preview(
+    title: &str,
+    old_content: Option<&str>,
+    new_content: Option<&str>,
+    unified_diff: Option<&str>,
+    expanded: bool,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let t = crate::theme::theme();
+    let bg = t.code_bg;
+    let target = panel_width.max(20) as usize;
+    let base_style = Style::default().bg(bg);
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    let hint_style = Style::default()
+        .fg(t.meta_fg)
+        .bg(bg)
+        .add_modifier(Modifier::DIM);
+    let blank = Line::from(Span::styled(" ".repeat(target), base_style));
+    let mut lines = vec![blank.clone()];
+    let header = format!("  ✎ {title}");
+    let header_w = UnicodeWidthStr::width(header.as_str());
+    let mut header_spans = vec![Span::styled(header, header_style)];
+    if target > header_w {
+        header_spans.push(Span::styled(" ".repeat(target - header_w), base_style));
+    }
+    lines.push(Line::from(header_spans));
+    lines.push(blank.clone());
+    if let (Some(old), Some(new)) = (old_content, new_content) {
+        let (body, total) = render_dual_diff_rows(title, old, new, expanded, target, bg);
+        lines.extend(body);
+        push_diff_fold_hint(&mut lines, expanded, total, 15, target, hint_style);
+    } else if let Some(diff) = unified_diff {
+        let body = render_unified_diff_rows(diff, expanded, target, bg);
+        let total = diff.lines().count();
+        lines.extend(body);
+        push_diff_fold_hint(&mut lines, expanded, total, 15, target, hint_style);
+    }
+    lines.push(blank);
+    lines
+}
+
+fn push_diff_fold_hint(
+    lines: &mut Vec<Line<'static>>,
+    expanded: bool,
+    total: usize,
+    folded: usize,
+    target: usize,
+    style: Style,
+) {
+    use unicode_width::UnicodeWidthStr;
+    if !expanded && total > folded {
+        let hint = format!("    ▼ {} more lines — click to expand", total - folded);
+        let pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, style)];
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), style));
+        }
+        lines.push(Line::from(spans));
+    } else if expanded && total > folded {
+        let hint = "    ▲ click to collapse".to_string();
+        let pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, style)];
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), style));
+        }
+        lines.push(Line::from(spans));
+    }
+}
+
+#[derive(Clone)]
+struct DiffCell {
+    line_no: Option<usize>,
+    text: String,
+    kind: DiffCellKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiffCellKind {
+    Normal,
+    Delete,
+    Insert,
+    Empty,
+}
+
+fn render_dual_diff_rows(
+    title: &str,
+    old: &str,
+    new: &str,
+    expanded: bool,
+    target: usize,
+    bg: Color,
+) -> (Vec<Line<'static>>, usize) {
+    let lang = language_from_title(title);
+    let old_lines = content_lines(old);
+    let new_lines = content_lines(new);
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut rows: Vec<(DiffCell, DiffCell)> = Vec::new();
+    for op in diff.ops() {
+        match *op {
+            similar::DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => {
+                for i in 0..len {
+                    rows.push((
+                        diff_cell(&old_lines, old_index + i, DiffCellKind::Normal),
+                        diff_cell(&new_lines, new_index + i, DiffCellKind::Normal),
+                    ));
+                }
+            }
+            similar::DiffOp::Delete {
+                old_index, old_len, ..
+            } => {
+                for i in 0..old_len {
+                    rows.push((
+                        diff_cell(&old_lines, old_index + i, DiffCellKind::Delete),
+                        empty_cell(),
+                    ));
+                }
+            }
+            similar::DiffOp::Insert {
+                new_index, new_len, ..
+            } => {
+                for i in 0..new_len {
+                    rows.push((
+                        empty_cell(),
+                        diff_cell(&new_lines, new_index + i, DiffCellKind::Insert),
+                    ));
+                }
+            }
+            similar::DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                let len = old_len.max(new_len);
+                for i in 0..len {
+                    rows.push((
+                        if i < old_len {
+                            diff_cell(&old_lines, old_index + i, DiffCellKind::Delete)
+                        } else {
+                            empty_cell()
+                        },
+                        if i < new_len {
+                            diff_cell(&new_lines, new_index + i, DiffCellKind::Insert)
+                        } else {
+                            empty_cell()
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    let total = rows.len();
+    let take = if expanded { total } else { total.min(15) };
+    let sep_w = 1usize;
+    let left_w = target.saturating_sub(sep_w) / 2;
+    let right_w = target.saturating_sub(sep_w).saturating_sub(left_w);
+    let sep_style = Style::default().fg(Color::DarkGray).bg(bg);
+    let mut out = Vec::with_capacity(take);
+    for (left, right) in rows.into_iter().take(take) {
+        let mut spans = render_diff_side(&left, left_w, &lang, bg);
+        spans.push(Span::styled("│".to_string(), sep_style));
+        spans.extend(render_diff_side(&right, right_w, &lang, bg));
+        out.push(Line::from(spans));
+    }
+    (out, total)
+}
+
+fn content_lines(s: &str) -> Vec<String> {
+    s.split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line).to_string())
+        .collect()
+}
+
+fn diff_cell(lines: &[String], idx: usize, kind: DiffCellKind) -> DiffCell {
+    DiffCell {
+        line_no: Some(idx + 1),
+        text: lines.get(idx).cloned().unwrap_or_default(),
+        kind,
+    }
+}
+
+fn empty_cell() -> DiffCell {
+    DiffCell {
+        line_no: None,
+        text: String::new(),
+        kind: DiffCellKind::Empty,
+    }
+}
+
+fn render_diff_side(cell: &DiffCell, width: usize, lang: &str, bg: Color) -> Vec<Span<'static>> {
+    let mark_style = match cell.kind {
+        DiffCellKind::Delete => Style::default().fg(Color::Red).bg(Color::Rgb(62, 30, 34)),
+        DiffCellKind::Insert => Style::default().fg(Color::Green).bg(Color::Rgb(28, 56, 36)),
+        DiffCellKind::Normal | DiffCellKind::Empty => Style::default().bg(bg),
+    };
+    let prefix = match cell.line_no {
+        Some(n) => format!("{n:>4} "),
+        None => "     ".to_string(),
+    };
+    let mut spans = vec![Span::styled(prefix, mark_style)];
+    let body_w = width.saturating_sub(5);
+    let highlighted = crate::highlight::highlight_code(lang, &cell.text);
+    if let Some(line) = highlighted.into_iter().next() {
+        let mut body = truncate_spans_with_bg(line.spans, body_w, mark_style.bg.unwrap_or(bg));
+        if !matches!(cell.kind, DiffCellKind::Normal | DiffCellKind::Empty) {
+            for span in &mut body {
+                span.style.fg = mark_style.fg.or(span.style.fg);
+            }
+        }
+        spans.extend(body);
+    }
+    pad_spans_to_width(&mut spans, width, mark_style);
+    spans
+}
+
+fn render_unified_diff_rows(
+    diff: &str,
+    expanded: bool,
+    target: usize,
+    bg: Color,
+) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let all_lines: Vec<&str> = diff.lines().collect();
+    let max = if expanded {
+        all_lines.len()
+    } else {
+        all_lines.len().min(15)
+    };
+    all_lines
+        .into_iter()
+        .take(max)
+        .map(|line| {
+            let style = if line.starts_with("@@") {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if line.starts_with('+') {
+                Style::default().fg(Color::Green).bg(bg)
+            } else if line.starts_with('-') {
+                Style::default().fg(Color::Red).bg(bg)
+            } else {
+                Style::default().bg(bg)
+            };
+            let shown = truncate_to_width(line, target);
+            let used = UnicodeWidthStr::width(shown.as_str());
+            let mut spans = vec![Span::styled(shown, style)];
+            if target > used {
+                spans.push(Span::styled(" ".repeat(target - used), style));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn language_from_title(title: &str) -> String {
+    std::path::Path::new(title)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| match ext {
+            "rs" => "rust",
+            "py" => "python",
+            "js" => "javascript",
+            "ts" => "typescript",
+            "tsx" => "tsx",
+            "jsx" => "jsx",
+            "md" => "markdown",
+            "toml" => "toml",
+            "json" => "json",
+            "yaml" | "yml" => "yaml",
+            "html" => "html",
+            "css" => "css",
+            "sh" => "bash",
+            other => other,
+        })
+        .unwrap_or("")
+        .to_string()
+}
+
+fn truncate_to_width(s: &str, max_w: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > max_w {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
+}
+
+fn truncate_spans_with_bg(
+    spans: Vec<Span<'static>>,
+    max_w: usize,
+    bg: Color,
+) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthChar;
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let w = ch.width().unwrap_or(0);
+            if used + w > max_w {
+                break;
+            }
+            text.push(ch);
+            used += w;
+        }
+        if !text.is_empty() {
+            let mut style = span.style;
+            style.bg = style.bg.or(Some(bg));
+            out.push(Span::styled(text, style));
+        }
+        if used >= max_w {
+            break;
+        }
+    }
+    out
+}
+
+fn pad_spans_to_width(spans: &mut Vec<Span<'static>>, width: usize, style: Style) {
+    use unicode_width::UnicodeWidthStr;
+    let used: usize = spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    if width > used {
+        spans.push(Span::styled(" ".repeat(width - used), style));
+    }
 }
 
 fn aggregate_llm_stats(

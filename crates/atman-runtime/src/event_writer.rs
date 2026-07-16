@@ -256,6 +256,7 @@ pub(crate) fn extract_ts(event: &Event) -> String {
         | Event::UserMsg { ts, .. }
         | Event::AssistantMsg { ts, .. }
         | Event::ToolResultMsg { ts, .. }
+        | Event::DiffPreview { ts, .. }
         | Event::SystemMsg { ts, .. }
         | Event::UserInject { ts, .. }
         | Event::ContentFilterHit { ts, .. }
@@ -287,6 +288,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::UserMsg { .. } => "user_msg",
         Event::AssistantMsg { .. } => "assistant_msg",
         Event::ToolResultMsg { .. } => "tool_result_msg",
+        Event::DiffPreview { .. } => "diff_preview",
         Event::SystemMsg { .. } => "system_msg",
         Event::UserInject { .. } => "user_inject",
         Event::ContentFilterHit { .. } => "content_filter_hit",
@@ -330,6 +332,14 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
             ..
         } => (
             Some(turn_id.0.to_string()),
+            flow_run_id.as_ref().map(|r| r.0.to_string()),
+        ),
+        Event::DiffPreview {
+            turn_id,
+            flow_run_id,
+            ..
+        } => (
+            turn_id.as_ref().map(|t| t.0.to_string()),
             flow_run_id.as_ref().map(|r| r.0.to_string()),
         ),
         Event::ContentFilterHit {

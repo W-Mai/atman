@@ -2137,6 +2137,7 @@ fn render_stream_frame(
         | StreamFrame::TerminalExited { .. }
         | StreamFrame::BashChunk { .. }
         | StreamFrame::BashExited { .. }
+        | StreamFrame::DiffPreview { .. }
         | StreamFrame::CompactionSummary { .. }
         | StreamFrame::Unknown => {}
     }

@@ -295,6 +295,7 @@ async fn dispatch_tool_call<'a>(
         });
     }
     let call_args = ToolArgs { positional, named };
+    let diff_preview = prepare_diff_preview(&name, &call_args);
     let level = tool.approval_level(&call_args, &ctx_with_anchors);
     let gate = crate::approval::request_approval(
         &ctx_with_anchors,
@@ -333,10 +334,111 @@ async fn dispatch_tool_call<'a>(
     {
         session.refresh_plans_from_store_async().await;
     }
+    if let (Some(sink), Ok(value)) = (ctx.events, &outcome) {
+        if let Some((title, old_content, new_content, unified_diff)) =
+            complete_diff_preview(diff_preview, &name, value)
+        {
+            sink.emit(crate::event::Event::DiffPreview {
+                seq: 0,
+                turn_id: ctx.turn_id.clone(),
+                flow_run_id: ctx.flow_run_id.clone(),
+                title,
+                old_content,
+                new_content,
+                unified_diff,
+                ts: chrono::Utc::now(),
+            });
+        }
+    }
     match outcome {
         Ok(v) => v,
         Err(e) => Value::Err(e),
     }
+}
+
+type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);
+
+fn prepare_diff_preview(name: &str, args: &ToolArgs) -> Option<DiffPreviewData> {
+    match name {
+        "fs.write" => {
+            let path = tool_arg_path(args, "path", 0)?;
+            let content = tool_arg_string(args, "content", 1)?;
+            Some((
+                path.display().to_string(),
+                std::fs::read_to_string(&path).ok(),
+                Some(content),
+                None,
+            ))
+        }
+        "fs.edit" => {
+            let path = tool_arg_path(args, "path", 0)?;
+            let old_string = tool_arg_string(args, "old_string", 1)?;
+            let new_string = tool_arg_string(args, "new_string", 2)?;
+            let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
+            let old = std::fs::read_to_string(&path).ok()?;
+            let new = if replace_all {
+                old.replace(&old_string, &new_string)
+            } else {
+                old.replacen(&old_string, &new_string, 1)
+            };
+            Some((path.display().to_string(), Some(old), Some(new), None))
+        }
+        _ => None,
+    }
+}
+
+fn complete_diff_preview(
+    prepared: Option<DiffPreviewData>,
+    name: &str,
+    value: &Value,
+) -> Option<DiffPreviewData> {
+    if prepared.is_some() {
+        return prepared;
+    }
+    match name {
+        "git.diff" => Some((
+            "git diff".into(),
+            None,
+            None,
+            value_struct_string(value, "diff"),
+        )),
+        "git.show" => Some((
+            value_struct_string(value, "sha")
+                .map(|sha| format!("git show {sha}"))
+                .unwrap_or_else(|| "git show".into()),
+            None,
+            None,
+            value_struct_string(value, "diff"),
+        )),
+        _ => None,
+    }
+}
+
+fn tool_arg_string(args: &ToolArgs, name: &str, pos: usize) -> Option<String> {
+    let value = args.named(name).or_else(|| args.positional.get(pos))?;
+    match value {
+        Value::Str(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn tool_arg_path(args: &ToolArgs, name: &str, pos: usize) -> Option<std::path::PathBuf> {
+    let value = args.named(name).or_else(|| args.positional.get(pos))?;
+    match value {
+        Value::Path(p) => Some(p.clone()),
+        Value::Str(s) => Some(std::path::PathBuf::from(s)),
+        _ => None,
+    }
+}
+
+fn value_struct_string(value: &Value, name: &str) -> Option<String> {
+    let Value::Struct(fields) = value else {
+        return None;
+    };
+    fields.iter().find_map(|(k, v)| match (k.as_str(), v) {
+        (key, Value::Str(s)) if key == name => Some(s.clone()),
+        _ => None,
+    })
 }
 
 async fn call_and_maybe_stream(

@@ -109,6 +109,17 @@ pub enum Event {
         message: crate::message::Message,
         ts: chrono::DateTime<chrono::Utc>,
     },
+    DiffPreview {
+        #[serde(default)]
+        seq: u64,
+        turn_id: Option<TurnId>,
+        flow_run_id: Option<FlowRunId>,
+        title: String,
+        old_content: Option<String>,
+        new_content: Option<String>,
+        unified_diff: Option<String>,
+        ts: chrono::DateTime<chrono::Utc>,
+    },
     SystemMsg {
         #[serde(default)]
         seq: u64,
@@ -299,6 +310,7 @@ impl Event {
             | Event::UserMsg { seq, .. }
             | Event::AssistantMsg { seq, .. }
             | Event::ToolResultMsg { seq, .. }
+            | Event::DiffPreview { seq, .. }
             | Event::SystemMsg { seq, .. }
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }
@@ -330,6 +342,7 @@ impl Event {
             | Event::UserMsg { seq, .. }
             | Event::AssistantMsg { seq, .. }
             | Event::ToolResultMsg { seq, .. }
+            | Event::DiffPreview { seq, .. }
             | Event::SystemMsg { seq, .. }
             | Event::UserInject { seq, .. }
             | Event::ContentFilterHit { seq, .. }

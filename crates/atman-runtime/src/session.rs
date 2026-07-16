@@ -499,6 +499,12 @@ pub enum TranscriptEntry {
         message: Message,
         flow_run_id: Option<String>,
     },
+    DiffPreview {
+        title: String,
+        old_content: Option<String>,
+        new_content: Option<String>,
+        unified_diff: Option<String>,
+    },
     FlowGraph {
         run_id: String,
         flow_name: String,
@@ -776,6 +782,14 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                             ordinal_out_idx.saturating_sub(removed_count.saturating_sub(1));
                     }
                 }
+            }
+            "diff_preview" => {
+                out.push(TranscriptEntry::DiffPreview {
+                    title: v["title"].as_str().unwrap_or("").to_string(),
+                    old_content: v["old_content"].as_str().map(String::from),
+                    new_content: v["new_content"].as_str().map(String::from),
+                    unified_diff: v["unified_diff"].as_str().map(String::from),
+                });
             }
             "flow_graph" => {
                 let run_id = v["run_id"].as_str().unwrap_or("").to_string();
