@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use git2::{BranchType, DiffFormat, Repository, Status, StatusOptions};
+use git2::{BranchType, Commit, Diff, DiffFormat, Repository, Status, StatusOptions};
 
 use crate::error::RuntimeError;
 use crate::stream::StreamFrame;
@@ -11,6 +11,88 @@ use crate::value::Value;
 pub struct GitStatus;
 
 pub struct GitShow;
+
+pub struct GitLog;
+
+impl Tool for GitLog {
+    fn name(&self) -> &str {
+        "git.log"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("List recent commits and preview the patch for the newest commit.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100, "description": "Maximum commits to return."},
+                "cwd": {"type": "string", "description": "Optional working dir; defaults to current process directory."}
+            }
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let limit = extract_optional_int(&args, "limit")
+                .unwrap_or(20)
+                .clamp(1, 100) as usize;
+            let cwd = extract_cwd(&args, "git.log cwd")?;
+            let repo = Repository::open(&cwd)
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.log: {e}")))?;
+            let mut revwalk = repo
+                .revwalk()
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.log revwalk: {e}")))?;
+            revwalk
+                .push_head()
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.log head: {e}")))?;
+
+            let mut commits = Vec::new();
+            let mut preview_diff = String::new();
+            let mut preview_files = Vec::new();
+            for oid in revwalk.take(limit) {
+                let oid = oid.map_err(|e| RuntimeError::ToolFailed(format!("git.log oid: {e}")))?;
+                let commit = repo
+                    .find_commit(oid)
+                    .map_err(|e| RuntimeError::ToolFailed(format!("git.log commit: {e}")))?;
+                let diff = commit_diff(&repo, &commit, "git.log")?;
+                let stats = diff
+                    .stats()
+                    .map_err(|e| RuntimeError::ToolFailed(format!("git.log stats: {e}")))?;
+                if commits.is_empty() {
+                    preview_files = diff_files(&diff, "git.log")?;
+                    preview_diff = diff_patch(&diff, "git.log")?;
+                }
+                commits.push(commit_entry(&commit, &stats));
+            }
+
+            if let Some(tx) = &ctx.stream_tx
+                && !preview_diff.is_empty()
+            {
+                let _ = tx.send(StreamFrame::DiffPreview {
+                    title: "git log HEAD".into(),
+                    old_content: None,
+                    new_content: None,
+                    unified_diff: Some(preview_diff.clone()),
+                });
+            }
+
+            Ok(Value::Struct(vec![
+                ("commits".into(), Value::List(commits)),
+                ("diff".into(), Value::Str(preview_diff)),
+                (
+                    "files".into(),
+                    Value::List(preview_files.into_iter().map(Value::Str).collect()),
+                ),
+            ]))
+        })
+    }
+}
 
 impl Tool for GitShow {
     fn name(&self) -> &str {
@@ -48,55 +130,9 @@ impl Tool for GitShow {
             let commit = object
                 .peel_to_commit()
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.show commit: {e}")))?;
-            let new_tree = commit
-                .tree()
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.show tree: {e}")))?;
-            let old_tree = if commit.parent_count() == 0 {
-                None
-            } else {
-                Some(
-                    commit
-                        .parent(0)
-                        .and_then(|p| p.tree())
-                        .map_err(|e| RuntimeError::ToolFailed(format!("git.show parent: {e}")))?,
-                )
-            };
-            let diff = repo
-                .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.show diff: {e}")))?;
-            let mut files = Vec::new();
-            diff.foreach(
-                &mut |delta, _| {
-                    let path = delta
-                        .new_file()
-                        .path()
-                        .or_else(|| delta.old_file().path())
-                        .map(|p| p.to_string_lossy().into_owned());
-                    if let Some(path) = path
-                        && !files.contains(&path)
-                    {
-                        files.push(path);
-                    }
-                    true
-                },
-                None,
-                None,
-                None,
-            )
-            .map_err(|e| RuntimeError::ToolFailed(format!("git.show files: {e}")))?;
-            let mut body = String::new();
-            diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
-                match line.origin() {
-                    'F' | 'H' => body.push_str(&String::from_utf8_lossy(line.content())),
-                    '+' | '-' | ' ' => {
-                        body.push(line.origin());
-                        body.push_str(&String::from_utf8_lossy(line.content()));
-                    }
-                    _ => body.push_str(&String::from_utf8_lossy(line.content())),
-                }
-                true
-            })
-            .map_err(|e| RuntimeError::ToolFailed(format!("git.show patch: {e}")))?;
+            let diff = commit_diff(&repo, &commit, "git.show")?;
+            let files = diff_files(&diff, "git.show")?;
+            let body = diff_patch(&diff, "git.show")?;
             let resolved = commit.id().to_string();
             if let Some(tx) = &ctx.stream_tx {
                 let _ = tx.send(StreamFrame::DiffPreview {
@@ -495,6 +531,109 @@ fn extract_optional_bool(args: &ToolArgs, name: &str) -> Option<bool> {
     }
 }
 
+fn extract_optional_int(args: &ToolArgs, name: &str) -> Option<i64> {
+    match args.named(name)? {
+        Value::Int(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn commit_diff<'repo>(
+    repo: &'repo Repository,
+    commit: &Commit<'repo>,
+    tool: &str,
+) -> Result<Diff<'repo>, RuntimeError> {
+    let new_tree = commit
+        .tree()
+        .map_err(|e| RuntimeError::ToolFailed(format!("{tool} tree: {e}")))?;
+    let old_tree = if commit.parent_count() == 0 {
+        None
+    } else {
+        Some(
+            commit
+                .parent(0)
+                .and_then(|p| p.tree())
+                .map_err(|e| RuntimeError::ToolFailed(format!("{tool} parent: {e}")))?,
+        )
+    };
+    repo.diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)
+        .map_err(|e| RuntimeError::ToolFailed(format!("{tool} diff: {e}")))
+}
+
+fn diff_files(diff: &Diff<'_>, tool: &str) -> Result<Vec<String>, RuntimeError> {
+    let mut files = Vec::new();
+    diff.foreach(
+        &mut |delta, _| {
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(|p| p.to_string_lossy().into_owned());
+            if let Some(path) = path
+                && !files.contains(&path)
+            {
+                files.push(path);
+            }
+            true
+        },
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| RuntimeError::ToolFailed(format!("{tool} files: {e}")))?;
+    Ok(files)
+}
+
+fn diff_patch(diff: &Diff<'_>, tool: &str) -> Result<String, RuntimeError> {
+    let mut body = String::new();
+    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        match line.origin() {
+            'F' | 'H' => body.push_str(&String::from_utf8_lossy(line.content())),
+            '+' | '-' | ' ' => {
+                body.push(line.origin());
+                body.push_str(&String::from_utf8_lossy(line.content()));
+            }
+            _ => body.push_str(&String::from_utf8_lossy(line.content())),
+        }
+        true
+    })
+    .map_err(|e| RuntimeError::ToolFailed(format!("{tool} patch: {e}")))?;
+    Ok(body)
+}
+
+fn commit_entry(commit: &Commit<'_>, stats: &git2::DiffStats) -> Value {
+    let author = commit.author();
+    let author_name = author.name().unwrap_or_default();
+    let author_email = author.email().unwrap_or_default();
+    let author_display = if author_email.is_empty() {
+        author_name.to_string()
+    } else if author_name.is_empty() {
+        author_email.to_string()
+    } else {
+        format!("{author_name} <{author_email}>")
+    };
+    Value::Struct(vec![
+        ("sha".into(), Value::Str(commit.id().to_string())),
+        ("author".into(), Value::Str(author_display)),
+        (
+            "date".into(),
+            Value::Str(commit.time().seconds().to_string()),
+        ),
+        (
+            "message".into(),
+            Value::Str(commit.summary().unwrap_or_default().to_string()),
+        ),
+        (
+            "stats".into(),
+            Value::Struct(vec![
+                ("files".into(), Value::Int(stats.files_changed() as i64)),
+                ("insertions".into(), Value::Int(stats.insertions() as i64)),
+                ("deletions".into(), Value::Int(stats.deletions() as i64)),
+            ]),
+        ),
+    ])
+}
+
 fn index_status(status: Status) -> Option<&'static str> {
     if status.is_index_new() {
         Some("new")
@@ -549,4 +688,72 @@ fn current_branch(cwd: &std::path::Path) -> Result<String, RuntimeError> {
     head.shorthand()
         .map(str::to_string)
         .ok_or_else(|| RuntimeError::ToolFailed("git.push: detached HEAD has no branch".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::GitCli;
+    use std::path::Path;
+
+    fn have_git() -> bool {
+        GitCli::ensure_available().is_ok()
+    }
+
+    fn seed_two_commits(dir: &Path) {
+        let cli = GitCli::at(dir);
+        cli.init("main").unwrap();
+        for (k, v) in [
+            ("user.email", "t@atman.local"),
+            ("user.name", "atman test"),
+            ("commit.gpgsign", "false"),
+        ] {
+            cli.run(&["config", k, v]).unwrap();
+        }
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        cli.add_all().unwrap();
+        cli.commit("initial").unwrap();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        cli.add_all().unwrap();
+        cli.commit("second").unwrap();
+    }
+
+    #[tokio::test]
+    async fn log_returns_limited_commits_and_head_patch() {
+        if !have_git() {
+            eprintln!("skip: git not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        seed_two_commits(tmp.path());
+        let ctx = ToolCtx::new();
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                ("limit".into(), Value::Int(1)),
+                (
+                    "cwd".into(),
+                    Value::Str(tmp.path().to_string_lossy().into()),
+                ),
+            ],
+        };
+
+        let value = GitLog.call(args, &ctx).await.unwrap();
+        let commits = value.field("commits").unwrap();
+        let Value::List(commits) = commits else {
+            panic!("expected commits list: {commits:?}");
+        };
+        assert_eq!(commits.len(), 1);
+        let head = &commits[0];
+        assert!(matches!(head.field("message"), Some(Value::Str(s)) if s == "second"));
+        assert!(matches!(head.field("sha"), Some(Value::Str(sha)) if sha.len() == 40));
+        let stats = head.field("stats").unwrap();
+        assert!(matches!(stats.field("files"), Some(Value::Int(1))));
+        assert!(matches!(stats.field("insertions"), Some(Value::Int(1))));
+        let diff = value.field("diff").unwrap();
+        assert!(
+            matches!(diff, Value::Str(s) if s.contains("+two")),
+            "diff={diff:?}"
+        );
+    }
 }

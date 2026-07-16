@@ -155,7 +155,7 @@ flow agent_loop(iteration: int) -> string {
             term.spawn, term.input, term.capture, term.resize, term.kill, term.list,
             web.fetch, web.search,
             hunk.review, hunk.apply, hunk.plan_edit,
-            git.diff, git.show, git.status, git.add, git.commit, git.branch, git.push, test.run,
+            git.diff, git.show, git.log, git.status, git.add, git.commit, git.branch, git.push, test.run,
             memory.confess, memory.fetch_confessions,
             memory.todo.set, memory.todo.done, memory.todo.cancel, memory.todo.delete, memory.todo.list,
             memory.goal.get, memory.goal.set, memory.goal.clear,

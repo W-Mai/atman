@@ -1640,33 +1640,101 @@ fn render_diff_cell_rows(
     let total = rows.len();
     let sep = " │ ";
     let sep_w = 3usize;
-    let left_w = target.saturating_sub(sep_w) / 2;
-    let right_w = target.saturating_sub(sep_w).saturating_sub(left_w);
+    let margin_w = 1usize;
+    let panes_w = target.saturating_sub(sep_w + margin_w * 2);
+    let left_w = panes_w / 2;
+    let right_w = panes_w.saturating_sub(left_w);
     let sep_style = Style::default().fg(Color::DarkGray).bg(bg);
-    let mut out;
+    let margin_style = Style::default().bg(bg);
+    let mut out = Vec::new();
     if expanded || total <= 15 {
-        out = Vec::with_capacity(total);
         for (left, right) in rows {
-            let mut spans = render_diff_side(left, left_w, lang, bg);
-            spans.push(Span::styled(sep.to_string(), sep_style));
-            spans.extend(render_diff_side(right, right_w, lang, bg));
-            out.push(Line::from(spans));
+            push_diff_visual_rows(
+                &mut out,
+                DiffVisualSpec {
+                    left,
+                    right,
+                    left_w,
+                    right_w,
+                    lang,
+                    bg,
+                    margin_w,
+                    margin_style,
+                    sep,
+                    sep_style,
+                    target,
+                },
+            );
         }
     } else {
-        // Collapsed: center window around first change.
         let fc = first_change.unwrap_or(0);
         let radius = 7usize;
         let start = fc.saturating_sub(radius).min(total.saturating_sub(15));
         let end = (start + 15).min(total);
-        out = Vec::with_capacity(15);
         for (left, right) in rows[start..end].iter() {
-            let mut spans = render_diff_side(left, left_w, lang, bg);
-            spans.push(Span::styled(sep.to_string(), sep_style));
-            spans.extend(render_diff_side(right, right_w, lang, bg));
-            out.push(Line::from(spans));
+            push_diff_visual_rows(
+                &mut out,
+                DiffVisualSpec {
+                    left,
+                    right,
+                    left_w,
+                    right_w,
+                    lang,
+                    bg,
+                    margin_w,
+                    margin_style,
+                    sep,
+                    sep_style,
+                    target,
+                },
+            );
         }
     }
     (out, total)
+}
+
+struct DiffVisualSpec<'a> {
+    left: &'a DiffCell,
+    right: &'a DiffCell,
+    left_w: usize,
+    right_w: usize,
+    lang: &'a str,
+    bg: Color,
+    margin_w: usize,
+    margin_style: Style,
+    sep: &'a str,
+    sep_style: Style,
+    target: usize,
+}
+
+fn push_diff_visual_rows(out: &mut Vec<Line<'static>>, spec: DiffVisualSpec<'_>) {
+    let left_lines = render_diff_side(spec.left, spec.left_w, spec.lang, spec.bg);
+    let right_lines = render_diff_side(spec.right, spec.right_w, spec.lang, spec.bg);
+    let left_blank = blank_diff_side(spec.left_w, spec.bg);
+    let right_blank = blank_diff_side(spec.right_w, spec.bg);
+    let line_count = left_lines.len().max(right_lines.len()).max(1);
+    for idx in 0..line_count {
+        let mut spans = Vec::new();
+        spans.push(Span::styled(" ".repeat(spec.margin_w), spec.margin_style));
+        spans.extend(
+            left_lines
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| left_blank.clone())
+                .spans,
+        );
+        spans.push(Span::styled(spec.sep.to_string(), spec.sep_style));
+        spans.extend(
+            right_lines
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| right_blank.clone())
+                .spans,
+        );
+        spans.push(Span::styled(" ".repeat(spec.margin_w), spec.margin_style));
+        pad_spans_to_width(&mut spans, spec.target, spec.margin_style);
+        out.push(Line::from(spans));
+    }
 }
 
 fn render_dual_diff_rows(
@@ -1923,30 +1991,52 @@ fn empty_cell() -> DiffCell {
     }
 }
 
-fn render_diff_side(cell: &DiffCell, width: usize, lang: &str, bg: Color) -> Vec<Span<'static>> {
+fn render_diff_side(cell: &DiffCell, width: usize, lang: &str, bg: Color) -> Vec<Line<'static>> {
     let mark_style = match cell.kind {
         DiffCellKind::Delete => Style::default().fg(Color::Red).bg(Color::Rgb(62, 30, 34)),
         DiffCellKind::Insert => Style::default().fg(Color::Green).bg(Color::Rgb(28, 56, 36)),
         DiffCellKind::Normal | DiffCellKind::Empty => Style::default().bg(bg),
     };
-    let prefix = match cell.line_no {
-        Some(n) => format!("{n:>4} "),
-        None => "     ".to_string(),
+    let gutter_w = 6usize;
+    let first_prefix = match cell.line_no {
+        Some(n) => format!("{n:>4}  "),
+        None => " ".repeat(gutter_w),
     };
-    let mut spans = vec![Span::styled(prefix, mark_style)];
-    let body_w = width.saturating_sub(5);
+    let continuation_prefix = " ".repeat(gutter_w);
+    let body_w = width.saturating_sub(gutter_w);
     let highlighted = crate::highlight::highlight_code(lang, &cell.text);
-    if let Some(line) = highlighted.into_iter().next() {
-        let mut body = truncate_spans_with_bg(line.spans, body_w, mark_style.bg.unwrap_or(bg));
+    let wrapped = highlighted
+        .into_iter()
+        .next()
+        .map(|line| wrap_spans_with_bg(line.spans, body_w, mark_style.bg.unwrap_or(bg)))
+        .unwrap_or_else(|| vec![Vec::new()]);
+    let mut lines = Vec::with_capacity(wrapped.len().max(1));
+    for (idx, body_spans) in wrapped.into_iter().enumerate() {
+        let prefix = if idx == 0 {
+            first_prefix.clone()
+        } else {
+            continuation_prefix.clone()
+        };
+        let mut spans = vec![Span::styled(prefix, mark_style)];
+        let mut body = body_spans;
         if !matches!(cell.kind, DiffCellKind::Normal | DiffCellKind::Empty) {
             for span in &mut body {
                 span.style.fg = mark_style.fg.or(span.style.fg);
             }
         }
         spans.extend(body);
+        pad_spans_to_width(&mut spans, width, mark_style);
+        lines.push(Line::from(spans));
     }
-    pad_spans_to_width(&mut spans, width, mark_style);
-    spans
+    if lines.is_empty() {
+        vec![blank_diff_side(width, bg)]
+    } else {
+        lines
+    }
+}
+
+fn blank_diff_side(width: usize, bg: Color) -> Line<'static> {
+    Line::from(Span::styled(" ".repeat(width), Style::default().bg(bg)))
 }
 
 fn language_from_title(title: &str) -> String {
@@ -1973,7 +2063,74 @@ fn language_from_title(title: &str) -> String {
         .to_string()
 }
 
-fn truncate_spans_with_bg(
+fn wrap_spans_with_bg(
+    spans: Vec<Span<'static>>,
+    max_w: usize,
+    bg: Color,
+) -> Vec<Vec<Span<'static>>> {
+    use unicode_width::UnicodeWidthChar;
+    if max_w == 0 {
+        return vec![Vec::new()];
+    }
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut used = 0usize;
+    let max_rows = 3usize;
+    let mut truncated = false;
+    for span in spans {
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let w = ch.width().unwrap_or(0);
+            if used + w > max_w {
+                push_wrapped_span(&mut rows, &mut text, span.style, bg);
+                if rows.len() >= max_rows {
+                    truncated = true;
+                    break;
+                }
+                rows.push(Vec::new());
+                used = 0;
+            }
+            text.push(ch);
+            used += w;
+        }
+        push_wrapped_span(&mut rows, &mut text, span.style, bg);
+        if truncated {
+            break;
+        }
+    }
+    if truncated {
+        add_ellipsis_to_row(
+            rows.last_mut().expect("wrap rows are never empty"),
+            max_w,
+            bg,
+        );
+    }
+    rows
+}
+
+fn push_wrapped_span(rows: &mut [Vec<Span<'static>>], text: &mut String, style: Style, bg: Color) {
+    if text.is_empty() {
+        return;
+    }
+    let mut styled = style;
+    styled.bg = styled.bg.or(Some(bg));
+    rows.last_mut()
+        .expect("wrap rows are never empty")
+        .push(Span::styled(std::mem::take(text), styled));
+}
+
+fn add_ellipsis_to_row(row: &mut Vec<Span<'static>>, max_w: usize, bg: Color) {
+    let style = row
+        .last()
+        .map(|span| span.style)
+        .unwrap_or_else(|| Style::default().bg(bg));
+    let trimmed = truncate_spans_to_width(std::mem::take(row), max_w.saturating_sub(1), bg);
+    *row = trimmed;
+    let mut ellipsis_style = style;
+    ellipsis_style.bg = ellipsis_style.bg.or(Some(bg));
+    row.push(Span::styled("⋯", ellipsis_style));
+}
+
+fn truncate_spans_to_width(
     spans: Vec<Span<'static>>,
     max_w: usize,
     bg: Color,
@@ -3769,6 +3926,56 @@ mod tests {
                 plain_line(line)
             );
         }
+    }
+
+    #[test]
+    fn unified_diff_parser_keeps_multi_file_changes() {
+        let diff = "diff --git a/a.rs b/a.rs\nindex 111..222 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,2 @@\n fn a() {}\n+fn b() {}\ndiff --git a/b.rs b/b.rs\nindex 333..444 100644\n--- a/b.rs\n+++ b/b.rs\n@@ -1,2 +1,1 @@\n keep\n-delete\n";
+        let (rows, lang) = parse_unified_diff_to_dual(diff);
+        assert_eq!(lang, "rust");
+        assert!(rows.iter().any(|(_, r)| r.text == "fn b() {}"));
+        assert!(rows.iter().any(|(l, _)| l.text == "delete"));
+    }
+
+    #[test]
+    fn diff_rows_wrap_and_align_long_sides() {
+        let long = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789中文中文中文";
+        let rows = vec![(
+            DiffCell {
+                line_no: Some(1),
+                text: long.into(),
+                kind: DiffCellKind::Delete,
+            },
+            DiffCell {
+                line_no: Some(1),
+                text: "short".into(),
+                kind: DiffCellKind::Insert,
+            },
+        )];
+        let (lines, total) = render_diff_cell_rows(&rows, "rust", true, 44, Color::Black, Some(0));
+        assert_eq!(total, 1);
+        assert!(lines.len() > 1, "long side should wrap: {lines:?}");
+        for line in &lines {
+            let text = plain_line(line);
+            let width = unicode_width::UnicodeWidthStr::width(text.as_str());
+            assert_eq!(width, 44, "line width mismatch: {text:?}");
+            assert!(text.starts_with(' '), "left margin missing: {text:?}");
+            assert!(text.ends_with(' '), "right margin missing: {text:?}");
+            assert!(text.contains(" │ "), "separator missing: {text:?}");
+        }
+    }
+
+    #[test]
+    fn diff_side_marks_extreme_wrap_with_ellipsis() {
+        let cell = DiffCell {
+            line_no: Some(1),
+            text: "x".repeat(200),
+            kind: DiffCellKind::Normal,
+        };
+        let lines = render_diff_side(&cell, 16, "", Color::Black);
+        assert_eq!(lines.len(), 3);
+        let last = plain_line(lines.last().unwrap());
+        assert!(last.contains('⋯'), "ellipsis missing: {last:?}");
     }
 
     #[test]

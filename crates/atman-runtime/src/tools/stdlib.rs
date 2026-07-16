@@ -1031,6 +1031,12 @@ fn emit_diff_preview_if_relevant(ctx: &ToolCtx, tool_name: &str, value: &Value) 
             };
             Some((format!("git show {sha}"), None, None, Some(diff)))
         }
+        "git.log" => {
+            let Some(diff) = value_struct_string(value, "diff") else {
+                return;
+            };
+            Some(("git log HEAD".into(), None, None, Some(diff)))
+        }
         _ => None,
     };
     if let Some((title, old_content, new_content, unified_diff)) = data {

@@ -57,6 +57,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(stdlib::ListReduce));
     reg.register(Arc::new(git::GitDiff));
     reg.register(Arc::new(git_ops::GitShow));
+    reg.register(Arc::new(git_ops::GitLog));
     reg.register(Arc::new(git_ops::GitStatus));
     reg.register(Arc::new(test::TestRun));
     reg.register(Arc::new(hunk::FsEdit));
