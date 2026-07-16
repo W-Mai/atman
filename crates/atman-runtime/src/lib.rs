@@ -15,6 +15,7 @@ pub mod flow_registry;
 pub mod form;
 pub mod fs_access;
 pub mod git;
+pub mod humanize;
 pub mod hunk;
 pub mod index;
 pub mod injection;

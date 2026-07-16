@@ -403,7 +403,7 @@ fn context_section<'a>(
         ctx.model.clone()
     };
     let stream_style = if streaming { bold } else { plain };
-    use crate::humanize::format_count;
+    use atman_runtime::humanize::format_count;
     let window = if ctx.window_budget == 0 {
         format_count(ctx.window_tokens)
     } else {

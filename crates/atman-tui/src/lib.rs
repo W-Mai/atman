@@ -22,7 +22,7 @@ pub mod form_modal;
 pub mod highlight;
 pub mod history;
 pub mod history_search_modal;
-pub mod humanize;
+
 pub mod input;
 pub mod keys;
 pub mod layout;

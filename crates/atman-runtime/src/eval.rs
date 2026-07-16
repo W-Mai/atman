@@ -486,7 +486,7 @@ fn available_models_system_prompt() -> Option<String> {
                     format!(
                         "{} ({} context{})",
                         info.name,
-                        format_context_budget(info.context_budget),
+                        crate::humanize::format_count(info.context_budget),
                         thinking
                     )
                 })
@@ -497,16 +497,6 @@ fn available_models_system_prompt() -> Option<String> {
     lines.push("Use these names or aliases with agent.spawn's model parameter.".into());
     lines.push("[/available models]".into());
     Some(lines.join("\n"))
-}
-
-fn format_context_budget(tokens: u64) -> String {
-    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
-        format!("{}M", tokens / 1_000_000)
-    } else if tokens >= 1_000 && tokens % 1_000 == 0 {
-        format!("{}K", tokens / 1_000)
-    } else {
-        tokens.to_string()
-    }
 }
 
 fn preview_tool_value(v: &Value) -> String {

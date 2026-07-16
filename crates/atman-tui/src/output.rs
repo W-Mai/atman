@@ -1532,7 +1532,7 @@ fn format_workflow_stats_footer(
     outer_width: u16,
     border_style: Style,
 ) -> Line<'static> {
-    use crate::humanize::format_count;
+    use atman_runtime::humanize::format_count;
     let stats = aggregate_llm_stats(&graph.root);
     let inner_w = (outer_width as usize).saturating_sub(2);
     let bottom_text =
@@ -1622,7 +1622,7 @@ pub fn render_workflow_panel_with_regions(
         ),
         Span::raw(format!(
             " · {count} nodes · {} · ",
-            crate::humanize::format_secs(elapsed)
+            atman_runtime::humanize::format_secs(elapsed)
         )),
         Span::styled(status_str, status_style),
     ]);
@@ -2786,7 +2786,7 @@ fn truncate_preview(s: &str, max: usize) -> String {
 }
 
 fn format_llm_stats_brief(stats: &atman_runtime::workflow::LlmStats) -> String {
-    use crate::humanize::format_count;
+    use atman_runtime::humanize::format_count;
     let mut parts = Vec::new();
     if stats.cache_read > 0 {
         let total_in = stats.input_tokens + stats.cache_read + stats.cache_write;
