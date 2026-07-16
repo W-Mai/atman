@@ -13,6 +13,7 @@ pub mod memory_stubs;
 pub mod plan;
 pub mod preview;
 pub mod session;
+pub mod sleep;
 pub mod stdlib;
 pub mod term;
 pub mod test;
@@ -61,6 +62,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(agent_ctrl::AgentSpawn));
     reg.register(Arc::new(form::FormAsk));
     reg.register(Arc::new(session::SessionPush));
+    reg.register(Arc::new(sleep::Sleep));
 }
 
 pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {

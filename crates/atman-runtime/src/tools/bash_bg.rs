@@ -717,9 +717,19 @@ impl Tool for BashSpawn {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Spawn a shell command via `sh -c`. block=false (default) returns immediately with \
-             a handle for async polling. block=true waits for exit (or block_timeout_ms) and \
-             returns stdout/stderr/exit_code. Flow contract must declare capabilities.shell = true.",
+            "Run a shell command via `sh -c`.\n\n\
+block=false (default): command runs in background, returns immediately with a\n\
+handle. The command keeps running — use bash.output to read its output later,\n\
+bash.status to check if it finished, bash.kill to stop it. Use this for:\n\
+- long-running commands (servers, watchers)\n\
+- commands where you need to check output incrementally\n\
+- when you want to do other things while the command runs\n\n\
+block=true: waits for the command to finish, then returns stdout/stderr/exit_code.\n\
+Use block_timeout_ms to set a max wait (default 30s). Use this for:\n\
+- short commands where you need the result immediately (ls, git status, echo)\n\
+- commands that finish quickly\n\n\
+Do NOT use `sleep` in your command to wait — use block=true with block_timeout_ms\n\
+instead, or use the sleep tool to pause the workflow.",
         )
     }
 
