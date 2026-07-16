@@ -181,7 +181,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     session.end_turn();
 
     assert!(matches!(out, Value::Str(s) if s == "reply 1"));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
     assert_eq!(provider.normal_calls.load(Ordering::SeqCst), 2);
     assert!(provider.second_call_tokens.lock().unwrap().is_some());
 }

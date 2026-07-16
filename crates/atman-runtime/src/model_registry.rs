@@ -7,6 +7,7 @@ pub struct ModelInfo {
     pub context_budget: u64,
     pub compact_threshold_ratio: f64,
     pub thinking_enabled: bool,
+    pub max_output_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,6 +88,7 @@ pub fn model_info(name: &str) -> ModelInfo {
                 context_budget: entry.context_budget.unwrap_or(budget),
                 compact_threshold_ratio: entry.compact_threshold_ratio.unwrap_or(ratio),
                 thinking_enabled: entry.thinking.unwrap_or(false),
+                max_output_tokens: entry.max_tokens,
             };
         }
     }
@@ -96,6 +98,7 @@ pub fn model_info(name: &str) -> ModelInfo {
         context_budget: budget,
         compact_threshold_ratio: ratio,
         thinking_enabled: false,
+        max_output_tokens: None,
     }
 }
 
@@ -135,7 +138,9 @@ fn builtin_budget(name: &str) -> (u64, f64) {
 
 impl ModelInfo {
     pub fn compact_threshold_tokens(&self) -> u64 {
-        (self.context_budget as f64 * self.compact_threshold_ratio) as u64
+        let reserved = self.max_output_tokens.unwrap_or(0) as u64;
+        let available = self.context_budget.saturating_sub(reserved);
+        (available as f64 * self.compact_threshold_ratio) as u64
     }
 
     pub fn thinking_enabled(&self) -> bool {
@@ -205,6 +210,27 @@ mod tests {
         let info = model_info("my-local-model");
         assert_eq!(info.context_budget, 8192);
         assert_eq!(info.compact_threshold_ratio, 0.9);
+    }
+
+    #[test]
+    fn compact_threshold_reserves_configured_output_tokens() {
+        let mut cfg = ModelConfig::default();
+        cfg.models.insert(
+            "large-output".into(),
+            ModelEntry {
+                model: "large-output".into(),
+                context_budget: Some(1_000_000),
+                compact_threshold_ratio: Some(0.8),
+                thinking: None,
+                provider: None,
+                api_key: None,
+                base_url: None,
+                max_tokens: Some(400_000),
+            },
+        );
+        set_model_config(cfg);
+        let info = model_info("large-output");
+        assert_eq!(info.compact_threshold_tokens(), 480_000);
     }
 
     #[test]

@@ -925,6 +925,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     "no provider registered for model `{model}`"
                 )));
             };
+            if !matches!(context_mode, ContextMode::None)
+                && messages_override.is_none()
+                && let Some(session) = ctx.session
+            {
+                crate::compaction::maybe_auto_compact(session, &model, ctx.providers).await;
+            }
             let turn_id = ctx
                 .turn_id
                 .clone()
