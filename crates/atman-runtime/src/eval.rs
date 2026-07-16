@@ -410,6 +410,12 @@ fn complete_diff_preview(
             None,
             value_struct_string(value, "diff"),
         )),
+        "git.log" => Some((
+            "git log HEAD".into(),
+            None,
+            None,
+            value_struct_string(value, "diff"),
+        )),
         _ => None,
     }
 }
@@ -1137,7 +1143,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     });
                 }
                 if let Some(session) = ctx.session {
-                    let input_with_cache = usage.input + usage.cached_input + usage.cache_write;
+                    let input_with_cache = input_with_cache_for_window(&usage);
                     let _ = session
                         .stream_tx()
                         .send(crate::stream::StreamFrame::LlmCallStats {
@@ -2123,6 +2129,10 @@ fn type_mismatch(expected: &str, l: &Value, r: &Value) -> Value {
     })
 }
 
+fn input_with_cache_for_window(usage: &crate::provider::TokenUsage) -> u64 {
+    usage.input + usage.cached_input
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2149,6 +2159,18 @@ mod tests {
             other => panic!("expected SessionRecent(10), got {other:?}"),
         }
         assert!(matches!(parse_context_mode("garbage"), ContextMode::None));
+    }
+
+    #[test]
+    fn input_with_cache_for_window_does_not_double_count_cache_write() {
+        let usage = crate::provider::TokenUsage {
+            input: 50_000,
+            cached_input: 0,
+            cache_write: 50_000,
+            ..Default::default()
+        };
+
+        assert_eq!(input_with_cache_for_window(&usage), 50_000);
     }
 
     async fn eval_snippet(expr_src: &str) -> Value {
