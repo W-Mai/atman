@@ -179,6 +179,57 @@ impl Tool for GitStatus {
     }
 }
 
+pub struct GitAdd;
+
+impl Tool for GitAdd {
+    fn name(&self) -> &str {
+        "git.add"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Two
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Stage files for commit. Pass specific paths — do NOT stage everything blindly.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "File paths to stage."},
+                "cwd": {"type": "string", "description": "Optional working dir."}
+            },
+            "required": ["paths"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let paths = extract_string_list(&args, "paths")?;
+            let cwd = extract_cwd(&args, "git.add cwd")?;
+            let repo = Repository::open(&cwd)
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.add: {e}")))?;
+            let mut index = repo
+                .index()
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.add index: {e}")))?;
+            for p in &paths {
+                index
+                    .add_path(std::path::Path::new(p))
+                    .map_err(|e| RuntimeError::ToolFailed(format!("git.add {p}: {e}")))?;
+            }
+            index
+                .write()
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.add write: {e}")))?;
+            Ok(Value::Struct(vec![(
+                "staged".into(),
+                Value::List(paths.into_iter().map(Value::Str).collect()),
+            )]))
+        })
+    }
+}
+
 pub struct GitCommit;
 
 impl Tool for GitCommit {
@@ -407,6 +458,26 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
             expected: "string".into(),
             actual: other.kind_name().into(),
         }),
+    }
+}
+
+fn extract_string_list(args: &ToolArgs, name: &str) -> Result<Vec<String>, RuntimeError> {
+    match args.named(name) {
+        Some(Value::List(items)) => items
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => Ok(s.clone()),
+                other => Err(RuntimeError::TypeMismatch {
+                    expected: "string".into(),
+                    actual: other.kind_name().into(),
+                }),
+            })
+            .collect(),
+        Some(other) => Err(RuntimeError::TypeMismatch {
+            expected: "list<string>".into(),
+            actual: other.kind_name().into(),
+        }),
+        None => Err(RuntimeError::MissingArg(name.into())),
     }
 }
 
