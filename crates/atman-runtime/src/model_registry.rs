@@ -66,6 +66,17 @@ pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
     Vec::new()
 }
 
+pub fn all_aliases() -> Vec<(String, String)> {
+    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
+        return cfg
+            .aliases
+            .iter()
+            .map(|(k, v)| (k.clone(), v.model.clone()))
+            .collect();
+    }
+    Vec::new()
+}
+
 pub fn model_info(name: &str) -> ModelInfo {
     let resolved = resolve_alias(name);
     if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {

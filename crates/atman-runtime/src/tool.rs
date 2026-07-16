@@ -96,6 +96,7 @@ pub struct ToolCtx {
     pub term_registry: Option<std::sync::Arc<crate::tools::term::TermRegistry>>,
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,
+    pub current_model: Option<String>,
 }
 
 impl ToolCtx {
@@ -223,6 +224,11 @@ impl ToolCtx {
 
     pub fn with_trust(mut self, trust: crate::trust::TrustConfig) -> Self {
         self.trust = Some(trust);
+        self
+    }
+
+    pub fn with_current_model(mut self, model: impl Into<String>) -> Self {
+        self.current_model = Some(model.into());
         self
     }
 

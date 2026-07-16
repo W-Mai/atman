@@ -109,14 +109,13 @@ fn emit_flow_node_start(
     stmt: &Stmt,
     parent_node_id: Option<&str>,
 ) {
-    let Some(session) = ctx.session else {
-        return;
-    };
     let Some(run_id) = ctx.flow_run_id.clone() else {
         return;
     };
     let (kind, label) = stmt_to_node_kind_label(stmt);
-    if let Some(sink) = ctx.events {
+    if let Some(sink) = ctx.events
+        && ctx.session.is_some()
+    {
         sink.emit(crate::event::Event::FlowNodeStart {
             seq: 0,
             run_id: run_id.clone(),
@@ -127,15 +126,17 @@ fn emit_flow_node_start(
             ts: chrono::Utc::now(),
         });
     }
-    let _ = session
-        .stream_tx()
-        .send(crate::stream::StreamFrame::FlowNodeStart {
-            run_id: run_id.0.to_string(),
-            node_id: node_id.to_string(),
-            kind,
-            label,
-            parent_node_id: parent_node_id.map(String::from),
-        });
+    if let Some(session) = ctx.session {
+        let _ = session
+            .stream_tx()
+            .send(crate::stream::StreamFrame::FlowNodeStart {
+                run_id: run_id.0.to_string(),
+                node_id: node_id.to_string(),
+                kind,
+                label,
+                parent_node_id: parent_node_id.map(String::from),
+            });
+    }
 }
 
 fn value_preview(v: &Value) -> Option<String> {
@@ -190,9 +191,6 @@ fn emit_flow_node_end(
     parent_node_id: Option<&str>,
     output_preview: Option<&str>,
 ) {
-    let Some(session) = ctx.session else {
-        return;
-    };
     let Some(run_id) = ctx.flow_run_id.clone() else {
         return;
     };
@@ -201,7 +199,9 @@ fn emit_flow_node_end(
         _ => crate::event::FlowNodeStatus::Ok,
     };
     let preview_owned = output_preview.map(String::from);
-    if let Some(sink) = ctx.events {
+    if let Some(sink) = ctx.events
+        && ctx.session.is_some()
+    {
         sink.emit(crate::event::Event::FlowNodeEnd {
             seq: 0,
             run_id: run_id.clone(),
@@ -211,15 +211,17 @@ fn emit_flow_node_end(
             ts: chrono::Utc::now(),
         });
     }
-    let _ = session
-        .stream_tx()
-        .send(crate::stream::StreamFrame::FlowNodeEnd {
-            run_id: run_id.0.to_string(),
-            node_id: node_id.to_string(),
-            status,
-            output_preview: preview_owned,
-            parent_node_id: parent_node_id.map(String::from),
-        });
+    if let Some(session) = ctx.session {
+        let _ = session
+            .stream_tx()
+            .send(crate::stream::StreamFrame::FlowNodeEnd {
+                run_id: run_id.0.to_string(),
+                node_id: node_id.to_string(),
+                status,
+                output_preview: preview_owned,
+                parent_node_id: parent_node_id.map(String::from),
+            });
+    }
 }
 
 fn stmt_to_node_kind_label(stmt: &Stmt) -> (crate::nodegraph::NodeKind, String) {

@@ -235,9 +235,20 @@ async fn dispatch_tool_call<'a>(
     let ctx_with_anchors = ctx_with_anchors.with_current_node(ctx.current_node_id.clone());
     let ctx_with_anchors =
         ctx_with_anchors.with_providers(std::sync::Arc::new(ctx.providers.clone()));
+    let mut ctx_with_anchors = if let Some(model) = &ctx.tool_ctx.current_model {
+        ctx_with_anchors.with_current_model(model.clone())
+    } else {
+        ctx_with_anchors
+    };
+    if let Some(tx) = ctx
+        .session
+        .map(|s| s.stream_tx())
+        .or_else(|| ctx.tool_ctx.stream_tx.clone())
+    {
+        ctx_with_anchors = ctx_with_anchors.with_stream_tx(tx);
+    }
     let ctx_with_anchors = if let Some(session) = ctx.session {
         let mut c = ctx_with_anchors
-            .with_stream_tx(session.stream_tx())
             .with_read_files(session.read_files())
             .with_approval(session.approval())
             .with_session_dir(session.dir().to_path_buf())
@@ -332,8 +343,9 @@ async fn call_and_maybe_stream(
     provider: &dyn crate::provider::Provider,
     req: crate::provider::LlmRequest,
     session: Option<&crate::session::Session>,
+    stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let result = call_and_maybe_stream_inner(provider, req, session).await;
+    let result = call_and_maybe_stream_inner(provider, req, session, stream_tx).await;
     if let (Some(sess), Err(RuntimeError::AttachmentError { reason })) = (session, &result) {
         let count = sess.record_attachment_degrade(reason);
         if count > 0 {
@@ -351,11 +363,12 @@ async fn call_and_maybe_stream_inner(
     provider: &dyn crate::provider::Provider,
     req: crate::provider::LlmRequest,
     session: Option<&crate::session::Session>,
+    stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let Some(session) = session else {
+    let stream_tx = stream_tx.or_else(|| session.map(|s| s.stream_tx()));
+    let Some(stream_tx) = stream_tx else {
         return provider.call(req).await;
     };
-    let stream_tx = session.stream_tx();
     let model_name = req.model.clone();
     let request_start = std::time::Instant::now();
     let mut first_token_at: Option<std::time::Instant> = None;
@@ -374,7 +387,9 @@ async fn call_and_maybe_stream_inner(
             ev = events.recv() => {
                 match ev {
                     Ok(crate::event::NodeEvent::LlmChunk { text, .. }) => {
-                        session.mark_streamed();
+                        if let Some(session) = session {
+                            session.mark_streamed();
+                        }
                         mark_first_token(&mut first_token_at);
                         let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
                             text,
@@ -395,7 +410,9 @@ async fn call_and_maybe_stream_inner(
                 while let Ok(ev) = events.try_recv() {
                     match ev {
                         crate::event::NodeEvent::LlmChunk { text, .. } => {
-                            session.mark_streamed();
+                            if let Some(session) = session {
+                                session.mark_streamed();
+                            }
                             mark_first_token(&mut first_token_at);
                             let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
                                 text,
@@ -433,6 +450,63 @@ fn preview_tool_args(positional: &[Value], named: &[(String, Value)]) -> String 
         parts.push(format!("{k}={}", preview_tool_value(v)));
     }
     truncate(&parts.join(", "), 4000)
+}
+
+fn available_models_system_prompt() -> Option<String> {
+    let mut aliases = crate::model_registry::all_aliases();
+    let mut models = crate::model_registry::all_model_entries();
+    if aliases.is_empty() && models.is_empty() {
+        return None;
+    }
+    aliases.sort_by(|a, b| a.0.cmp(&b.0));
+    models.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut lines = vec!["[available models]".to_string()];
+    if !aliases.is_empty() {
+        lines.push(format!(
+            "Aliases: {}",
+            aliases
+                .into_iter()
+                .map(|(alias, model)| format!("{alias} -> {model}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !models.is_empty() {
+        lines.push(format!(
+            "Models: {}",
+            models
+                .into_iter()
+                .map(|(name, _)| {
+                    let info = crate::model_registry::model_info(&name);
+                    let thinking = if info.thinking_enabled() {
+                        ", thinking"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{} ({} context{})",
+                        info.name,
+                        format_context_budget(info.context_budget),
+                        thinking
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines.push("Use these names or aliases with agent.spawn's model parameter.".into());
+    lines.push("[/available models]".into());
+    Some(lines.join("\n"))
+}
+
+fn format_context_budget(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1_000 && tokens % 1_000 == 0 {
+        format!("{}K", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
 }
 
 fn preview_tool_value(v: &Value) -> String {
@@ -894,6 +968,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     ),
                 ));
             }
+            if let Some(model_info) = available_models_system_prompt() {
+                final_messages.push(crate::message::Message::system_text(
+                    turn_id.clone(),
+                    model_info,
+                ));
+            }
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
             for attempt in 0..=retry_count {
@@ -909,7 +989,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     thinking_enabled: crate::model_registry::model_info(&model).thinking_enabled(),
                 };
                 let start = std::time::Instant::now();
-                let outcome = call_and_maybe_stream(provider.as_ref(), req, ctx.session).await;
+                let outcome = call_and_maybe_stream(
+                    provider.as_ref(),
+                    req,
+                    ctx.session,
+                    ctx.tool_ctx.stream_tx.clone(),
+                )
+                .await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 let usage = match &outcome {
                     Ok(am) => crate::provider::TokenUsage {
