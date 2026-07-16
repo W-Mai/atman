@@ -59,6 +59,7 @@ pub struct Session {
     manual_compact_pending: std::sync::atomic::AtomicBool,
     last_input_tokens: std::sync::atomic::AtomicU64,
     compact_review_mode: Mutex<CompactReviewMode>,
+    compact_lock: tokio::sync::Mutex<()>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     approval: std::sync::Arc<ApprovalRegistry>,
@@ -1065,6 +1066,7 @@ impl Session {
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
+            compact_lock: tokio::sync::Mutex::new(()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1155,6 +1157,7 @@ impl Session {
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
+            compact_lock: tokio::sync::Mutex::new(()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1196,6 +1199,7 @@ impl Session {
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
+            compact_lock: tokio::sync::Mutex::new(()),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1365,6 +1369,10 @@ impl Session {
     pub fn last_input_tokens(&self) -> u64 {
         self.last_input_tokens
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub async fn acquire_compact_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.compact_lock.lock().await
     }
 
     fn clear_last_input_tokens(&self) {

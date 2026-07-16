@@ -58,6 +58,68 @@ fn parse_context_mode(s: &str) -> ContextMode {
     }
 }
 
+fn is_context_overflow_error(err: &RuntimeError) -> bool {
+    let RuntimeError::ToolFailed(msg) = err else {
+        return false;
+    };
+    let msg = msg.to_ascii_lowercase();
+    msg.contains("maximum context length")
+        || msg.contains("context overflow")
+        || msg.contains("context window")
+        || msg.contains("context length")
+        || msg.contains("prompt is too long")
+        || msg.contains("input is too long")
+        || msg.contains("too many tokens")
+}
+
+async fn rebuild_session_llm_messages(
+    session: &crate::session::Session,
+    context_mode: ContextMode,
+    turn_id: &crate::event::TurnId,
+    prompt: Option<&str>,
+    extra_messages: &[crate::message::Message],
+) -> Vec<crate::message::Message> {
+    let mut messages = match context_mode {
+        ContextMode::Session => session.messages(),
+        ContextMode::SessionRecent(n) => {
+            let all = session.messages();
+            let start = all.len().saturating_sub(n);
+            all[start..].to_vec()
+        }
+        ContextMode::None => Vec::new(),
+    };
+    if let Some(prompt) = prompt
+        && !prompt.is_empty()
+    {
+        messages.push(crate::message::Message::user_text(
+            turn_id.clone(),
+            prompt.to_string(),
+        ));
+    }
+    messages.extend_from_slice(extra_messages);
+    if let Some(goal) = session.goal() {
+        messages.push(crate::message::Message::system_text(
+            turn_id.clone(),
+            format!("[session goal]\n{goal}\n[/session goal]"),
+        ));
+    }
+    if let Some(plan) = session.plan_system_prompt().await {
+        messages.push(crate::message::Message::system_text(
+            turn_id.clone(),
+            format!(
+                "[active plan]\n{plan}\n[/active plan]\n\nCall plan.tick to mark a step done. Call plan.write to revise."
+            ),
+        ));
+    }
+    if let Some(model_info) = available_models_system_prompt() {
+        messages.push(crate::message::Message::system_text(
+            turn_id.clone(),
+            model_info,
+        ));
+    }
+    messages
+}
+
 async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
     match expr {
         Expr::Literal(lit) => eval_literal(lit),
@@ -925,8 +987,17 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     "no provider registered for model `{model}`"
                 )));
             };
+            let has_messages_override = messages_override.is_some();
+            let _compact_guard = if !matches!(context_mode, ContextMode::None)
+                && !has_messages_override
+                && let Some(session) = ctx.session
+            {
+                Some(session.acquire_compact_lock().await)
+            } else {
+                None
+            };
             if !matches!(context_mode, ContextMode::None)
-                && messages_override.is_none()
+                && !has_messages_override
                 && let Some(session) = ctx.session
             {
                 crate::compaction::maybe_auto_compact(session, &model, ctx.providers).await;
@@ -983,6 +1054,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     crate::message::Message::user_text(turn_id.clone(), prompt_text.clone());
                 (vec![user_msg], prompt_text)
             };
+            let session_messages_len = final_messages.len();
             if let Some(session) = ctx.session
                 && let Some(l3_or_l2) = session.peek_pending_l2_or_higher(&turn_id)
                 && matches!(l3_or_l2.level, crate::injection::InjectionLevel::L3Redirect)
@@ -1080,182 +1152,232 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     model_info,
                 ));
             }
+            let retry_base_messages = final_messages.clone();
+            let can_rebuild_from_session = !matches!(context_mode, ContextMode::None)
+                && !has_messages_override
+                && ctx.session.is_some();
+            let mut compact_after_overflow_used = false;
+            let mut saw_context_overflow = false;
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
-            for attempt in 0..=retry_count {
-                let sanitized_messages = sanitize_tool_pairs(final_messages.clone());
-                let req = crate::provider::LlmRequest {
-                    model: model.clone(),
-                    messages: sanitized_messages,
-                    system: system.clone(),
-                    input: input.clone(),
-                    schema: None,
-                    cache_prompt,
-                    tools: tool_specs.clone(),
-                    thinking_enabled: crate::model_registry::model_info(&model).thinking_enabled(),
-                };
-                let start = std::time::Instant::now();
-                let outcome = call_and_maybe_stream(
-                    provider.as_ref(),
-                    req,
-                    ctx.session,
-                    ctx.tool_ctx.stream_tx.clone(),
-                )
-                .await;
-                let elapsed_ms = start.elapsed().as_millis() as u64;
-                let usage = match &outcome {
-                    Ok(am) => crate::provider::TokenUsage {
-                        input: am
-                            .token_usage
-                            .input
-                            .max(crate::provider::estimate_tokens(&prompt)),
-                        cached_input: am.token_usage.cached_input,
-                        output: am
-                            .token_usage
-                            .output
-                            .max(crate::provider::estimate_tokens(&am.text_concat())),
-                        cache_write: am.token_usage.cache_write,
-                        ..Default::default()
-                    },
-                    Err(_) => crate::provider::TokenUsage {
-                        input: crate::provider::estimate_tokens(&prompt),
-                        ..Default::default()
-                    },
-                };
-                let status = match &outcome {
-                    Ok(_) => crate::event::LlmCallStatus::Ok,
-                    Err(e) => crate::event::LlmCallStatus::Errored {
-                        message: e.to_string(),
-                    },
-                };
-                let (ttft_ms, tps) = match &outcome {
-                    Ok(am) => (
-                        am.timing.ttft_ms,
-                        am.timing.tokens_per_second(am.token_usage.output),
-                    ),
-                    Err(_) => (None, None),
-                };
-                if let Some(sink) = ctx.events {
-                    sink.emit(crate::event::Event::LlmCall {
-                        seq: 0,
+            'llm_attempts: loop {
+                for attempt in 0..=retry_count {
+                    let sanitized_messages = sanitize_tool_pairs(final_messages.clone());
+                    let req = crate::provider::LlmRequest {
                         model: model.clone(),
-                        provider: provider.name().to_string(),
-                        usage: usage.clone(),
-                        wallclock_ms: elapsed_ms,
-                        ttft_ms,
-                        tokens_per_second: tps,
-                        status,
-                        run_id: ctx.flow_run_id.clone(),
-                        node_id: ctx.current_node_id.clone(),
-                        ts: chrono::Utc::now(),
-                    });
-                }
-                if let Some(session) = ctx.session {
-                    let input_with_cache = input_with_cache_for_window(&usage);
-                    let _ = session
-                        .stream_tx()
-                        .send(crate::stream::StreamFrame::LlmCallStats {
+                        messages: sanitized_messages,
+                        system: system.clone(),
+                        input: input.clone(),
+                        schema: None,
+                        cache_prompt,
+                        tools: tool_specs.clone(),
+                        thinking_enabled: crate::model_registry::model_info(&model)
+                            .thinking_enabled(),
+                    };
+                    let start = std::time::Instant::now();
+                    let outcome = call_and_maybe_stream(
+                        provider.as_ref(),
+                        req,
+                        ctx.session,
+                        ctx.tool_ctx.stream_tx.clone(),
+                    )
+                    .await;
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    let usage = match &outcome {
+                        Ok(am) => crate::provider::TokenUsage {
+                            input: am
+                                .token_usage
+                                .input
+                                .max(crate::provider::estimate_tokens(&prompt)),
+                            cached_input: am.token_usage.cached_input,
+                            output: am
+                                .token_usage
+                                .output
+                                .max(crate::provider::estimate_tokens(&am.text_concat())),
+                            cache_write: am.token_usage.cache_write,
+                            ..Default::default()
+                        },
+                        Err(_) => crate::provider::TokenUsage {
+                            input: crate::provider::estimate_tokens(&prompt),
+                            ..Default::default()
+                        },
+                    };
+                    let status = match &outcome {
+                        Ok(_) => crate::event::LlmCallStatus::Ok,
+                        Err(e) => crate::event::LlmCallStatus::Errored {
+                            message: e.to_string(),
+                        },
+                    };
+                    let (ttft_ms, tps) = match &outcome {
+                        Ok(am) => (
+                            am.timing.ttft_ms,
+                            am.timing.tokens_per_second(am.token_usage.output),
+                        ),
+                        Err(_) => (None, None),
+                    };
+                    if let Some(sink) = ctx.events {
+                        sink.emit(crate::event::Event::LlmCall {
+                            seq: 0,
                             model: model.clone(),
-                            input_tokens: usage.input,
-                            output_tokens: usage.output,
-                            cache_read: usage.cached_input,
-                            cache_write: usage.cache_write,
-                            ttft_ms: ttft_ms.unwrap_or(0),
-                            tokens_per_second: tps.unwrap_or(0.0),
+                            provider: provider.name().to_string(),
+                            usage: usage.clone(),
                             wallclock_ms: elapsed_ms,
-                            run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+                            ttft_ms,
+                            tokens_per_second: tps,
+                            status,
+                            run_id: ctx.flow_run_id.clone(),
                             node_id: ctx.current_node_id.clone(),
+                            ts: chrono::Utc::now(),
                         });
-                    session.record_llm_call(
-                        &model,
-                        input_with_cache,
-                        usage.output,
-                        usage.cached_input,
-                        usage.cache_write,
-                        ttft_ms,
-                        tps,
-                    );
-                }
-                match outcome {
-                    Ok(am) => {
-                        if let Some(session) = ctx.session {
-                            session.append_message(am.message.clone(), ctx.flow_run_id.clone());
-                            crate::compaction::maybe_auto_compact(session, &model, ctx.providers)
-                                .await;
-                        }
-                        return crate::provider::assistant_message_to_value(&am);
                     }
-                    Err(e) => {
-                        if !rewrite_used
-                            && let Some(safety) = ctx.safety
-                            && safety.enabled
-                            && safety.auto_rewrite
-                            && matches!(e.kind(), crate::error::ErrorKind::ContentFilter)
-                        {
-                            rewrite_used = true;
-                            if let Some(last) = final_messages.last_mut()
-                                && let Some(part) = last.parts.iter_mut().find_map(|p| match p {
-                                    crate::message::MessagePart::Text { text } => Some(text),
-                                    _ => None,
-                                })
-                            {
-                                *part = format!(
-                                    "Please rewrite the following in a neutral, safety-compliant way and answer it:\n{part}"
-                                );
-                            }
-                            if let Some(sink) = ctx.events {
-                                sink.emit(crate::event::Event::ContentFilterHit {
-                                    seq: 0,
-                                    turn_id: Some(turn_id.clone()),
-                                    flow_run_id: ctx.flow_run_id.clone(),
-                                    provider: provider.name().to_string(),
+                    if let Some(session) = ctx.session {
+                        let input_with_cache = input_with_cache_for_window(&usage);
+                        let _ =
+                            session
+                                .stream_tx()
+                                .send(crate::stream::StreamFrame::LlmCallStats {
                                     model: model.clone(),
-                                    category: "auto_rewrite".to_string(),
-                                    action: "rewritten".to_string(),
-                                    ts: chrono::Utc::now(),
+                                    input_tokens: usage.input,
+                                    output_tokens: usage.output,
+                                    cache_read: usage.cached_input,
+                                    cache_write: usage.cache_write,
+                                    ttft_ms: ttft_ms.unwrap_or(0),
+                                    tokens_per_second: tps.unwrap_or(0.0),
+                                    wallclock_ms: elapsed_ms,
+                                    run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+                                    node_id: ctx.current_node_id.clone(),
                                 });
+                        session.record_llm_call(
+                            &model,
+                            input_with_cache,
+                            usage.output,
+                            usage.cached_input,
+                            usage.cache_write,
+                            ttft_ms,
+                            tps,
+                        );
+                    }
+                    match outcome {
+                        Ok(am) => {
+                            if let Some(session) = ctx.session {
+                                session.append_message(am.message.clone(), ctx.flow_run_id.clone());
+                                crate::compaction::maybe_auto_compact(
+                                    session,
+                                    &model,
+                                    ctx.providers,
+                                )
+                                .await;
                             }
-                            last_err = Some(e);
-                            continue;
+                            return crate::provider::assistant_message_to_value(&am);
                         }
-                        if attempt < retry_count {
-                            let kind = e.kind();
-                            let should_retry = match &retry_kinds_ref {
-                                Some(allowed) => allowed.contains(&kind),
-                                None => true,
-                            };
-                            if !should_retry {
+                        Err(e) => {
+                            if is_context_overflow_error(&e)
+                                && can_rebuild_from_session
+                                && !compact_after_overflow_used
+                            {
+                                compact_after_overflow_used = true;
+                                saw_context_overflow = true;
+                                let session =
+                                    ctx.session.expect("checked by can_rebuild_from_session");
+                                session.request_manual_compact();
+                                crate::compaction::maybe_auto_compact(
+                                    session,
+                                    &model,
+                                    ctx.providers,
+                                )
+                                .await;
+                                final_messages = rebuild_session_llm_messages(
+                                    session,
+                                    context_mode,
+                                    &turn_id,
+                                    Some(prompt.as_str()),
+                                    &retry_base_messages[session_messages_len..],
+                                )
+                                .await;
+                                last_err = Some(e);
+                                continue 'llm_attempts;
+                            }
+                            if is_context_overflow_error(&e) {
                                 last_err = Some(e);
                                 break;
                             }
-                            if matches!(
-                                kind,
-                                crate::error::ErrorKind::RateLimit
-                                    | crate::error::ErrorKind::Timeout
-                                    | crate::error::ErrorKind::ProviderDown
-                                    | crate::error::ErrorKind::Transient
-                            ) {
-                                let delay_ms = 1000u64 << attempt;
-                                if let Some(tx) = ctx.session.map(|s| s.stream_tx()) {
-                                    let _ = tx.send(crate::stream::StreamFrame::Note(format!(
-                                        "retrying in {}s…",
-                                        delay_ms / 1000
-                                    )));
+                            if !rewrite_used
+                                && let Some(safety) = ctx.safety
+                                && safety.enabled
+                                && safety.auto_rewrite
+                                && matches!(e.kind(), crate::error::ErrorKind::ContentFilter)
+                            {
+                                rewrite_used = true;
+                                if let Some(last) = final_messages.last_mut()
+                                    && let Some(part) =
+                                        last.parts.iter_mut().find_map(|p| match p {
+                                            crate::message::MessagePart::Text { text } => {
+                                                Some(text)
+                                            }
+                                            _ => None,
+                                        })
+                                {
+                                    *part = format!(
+                                        "Please rewrite the following in a neutral, safety-compliant way and answer it:\n{part}"
+                                    );
                                 }
-                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
-                                    .await;
+                                if let Some(sink) = ctx.events {
+                                    sink.emit(crate::event::Event::ContentFilterHit {
+                                        seq: 0,
+                                        turn_id: Some(turn_id.clone()),
+                                        flow_run_id: ctx.flow_run_id.clone(),
+                                        provider: provider.name().to_string(),
+                                        model: model.clone(),
+                                        category: "auto_rewrite".to_string(),
+                                        action: "rewritten".to_string(),
+                                        ts: chrono::Utc::now(),
+                                    });
+                                }
+                                last_err = Some(e);
+                                continue;
                             }
-                            last_err = Some(e);
-                        } else {
-                            last_err = Some(e);
+                            if attempt < retry_count {
+                                let kind = e.kind();
+                                let should_retry = match &retry_kinds_ref {
+                                    Some(allowed) => allowed.contains(&kind),
+                                    None => true,
+                                };
+                                if !should_retry {
+                                    last_err = Some(e);
+                                    break;
+                                }
+                                if matches!(
+                                    kind,
+                                    crate::error::ErrorKind::RateLimit
+                                        | crate::error::ErrorKind::Timeout
+                                        | crate::error::ErrorKind::ProviderDown
+                                        | crate::error::ErrorKind::Transient
+                                ) {
+                                    let delay_ms = 1000u64 << attempt;
+                                    if let Some(tx) = ctx.session.map(|s| s.stream_tx()) {
+                                        let _ = tx.send(crate::stream::StreamFrame::Note(format!(
+                                            "retrying in {}s…",
+                                            delay_ms / 1000
+                                        )));
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                        .await;
+                                }
+                                last_err = Some(e);
+                            } else {
+                                last_err = Some(e);
+                            }
                         }
                     }
                 }
+                break;
             }
             if let Some(fb) = fallback_expr {
                 return eval_expr(fb, env, ctx).await;
             }
-            if let Some(session) = ctx.session {
+            if let Some(session) = ctx.session
+                && !saw_context_overflow
+            {
                 crate::compaction::maybe_auto_compact(session, &model, ctx.providers).await;
             }
             Value::Err(last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into())))
