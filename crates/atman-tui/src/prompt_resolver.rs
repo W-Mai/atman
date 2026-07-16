@@ -56,6 +56,11 @@ impl PromptResolver for TuiPromptResolver {
 
 fn build_form_kind(kind: &str, payload: &serde_json::Value) -> FormKind {
     match kind {
+        "form_ask" => {
+            serde_json::from_value::<FormKind>(payload.clone()).unwrap_or(FormKind::Confirm {
+                prompt: "Approve form_ask?".into(),
+            })
+        }
         "hunk_selection" => {
             let hunks = payload["hunks"].as_array().cloned().unwrap_or_default();
             let options: Vec<String> = hunks
@@ -82,9 +87,15 @@ fn build_form_kind(kind: &str, payload: &serde_json::Value) -> FormKind {
 
 fn answer_to_value(
     answer: Option<FormAnswer>,
-    _kind: &str,
+    kind: &str,
     payload: &serde_json::Value,
 ) -> serde_json::Value {
+    if kind == "form_ask" {
+        return match answer {
+            Some(a) => serde_json::to_value(&a).unwrap_or(serde_json::json!({})),
+            None => serde_json::to_value(&FormAnswer::Cancelled).unwrap_or(serde_json::json!({})),
+        };
+    }
     let hunks = payload["hunks"].as_array().cloned().unwrap_or_default();
     let all_ids: Vec<u64> = hunks.iter().filter_map(|h| h["id"].as_u64()).collect();
     match answer {
