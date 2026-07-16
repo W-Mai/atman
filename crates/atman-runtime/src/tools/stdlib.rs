@@ -841,6 +841,7 @@ fn prepare_dispatch(
 struct Approved {
     index: usize,
     id: String,
+    name: String,
     tool: std::sync::Arc<dyn Tool>,
     call_args: ToolArgs,
 }
@@ -904,6 +905,7 @@ async fn partition_and_gate(
                 let a = Approved {
                     index: r.index,
                     id: r.id,
+                    name: r.name.clone(),
                     tool: r.tool,
                     call_args: r.call_args,
                 };
@@ -934,10 +936,13 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
     let futs = batch.iter().map(|a| a.tool.call(a.call_args.clone(), ctx));
     let results = futures::future::join_all(futs).await;
     for (a, r) in batch.into_iter().zip(results) {
-        let (content, is_error) = match r {
-            Ok(v) => (render_tool_result_text(&v), false),
+        let (content, is_error) = match &r {
+            Ok(v) => (render_tool_result_text(v), false),
             Err(e) => (format!("{e}"), true),
         };
+        if let Ok(v) = &r {
+            emit_diff_preview_if_relevant(ctx, &a.name, v);
+        }
         let msg = crate::message::Message {
             role: crate::message::MessageRole::Tool,
             parts: vec![crate::message::MessagePart::ToolResult {
@@ -957,10 +962,14 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
 
 async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
     for a in batch {
-        let (content, is_error) = match a.tool.call(a.call_args, ctx).await {
-            Ok(v) => (render_tool_result_text(&v), false),
+        let r = a.tool.call(a.call_args, ctx).await;
+        let (content, is_error) = match &r {
+            Ok(v) => (render_tool_result_text(v), false),
             Err(e) => (format!("{e}"), true),
         };
+        if let Ok(v) = &r {
+            emit_diff_preview_if_relevant(ctx, &a.name, v);
+        }
         let msg = crate::message::Message {
             role: crate::message::MessageRole::Tool,
             parts: vec![crate::message::MessagePart::ToolResult {
@@ -975,6 +984,80 @@ async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option
         };
         emit_tool_result(ctx, &msg);
         out_slots[a.index] = Some(Value::Message(msg));
+    }
+}
+
+type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);
+
+fn emit_diff_preview_if_relevant(ctx: &ToolCtx, tool_name: &str, value: &Value) {
+    let Some(sink) = ctx.events.as_ref() else {
+        return;
+    };
+    let data: Option<DiffPreviewData> = match tool_name {
+        "fs.edit" => {
+            let path = value_struct_string(value, "summary").and_then(|s| {
+                s.strip_prefix("[fs.edit(")
+                    .and_then(|s| s.split(':').next())
+                    .map(|s| s.trim_end_matches(')').to_string())
+            });
+            let old = value_struct_string(value, "old_content");
+            let new = value_struct_string(value, "new_content");
+            if old.is_some() || new.is_some() {
+                Some((path.unwrap_or_default(), old, new, None))
+            } else {
+                None
+            }
+        }
+        "fs.write" => {
+            let path = value_struct_string(value, "path").unwrap_or_default();
+            let old = value_struct_string(value, "old_content");
+            let new = value_struct_string(value, "new_content");
+            if old.is_some() || new.is_some() {
+                Some((path, old, new, None))
+            } else {
+                None
+            }
+        }
+        "git.diff" => {
+            let Some(diff) = value_struct_string(value, "diff") else {
+                return;
+            };
+            Some(("git diff".into(), None, None, Some(diff)))
+        }
+        "git.show" => {
+            let sha = value_struct_string(value, "sha").unwrap_or_default();
+            let Some(diff) = value_struct_string(value, "diff") else {
+                return;
+            };
+            Some((format!("git show {sha}"), None, None, Some(diff)))
+        }
+        _ => None,
+    };
+    if let Some((title, old_content, new_content, unified_diff)) = data {
+        sink.emit(crate::event::Event::DiffPreview {
+            seq: 0,
+            turn_id: ctx.turn_id.clone(),
+            flow_run_id: ctx.flow_run_id.clone(),
+            title,
+            old_content,
+            new_content,
+            unified_diff,
+            ts: chrono::Utc::now(),
+        });
+    }
+}
+
+fn value_struct_string(value: &Value, field: &str) -> Option<String> {
+    if let Value::Struct(fields) = value {
+        fields
+            .iter()
+            .find(|(k, _)| k == field)
+            .and_then(|(_, v)| match v {
+                Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+    } else {
+        None
     }
 }
 
