@@ -354,6 +354,21 @@ impl AppState {
         self.running_workflow_count > 0
     }
 
+    pub fn has_active_animation(&self) -> bool {
+        self.has_running_workflow()
+            || self.items.iter().any(|item| {
+                matches!(
+                    item,
+                    OutputItem::Terminal { done: false, .. }
+                        | OutputItem::Bash { done: false, .. }
+                        | OutputItem::CompactionSummary {
+                            phase: CompactionPhase::Running,
+                            ..
+                        }
+                )
+            })
+    }
+
     pub fn hit_test(&self, col: u16, row: u16) -> Option<usize> {
         let rect = self.last_transcript_rect?;
         if col < rect.x

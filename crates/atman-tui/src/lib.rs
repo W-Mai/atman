@@ -260,7 +260,7 @@ async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.has_running_workflow() => {
+            _ = animation_tick.tick(), if app.has_active_animation() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
             _ = intro_tick.tick(), if app.startup_intro.is_some() => {
