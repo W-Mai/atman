@@ -2231,6 +2231,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let transcript_area = transcript_content;
     app.last_transcript_rect = Some(transcript_area);
     let effective_viewport = transcript_area.height.max(1);
+    let tail_anchor = input_rect.y.saturating_sub(transcript_area.y).max(1);
     if startup_active {
         if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
             let base = output::compute_startup_overlay(l.transcript, recent).area;
@@ -2275,7 +2276,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         };
         let mut cache = std::mem::take(&mut app.layout_cache);
         let scroll_before = if app.follow_tail {
-            cache.cached_total_rows().saturating_sub(effective_viewport)
+            cache.cached_total_rows().saturating_sub(tail_anchor)
         } else {
             app.scroll_offset
         };
@@ -2290,6 +2291,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_node_regions = node_regions;
         app.layout_cache = cache;
         app.resolve_scroll(total_rows, effective_viewport);
+        if app.follow_tail {
+            app.scroll_offset = total_rows.saturating_sub(tail_anchor);
+        }
         let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
         f.render_widget(paragraph, transcript_area);
     }
