@@ -204,6 +204,56 @@ pub async fn maybe_auto_compact(
     model: &str,
     providers: &crate::provider::ProviderRegistry,
 ) {
+    let _compact_guard = session.acquire_compact_lock().await;
+    maybe_auto_compact_locked(session, model, providers).await;
+}
+
+pub fn spawn_auto_compact(
+    session: std::sync::Arc<crate::session::Session>,
+    model: String,
+    providers: crate::provider::ProviderRegistry,
+) {
+    tokio::task::spawn_blocking(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            session.push_system_note("compaction skipped: background runtime init failed".into());
+            return;
+        };
+        rt.block_on(async move {
+            maybe_auto_compact(&session, &model, &providers).await;
+        });
+    });
+}
+
+pub async fn start_auto_compact(
+    session: std::sync::Arc<crate::session::Session>,
+    model: String,
+    providers: crate::provider::ProviderRegistry,
+) {
+    let compact_guard = session.acquire_compact_lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            drop(compact_guard);
+            session.push_system_note("compaction skipped: background runtime init failed".into());
+            return;
+        };
+        rt.block_on(async move {
+            maybe_auto_compact_locked(&session, &model, &providers).await;
+            drop(compact_guard);
+        });
+    });
+}
+
+async fn maybe_auto_compact_locked(
+    session: &crate::session::Session,
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+) {
     let forced = session.take_manual_compact_request();
     let info = crate::model_registry::model_info(model);
     let threshold = info.compact_threshold_tokens();

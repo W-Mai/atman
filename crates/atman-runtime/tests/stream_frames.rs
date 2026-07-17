@@ -9,7 +9,7 @@ use atman_runtime::{Executor, Session, Value, tools};
 #[tokio::test]
 async fn llm_chunks_flow_from_provider_to_session_stream() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let mut rx = session.stream_subscribe();
 
     let mut ex = Executor::new();
@@ -28,7 +28,7 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
     let user_msg =
         atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
-    ex.run_in_turn(&file, "t", vec![], None, Some(&session))
+    ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .expect("flow ok");
     session.end_turn();
@@ -56,7 +56,7 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
 #[tokio::test]
 async fn tool_use_frames_wrap_dispatch() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let mut rx = session.stream_subscribe();
 
     let mut ex = Executor::new();
@@ -71,7 +71,7 @@ async fn tool_use_frames_wrap_dispatch() {
     let user_msg =
         atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
-    ex.run_in_turn(&file, "t", vec![], None, Some(&session))
+    ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .expect("flow ok");
     session.end_turn();
@@ -95,7 +95,7 @@ async fn tool_use_frames_wrap_dispatch() {
 #[tokio::test]
 async fn zero_subscribers_makes_stream_send_a_noop() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     let mut ex = Executor::new();
     tools::register_tier_zero(&mut ex.tools);
@@ -109,7 +109,7 @@ async fn zero_subscribers_makes_stream_send_a_noop() {
         atman_runtime::message::Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
     let out = ex
-        .run_in_turn(&file, "t", vec![], None, Some(&session))
+        .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .expect("flow ok");
     session.end_turn();

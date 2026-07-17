@@ -15,7 +15,7 @@ pub struct EvalCtx<'a> {
     pub events: Option<&'a crate::event::EventSink>,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
-    pub session: Option<&'a crate::session::Session>,
+    pub session: Option<std::sync::Arc<crate::session::Session>>,
     pub flow_cancel: tokio_util::sync::CancellationToken,
     pub safety: Option<&'a crate::safety::SafetyConfig>,
     pub current_node_id: Option<String>,
@@ -287,10 +287,11 @@ async fn dispatch_tool_call<'a>(
         c.sandbox = None;
         c
     };
-    let ctx_with_anchors = if let Some(session) = ctx.session {
+    let ctx_with_anchors = if let Some(session) = ctx.session.as_ref() {
         ctx_with_anchors
             .with_session_messages(std::sync::Arc::new(session.messages()))
             .with_session_messages_handle(session.messages_handle())
+            .with_compact_lock_handle(session.compact_lock_handle())
     } else {
         ctx_with_anchors
     };
@@ -304,12 +305,13 @@ async fn dispatch_tool_call<'a>(
     };
     if let Some(tx) = ctx
         .session
+        .as_ref()
         .map(|s| s.stream_tx())
         .or_else(|| ctx.tool_ctx.stream_tx.clone())
     {
         ctx_with_anchors = ctx_with_anchors.with_stream_tx(tx);
     }
-    let ctx_with_anchors = if let Some(session) = ctx.session {
+    let ctx_with_anchors = if let Some(session) = ctx.session.as_ref() {
         let mut c = ctx_with_anchors
             .with_read_files(session.read_files())
             .with_approval(session.approval())
@@ -324,7 +326,7 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
-    let stream_tx = ctx.session.map(|s| s.stream_tx());
+    let stream_tx = ctx.session.as_ref().map(|s| s.stream_tx());
     let tool_call_id = uuid::Uuid::now_v7().to_string();
     let args_preview = preview_tool_args(&positional, &named);
     if let (Some(sink), Some(run_id), Some(parent_node)) =
@@ -386,12 +388,12 @@ async fn dispatch_tool_call<'a>(
             id: tool_call_id,
         });
     }
-    if let Some(session) = ctx.session
+    if let Some(session) = ctx.session.as_ref()
         && (name == "memory.todo.set" || name == "memory.todo.done")
     {
         session.refresh_todos_from_store_async().await;
     }
-    if let Some(session) = ctx.session
+    if let Some(session) = ctx.session.as_ref()
         && (name == "plan.write" || name == "plan.tick")
     {
         session.refresh_plans_from_store_async().await;
@@ -763,7 +765,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 parent_node_id: parent_id.clone(),
                                 ts: chrono::Utc::now(),
                             });
-                            if let Some(session) = ctx.session {
+                            if let Some(session) = ctx.session.as_ref() {
                                 let _ = session.stream_tx().send(
                                     crate::stream::StreamFrame::FlowNodeStart {
                                         run_id: run_id.0.to_string(),
@@ -800,7 +802,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             output_preview: None,
                             ts: chrono::Utc::now(),
                         });
-                        if let Some(session) = ctx.session {
+                        if let Some(session) = ctx.session.as_ref() {
                             let _ =
                                 session
                                     .stream_tx()
@@ -988,20 +990,25 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 )));
             };
             let has_messages_override = messages_override.is_some();
-            let _compact_guard = if !matches!(context_mode, ContextMode::None)
+            if !matches!(context_mode, ContextMode::None)
                 && !has_messages_override
-                && let Some(session) = ctx.session
+                && let Some(session) = ctx.session.as_ref()
+            {
+                crate::compaction::start_auto_compact(
+                    session.clone(),
+                    model.clone(),
+                    ctx.providers.clone(),
+                )
+                .await;
+            }
+            let mut compact_guard = if !matches!(context_mode, ContextMode::None)
+                && !has_messages_override
+                && let Some(session) = ctx.session.as_ref()
             {
                 Some(session.acquire_compact_lock().await)
             } else {
                 None
             };
-            if !matches!(context_mode, ContextMode::None)
-                && !has_messages_override
-                && let Some(session) = ctx.session
-            {
-                crate::compaction::maybe_auto_compact(session, &model, ctx.providers).await;
-            }
             let turn_id = ctx
                 .turn_id
                 .clone()
@@ -1010,7 +1017,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 let budget_text = msgs.last().map(|m| m.text_concat()).unwrap_or_default();
                 (msgs, budget_text)
             } else if !matches!(context_mode, ContextMode::None)
-                && let Some(session) = ctx.session
+                && let Some(session) = ctx.session.as_ref()
             {
                 let mut history = match context_mode {
                     ContextMode::Session => session.messages(),
@@ -1055,7 +1062,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 (vec![user_msg], prompt_text)
             };
             let session_messages_len = final_messages.len();
-            if let Some(session) = ctx.session
+            if let Some(session) = ctx.session.as_ref()
                 && let Some(l3_or_l2) = session.peek_pending_l2_or_higher(&turn_id)
                 && matches!(l3_or_l2.level, crate::injection::InjectionLevel::L3Redirect)
                 && let Some(target) = &l3_or_l2.redirect_target
@@ -1063,7 +1070,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 session.mark_injection_consumed(&l3_or_l2.id);
                 return Value::Err(RuntimeError::Redirect(target.clone()));
             }
-            if let Some(session) = ctx.session {
+            if let Some(session) = ctx.session.as_ref() {
                 let injections = session.drain_injections(&turn_id);
                 let renderable: Vec<crate::injection::Injection> = injections
                     .into_iter()
@@ -1128,7 +1135,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     )));
                 }
             }
-            if let Some(session) = ctx.session
+            if let Some(session) = ctx.session.as_ref()
                 && let Some(goal) = session.goal()
             {
                 final_messages.push(crate::message::Message::system_text(
@@ -1136,7 +1143,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     format!("[session goal]\n{goal}\n[/session goal]"),
                 ));
             }
-            if let Some(session) = ctx.session
+            if let Some(session) = ctx.session.as_ref()
                 && let Some(plan) = session.plan_system_prompt().await
             {
                 final_messages.push(crate::message::Message::system_text(
@@ -1178,7 +1185,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     let outcome = call_and_maybe_stream(
                         provider.as_ref(),
                         req,
-                        ctx.session,
+                        ctx.session.as_deref(),
                         ctx.tool_ctx.stream_tx.clone(),
                     )
                     .await;
@@ -1230,7 +1237,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             ts: chrono::Utc::now(),
                         });
                     }
-                    if let Some(session) = ctx.session {
+                    if let Some(session) = ctx.session.as_ref() {
                         let input_with_cache = input_with_cache_for_window(&usage);
                         let _ =
                             session
@@ -1259,12 +1266,19 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     }
                     match outcome {
                         Ok(am) => {
-                            if let Some(session) = ctx.session {
+                            if let Some(session) = ctx.session.as_ref() {
+                                if !matches!(context_mode, ContextMode::None)
+                                    && !has_messages_override
+                                {
+                                    drop(compact_guard.take());
+                                }
+                                let _append_compact_guard = session.acquire_compact_lock().await;
                                 session.append_message(am.message.clone(), ctx.flow_run_id.clone());
-                                crate::compaction::maybe_auto_compact(
-                                    session,
-                                    &model,
-                                    ctx.providers,
+                                drop(_append_compact_guard);
+                                crate::compaction::start_auto_compact(
+                                    session.clone(),
+                                    model.clone(),
+                                    ctx.providers.clone(),
                                 )
                                 .await;
                             }
@@ -1277,9 +1291,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             {
                                 compact_after_overflow_used = true;
                                 saw_context_overflow = true;
-                                let session =
-                                    ctx.session.expect("checked by can_rebuild_from_session");
+                                let session = ctx
+                                    .session
+                                    .as_ref()
+                                    .expect("checked by can_rebuild_from_session");
                                 session.request_manual_compact();
+                                drop(compact_guard.take());
                                 crate::compaction::maybe_auto_compact(
                                     session,
                                     &model,
@@ -1354,7 +1371,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                         | crate::error::ErrorKind::Transient
                                 ) {
                                     let delay_ms = 1000u64 << attempt;
-                                    if let Some(tx) = ctx.session.map(|s| s.stream_tx()) {
+                                    if let Some(tx) = ctx.session.as_ref().map(|s| s.stream_tx()) {
                                         let _ = tx.send(crate::stream::StreamFrame::Note(format!(
                                             "retrying in {}s…",
                                             delay_ms / 1000
@@ -1375,10 +1392,15 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             if let Some(fb) = fallback_expr {
                 return eval_expr(fb, env, ctx).await;
             }
-            if let Some(session) = ctx.session
+            if let Some(session) = ctx.session.as_ref()
                 && !saw_context_overflow
             {
-                crate::compaction::maybe_auto_compact(session, &model, ctx.providers).await;
+                crate::compaction::start_auto_compact(
+                    session.clone(),
+                    model.clone(),
+                    ctx.providers.clone(),
+                )
+                .await;
             }
             Value::Err(last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into())))
         }
@@ -1418,7 +1440,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     crate::form::FormAnswer::Confirmed { value: true }
                 ));
             }
-            let Some(session) = ctx.session else {
+            let Some(session) = ctx.session.as_ref() else {
                 return Value::Bool(true);
             };
             let forms = session.forms();
@@ -1489,7 +1511,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     ts: chrono::Utc::now(),
                 });
             }
-            if let Some(session) = ctx.session {
+            if let Some(session) = ctx.session.as_ref() {
                 let _ = session
                     .stream_tx()
                     .send(crate::stream::StreamFrame::FlowStart {
@@ -1527,7 +1549,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     ts: chrono::Utc::now(),
                 });
             }
-            if let Some(session) = ctx.session {
+            if let Some(session) = ctx.session.as_ref() {
                 let _ = session
                     .stream_tx()
                     .send(crate::stream::StreamFrame::FlowDone {

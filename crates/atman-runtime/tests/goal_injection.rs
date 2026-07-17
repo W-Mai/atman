@@ -81,7 +81,7 @@ impl atman_runtime::provider::Provider for CapturedProvider {
 #[tokio::test]
 async fn goal_prefix_lands_in_llm_system_prompt() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir())
         .set("ship the atman agent")
         .unwrap();
@@ -99,7 +99,7 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
     let _ = ex
-        .run_in_turn(&file, "t", vec![], None, Some(&session))
+        .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
     session.end_turn();
@@ -123,7 +123,7 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
 #[tokio::test]
 async fn goal_prefix_prepends_user_system_and_keeps_both() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir()).set("stay minimal").unwrap();
 
     let provider = mock_that_echoes_system();
@@ -143,7 +143,7 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
     let _ = ex
-        .run_in_turn(&file, "t", vec![], None, Some(&session))
+        .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
     session.end_turn();
@@ -168,7 +168,7 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
 #[tokio::test]
 async fn no_goal_leaves_system_untouched() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     let provider = mock_that_echoes_system();
     let mut ex = Executor::new();
@@ -182,7 +182,7 @@ async fn no_goal_leaves_system_untouched() {
     let file = parse_file(src).unwrap();
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
-    ex.run_in_turn(&file, "t", vec![], None, Some(&session))
+    ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
     session.end_turn();
@@ -193,7 +193,7 @@ async fn no_goal_leaves_system_untouched() {
 #[tokio::test]
 async fn goal_survives_multiple_turns_in_same_session() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir()).set("persistent goal").unwrap();
 
     let provider = mock_that_echoes_system();
@@ -210,7 +210,7 @@ async fn goal_survives_multiple_turns_in_same_session() {
     for _ in 0..3 {
         let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
         session.begin_turn(user_msg);
-        ex.run_in_turn(&file, "t", vec![], None, Some(&session))
+        ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
             .await
             .unwrap();
         session.end_turn();
@@ -230,7 +230,7 @@ async fn goal_survives_multiple_turns_in_same_session() {
 #[tokio::test]
 async fn dsl_goal_set_persists_to_disk() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     let mut ex = Executor::new();
     atman_runtime::tools::register_tier_zero(&mut ex.tools);
@@ -251,7 +251,7 @@ async fn dsl_goal_set_persists_to_disk() {
     let file = parse_file(src).unwrap();
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
-    ex.run_in_turn(&file, "t", vec![], None, Some(&session))
+    ex.run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
     session.end_turn();

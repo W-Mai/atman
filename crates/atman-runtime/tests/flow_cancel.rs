@@ -32,13 +32,13 @@ async fn flow_cancel_before_start_returns_cancelled_error() {
         MockProvider::new("mock").with_model("mock", Value::Str("would-run".into())),
     ));
 
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     session.cancel_flow();
 
     let err = executor
-        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(&session))
+        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone()))
         .await
         .unwrap_err();
     assert!(matches!(err, RuntimeError::Cancelled(msg) if msg.contains("cancelled")));
@@ -142,7 +142,13 @@ async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
         }));
 
     let out = executor
-        .run_in_turn(&file, "chained", vec![], Some(turn_id), Some(&session))
+        .run_in_turn(
+            &file,
+            "chained",
+            vec![],
+            Some(turn_id),
+            Some(session.clone()),
+        )
         .await;
     assert!(out.is_err(), "flow should abort after cancel_flow");
     assert_eq!(

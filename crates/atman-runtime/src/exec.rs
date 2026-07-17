@@ -126,7 +126,7 @@ fn emit_flow_node_start(
             ts: chrono::Utc::now(),
         });
     }
-    if let Some(session) = ctx.session {
+    if let Some(session) = ctx.session.as_ref() {
         let _ = session
             .stream_tx()
             .send(crate::stream::StreamFrame::FlowNodeStart {
@@ -211,7 +211,7 @@ fn emit_flow_node_end(
             ts: chrono::Utc::now(),
         });
     }
-    if let Some(session) = ctx.session {
+    if let Some(session) = ctx.session.as_ref() {
         let _ = session
             .stream_tx()
             .send(crate::stream::StreamFrame::FlowNodeEnd {
@@ -514,8 +514,8 @@ async fn run_streaming_once<'a>(
     rules: &WatchRules,
     ctx: &EvalCtx<'a>,
 ) -> StreamOutcome {
-    let mut inj_rx = ctx.session.map(|s| s.subscribe_injections());
-    let stream_tx = ctx.session.map(|s| s.stream_tx());
+    let mut inj_rx = ctx.session.as_ref().map(|s| s.subscribe_injections());
+    let stream_tx = ctx.session.as_ref().map(|s| s.stream_tx());
     let model_name = req.model.clone();
     let obs = provider.call_streaming(req);
     let cancel = obs.cancel.clone();
@@ -539,7 +539,7 @@ async fn run_streaming_once<'a>(
             ev = events.recv() => {
                 match ev {
                     Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
-                        if let Some(session) = ctx.session {
+                        if let Some(session) = ctx.session.as_ref() {
                             session.mark_streamed();
                         }
                         if let Some(tx) = &stream_tx {
@@ -599,7 +599,7 @@ async fn run_streaming_once<'a>(
                 text,
                 cumulative_tokens,
             } => {
-                if let Some(session) = ctx.session {
+                if let Some(session) = ctx.session.as_ref() {
                     session.mark_streamed();
                 }
                 if let Some(tx) = &stream_tx {
@@ -942,7 +942,7 @@ pub async fn exec_flow_with_siblings(
     events: Option<&crate::event::EventSink>,
     turn_id: Option<crate::event::TurnId>,
     flow_run_id: Option<crate::event::FlowRunId>,
-    session: Option<&crate::session::Session>,
+    session: Option<std::sync::Arc<crate::session::Session>>,
     flow_cancel: tokio_util::sync::CancellationToken,
     safety: Option<&crate::safety::SafetyConfig>,
 ) -> Result<Value, RuntimeError> {

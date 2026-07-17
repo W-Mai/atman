@@ -59,7 +59,7 @@ pub struct Session {
     manual_compact_pending: std::sync::atomic::AtomicBool,
     last_input_tokens: std::sync::atomic::AtomicU64,
     compact_review_mode: Mutex<CompactReviewMode>,
-    compact_lock: tokio::sync::Mutex<()>,
+    compact_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     approval: std::sync::Arc<ApprovalRegistry>,
@@ -1083,7 +1083,7 @@ impl Session {
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
-            compact_lock: tokio::sync::Mutex::new(()),
+            compact_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1174,7 +1174,7 @@ impl Session {
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
-            compact_lock: tokio::sync::Mutex::new(()),
+            compact_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1216,7 +1216,7 @@ impl Session {
             manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
             last_input_tokens: std::sync::atomic::AtomicU64::new(0),
             compact_review_mode: Mutex::new(CompactReviewMode::default()),
-            compact_lock: tokio::sync::Mutex::new(()),
+            compact_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -1390,6 +1390,14 @@ impl Session {
 
     pub async fn acquire_compact_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.compact_lock.lock().await
+    }
+
+    pub async fn acquire_compact_lock_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.compact_lock.clone().lock_owned().await
+    }
+
+    pub fn compact_lock_handle(&self) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.compact_lock.clone()
     }
 
     fn clear_last_input_tokens(&self) {

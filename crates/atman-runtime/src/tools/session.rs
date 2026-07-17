@@ -73,6 +73,10 @@ impl Tool for SessionPush {
                     "session.push: no session messages handle available".into(),
                 ));
             };
+            let _compact_guard = match &ctx.compact_lock_handle {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
             for msg in msgs {
                 emit_message_event(ctx, &msg);
                 if let Some(tx) = &ctx.stream_tx {

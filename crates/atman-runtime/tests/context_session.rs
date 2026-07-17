@@ -164,7 +164,7 @@ async fn context_session_feeds_session_history_into_llm_call() {
         }],
     ]));
 
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let mut ex = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&mut ex.tools);
     ex.providers.register(provider.clone());
@@ -184,7 +184,7 @@ async fn context_session_feeds_session_history_into_llm_call() {
                 Value::Str("what's in the file?".into()),
             )],
             Some(turn_id),
-            Some(&session),
+            Some(session.clone()),
         )
         .await;
     let result = match result {
@@ -277,7 +277,7 @@ async fn context_none_default_does_not_read_session_history() {
         text: "ok".into(),
     }]]));
 
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let mut ex = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&mut ex.tools);
     ex.providers.register(provider.clone());
@@ -296,7 +296,7 @@ async fn context_none_default_does_not_read_session_history() {
             "one_shot",
             vec![("user_prompt".into(), Value::Str("just this prompt".into()))],
             Some(turn_id),
-            Some(&session),
+            Some(session.clone()),
         )
         .await
         .unwrap();

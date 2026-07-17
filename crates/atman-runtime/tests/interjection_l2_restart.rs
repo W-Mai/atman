@@ -10,7 +10,7 @@ use atman_runtime::{Executor, Session, Value};
 #[tokio::test(flavor = "multi_thread")]
 async fn l2_injection_mid_stream_triggers_restart_with_correction() {
     let root = tempfile::tempdir().unwrap();
-    let session = Session::open(root.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(root.path()).unwrap());
     let sink = session.sink().clone();
 
     let mut ex = Executor::with_events(sink.clone());
@@ -53,7 +53,7 @@ flow t(user: string) -> string {
         "t",
         vec![("user".into(), Value::Str("start".into()))],
         Some(turn_id.clone()),
-        Some(&session),
+        Some(session.clone()),
     );
 
     let (result, ()) = tokio::join!(flow, injector);

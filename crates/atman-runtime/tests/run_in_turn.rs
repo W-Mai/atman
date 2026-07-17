@@ -27,12 +27,18 @@ async fn run_in_turn_appends_assistant_message_to_session() {
         MockProvider::new("mock").with_model("mock", Value::Str("hello world".into())),
     ));
 
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "please respond"));
 
     let out = executor
-        .run_in_turn(&file, "ask", vec![], Some(turn_id.clone()), Some(&session))
+        .run_in_turn(
+            &file,
+            "ask",
+            vec![],
+            Some(turn_id.clone()),
+            Some(session.clone()),
+        )
         .await
         .unwrap();
     session.end_turn();
@@ -75,12 +81,18 @@ async fn assistant_msg_event_carries_flow_run_id() {
         MockProvider::new("mock").with_model("mock", Value::Str("ok".into())),
     ));
 
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
 
     executor
-        .run_in_turn(&file, "ask", vec![], Some(turn_id.clone()), Some(&session))
+        .run_in_turn(
+            &file,
+            "ask",
+            vec![],
+            Some(turn_id.clone()),
+            Some(session.clone()),
+        )
         .await
         .unwrap();
     session.end_turn();

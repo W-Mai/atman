@@ -18,7 +18,7 @@ fn build_long_history(session: &Session, msg_count: usize) {
 #[tokio::test]
 async fn compact_messages_replaces_middle_span() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     build_long_history(&session, 20);
     let before_len = session.message_count();
@@ -37,7 +37,7 @@ async fn compact_messages_replaces_middle_span() {
 #[tokio::test]
 async fn compact_messages_refreshes_window_from_compacted_history() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     build_long_history(&session, 20);
     session.record_llm_call("llama-3b", 50_000, 0, 0, 0, None, None);
 
@@ -157,7 +157,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
         normal_calls: AtomicUsize::new(0),
         second_call_tokens: std::sync::Mutex::new(None),
     });
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     build_long_history(&session, 20);
 
     let mut ex = Executor::with_events(session.sink().clone());
@@ -175,7 +175,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     let turn_id = TurnId::now();
     session.begin_turn(Message::user_text(turn_id.clone(), "run"));
     let out = ex
-        .run_in_turn(&file, "start", vec![], Some(turn_id), Some(&session))
+        .run_in_turn(&file, "start", vec![], Some(turn_id), Some(session.clone()))
         .await
         .unwrap();
     session.end_turn();
@@ -189,7 +189,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
 #[tokio::test]
 async fn compact_messages_returns_none_below_budget() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("claude-opus-4.7", 0, 0, 0, 0, None, None);
     for i in 0..4 {
         let msg = Message::user_text(TurnId::now(), format!("hi {i}"));
@@ -202,7 +202,7 @@ async fn compact_messages_returns_none_below_budget() {
 async fn maybe_auto_compact_emits_warning_when_no_range_found() {
     use atman_runtime::compaction::maybe_auto_compact;
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let big = "y".repeat(50_000);
     session.append_message(Message::user_text(TurnId::now(), big.clone()), None);
     session.append_message(Message::assistant_text(TurnId::now(), big), None);
@@ -226,7 +226,7 @@ async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
     use atman_runtime::value::Value;
     use std::sync::Arc;
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     build_long_history(&session, 60);
     session.record_llm_call("mock-summary", 0, 0, 0, 0, None, None);
     let mut providers = ProviderRegistry::new();
@@ -430,7 +430,7 @@ async fn review_always_without_subscriber_auto_accepts_daemon_shape() {
 #[tokio::test]
 async fn cooldown_blocks_repeat_compaction_within_window() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     build_long_history(&session, 20);
     assert!(session.approval_cooldown_ok_for_compact());

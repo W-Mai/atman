@@ -60,7 +60,7 @@ impl Executor {
         flow_name: &str,
         args: Vec<(String, Value)>,
         turn_id: Option<TurnId>,
-        session: Option<&Session>,
+        session: Option<std::sync::Arc<Session>>,
     ) -> Result<Value, RuntimeError> {
         self.run_in_turn_with_run_id(file, flow_name, args, turn_id, session, None)
             .await
@@ -72,7 +72,7 @@ impl Executor {
         flow_name: &str,
         args: Vec<(String, Value)>,
         turn_id: Option<TurnId>,
-        session: Option<&Session>,
+        session: Option<std::sync::Arc<Session>>,
         first_run_id: Option<FlowRunId>,
     ) -> Result<Value, RuntimeError> {
         let flows: HashMap<_, _> = file
@@ -93,7 +93,7 @@ impl Executor {
                     current_args,
                     &flows,
                     turn_id.clone(),
-                    session,
+                    session.clone(),
                     next_run_id.take(),
                 )
                 .await
@@ -117,7 +117,7 @@ impl Executor {
         args: Vec<(String, Value)>,
         flows: &HashMap<String, FlowDecl>,
         turn_id: Option<TurnId>,
-        session: Option<&Session>,
+        session: Option<std::sync::Arc<Session>>,
         run_id: Option<FlowRunId>,
     ) -> Result<Value, RuntimeError> {
         let run_id = run_id.unwrap_or_else(FlowRunId::now);
@@ -129,7 +129,7 @@ impl Executor {
             parent_node_id: None,
             ts: chrono::Utc::now(),
         });
-        if let Some(sess) = session {
+        if let Some(sess) = session.as_ref() {
             let _ = sess
                 .stream_tx()
                 .send(crate::stream::StreamFrame::FlowStart {
@@ -146,7 +146,7 @@ impl Executor {
             graph: graph.clone(),
             ts: chrono::Utc::now(),
         });
-        if let Some(sess) = session {
+        if let Some(sess) = session.as_ref() {
             let _ = sess
                 .stream_tx()
                 .send(crate::stream::StreamFrame::FlowGraph {
@@ -154,7 +154,10 @@ impl Executor {
                     graph,
                 });
         }
-        let flow_cancel = session.map(|s| s.flow_cancel_token()).unwrap_or_default();
+        let flow_cancel = session
+            .as_ref()
+            .map(|s| s.flow_cancel_token())
+            .unwrap_or_default();
         let exec_fut = exec_flow_with_siblings(
             flow,
             args,
@@ -165,7 +168,7 @@ impl Executor {
             Some(&self.events),
             turn_id,
             Some(run_id.clone()),
-            session,
+            session.clone(),
             flow_cancel.clone(),
             self.safety.as_ref(),
         );
@@ -187,7 +190,7 @@ impl Executor {
             status: status.clone(),
             ts: chrono::Utc::now(),
         });
-        if let Some(sess) = session {
+        if let Some(sess) = session.as_ref() {
             let _ = sess.stream_tx().send(crate::stream::StreamFrame::FlowDone {
                 run_id: run_id.0.to_string(),
                 flow_name: flow.name.name.clone(),

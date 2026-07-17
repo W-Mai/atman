@@ -89,7 +89,7 @@ async fn l2_course_correct_renders_as_user_correction_tag() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     session
@@ -103,9 +103,15 @@ async fn l2_course_correct_renders_as_user_correction_tag() {
         calls: calls.clone(),
     }));
 
-    ex.run_in_turn(&file, "ask", vec![], Some(turn_id.clone()), Some(&session))
-        .await
-        .unwrap();
+    ex.run_in_turn(
+        &file,
+        "ask",
+        vec![],
+        Some(turn_id.clone()),
+        Some(session.clone()),
+    )
+    .await
+    .unwrap();
 
     let seen = joined_messages(&calls.lock().unwrap());
     assert!(
@@ -125,7 +131,7 @@ flow second() -> string {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     session
@@ -143,7 +149,7 @@ flow second() -> string {
             "first",
             vec![],
             Some(turn_id.clone()),
-            Some(&session),
+            Some(session.clone()),
         )
         .await
         .unwrap();
@@ -161,7 +167,7 @@ flow f() -> string { return llm { model: "mock", prompt: "x" } }
 flow g() -> string { return "reached" }
 "#;
     let file = parse_file(src).unwrap();
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     for target in ["b", "c", "d", "e", "f", "g"] {
@@ -176,7 +182,7 @@ flow g() -> string { return "reached" }
     ));
 
     let err = ex
-        .run_in_turn(&file, "a", vec![], Some(turn_id), Some(&session))
+        .run_in_turn(&file, "a", vec![], Some(turn_id), Some(session.clone()))
         .await
         .unwrap_err();
     assert!(
@@ -192,7 +198,7 @@ async fn l1_and_l2_both_appear_in_next_llm_request() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     session.enqueue_injection("small hint").unwrap();
@@ -207,7 +213,7 @@ async fn l1_and_l2_both_appear_in_next_llm_request() {
         calls: calls.clone(),
     }));
 
-    ex.run_in_turn(&file, "ask", vec![], Some(turn_id), Some(&session))
+    ex.run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone()))
         .await
         .unwrap();
 

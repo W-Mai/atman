@@ -106,9 +106,10 @@ impl RunLauncher {
                     None
                 }
             };
-        let session =
+        let session = std::sync::Arc::new(
             atman_runtime::Session::open_with_context(state.data_dir(), redactor, project_index)
-                .with_context(|| format!("opening session under {}", state.data_dir().display()))?;
+                .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
+        );
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();
         let run_id_proto = ProtoRunId(run_id_runtime.0);
@@ -140,7 +141,7 @@ impl RunLauncher {
                 let state_for_run = state_for_task.clone();
                 rt.block_on(async move {
                     if let Err(e) = run_flow_inner(
-                        &session,
+                        session.clone(),
                         &path,
                         args,
                         run_id_runtime,
@@ -153,7 +154,10 @@ impl RunLauncher {
                     {
                         eprintln!("[atman-daemon] flow run failed: {e:#}");
                     }
-                    session.shutdown().await;
+                    match std::sync::Arc::try_unwrap(session) {
+                        Ok(s) => s.shutdown().await,
+                        Err(_) => eprintln!("[atman-daemon] session still had refs at shutdown"),
+                    }
                     state_for_task.deregister_live(&sid_for_task);
                 });
             })
@@ -168,7 +172,7 @@ impl RunLauncher {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_flow_inner(
-    session: &atman_runtime::Session,
+    session: std::sync::Arc<atman_runtime::Session>,
     path: &std::path::Path,
     args: Vec<(String, atman_runtime::Value)>,
     run_id: RuntimeRunId,
@@ -257,7 +261,10 @@ async fn run_flow_inner(
         turn_id.clone(),
         format!("daemon run {} flow={flow_name}", path.display()),
     );
-    session.begin_turn(user_msg);
+    {
+        let _compact_guard = session.acquire_compact_lock().await;
+        session.begin_turn(user_msg);
+    }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
         .await;
@@ -267,7 +274,7 @@ async fn run_flow_inner(
             &flow_name,
             args,
             Some(turn_id),
-            Some(session),
+            Some(session.clone()),
             Some(run_id),
         )
         .await;

@@ -89,7 +89,7 @@ async fn pending_injection_appears_in_next_llm_request_messages() {
 "#;
     let file = parse_file(src).unwrap();
 
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     session
@@ -105,7 +105,13 @@ async fn pending_injection_appears_in_next_llm_request_messages() {
     }));
 
     executor
-        .run_in_turn(&file, "ask", vec![], Some(turn_id.clone()), Some(&session))
+        .run_in_turn(
+            &file,
+            "ask",
+            vec![],
+            Some(turn_id.clone()),
+            Some(session.clone()),
+        )
         .await
         .unwrap();
 
@@ -129,7 +135,7 @@ async fn no_pending_injection_yields_bare_user_message() {
 "#;
     let file = parse_file(src).unwrap();
 
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
 
@@ -142,7 +148,7 @@ async fn no_pending_injection_yields_bare_user_message() {
     }));
 
     executor
-        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(&session))
+        .run_in_turn(&file, "ask", vec![], Some(turn_id), Some(session.clone()))
         .await
         .unwrap();
 
@@ -161,7 +167,7 @@ async fn injection_drained_once_not_reused_by_next_node() {
 "#;
     let file = parse_file(src).unwrap();
 
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
     session.begin_turn(user_msg(turn_id.clone(), "start"));
     session.enqueue_injection("one-shot nudge").unwrap();
@@ -175,7 +181,13 @@ async fn injection_drained_once_not_reused_by_next_node() {
     }));
 
     executor
-        .run_in_turn(&file, "chained", vec![], Some(turn_id), Some(&session))
+        .run_in_turn(
+            &file,
+            "chained",
+            vec![],
+            Some(turn_id),
+            Some(session.clone()),
+        )
         .await
         .unwrap();
 

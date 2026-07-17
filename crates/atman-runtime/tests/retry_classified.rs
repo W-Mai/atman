@@ -342,7 +342,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
         summary_calls: std::sync::Arc::new(AtomicUsize::new(0)),
         request_tokens: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
     });
-    let session = Session::open_ephemeral();
+    let session = std::sync::Arc::new(Session::open_ephemeral());
     build_long_history(&session, 30);
     let file = parse_file(
         r#"flow t() -> string {
@@ -361,7 +361,8 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let turn_id = atman_runtime::event::TurnId::now();
     session.begin_turn(Message::user_text(turn_id.clone(), "run"));
-    let result = rt.block_on(ex.run_in_turn(&file, "t", vec![], Some(turn_id), Some(&session)));
+    let result =
+        rt.block_on(ex.run_in_turn(&file, "t", vec![], Some(turn_id), Some(session.clone())));
     session.end_turn();
 
     match result.unwrap() {

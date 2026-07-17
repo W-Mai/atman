@@ -8,7 +8,7 @@ use atman_runtime::{Executor, Session, Value};
 #[tokio::test]
 async fn recent_turns_returns_empty_before_any_message() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let mut ex = Executor::new();
     atman_runtime::tools::register_tier_zero(&mut ex.tools);
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
@@ -26,7 +26,7 @@ async fn recent_turns_returns_empty_before_any_message() {
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
     let out = ex
-        .run_in_turn(&file, "t", vec![], None, Some(&session))
+        .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
     session.end_turn();
@@ -40,7 +40,7 @@ async fn recent_turns_returns_empty_before_any_message() {
 #[tokio::test]
 async fn recent_turns_picks_up_appended_messages() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     for role in ["hi", "world"] {
         let m = Message::user_text(atman_runtime::event::TurnId::now(), role);
@@ -65,7 +65,7 @@ async fn recent_turns_picks_up_appended_messages() {
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
     let out = ex
-        .run_in_turn(&file, "t", vec![], None, Some(&session))
+        .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
     session.end_turn();
@@ -79,7 +79,7 @@ async fn recent_turns_picks_up_appended_messages() {
 #[tokio::test]
 async fn recent_turns_caps_output_at_n() {
     let tmp = tempfile::tempdir().unwrap();
-    let session = Session::open(tmp.path()).unwrap();
+    let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     for i in 0..8 {
         let m = Message {
@@ -110,7 +110,7 @@ async fn recent_turns_caps_output_at_n() {
     let user_msg = Message::user_text(atman_runtime::event::TurnId::now(), "run");
     session.begin_turn(user_msg);
     let out = ex
-        .run_in_turn(&file, "t", vec![], None, Some(&session))
+        .run_in_turn(&file, "t", vec![], None, Some(session.clone()))
         .await
         .unwrap();
     session.end_turn();
