@@ -2230,7 +2230,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     );
     let transcript_area = transcript_content;
     app.last_transcript_rect = Some(transcript_area);
-    let effective_viewport = input_rect.y.saturating_sub(transcript_area.y).max(1);
+    let effective_viewport = transcript_area.height.max(1);
     if startup_active {
         if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
             let base = output::compute_startup_overlay(l.transcript, recent).area;
