@@ -2,25 +2,45 @@ flow agent(user_prompt: string) -> string {
     contract {
         capabilities { shell: true }
     }
-    initial = user_msg(user_prompt)
-    return subflow(agent_loop, [initial], 0)
+    _prompt_lands_via_begin_turn = user_prompt
+    return subflow(agent_loop, 0)
 }
 
-flow agent_loop(messages: list, iteration: int) -> string {
+flow agent_loop(iteration: int) -> string {
     when iteration >= 200 {
         return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
     }
     reply = llm {
         model: "smart"
-        messages: messages
-        tools: [fs.read, fs.write, fs.edit, fs.list, bash.exec, hunk.review, hunk.apply, git.diff, git.show, memory.confess]
+        context: session
+        system: "Planning tools: use plan.write/read/tick for the active high-level route through a multi-step task. A plan is a durable ordered checklist that atman injects back into every LLM call; create or revise one for work that spans several steps, files, tool calls, or turns, then call plan.tick when a plan step is truly complete. Use memory.todo.set/done/cancel/delete/list for concrete execution items inside the current plan step: small trackable units with where/why/how/expected_result, especially when you need a visible work queue or may pause and resume. Do not mirror the same item in both systems. If a plan step is enough, do not create a todo. If a todo becomes the whole strategy, replace it with a plan. Typical flow: set or read the plan, execute one plan step, create todos only for that step's sub-work, finish/cancel those todos, then tick the plan step."
+        cache: true
+        retry: 12
+        tools: [
+            fs.read, fs.write, fs.edit, fs.list, fs.grep,
+            bash.spawn, bash.status, bash.output, bash.kill, bash.list,
+            term.spawn, term.input, term.capture, term.resize, term.kill, term.list,
+            web.fetch, web.search,
+            hunk.review, hunk.apply, hunk.plan_edit,
+            git.diff, git.show, git.log, git.status, git.add, git.commit, git.branch, git.push, test.run,
+            memory.confess, memory.fetch_confessions,
+            memory.todo.set, memory.todo.done, memory.todo.cancel, memory.todo.delete, memory.todo.list,
+            memory.goal.get, memory.goal.set, memory.goal.clear,
+            memory.recent_turns, memory.history.search, memory.history.read,
+            memory.spec.status, memory.spec.update, memory.spec.deviate,
+            plan.write, plan.read, plan.tick,
+            agent.spawn,
+            form.ask,
+            preview.push,
+            session.push, sleep
+        ]
     }
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         return text_concat(reply)
     }
     tool_results = dispatch_all(tool_uses)
-    new_history = concat(messages, concat([reply], tool_results))
+    session.push(tool_results)
     j = iteration + 1
-    return subflow(agent_loop, new_history, j)
+    return subflow(agent_loop, j)
 }

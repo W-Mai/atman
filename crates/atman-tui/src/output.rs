@@ -1032,7 +1032,7 @@ pub fn render_startup_intro_fade(
     lines.push(Line::from(""));
     lines.push(
         Line::from(Span::styled(
-            format!("agentic coding in your terminal · v{version}"),
+            format!("atman witnesses; code exists · v{version}"),
             subtle,
         ))
         .centered(),
@@ -1129,7 +1129,7 @@ pub fn render_startup_overlay(
     lines.push(Line::from(""));
     lines.push(
         Line::from(Span::styled(
-            format!("agentic coding in your terminal · v{version}"),
+            format!("atman witnesses; code exists · v{version}"),
             subtle,
         ))
         .centered(),
