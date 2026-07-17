@@ -2263,7 +2263,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             panel_width: transcript_area.width,
             hovered_thinking_idx: app.hovered_thinking_idx,
         };
-        let animation_key = if app.has_running_workflow() {
+        let animation_key = if app.has_active_animation() {
             Some(app.animation_frame)
         } else {
             None

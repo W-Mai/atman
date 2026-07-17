@@ -415,6 +415,9 @@ fn item_content_hash(
             done.hash(&mut h);
             expanded.hash(&mut h);
             scroll_offset.hash(&mut h);
+            if !done {
+                animation_frame.hash(&mut h);
+            }
         }
         OutputItem::Bash {
             handle,
@@ -427,6 +430,9 @@ fn item_content_hash(
             str_fp(output).hash(&mut h);
             done.hash(&mut h);
             expanded.hash(&mut h);
+            if !done {
+                animation_frame.hash(&mut h);
+            }
         }
         OutputItem::CompactionSummary {
             phase,
