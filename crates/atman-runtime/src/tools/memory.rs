@@ -195,12 +195,17 @@ impl Tool for MemoryTodoSet {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Create a todo item. Returns the todo id (UUID string) — save it for \
-             memory.todo.done / memory.todo.cancel / memory.todo.delete.\n\n\
-             Best practice: create a todo for each discrete subtask. Keep `where` \
-             specific (file path or module), `why` one sentence, `how` a brief \
-             approach, `expected_result` the verification criteria. Don't create \
-             todos for trivial steps — only for things the user would want to track.\n\n\
+            "Create a concrete execution todo. Returns the todo id (UUID string) — \
+             save it for memory.todo.done / memory.todo.cancel / memory.todo.delete.\n\n\
+             Todos are for short, trackable work items, usually inside the current \
+             plan step. Use plan.write/read/tick for the high-level ordered route \
+             through a multi-step task. Do not create todos that simply mirror plan \
+             steps; do not create a todo when one plan step is enough.\n\n\
+             Best practice: create a todo for each discrete execution item that \
+             should stay visible while you work. Keep `where` specific (file path \
+             or module), `why` one sentence, `how` a brief approach, \
+             `expected_result` the verification criteria. Don't create todos for \
+             trivial steps — only for things the user would want to track.\n\n\
              To modify an existing todo, cancel the old one then create a new one. \
              There is no update tool.",
         )
@@ -396,7 +401,8 @@ impl Tool for MemoryTodoList {
             "List all todos in the current session. Returns an array of \
              {id, where, why, how, expected_result, status}. \
              status is one of: pending, done, cancelled. \
-             Call this to check progress before starting new work.",
+             Call this to check concrete work items before starting or resuming a \
+             plan step.",
         )
     }
 

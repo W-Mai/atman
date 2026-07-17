@@ -20,14 +20,17 @@ impl Tool for PlanWrite {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Create or overwrite a step-by-step plan. atman injects the plan as a \
-             system-prompt prefix on every LLM call so the agent always knows what \
-             step it's on. Use plan.tick to mark steps complete.\n\n\
-             Best practice: call plan.write early, right after setting the goal. \
-             Break work into 3-8 concrete steps. Each step should be a single \
-             actionable verb: 'read auth.rs', 'add validate_token function', \
-             'write regression test for empty token'. Update the plan if you \
-             discover the approach needs to change. Use plan.tick after each step.",
+            "Create or overwrite the active high-level plan for a multi-step task. \
+             atman injects this plan into every LLM call, so use it for durable \
+             strategy across several steps, files, tool calls, or turns. Use \
+             memory.todo.* only for smaller execution items inside a plan step; do \
+             not duplicate the same work in both systems.\n\n\
+             Best practice: call plan.write early for non-trivial work, usually \
+             right after setting the goal. Break work into 3-8 ordered milestones. \
+             Each step should be a single actionable verb: 'read auth.rs', 'add \
+             validate_token function', 'write regression test for empty token'. \
+             Update the plan if the strategy changes. Use plan.tick after a step \
+             is truly complete.",
         )
     }
 
@@ -79,7 +82,7 @@ impl Tool for PlanRead {
             "Read the current plan as a markdown checklist with progress markers. \
              Without `id`, returns the most recently updated plan. \
              Returns empty string if no plan exists. Call this to refresh your \
-             memory of the plan before starting a new step.",
+             memory of the high-level route before starting or revising work.",
         )
     }
 
@@ -131,7 +134,7 @@ impl Tool for PlanTick {
         Some(
             "Mark a plan step as done (0-based index). Without `id`, targets the \
              latest plan. Returns the updated plan as markdown. Call this right \
-             after completing each step to keep progress visible in the sidebar.",
+             after completing a high-level plan step, not after every small todo.",
         )
     }
 
