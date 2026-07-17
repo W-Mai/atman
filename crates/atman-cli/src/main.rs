@@ -535,14 +535,14 @@ async fn cmd_run(
     let args = parse_args(&raw_args)?;
 
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
-    let session = if ephemeral {
+    let session = std::sync::Arc::new(if ephemeral {
         Session::open_ephemeral()
     } else {
         let root = data_dir()?;
         let project_index = open_current_project_index()?;
         Session::open_with_context(&root, redactor.clone(), project_index)
             .with_context(|| format!("opening session under {}", root.display()))?
-    };
+    });
 
     if let Some(path) = session.events_path() {
         eprintln!("[atman] session={} events={}", session.id(), path.display());
@@ -595,12 +595,24 @@ async fn cmd_run(
     session
         .approval()
         .set_auto_ceiling(atman_runtime::tool::ApprovalLevel::Dangerous);
-    session.begin_turn(user_msg);
+    {
+        let _compact_guard = session.acquire_compact_lock().await;
+        session.begin_turn(user_msg);
+    }
     let outcome = executor
-        .run_in_turn(&parsed, &flow_name, args, Some(turn_id), Some(&session))
+        .run_in_turn(
+            &parsed,
+            &flow_name,
+            args,
+            Some(turn_id),
+            Some(session.clone()),
+        )
         .await;
     session.end_turn();
-    session.shutdown().await;
+    match std::sync::Arc::try_unwrap(session) {
+        Ok(s) => s.shutdown().await,
+        Err(_) => eprintln!("[atman] session still had refs at shutdown; skipping graceful close"),
+    }
 
     match outcome {
         Ok(v) => {
@@ -1030,7 +1042,7 @@ enum RouteOutcome {
 async fn route_input_in_turn(
     line: &str,
     executor: &Executor,
-    session: &Session,
+    session: std::sync::Arc<Session>,
     turn_id: atman_runtime::event::TurnId,
 ) -> RouteOutcome {
     let Some(call) = resolve_route_call(line) else {
@@ -1145,7 +1157,7 @@ async fn run_boot_flow(executor: &Executor, reporter: &Reporter) -> Result<()> {
 async fn run_slash_command_in_turn(
     line: &str,
     executor: &Executor,
-    session: &Session,
+    session: std::sync::Arc<Session>,
     turn_id: atman_runtime::event::TurnId,
 ) -> Result<Value> {
     let (parsed, flow_name, kv) = resolve_slash_command(line)?;
@@ -1749,7 +1761,7 @@ async fn cmd_repl_once(
                     ));
                 }
                 "compact" => {
-                    handle_compact_builtin(&session, &reporter, &executor.providers).await;
+                    handle_compact_builtin(&session, &reporter, &executor.providers);
                 }
                 "attach" => {
                     let arg = trimmed.strip_prefix("attach").unwrap_or("").trim();
@@ -1776,7 +1788,7 @@ async fn cmd_repl_once(
             (trimmed.to_string(), TurnKind::Bare)
         };
         run_turn_with_interjection(
-            &session,
+            session.clone(),
             &executor,
             &lifecycles,
             classifier.as_ref(),
@@ -2167,7 +2179,7 @@ enum TurnKind {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_turn_with_interjection(
-    session: &Session,
+    session: std::sync::Arc<Session>,
     executor: &Executor,
     lifecycles: &atman_runtime::lifecycle::LifecycleRunner,
     classifier: Option<
@@ -2185,21 +2197,28 @@ async fn run_turn_with_interjection(
     attachments.extend(inline_attachments);
     let turn_id = atman_runtime::event::TurnId::now();
     let user_msg = build_user_message(&text, &attachments, turn_id.clone());
-    session.begin_turn(user_msg);
+    {
+        let _compact_guard = session.acquire_compact_lock().await;
+        session.begin_turn(user_msg);
+    }
     lifecycles
         .fire(executor, atman_dsl::ast::LifecycleEvent::TurnStart)
         .await;
 
     let flow_fut = async {
         match kind {
-            TurnKind::Slash => run_slash_command_in_turn(&text, executor, session, turn_id).await,
-            TurnKind::Bare => match route_input_in_turn(&text, executor, session, turn_id).await {
-                RouteOutcome::Handled(v) => Ok(v),
-                RouteOutcome::HandledErr(e) => Err(e),
-                RouteOutcome::Unmatched => Err(anyhow::anyhow!(
-                    "no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
-                )),
-            },
+            TurnKind::Slash => {
+                run_slash_command_in_turn(&text, executor, session.clone(), turn_id).await
+            }
+            TurnKind::Bare => {
+                match route_input_in_turn(&text, executor, session.clone(), turn_id).await {
+                    RouteOutcome::Handled(v) => Ok(v),
+                    RouteOutcome::HandledErr(e) => Err(e),
+                    RouteOutcome::Unmatched => Err(anyhow::anyhow!(
+                        "no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
+                    )),
+                }
+            }
         }
     };
     tokio::pin!(flow_fut);
@@ -2209,7 +2228,7 @@ async fn run_turn_with_interjection(
             biased;
             r = &mut flow_fut => break r,
             Some(line) = input_rx.recv() => {
-                if !consume_interjection_input(&line, session, classifier, reporter).await {
+                if !consume_interjection_input(&line, &session, classifier, reporter).await {
                     pushback.push_back(line);
                 }
             }
@@ -2253,6 +2272,7 @@ async fn consume_interjection_input(
     }
     if trimmed == "!stop" {
         session.cancel_flow();
+        let _compact_guard = session.acquire_compact_lock().await;
         let _ = session.enqueue_injection_with_level("stop", InjectionLevel::L4HardStop, None);
         reporter.info("[atman] stop requested; flow will abort at next node boundary");
         return true;
@@ -2263,6 +2283,7 @@ async fn consume_interjection_input(
             reporter.error("[atman] usage: !course-correct <text>");
             return true;
         }
+        let _compact_guard = session.acquire_compact_lock().await;
         match session.enqueue_injection_with_level(text, InjectionLevel::L2CourseCorrect, None) {
             Ok(id) => reporter.info(format!(
                 "[atman] course-correct queued ({id}) — llm restarts at next chunk boundary"
@@ -2277,6 +2298,7 @@ async fn consume_interjection_input(
             reporter.error("[atman] usage: !redirect <flow_name>");
             return true;
         }
+        let _compact_guard = session.acquire_compact_lock().await;
         match session.enqueue_injection_with_level(
             target,
             InjectionLevel::L3Redirect,
@@ -2293,6 +2315,7 @@ async fn consume_interjection_input(
             reporter.error("[atman] usage: !nudge <text>");
             return true;
         }
+        let _compact_guard = session.acquire_compact_lock().await;
         match session.enqueue_injection(text) {
             Ok(id) => reporter.info(format!(
                 "[atman] nudge queued ({id}) — will inject at next llm node"
@@ -2309,6 +2332,7 @@ async fn consume_interjection_input(
             );
             return true;
         }
+        let _compact_guard = session.acquire_compact_lock().await;
         match session.enqueue_injection(text) {
             Ok(id) => reporter.info(format!(
                 "[atman] nudge queued ({id}) — will inject at next llm node"
@@ -2325,6 +2349,7 @@ async fn consume_interjection_input(
     match cls.level {
         InjectionLevel::L4HardStop => {
             session.cancel_flow();
+            let _compact_guard = session.acquire_compact_lock().await;
             let _ = session.enqueue_injection_with_level(
                 trimmed,
                 InjectionLevel::L4HardStop,
@@ -2334,6 +2359,7 @@ async fn consume_interjection_input(
         }
         InjectionLevel::L3Redirect => {
             let target = cls.redirect_target.clone();
+            let _compact_guard = session.acquire_compact_lock().await;
             match session.enqueue_injection_with_level(
                 trimmed,
                 InjectionLevel::L3Redirect,
@@ -2347,6 +2373,7 @@ async fn consume_interjection_input(
             }
         }
         InjectionLevel::L2CourseCorrect => {
+            let _compact_guard = session.acquire_compact_lock().await;
             match session.enqueue_injection_with_level(
                 trimmed,
                 InjectionLevel::L2CourseCorrect,
@@ -2358,12 +2385,15 @@ async fn consume_interjection_input(
                 Err(e) => reporter.error(format!("[atman] L2 course-correct rejected: {e}")),
             }
         }
-        InjectionLevel::L1Nudge => match session.enqueue_injection(trimmed) {
-            Ok(id) => reporter.info(format!(
-                "[atman] L1 nudge queued ({id}, {source}): {trimmed}"
-            )),
-            Err(e) => reporter.error(format!("[atman] L1 nudge rejected: {e}")),
-        },
+        InjectionLevel::L1Nudge => {
+            let _compact_guard = session.acquire_compact_lock().await;
+            match session.enqueue_injection(trimmed) {
+                Ok(id) => reporter.info(format!(
+                    "[atman] L1 nudge queued ({id}, {source}): {trimmed}"
+                )),
+                Err(e) => reporter.error(format!("[atman] L1 nudge rejected: {e}")),
+            }
+        }
     }
     let _ = ClassifierSource::Default;
     true
@@ -2795,8 +2825,8 @@ fn handle_attach_builtin(
     }
 }
 
-async fn handle_compact_builtin(
-    session: &Session,
+fn handle_compact_builtin(
+    session: &Arc<Session>,
     reporter: &Reporter,
     providers: &atman_runtime::provider::ProviderRegistry,
 ) {
@@ -2812,12 +2842,36 @@ async fn handle_compact_builtin(
     reporter.info(format!(
         ":compact — running LLM summary on {before} messages ({tok_before} tokens)…"
     ));
-    atman_runtime::compaction::maybe_auto_compact(session, &model, providers).await;
-    let after = session.messages().len();
-    let tok_after = atman_runtime::compaction::estimate_tokens_for_messages(&session.messages());
-    reporter.info(format!(
-        ":compact — {before} → {after} messages · {tok_before} → {tok_after} tokens"
-    ));
+    let session_for_compact = Arc::clone(session);
+    let providers_for_compact = providers.clone();
+    let reporter_for_compact = reporter.clone();
+    tokio::task::spawn_blocking(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                reporter_for_compact.error(format!(":compact — runtime init failed: {e}"));
+                return;
+            }
+        };
+        rt.block_on(async {
+            atman_runtime::compaction::maybe_auto_compact(
+                &session_for_compact,
+                &model,
+                &providers_for_compact,
+            )
+            .await;
+        });
+        let after = session_for_compact.messages().len();
+        let tok_after = atman_runtime::compaction::estimate_tokens_for_messages(
+            &session_for_compact.messages(),
+        );
+        reporter_for_compact.info(format!(
+            ":compact — {before} → {after} messages · {tok_before} → {tok_after} tokens"
+        ));
+    });
 }
 
 fn handle_copy_builtin(arg: &str, session: &Session, reporter: &Reporter) {
