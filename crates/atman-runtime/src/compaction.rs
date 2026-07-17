@@ -291,6 +291,19 @@ async fn maybe_auto_compact_locked(
             after_tokens: 0,
             compacted_count: range.end - range.start,
         });
+    let send_failed = |session: &crate::session::Session, reason: &str| {
+        let _ = session
+            .stream_tx()
+            .send(crate::stream::StreamFrame::CompactionSummary {
+                phase: crate::stream::CompactionPhase::Failed,
+                range_start: range.start,
+                range_end: range.end.saturating_sub(1),
+                summary: reason.to_string(),
+                before_tokens: current,
+                after_tokens: current,
+                compacted_count: range.end - range.start,
+            });
+    };
     let mut filtered: Vec<Message> = msgs[range.start..range.end].to_vec();
     filter_orphan_tool_messages(&mut filtered);
     let summary = match generate_llm_summary(&filtered, model, providers).await {
@@ -315,6 +328,10 @@ async fn maybe_auto_compact_locked(
         {
             ReviewOutcome::Commit(s) => s,
             ReviewOutcome::Rejected => {
+                send_failed(
+                    session,
+                    "compaction rejected by user; keeping full transcript",
+                );
                 session.push_system_note(
                     "compaction rejected by user; keeping full transcript".into(),
                 );
@@ -323,6 +340,13 @@ async fn maybe_auto_compact_locked(
         };
     let after_tokens = estimate_compacted_message_tokens(&msgs, &range, &final_summary);
     if after_tokens >= current {
+        send_failed(
+            session,
+            &format!(
+                "compaction skipped: summary would not shrink transcript ({} >= {} tokens)",
+                after_tokens, current
+            ),
+        );
         session.push_system_note(format!(
             "compaction skipped: summary would not shrink transcript ({} >= {} tokens)",
             after_tokens, current

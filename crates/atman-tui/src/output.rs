@@ -4567,11 +4567,16 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
 
     let stats = match phase {
         CompactionPhase::Running => format!(
-            " {} 正在压缩 {range_start}..{range_end} 条消息... ",
+            " {} compacting {range_start}..{range_end}... ",
             spinner_char(animation_frame)
         ),
         CompactionPhase::Finished => {
-            format!(" ✓ 已压缩 {compacted_count} 条消息 · {before_tokens} → {after_tokens} tokens ")
+            format!(
+                " ✓ compacted {compacted_count} msgs · {before_tokens} → {after_tokens} tokens "
+            )
+        }
+        CompactionPhase::Failed => {
+            format!(" ✗ compaction failed · {summary} ")
         }
     };
     let stats_used = UnicodeWidthStr::width(stats.as_str());
