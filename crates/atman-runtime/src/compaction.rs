@@ -4,6 +4,7 @@ pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     let mut chars = 0usize;
     for part in &msg.parts {
         chars += match part {
+            MessagePart::CompactSummary { summary, .. } => summary.len(),
             MessagePart::Text { text } => text.len(),
             MessagePart::Thinking { thinking, .. } => thinking.len(),
             MessagePart::ToolResult { content, .. } => content.len(),
@@ -52,7 +53,9 @@ pub fn is_compaction_summary(msg: &Message) -> bool {
     if !matches!(msg.role, MessageRole::System) {
         return false;
     }
-    msg.text_concat().contains("[atman:compact")
+    msg.parts
+        .iter()
+        .any(|part| matches!(part, MessagePart::CompactSummary { .. }))
 }
 
 pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRange> {
@@ -60,19 +63,26 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
     if total <= budget || messages.len() < 4 {
         return None;
     }
-    let start = messages
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, m)| is_compaction_summary(m))
-        .map(|(i, _)| i)
-        .unwrap_or(0);
     let end = messages.len().saturating_sub(2);
-    if end < start + 2 {
+    if let Some(anchor) = messages.iter().position(is_compaction_summary) {
+        if anchor + 2 > end {
+            return None;
+        }
+        let tokens_saved = messages[anchor..end]
+            .iter()
+            .map(estimate_tokens_for_message)
+            .sum();
+        return Some(CompactRange {
+            start: anchor,
+            end,
+            tokens_saved_estimate: tokens_saved,
+        });
+    }
+    if end < 2 {
         return None;
     }
     let mut best: Option<CompactRange> = None;
-    let mut idx = start;
+    let mut idx = 0;
     while idx < end {
         while idx < end && is_plan_related(&messages[idx]) {
             idx += 1;
@@ -100,6 +110,19 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
         }
     }
     best
+}
+
+pub fn estimate_compacted_message_tokens(
+    messages: &[Message],
+    range: &CompactRange,
+    summary: &str,
+) -> u64 {
+    let turn_id = messages
+        .get(range.start)
+        .map(|m| m.turn_id.clone())
+        .unwrap_or_else(crate::event::TurnId::now);
+    let after = replace_range_with_summary(messages, range, summary.to_string(), turn_id);
+    estimate_tokens_for_messages(&after)
 }
 
 pub fn filter_orphan_tool_messages(messages: &mut Vec<Message>) {
@@ -131,12 +154,13 @@ pub fn filter_orphan_tool_messages(messages: &mut Vec<Message>) {
 pub fn find_compact_summaries(messages: &[Message]) -> Vec<CompactSummary> {
     let mut out = Vec::new();
     for (idx, msg) in messages.iter().enumerate() {
-        if msg.role != MessageRole::System {
-            continue;
-        }
-        let text = msg.text_concat();
-        if let Some(summary) = parse_compact_footer(&text, idx) {
-            out.push(summary);
+        if let Some(summary) = compact_summary(msg) {
+            out.push(CompactSummary {
+                message_index: idx,
+                seq_start: summary.seq_start,
+                seq_end: summary.seq_end,
+                count: summary.count,
+            });
         }
     }
     out
@@ -150,31 +174,28 @@ pub struct CompactSummary {
     pub count: usize,
 }
 
-fn parse_compact_footer(text: &str, idx: usize) -> Option<CompactSummary> {
-    let start_marker = "[atman:compact ";
-    let start = text.rfind(start_marker)?;
-    let after = &text[start + start_marker.len()..];
-    let end = after.find(']')?;
-    let inner = &after[..end];
-    let mut seq_start = None;
-    let mut seq_end = None;
-    let mut count = None;
-    for token in inner.split_whitespace() {
-        let Some((k, v)) = token.split_once('=') else {
-            continue;
-        };
-        match k {
-            "seq_start" => seq_start = v.parse().ok(),
-            "seq_end" => seq_end = v.parse().ok(),
-            "count" => count = v.parse().ok(),
-            _ => {}
-        }
+struct CompactSummaryPart {
+    seq_start: u64,
+    seq_end: u64,
+    count: usize,
+}
+
+fn compact_summary(msg: &Message) -> Option<CompactSummaryPart> {
+    if msg.role != MessageRole::System {
+        return None;
     }
-    Some(CompactSummary {
-        message_index: idx,
-        seq_start: seq_start?,
-        seq_end: seq_end?,
-        count: count?,
+    msg.parts.iter().find_map(|part| match part {
+        MessagePart::CompactSummary {
+            seq_start,
+            seq_end,
+            count,
+            ..
+        } => Some(CompactSummaryPart {
+            seq_start: *seq_start,
+            seq_end: *seq_end,
+            count: *count,
+        }),
+        _ => None,
     })
 }
 
@@ -250,6 +271,14 @@ pub async fn maybe_auto_compact(
                 return;
             }
         };
+    let after_tokens = estimate_compacted_message_tokens(&msgs, &range, &final_summary);
+    if after_tokens >= current {
+        session.push_system_note(format!(
+            "compaction skipped: summary would not shrink transcript ({} >= {} tokens)",
+            after_tokens, current
+        ));
+        return;
+    }
     match session.compact_messages(final_summary) {
         Some(result) => {
             session.push_system_note(format!(
@@ -416,6 +445,9 @@ fn serialize_message_for_summary(msg: &Message) -> String {
     let mut parts = Vec::new();
     for part in &msg.parts {
         match part {
+            MessagePart::CompactSummary { summary, .. } => {
+                parts.push(summary.clone());
+            }
             MessagePart::Text { text } => {
                 parts.push(text.clone());
             }
@@ -458,12 +490,13 @@ pub fn replace_range_with_summary(
 ) -> Vec<Message> {
     let mut out = Vec::with_capacity(messages.len() - (range.end - range.start) + 1);
     out.extend_from_slice(&messages[..range.start]);
-    let compacted_marker = format!(
-        "[atman: compacted {} messages]\n{}",
+    out.push(Message::system_compact_summary(
+        turn_id,
+        summary,
+        range.start as u64,
+        range.end.saturating_sub(1) as u64,
         range.end - range.start,
-        summary
-    );
-    out.push(Message::system_text(turn_id, compacted_marker));
+    ));
     out.extend_from_slice(&messages[range.end..]);
     out
 }
@@ -527,10 +560,33 @@ mod tests {
         assert_eq!(out[0].role, MessageRole::System);
         assert_eq!(out[0].text_concat(), "head");
         assert_eq!(out[1].role, MessageRole::System);
-        assert!(out[1].text_concat().contains("compacted 4 messages"));
         assert!(out[1].text_concat().contains("gist: talked about"));
+        assert!(matches!(
+            out[1].parts.as_slice(),
+            [MessagePart::CompactSummary {
+                seq_start: 1,
+                seq_end: 4,
+                count: 4,
+                ..
+            }]
+        ));
         assert_eq!(out[2].role, MessageRole::User);
         assert_eq!(out[2].text_concat(), "tail");
+    }
+
+    #[test]
+    fn find_compact_range_anchors_on_latest_structured_summary() {
+        let msgs = vec![
+            system("head"),
+            Message::system_compact_summary(TurnId::now(), "old", 0, 1, 2),
+            user("m1"),
+            assistant("m2"),
+            user("m3"),
+            assistant("m4"),
+        ];
+        let range = find_compact_range(&msgs, 1).expect("range");
+        assert_eq!(range.start, 1);
+        assert_eq!(range.end, 4);
     }
 
     fn assistant_with_tool_use(text: &str, tool_name: &str, input: serde_json::Value) -> Message {
@@ -632,14 +688,11 @@ mod tests {
     }
 
     fn compaction_summary(text: &str) -> Message {
-        let body = format!(
-            "[atman: compacted 5 messages]\n{text}\n[atman:compact seq_start=1 seq_end=5 count=5]"
-        );
-        Message::system_text(TurnId::now(), body)
+        Message::system_compact_summary(TurnId::now(), text, 1, 5, 5)
     }
 
     #[test]
-    fn is_compaction_summary_detects_marker() {
+    fn is_compaction_summary_detects_structured_variant() {
         assert!(is_compaction_summary(&compaction_summary("gist")));
         assert!(!is_compaction_summary(&system("plain system msg")));
         assert!(!is_compaction_summary(&user("user msg")));
@@ -661,9 +714,13 @@ mod tests {
             assistant("tail"),
         ];
         let range = find_compact_range(&msgs, 500).expect("expected range across summary");
+        assert_eq!(
+            range.start, 4,
+            "range should anchor at the structured summary"
+        );
         assert!(
-            range.start <= 4 && range.end > 4,
-            "range should span across the compaction summary at idx 4, got {range:?}"
+            range.end > 4,
+            "range should include later work, got {range:?}"
         );
         assert!(
             range.end - range.start >= 3,
@@ -673,20 +730,55 @@ mod tests {
     }
 
     #[test]
-    fn find_compact_starts_from_last_summary() {
+    fn find_compact_starts_from_earliest_summary() {
         let msgs = vec![
             user("a"),
             assistant("b"),
-            system(
-                "[atman: compacted 2 messages]\nsummary 1\n[atman:compact seq_start=0 seq_end=1 count=2]",
-            ),
+            compaction_summary("summary 1"),
             user("c"),
             assistant("d"),
             user("e"),
         ];
         let range = find_compact_range(&msgs, 10).expect("expected range");
-        assert_eq!(range.start, 2, "should start from last summary");
+        assert_eq!(
+            range.start, 2,
+            "should start from the compact summary anchor"
+        );
         assert_eq!(range.end, 4, "should end at len-2");
+    }
+
+    #[test]
+    fn find_compact_range_includes_older_compaction_summaries() {
+        let msgs = vec![
+            compaction_summary("summary 0"),
+            user(&"x".repeat(2000)),
+            assistant(&"y".repeat(2000)),
+            compaction_summary("summary 1"),
+            user(&"z".repeat(2000)),
+            assistant(&"w".repeat(2000)),
+            user("tail"),
+            assistant("tail"),
+        ];
+        let range = find_compact_range(&msgs, 500).expect("expected range");
+        assert_eq!(range.start, 0, "should compact from the oldest summary");
+        assert!(range.end > 3, "should include later summaries and new work");
+    }
+
+    #[test]
+    fn compacted_message_tokens_detects_growth() {
+        let msgs = vec![compaction_summary("summary 0"), user("a"), assistant("b")];
+        let range = CompactRange {
+            start: 1,
+            end: 3,
+            tokens_saved_estimate: 0,
+        };
+        let before = estimate_tokens_for_messages(&msgs);
+        let after = estimate_compacted_message_tokens(
+            &msgs,
+            &range,
+            "a very long summary that expands the transcript a lot",
+        );
+        assert!(after > before, "expected growth to be detectable");
     }
 
     #[test]

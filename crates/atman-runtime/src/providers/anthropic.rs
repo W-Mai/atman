@@ -126,6 +126,14 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
     let last_idx = m.parts.len().saturating_sub(1);
     for (i, part) in m.parts.iter().enumerate() {
         blocks.push(match part {
+            MessagePart::CompactSummary { summary, .. } => ContentPart::Text {
+                text: summary.clone(),
+                cache_control: if apply_cache_control && i == last_idx {
+                    Some(CacheControl { kind: "ephemeral" })
+                } else {
+                    None
+                },
+            },
             MessagePart::Text { text } => ContentPart::Text {
                 text: text.clone(),
                 cache_control: if apply_cache_control && i == last_idx {

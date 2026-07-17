@@ -30,8 +30,8 @@ async fn compact_messages_replaces_middle_span() {
     let msgs = session.messages();
     let has_footer = msgs
         .iter()
-        .any(|m| m.text_concat().contains("[atman:compact"));
-    assert!(has_footer, "compaction should leave a summary marker");
+        .any(atman_runtime::compaction::is_compaction_summary);
+    assert!(has_footer, "compaction should leave a structured summary");
 }
 
 #[tokio::test]

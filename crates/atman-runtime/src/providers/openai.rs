@@ -160,6 +160,9 @@ fn build_user_parts(parts: &[MessagePart]) -> Vec<ChatPart> {
     let mut out = Vec::with_capacity(parts.len());
     for p in parts {
         match p {
+            MessagePart::CompactSummary { summary, .. } => out.push(ChatPart::Text {
+                text: summary.clone(),
+            }),
             MessagePart::Text { text } => out.push(ChatPart::Text { text: text.clone() }),
             MessagePart::Image { source } => {
                 let url = match &source.data {

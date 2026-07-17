@@ -592,9 +592,11 @@ fn replay_context_snapshot_from(path: &Path) -> ContextSnapshot {
 }
 
 fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
-    if let Some((checkpoint_seq, mut messages)) = load_last_checkpoint(path)? {
+    if let Some((checkpoint_seq, messages)) = load_last_checkpoint(path)? {
         let values = read_jsonl_values(path)?;
         let patches = collect_attachment_patches(&values);
+        let mut message_seqs: Vec<(u64, Message)> =
+            messages.into_iter().map(|message| (0, message)).collect();
         for v in &values {
             let ty = v["type"].as_str().unwrap_or("");
             let seq = v["seq"].as_u64().unwrap_or(0);
@@ -610,11 +612,53 @@ fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
                     {
                         apply_attachment_patches(&mut msg, ps);
                     }
-                    messages.push(msg);
+                    message_seqs.push((seq, msg));
+                }
+            } else if ty == "context_compact" {
+                let Some(event) = parse_context_compact_event(v) else {
+                    continue;
+                };
+                if event.range_start > event.range_end || event.range_end >= message_seqs.len() {
+                    continue;
+                }
+                let Some(replacement_seq) = event.replacement_msg_seq else {
+                    continue;
+                };
+                let Some(replacement_idx) = message_seqs
+                    .iter()
+                    .position(|(msg_seq, _)| *msg_seq == replacement_seq)
+                else {
+                    continue;
+                };
+                if event.after_tokens >= event.before_tokens {
+                    continue;
+                }
+                let replacement = message_seqs.remove(replacement_idx);
+                let removed_count = event.range_end - event.range_start + 1;
+                for _ in 0..removed_count {
+                    message_seqs.remove(event.range_start);
+                }
+                let insertion_idx = event.range_start.min(message_seqs.len());
+                if let Some(summary) = event.summary_text {
+                    message_seqs.insert(
+                        insertion_idx,
+                        (
+                            replacement_seq,
+                            Message::system_compact_summary(
+                                TurnId::now(),
+                                summary,
+                                event.range_start as u64,
+                                event.range_end as u64,
+                                removed_count,
+                            ),
+                        ),
+                    );
+                } else {
+                    message_seqs.insert(insertion_idx, replacement);
                 }
             }
         }
-        return Ok(messages);
+        return Ok(message_seqs.into_iter().map(|(_, msg)| msg).collect());
     }
     let entries = replay_transcript_from(path)?;
     let mut out = Vec::new();
@@ -674,20 +718,31 @@ fn parse_ts(v: &serde_json::Value) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
-fn parse_compaction_message(message: &Message) -> Option<(usize, usize, usize, String)> {
-    let text = message.text_concat();
-    let footer = crate::compaction::find_compact_summaries(std::slice::from_ref(message))
-        .into_iter()
-        .next()?;
-    let footer_marker = "[atman:compact ";
-    let footer_start = text.rfind(footer_marker)?;
-    let body = text[..footer_start].trim_end().to_string();
-    Some((
-        footer.seq_start as usize,
-        footer.seq_end as usize,
-        footer.count,
-        body,
-    ))
+fn parse_context_compact_event(v: &serde_json::Value) -> Option<CompactReplayEvent> {
+    if v["type"].as_str() != Some("context_compact") {
+        return None;
+    }
+    Some(CompactReplayEvent {
+        range_start: v["compacted_range_start"].as_u64().unwrap_or(0) as usize,
+        range_end: v["compacted_range_end"].as_u64().unwrap_or(0) as usize,
+        before_tokens: v["before_tokens"].as_u64().unwrap_or(0),
+        after_tokens: v["after_tokens"].as_u64().unwrap_or(0),
+        summary_text: v
+            .get("summary_text")
+            .and_then(|s| s.as_str())
+            .map(String::from),
+        replacement_msg_seq: v["replacement_msg_seq"].as_u64(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct CompactReplayEvent {
+    range_start: usize,
+    range_end: usize,
+    before_tokens: u64,
+    after_tokens: u64,
+    summary_text: Option<String>,
+    replacement_msg_seq: Option<u64>,
 }
 
 fn parse_json_lines(text: &str) -> Vec<serde_json::Value> {
@@ -754,11 +809,9 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
     };
     let values = parse_json_lines(&text);
     let patches = collect_attachment_patches(&values);
-    let has_compaction_summary_event = values
-        .iter()
-        .any(|v| v["type"].as_str() == Some("compaction_summary"));
     let mut out = Vec::new();
     let mut msg_indices: Vec<usize> = Vec::new();
+    let mut msg_seqs: Vec<u64> = Vec::new();
     for v in &values {
         let ty = v["type"].as_str().unwrap_or("");
         match ty {
@@ -766,33 +819,13 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 if let Some(m) = v.get("message")
                     && let Ok(mut msg) = serde_json::from_value::<Message>(m.clone())
                 {
-                    if let Some(seq) = v["seq"].as_u64()
-                        && let Some(ps) = patches.get(&seq)
-                    {
+                    let seq = v["seq"].as_u64().unwrap_or(0);
+                    if let Some(ps) = patches.get(&seq) {
                         apply_attachment_patches(&mut msg, ps);
-                    }
-                    if crate::compaction::is_compaction_summary(&msg)
-                        && let Some((range_start, range_end, compacted_count, summary)) =
-                            parse_compaction_message(&msg)
-                    {
-                        let flow_run_id = v["flow_run_id"].as_str().map(String::from);
-                        out.push(TranscriptEntry::Message {
-                            message: msg.clone(),
-                            flow_run_id,
-                        });
-                        out.push(TranscriptEntry::CompactionSummary {
-                            range_start,
-                            range_end,
-                            compacted_count,
-                            before_tokens: 0,
-                            after_tokens: 0,
-                            summary,
-                            ts: parse_ts(v),
-                        });
-                        continue;
                     }
                     let flow_run_id = v["flow_run_id"].as_str().map(String::from);
                     msg_indices.push(out.len());
+                    msg_seqs.push(seq);
                     out.push(TranscriptEntry::Message {
                         message: msg,
                         flow_run_id,
@@ -800,49 +833,33 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 }
             }
             "context_compact" => {
-                if has_compaction_summary_event {
+                let Some(event) = parse_context_compact_event(v) else {
+                    continue;
+                };
+                if event.range_start > event.range_end || event.range_end >= msg_indices.len() {
                     continue;
                 }
-                let has_summary = v.get("summary_text").is_some();
-                let has_replacement = v.get("replacement_msg_seq").is_some();
-                if !has_summary && !has_replacement {
+                let Some(replacement_seq) = event.replacement_msg_seq else {
                     continue;
-                }
-                let range_start = v["compacted_range_start"].as_u64().unwrap_or(0) as usize;
-                let range_end = v["compacted_range_end"].as_u64().unwrap_or(0) as usize;
-                let compacted_count = range_end.saturating_sub(range_start) + 1;
-                if let Some(summary) = v.get("summary_text").and_then(|s| s.as_str()) {
-                    out.push(TranscriptEntry::CompactionSummary {
-                        range_start,
-                        range_end,
-                        compacted_count,
-                        before_tokens: v["before_tokens"].as_u64().unwrap_or(0),
-                        after_tokens: v["after_tokens"].as_u64().unwrap_or(0),
-                        summary: summary.to_string(),
-                        ts: parse_ts(v),
-                    });
+                };
+                let Some(replacement_pos) = msg_seqs.iter().position(|seq| *seq == replacement_seq)
+                else {
                     continue;
-                }
-                if range_start > range_end || range_end >= msg_indices.len() {
-                    continue;
-                }
-                let replacement_ordinal = msg_indices.len().saturating_sub(1);
-                if replacement_ordinal <= range_end {
-                    continue;
-                }
-                let replacement_out_idx = msg_indices[replacement_ordinal];
+                };
+                let replacement_out_idx = msg_indices[replacement_pos];
                 let replacement_entry = out.remove(replacement_out_idx);
-                msg_indices.pop();
-                let removed_out_start = msg_indices[range_start];
-                let removed_count = range_end - range_start + 1;
+                let removed_out_start = msg_indices[event.range_start];
+                let removed_count = event.range_end - event.range_start + 1;
                 for _ in 0..removed_count {
                     out.remove(removed_out_start);
                 }
-                msg_indices.drain(range_start..=range_end);
+                msg_indices.drain(event.range_start..=event.range_end);
+                msg_seqs.drain(event.range_start..=event.range_end);
                 out.insert(removed_out_start, replacement_entry);
-                msg_indices.insert(range_start, removed_out_start);
+                msg_indices.insert(event.range_start, removed_out_start);
+                msg_seqs.insert(event.range_start, replacement_seq);
                 for (i, ordinal_out_idx) in msg_indices.iter_mut().enumerate() {
-                    if i > range_start {
+                    if i > event.range_start {
                         *ordinal_out_idx =
                             ordinal_out_idx.saturating_sub(removed_count.saturating_sub(1));
                     }
@@ -1692,19 +1709,25 @@ impl Session {
             .map(|m| m.turn_id.clone())
             .unwrap_or_else(TurnId::now);
         let before_tokens = estimate_tokens_for_messages(&before);
-        let footer = format!(
-            "\n\n[atman:compact seq_start={} seq_end={} count={}]",
-            range.start,
-            range.end.saturating_sub(1),
-            range.end - range.start
-        );
-        let annotated = format!("{summary}{footer}");
-        let after = replace_range_with_summary(&before, &range, annotated.clone(), turn_id.clone());
+        let after = replace_range_with_summary(&before, &range, summary.clone(), turn_id.clone());
         let after_tokens = estimate_tokens_for_messages(&after);
-        let replacement_msg = after
-            .get(range.start)
-            .cloned()
-            .unwrap_or_else(|| Message::system_text(turn_id.clone(), annotated));
+        if after_tokens >= before_tokens {
+            drop(guard);
+            self.push_system_note(format!(
+                "compaction skipped: summary would not shrink transcript ({} >= {} tokens)",
+                after_tokens, before_tokens
+            ));
+            return None;
+        }
+        let replacement_msg = after.get(range.start).cloned().unwrap_or_else(|| {
+            Message::system_compact_summary(
+                turn_id.clone(),
+                summary.clone(),
+                range.start as u64,
+                range.end.saturating_sub(1) as u64,
+                range.end - range.start,
+            )
+        });
         *guard = after;
         drop(guard);
         self.sink.mark_compacted();

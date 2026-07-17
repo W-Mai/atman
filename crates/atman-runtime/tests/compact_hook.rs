@@ -11,7 +11,7 @@ fn assistant(text: &str) -> Message {
 }
 
 #[test]
-fn replace_range_summary_contains_atman_compact_footer_markers() {
+fn replace_range_summary_uses_structured_compact_summary() {
     let msgs = vec![user("m1"), assistant("m2"), user("m3"), user("tail")];
     let range = CompactRange {
         start: 0,
@@ -21,26 +21,25 @@ fn replace_range_summary_contains_atman_compact_footer_markers() {
     let out = replace_range_with_summary(
         &msgs,
         &range,
-        "gist: talked about m1..m3\n\n[atman:compact seq_start=0 seq_end=2 count=3]".into(),
+        "gist: talked about m1..m3".into(),
         TurnId::now(),
     );
-    let text = out[0].text_concat();
-    assert!(text.contains("[atman:compact "), "footer missing: {text}");
-    assert!(text.contains("count=3"));
+    assert!(matches!(
+        out[0].parts.as_slice(),
+        [MessagePart::CompactSummary {
+            seq_start: 0,
+            seq_end: 2,
+            count: 3,
+            ..
+        }]
+    ));
 }
 
 #[test]
-fn find_compact_summaries_extracts_footer_metadata_from_system_messages() {
-    let footer = "[atman:compact seq_start=42 seq_end=87 count=45]";
+fn find_compact_summaries_extracts_structured_metadata() {
     let msgs = vec![
         user("keep"),
-        Message {
-            role: MessageRole::System,
-            parts: vec![MessagePart::Text {
-                text: format!("summary body\n\n{footer}"),
-            }],
-            turn_id: TurnId::now(),
-        },
+        Message::system_compact_summary(TurnId::now(), "summary body", 42, 87, 45),
         assistant("tail"),
     ];
     let summaries = find_compact_summaries(&msgs);
@@ -50,6 +49,23 @@ fn find_compact_summaries_extracts_footer_metadata_from_system_messages() {
     assert_eq!(s.seq_start, 42);
     assert_eq!(s.seq_end, 87);
     assert_eq!(s.count, 45);
+}
+
+#[test]
+fn legacy_structured_summary_still_deserializes() {
+    let msg = Message {
+        role: MessageRole::System,
+        parts: vec![MessagePart::Text {
+            text: "summary body\n\n[atman:compact seq_start=1 seq_end=2 count=2]".into(),
+        }],
+        turn_id: TurnId::now(),
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let back: Message = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        back.parts.as_slice(),
+        [MessagePart::CompactSummary { .. }]
+    ));
 }
 
 #[test]

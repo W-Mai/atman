@@ -51,6 +51,14 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 message: msg,
                 flow_run_id,
             } => {
+                if matches!(msg.role, MessageRole::System)
+                    && matches!(msg.parts.as_slice(), [MessagePart::CompactSummary { .. }])
+                {
+                    if let Some(summary) = parse_compaction_summary(msg) {
+                        out.push(summary);
+                    }
+                    continue;
+                }
                 if matches!(msg.role, MessageRole::User)
                     && let Some(i) = current_workflow_idx.take()
                     && let Some(OutputItem::WorkflowPanel { ended_at, .. }) = out.get_mut(i)
@@ -319,13 +327,10 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>) {
 }
 
 fn parse_compaction_summary(msg: &Message) -> Option<OutputItem> {
-    let text = msg.text_concat();
     let footer = atman_runtime::compaction::find_compact_summaries(std::slice::from_ref(msg))
         .into_iter()
         .next()?;
-    let footer_marker = "[atman:compact ";
-    let footer_start = text.rfind(footer_marker)?;
-    let body = text[..footer_start].trim_end().to_string();
+    let body = msg.text_concat();
     Some(OutputItem::CompactionSummary {
         phase: atman_runtime::stream::CompactionPhase::Finished,
         range_start: footer.seq_start as usize,

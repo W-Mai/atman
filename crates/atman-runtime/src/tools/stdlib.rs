@@ -260,16 +260,8 @@ impl Tool for ReplaceMessagesRange {
                 .first()
                 .map(|m| m.turn_id.clone())
                 .unwrap_or_else(crate::event::TurnId::now);
-            let footer = format!(
-                "\n\n[atman:compact seq_start={} seq_end={} count={}]",
-                seq_span.0,
-                seq_span.1,
-                end - start
-            );
-            let annotated = format!("{summary}{footer}");
-            let out = crate::compaction::replace_range_with_summary(
-                &messages, &range, annotated, turn_id,
-            );
+            let out =
+                crate::compaction::replace_range_with_summary(&messages, &range, summary, turn_id);
             let after_tokens = crate::compaction::estimate_tokens_for_messages(&out);
             if let Some(sink) = &ctx.events {
                 sink.mark_compacted();

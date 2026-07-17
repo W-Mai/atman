@@ -4,11 +4,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::TurnId;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Message {
     pub role: MessageRole,
     pub parts: Vec<MessagePart>,
     pub turn_id: TurnId,
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawMessage {
+            role: MessageRole,
+            parts: Vec<MessagePart>,
+            turn_id: TurnId,
+        }
+
+        let raw = RawMessage::deserialize(deserializer)?;
+        let RawMessage {
+            role,
+            parts,
+            turn_id,
+        } = raw;
+        Ok(Self {
+            role,
+            parts: normalize_legacy_compact_summary(role, parts),
+            turn_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,6 +49,12 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessagePart {
+    CompactSummary {
+        summary: String,
+        seq_start: u64,
+        seq_end: u64,
+        count: usize,
+    },
     Text {
         text: String,
     },
@@ -85,11 +117,32 @@ impl Message {
         }
     }
 
+    pub fn system_compact_summary(
+        turn_id: TurnId,
+        summary: impl Into<String>,
+        seq_start: u64,
+        seq_end: u64,
+        count: usize,
+    ) -> Self {
+        Self {
+            role: MessageRole::System,
+            parts: vec![MessagePart::CompactSummary {
+                summary: summary.into(),
+                seq_start,
+                seq_end,
+                count,
+            }],
+            turn_id,
+        }
+    }
+
     pub fn text_concat(&self) -> String {
         let mut out = String::new();
         for p in &self.parts {
-            if let MessagePart::Text { text } = p {
-                out.push_str(text);
+            match p {
+                MessagePart::Text { text } => out.push_str(text),
+                MessagePart::CompactSummary { summary, .. } => out.push_str(summary),
+                _ => {}
             }
         }
         out
@@ -127,6 +180,54 @@ impl MessageRole {
     }
 }
 
+fn normalize_legacy_compact_summary(
+    role: MessageRole,
+    parts: Vec<MessagePart>,
+) -> Vec<MessagePart> {
+    if role != MessageRole::System {
+        return parts;
+    }
+    if parts.len() != 1 {
+        return parts;
+    }
+    let MessagePart::Text { text } = &parts[0] else {
+        return parts;
+    };
+    let Some((summary, seq_start, seq_end, count)) = parse_legacy_compact_summary_text(text) else {
+        return parts;
+    };
+    vec![MessagePart::CompactSummary {
+        summary,
+        seq_start,
+        seq_end,
+        count,
+    }]
+}
+
+pub(crate) fn parse_legacy_compact_summary_text(text: &str) -> Option<(String, u64, u64, usize)> {
+    let start_marker = "[atman:compact ";
+    let start = text.rfind(start_marker)?;
+    let after = &text[start + start_marker.len()..];
+    let end = after.find(']')?;
+    let inner = &after[..end];
+    let mut seq_start = None;
+    let mut seq_end = None;
+    let mut count = None;
+    for token in inner.split_whitespace() {
+        let Some((k, v)) = token.split_once('=') else {
+            continue;
+        };
+        match k {
+            "seq_start" => seq_start = v.parse().ok(),
+            "seq_end" => seq_end = v.parse().ok(),
+            "count" => count = v.parse().ok(),
+            _ => {}
+        }
+    }
+    let summary = text[..start].trim_end().to_string();
+    Some((summary, seq_start?, seq_end?, count?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +238,25 @@ mod tests {
         let s = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&s).unwrap();
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn legacy_compact_summary_deserializes_to_structured_variant() {
+        let turn_id = TurnId::now();
+        let msg = Message {
+            role: MessageRole::System,
+            parts: vec![MessagePart::Text {
+                text: "handoff\n\n[atman:compact seq_start=2 seq_end=7 count=6]".into(),
+            }],
+            turn_id,
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back.parts.as_slice(),
+            [MessagePart::CompactSummary { .. }]
+        ));
+        assert_eq!(back.text_concat(), "handoff");
     }
 
     #[test]
