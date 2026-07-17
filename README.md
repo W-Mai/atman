@@ -24,7 +24,7 @@
   <a href="#why-atman">Why atman?</a>
 </p>
 
-[![atman TUI](static/snapshot-running.png)](https://w-mai.github.io/atman/)
+[![atman TUI](static/snapshot-hero.png)](https://w-mai.github.io/atman/)
 
 ---
 
