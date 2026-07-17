@@ -1749,7 +1749,7 @@ async fn cmd_repl_once(
                     ));
                 }
                 "compact" => {
-                    handle_compact_builtin(&session, &reporter);
+                    handle_compact_builtin(&session, &reporter, &executor.providers).await;
                 }
                 "attach" => {
                     let arg = trimmed.strip_prefix("attach").unwrap_or("").trim();
@@ -2795,28 +2795,29 @@ fn handle_attach_builtin(
     }
 }
 
-fn handle_compact_builtin(session: &Session, reporter: &Reporter) {
+async fn handle_compact_builtin(
+    session: &Session,
+    reporter: &Reporter,
+    providers: &atman_runtime::provider::ProviderRegistry,
+) {
     let model = session.last_model();
     let model = if model.is_empty() {
         "claude-opus-4.7".to_string()
     } else {
         model
     };
-    let summary = format!("manual :compact (model {model})");
-    match session.compact_messages(summary) {
-        Some(result) => {
-            reporter.info(format!(
-                ":compact — {}..{} · {} → {} tokens",
-                result.compacted_start,
-                result.compacted_end,
-                result.before_tokens,
-                result.after_tokens
-            ));
-        }
-        None => {
-            reporter.info(":compact — nothing to compact (history too short or already compacted)");
-        }
-    }
+    session.request_manual_compact();
+    let before = session.messages().len();
+    let tok_before = atman_runtime::compaction::estimate_tokens_for_messages(&session.messages());
+    reporter.info(format!(
+        ":compact — running LLM summary on {before} messages ({tok_before} tokens)…"
+    ));
+    atman_runtime::compaction::maybe_auto_compact(session, &model, providers).await;
+    let after = session.messages().len();
+    let tok_after = atman_runtime::compaction::estimate_tokens_for_messages(&session.messages());
+    reporter.info(format!(
+        ":compact — {before} → {after} messages · {tok_before} → {tok_after} tokens"
+    ));
 }
 
 fn handle_copy_builtin(arg: &str, session: &Session, reporter: &Reporter) {
