@@ -1,7 +1,7 @@
 {
   "project": {
     "name": "atman",
-    "description": "atman witnesses; code exists",
+    "description": "A flow-driven AI coding agent runtime. Write agent workflows in the .at DSL — Turing-complete, inspectable, deterministic. The LLM is one node; atman orchestrates the rest.",
     "repository": "https://github.com/W-Mai/atman",
     "homepage": "https://w-mai.github.io/atman/",
     "license": "MIT OR Apache-2.0",
@@ -10,7 +10,7 @@
   "marketing": {
     "social": {
       "image": "static/ATMAN-LOGO.png",
-      "image_alt": "atman — flow-driven code agent runtime"
+      "image_alt": "atman — flow-driven AI coding agent runtime. Turing-complete .at DSL, deterministic orchestration, the LLM is one node."
     }
   },
   "components": {
