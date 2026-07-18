@@ -26,10 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install oranda
-        run: |
-          curl -sSL https://oranda.install.axo.dev | sh
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        run: cargo install oranda --locked --version 0.6.5
       - name: Build oranda site
         run: bash scripts/build-site.sh
       - name: Upload artifact
