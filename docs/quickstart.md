@@ -76,7 +76,7 @@ atman
 You'll land in an interactive prompt:
 
 ```
-atman v0.0.0 — type `:help` for commands, `:exit` to leave
+atman v1.0.0 — type `:help` for commands, `:exit` to leave
 [atman] session=… events=/…/events.jsonl
 atman ready. `/hello` for a smoke test, plain text to chat.
 atman>

@@ -179,6 +179,12 @@ flow edit_and_verify(file: path, instruction: string) -> EditResult {
         on_giveup: { status: "gave_up", iters: iters, last_fail: prev_fail }
     }
 
+    audit = preview.push(
+        topic: "edit-and-verify",
+        title: "edit-and-verify: " + file,
+        content: "**iters:** " + to_json_string(result.iters) + "\n\n**status:** " + result.status,
+    )
+
     return result
 }
 ```
@@ -221,18 +227,18 @@ See [`examples/`](examples/) for 9 canonical flows: agent loop, code review with
 
 | Category | Tools | Tier |
 |---|---|---|
-| `fs` | read, list, write, edit, grep | 0–1 |
+| `fs` | read (0), list (0), grep (1), write (2), edit (2) | 0–2 |
 | `bash` | spawn, status, output, kill, list | 4 |
 | `term` | spawn, input, capture, resize, kill, list | 4 |
 | `web` | fetch, search | 3 |
-| `git` | diff, show, log, status, add, commit, branch, push | 0–3 |
+| `git` | diff, show, log, status (0), add, commit, branch (2), push (3) | 0–3 |
 | `test` | run | 2 |
-| `hunk` | review, apply, plan_edit | 0–1 |
-| `memory` | todo, goal, confess, recent_turns, history, spec | 0 |
-| `plan` | write, read, tick | 0 |
+| `hunk` | review (0), apply (1), plan_edit (2) | 0–2 |
+| `memory` | todo.list, goal.clear, recent_turns, history, fetch_confessions, spec.status (0), todo.set/done/cancel/delete, goal.get/set, confess, spec.update/deviate (1) | 0–1 |
+| `plan` | read (0), write, tick (1) | 0–1 |
 | `agent` | spawn | 2 |
 | `form` | ask | 0 |
-| `preview` | push | 0 |
+| `preview` | push | 1 |
 | `session` | push | 0 |
 | `sleep` | — | 0 |
 
@@ -320,6 +326,7 @@ atman/
     atman-cli/       # Binary, REPL, slash commands, monitor, daemon client
     atman-proto/     # JSON-RPC 2.0 envelope + daemon request/response types
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool
+    atman-tui/       # Terminal UI — themes, workflow panel, diff preview, input
   examples/          # 9 canonical .at flow examples
   docs/              # Quickstart, context strategy, list combinators
 ```
