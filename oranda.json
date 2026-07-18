@@ -3,7 +3,7 @@
     "name": "atman",
     "description": "A flow-driven AI coding agent runtime. Write agent workflows in the .at DSL — Turing-complete, inspectable, deterministic. The LLM is one node; atman orchestrates the rest.",
     "repository": "https://github.com/W-Mai/atman",
-    "homepage": "https://w-mai.github.io/atman/",
+    "homepage": "https://atman.run",
     "license": "MIT OR Apache-2.0",
     "readme_path": "LANDING.md"
   },

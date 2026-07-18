@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://w-mai.github.io/atman/">
+  <a href="https://atman.run">
     <img src="static/ATMAN-LOGO.png" alt="atman" width="180">
   </a>
 </p>
@@ -24,7 +24,7 @@
   <a href="#why-atman">Why atman?</a>
 </p>
 
-[![atman TUI](static/snapshot-hero.png)](https://w-mai.github.io/atman/)
+[![atman TUI](static/snapshot-hero.png)](https://atman.run)
 
 ---
 
