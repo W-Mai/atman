@@ -19,7 +19,17 @@
     <div class="atman-hero-ctas">
       <a class="atman-btn atman-btn-primary" href="#installation">Get started →</a>
       <a class="atman-btn atman-btn-secondary" href="https://github.com/W-Mai/atman#flow-dsl">Read the docs</a>
-      <span class="atman-install-cmd">cargo install --path crates/atman-cli</span>
+    </div>
+    <div class="atman-hero-install">
+      <div class="atman-hero-install-row" id="atman-install-row-1">
+        <code class="atman-hero-install-cmd" id="atman-install-cmd-1">curl -fsSL https://atman.run/install.sh | sh</code>
+        <span class="atman-hero-copy" id="atman-copy-1" title="Copy"><span class="atman-icon-copy"></span></span>
+      </div>
+      <div class="atman-hero-install-row" id="atman-install-row-2" style="display:none">
+        <code class="atman-hero-install-cmd" id="atman-install-cmd-2">brew install W-Mai/cellar/atman-cli</code>
+        <span class="atman-hero-copy" id="atman-copy-2" title="Copy"><span class="atman-icon-copy"></span></span>
+      </div>
+      <a class="atman-hero-install-more" href="/artifacts/">All downloads →</a>
     </div>
   </div>
   <div class="atman-hero-right">
@@ -232,14 +242,18 @@
 <div class="atman-section">
   <div class="atman-section-heading">
     <h2>Get started in 30 seconds.</h2>
-    <p>Clone, build, configure, run.</p>
+    <p>Three ways to install. Pick one.</p>
   </div>
 
   <div class="atman-install-block">
-    <pre class="language-bash"><code><span class="com"># clone &amp; build</span>
-git clone https://github.com/W-Mai/atman.git
-cd atman
-cargo install --path crates/atman-cli
+    <pre class="language-bash"><code><span class="com"># shell installer (macOS / Linux)</span>
+curl -fsSL https://atman.run/install.sh | sh
+
+<span class="com"># homebrew</span>
+brew install W-Mai/cellar/atman-cli
+
+<span class="com"># cargo</span>
+cargo install atman-cli --locked
 
 <span class="com"># configure &amp; run</span>
 atman init          <span class="com"># scaffold ~/.config/atman/</span>

@@ -960,12 +960,33 @@ pre code .sec { color: #8b5cf6; font-weight: 600; }
     grid-template-columns: 1fr;
     min-height: auto;
     gap: 2rem;
-    text-align: left;
+    text-align: center;
+    padding: clamp(4rem, 10vw, 7rem) 1.5rem 6rem;
+    width: 100%;
+    margin-left: 0;
+    margin-right: 0;
   }
-  .atman-hero-left { align-items: flex-start; }
-  .atman-hero-logo { width: 90px; }
-  .atman-hero-ctas { flex-direction: column; align-items: stretch; }
-  .atman-btn, .atman-install-cmd { width: 100%; justify-content: center; }
+  .atman-hero-left { align-items: center; max-width: 100%; overflow: hidden; text-align: center; }
+  .atman-hero-logo { width: 90px; margin: 0 auto; }
+  .atman-hero-slogan { text-align: center; }
+  .atman-hero-ctas { flex-direction: row; align-items: center; justify-content: center; }
+  .atman-btn { width: auto; }
+  .atman-install-cmd { width: 100%; justify-content: center; }
+
+  .atman-hero-kicker {
+    font-size: 0.72rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .atman-hero-install-row {
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .atman-hero-install-cmd {
+    overflow-x: auto;
+    min-width: 0;
+  }
+  .atman-hero-install-more { display: none; }
 
   .atman-bento { grid-template-columns: repeat(2, 1fr); }
   .atman-bento-large,
@@ -997,6 +1018,9 @@ pre code .sec { color: #8b5cf6; font-weight: 600; }
   .atman-terminal-trace pre {
     font-family: "JetBrains Mono", "Menlo", "Monaco", monospace !important;
   }
+  .atman-hero-install-cmd {
+    margin-bottom: 0 !important;
+  }
   pre:not([class]) {
     background: var(--atman-code-bg) !important;
     border: 1px solid var(--atman-border-soft);
@@ -1022,4 +1046,201 @@ pre code .sec { color: #8b5cf6; font-weight: 600; }
 @keyframes tw-blink {
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
+}
+
+body:has(.atman-page-shell) main > .artifacts {
+  order: 2;
+  max-width: 760px;
+  margin: 0 auto 2rem;
+  position: relative;
+  z-index: 10;
+}
+
+body:has(.atman-page-shell) main {
+  display: flex !important;
+  flex-direction: column;
+}
+
+body:has(.atman-page-shell) main > .atman-page-shell {
+  order: 1;
+}
+
+body:has(.atman-page-shell) main > .atman-page-shell .atman-snap-hero {
+  order: 0;
+}
+
+body:has(.atman-page-shell) main > .artifacts .install-code-wrapper pre {
+  background: var(--atman-code-bg) !important;
+  border: 1px solid var(--atman-border-soft);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  font-family: var(--atman-mono);
+  font-size: 0.85rem;
+}
+
+body:has(.atman-page-shell) main > .artifacts .install-code-wrapper pre span {
+  color: var(--atman-fg) !important;
+}
+
+body:has(.atman-page-shell) main > .artifacts .artifact-header h4 {
+  font-family: var(--atman-mono);
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--atman-fg);
+}
+
+body:has(.atman-page-shell) main > .artifacts .install-tab {
+  font-family: var(--atman-mono);
+  font-size: 0.85rem;
+}
+
+body:has(.atman-page-shell) main > .artifacts .button.primary {
+  background: var(--atman-accent);
+  color: #fff;
+  border: 1px solid var(--atman-accent);
+  border-radius: 6px;
+  font-family: var(--atman-mono);
+}
+
+body:has(.atman-page-shell) main > .artifacts .arches {
+  display: block;
+}
+
+body:has(.atman-page-shell) main > .artifacts .arch:not(:first-child) {
+  display: none;
+}
+
+body:has(.atman-page-shell) main > .artifacts .arch.hidden {
+  display: none;
+}
+
+body:has(.atman-page-shell) main > .artifacts .bottom-options {
+  display: none;
+}
+
+body:has(.atman-page-shell) main > .artifacts .no-autodetect {
+  display: none;
+}
+
+body:has(.atman-page-shell) main > .artifacts .published-date {
+  display: none;
+}
+
+body:has(.atman-page-shell) main > .artifacts .install-tab[data-id="1"],
+body:has(.atman-page-shell) main > .artifacts .install-tab[data-id="2"],
+body:has(.atman-page-shell) main > .artifacts .install-tab[data-id="3"],
+body:has(.atman-page-shell) main > .artifacts .install-tab[data-id="4"],
+body:has(.atman-page-shell) main > .artifacts .install-tab[data-id="5"],
+body:has(.atman-page-shell) main > .artifacts .install-tab[data-id="6"] {
+  display: none;
+}
+
+body:has(.atman-page-shell) main > .artifacts .install-content[data-id="1"],
+body:has(.atman-page-shell) main > .artifacts .install-content[data-id="2"],
+body:has(.atman-page-shell) main > .artifacts .install-content[data-id="3"],
+body:has(.atman-page-shell) main > .artifacts .install-content[data-id="4"],
+body:has(.atman-page-shell) main > .artifacts .install-content[data-id="5"],
+body:has(.atman-page-shell) main > .artifacts .install-content[data-id="6"] {
+  display: none;
+}
+
+body:has(.atman-page-shell) main > .artifacts {
+  display: none !important;
+}
+
+.atman-hero-install-label {
+  font-family: var(--atman-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--atman-fg-dim);
+}
+
+.atman-hero-install {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-end;
+  width: 100%;
+}
+
+.atman-hero-install-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.atman-hero-install-cmd {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  padding: 0.55rem 0.85rem;
+  border-radius: 6px 0 0 6px;
+  background: var(--atman-code-bg);
+  border: 1px solid var(--atman-border-soft);
+  border-right: none;
+  font-family: var(--atman-mono);
+  font-size: 0.8rem;
+  color: var(--atman-fg-soft);
+  white-space: nowrap;
+  overflow-x: auto;
+  line-height: 1.4;
+}
+
+.atman-hero-copy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 2.4rem;
+  border-radius: 0 6px 6px 0;
+  background: var(--atman-bg-panel);
+  border: 1px solid var(--atman-border-soft);
+  border-left: none;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.atman-hero-copy .atman-icon-copy {
+  width: 16px;
+  height: 16px;
+  background-color: var(--atman-fg-dim);
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'><rect x='9' y='9' width='13' height='13' rx='2'/><path d='M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1'/></svg>");
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'><rect x='9' y='9' width='13' height='13' rx='2'/><path d='M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1'/></svg>");
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+}
+
+.atman-hero-copy:hover {
+  background: var(--atman-accent-soft);
+  color: var(--atman-accent);
+}
+
+.atman-hero-copy.copied {
+  background: #16a34a;
+  color: #fff;
+  border-color: #16a34a;
+}
+
+.atman-hero-install-more {
+  font-family: var(--atman-mono);
+  font-size: 0.78rem;
+  color: var(--atman-accent);
+  text-decoration: none;
+}
+
+.atman-hero-install-more:hover {
+  text-decoration: underline;
+}
+
+
+.button.mobile-download,
+.backup-download {
+  display: none !important;
 }

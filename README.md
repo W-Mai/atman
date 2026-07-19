@@ -33,9 +33,14 @@
 ### Installation
 
 ```bash
-git clone https://github.com/W-Mai/atman.git
-cd atman
-cargo install --path crates/atman-cli
+# shell installer (macOS / Linux)
+curl -fsSL https://atman.run/install.sh | sh
+
+# or homebrew
+brew install W-Mai/cellar/atman-cli
+
+# or cargo
+cargo install atman-cli --locked
 
 atman init          # scaffold ~/.config/atman/
 atman doctor        # verify config + providers

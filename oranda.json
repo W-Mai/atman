@@ -20,7 +20,7 @@
         "preferred": {
           "cargo": "cargo install atman-cli --locked --profile=dist",
           "crates.io": "cargo install atman-cli --locked",
-          "homebrew": "brew install atman-cli"
+          "homebrew": "brew install W-Mai/cellar/atman-cli"
         },
         "additional": {
           "binstall": "cargo binstall atman-cli",
