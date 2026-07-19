@@ -19,6 +19,7 @@
   },
   "styles": {
     "theme": "dark",
-    "additional_css": ["static/atman-landing.css"]
+    "additional_css": ["static/atman-landing.css"],
+    "favicon": "static/ATMAN-LOGO.png"
   }
 }
