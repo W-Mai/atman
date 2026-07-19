@@ -3766,28 +3766,22 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
     }
     println!();
     println!("next steps:");
-    println!("  1. export an api key:  export ANTHROPIC_API_KEY=...");
-    println!("  2. sanity check:       atman doctor          (add --fix to auto-repair)");
-    println!("  3. start REPL:         atman");
-    println!("     · plain text goes to the code agent (see commands/agent.at)");
-    println!("     · /hello runs commands/hello.at");
-    println!("     · :goal <text> anchors the session (never evicted from context)");
-    println!("     · the agent auto-tracks todos + the last 10 turns of history");
-    println!("  4. see docs/quickstart.md for a walkthrough,");
-    println!("     docs/context-strategy.md for how goal / todos / recent_turns compose.");
+    let cfg_dir = config_dir().ok();
+    let cfg_file = cfg_dir
+        .as_ref()
+        .map(|d| d.join("config.toml").display().to_string())
+        .unwrap_or_else(|| "<config_dir>/config.toml".to_string());
+    println!("  1. set an api key:     export ANTHROPIC_API_KEY=...");
+    println!("     (or put api_key = \"sk-...\" in {})", cfg_file);
+    println!("  2. verify setup:       atman doctor");
+    println!("  3. launch:             atman");
     println!();
-    println!("fs access policy:");
-    match fs_access {
-        Some(mode) => println!(
-            "  [fs_access] mode = \"{}\" persisted to config.toml.",
-            mode.as_str()
-        ),
-        None => println!("  default is workspace-write — atman may create / edit files inside",),
+    println!("config: {}", cfg_file);
+    println!("docs:   https://atman.run");
+    if fs_access.is_none() {
+        println!();
+        println!("fs access: workspace-write (default). override with ATMAN_FS_ACCESS.");
     }
-    println!("  this repo and the system tempdir, writes outside are blocked.");
-    println!(
-        "  Override per run with ATMAN_FS_ACCESS=read-only|workspace-write|danger-full-access."
-    );
     Ok(())
 }
 
