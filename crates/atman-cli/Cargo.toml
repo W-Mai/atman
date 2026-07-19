@@ -5,8 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = true
 description = "atman command-line interface"
+repository = "https://github.com/W-Mai/atman"
+homepage = "https://atman.run"
+
+[package.metadata.dist]
+dist = true
+
+[package.metadata.wix]
+upgrade-guid = "9423FACA-635E-4F41-9BC3-CAE25ED07736"
+path-guid = "92345BB1-0DC9-44A4-A476-5A8F26F1EA0E"
+license = false
+eula = false
 
 [[bin]]
 name = "atman"

@@ -14,7 +14,21 @@
     }
   },
   "components": {
-    "artifacts": false,
+    "artifacts": {
+      "cargo_dist": true,
+      "package_managers": {
+        "preferred": {
+          "cargo": "cargo install atman-cli --locked --profile=dist",
+          "crates.io": "cargo install atman-cli --locked",
+          "homebrew": "brew install atman-cli"
+        },
+        "additional": {
+          "binstall": "cargo binstall atman-cli",
+          "shell": "curl -fsSL https://atman.run/install.sh | sh",
+          "powershell": "irm https://atman.run/install.ps1 | iex"
+        }
+      }
+    },
     "changelog": false
   },
   "styles": {

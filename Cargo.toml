@@ -10,6 +10,7 @@ rust-version = "1.85"
 authors = ["W-Mai"]
 license = "MIT OR Apache-2.0"
 publish = false
+homepage = "https://atman.run"
 
 [workspace.dependencies]
 syn        = { version = "2", features = ["full", "extra-traits"] }
@@ -48,3 +49,8 @@ vt100       = "0.16"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
