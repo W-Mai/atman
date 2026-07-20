@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::SessionPickerRow;
 
@@ -279,30 +279,15 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     f.render_widget(Clear, rect);
     let title = if switcher.rename_mode {
         format!(
-            " Rename Session · {}▏ · Enter save · Esc cancel ",
+            " Rename · {}▏ · Enter save · Esc cancel ",
             switcher.rename_buf
         )
     } else if switcher.delete_armed.is_some() {
-        format!(
-            " Switch Session · {} · d again to DELETE · any other key cancels ",
-            switcher.scope.label()
-        )
+        " Delete? · d again to confirm · any other key cancels ".to_string()
     } else if switcher.filter_mode {
-        format!(
-            " Switch Session · filter: {}▏ · Esc/Enter done ",
-            switcher.filter
-        )
+        format!(" Filter · {}▏ · Esc/Enter done ", switcher.filter)
     } else {
-        format!(
-            " Switch Session · {} · sort:{} · filter:{} · Tab scope · s sort · f filter · r rename · Enter open · d delete · Esc ",
-            switcher.scope.label(),
-            switcher.sort_mode.label(),
-            if switcher.filter.is_empty() {
-                "-".to_string()
-            } else {
-                switcher.filter.clone()
-            },
-        )
+        format!(" Sessions · {} ", switcher.scope.label())
     };
     let border_color = if switcher.rename_mode {
         crate::theme::theme().warn
@@ -322,6 +307,35 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         ));
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
+    if inner.height == 0 {
+        return;
+    }
+    if !switcher.rename_mode
+        && switcher.delete_armed.is_none()
+        && !switcher.filter_mode
+        && inner.height >= 2
+    {
+        let footer_rect = Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+        let footer = Line::from(Span::styled(
+            " s:sort  f:filter  r:rename  Enter:open  d:delete  Tab:scope  Esc:close ",
+            Style::default().fg(crate::theme::theme().subtle_fg),
+        ));
+        f.render_widget(Paragraph::new(footer), footer_rect);
+    }
+    let list_height = if !switcher.rename_mode
+        && switcher.delete_armed.is_none()
+        && !switcher.filter_mode
+        && inner.height >= 2
+    {
+        inner.height.saturating_sub(1)
+    } else {
+        inner.height
+    };
     if inner.height == 0 {
         return;
     }
@@ -393,7 +407,13 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     if !switcher.rows.is_empty() {
         state.select(Some(switcher.selected));
     }
-    f.render_stateful_widget(list, inner, &mut state);
+    let list_rect = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: list_height,
+    };
+    f.render_stateful_widget(list, list_rect, &mut state);
 }
 
 #[cfg(test)]
