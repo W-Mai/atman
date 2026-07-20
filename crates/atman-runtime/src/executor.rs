@@ -178,7 +178,15 @@ impl Executor {
             r = exec_fut => r,
         };
         let status = match &result {
-            Ok(_) => FlowStatus::Ok,
+            Ok(v) => {
+                if let Value::Err(e) = v
+                    && matches!(e, RuntimeError::Cancelled(_))
+                {
+                    FlowStatus::Cancelled
+                } else {
+                    FlowStatus::Ok
+                }
+            }
             Err(e) => {
                 if matches!(e, RuntimeError::Cancelled(_)) {
                     FlowStatus::Cancelled
