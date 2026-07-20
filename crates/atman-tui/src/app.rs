@@ -173,7 +173,6 @@ pub struct AppState {
     pub last_viewport_rows: u16,
     pub mouse_captured: bool,
     pub handle_index: std::collections::HashMap<String, usize>,
-    pub running_workflow_count: u32,
     pub last_workflow_panel_idx: Option<usize>,
     pub workflow_run_to_panel: std::collections::HashMap<String, usize>,
     pub goal_scroll: u16,
@@ -353,7 +352,9 @@ impl AppState {
     }
 
     pub fn has_running_workflow(&self) -> bool {
-        self.running_workflow_count > 0
+        self.items
+            .iter()
+            .any(|it| matches!(it, OutputItem::WorkflowPanel { ended_at: None, .. }))
     }
 
     pub fn has_active_animation(&self) -> bool {
@@ -547,7 +548,6 @@ impl AppState {
                 self.handle_index.insert(handle.clone(), idx);
             }
             OutputItem::WorkflowPanel { ended_at: None, .. } => {
-                self.running_workflow_count = self.running_workflow_count.saturating_add(1);
                 self.last_workflow_panel_idx = Some(idx);
             }
             _ => {}
@@ -866,7 +866,6 @@ impl AppState {
                 {
                     if ended_at.is_some() {
                         *ended_at = None;
-                        self.running_workflow_count = self.running_workflow_count.saturating_add(1);
                     }
                 }
                 self.workflow_run_to_panel
@@ -913,15 +912,25 @@ impl AppState {
                     cancelled: true,
                     ..
                 } => {
-                    // Reopen a cancelled panel for course-correct restart.
                     reopen_idx = Some(i);
                     panel_after_user_turn = true;
                     break;
                 }
-                OutputItem::WorkflowPanel { .. } => {
-                    // closed panel — skip it, don't reuse
+                OutputItem::WorkflowPanel { .. } => {}
+                OutputItem::UserTurn { .. } => {
+                    if i > 0 {
+                        if let Some(OutputItem::WorkflowPanel {
+                            ended_at: Some(_),
+                            cancelled: true,
+                            ..
+                        }) = self.items.get(i - 1)
+                        {
+                            reopen_idx = Some(i - 1);
+                            panel_after_user_turn = true;
+                        }
+                    }
+                    break;
                 }
-                OutputItem::UserTurn { .. } => break,
                 _ => {}
             }
         }
@@ -934,7 +943,6 @@ impl AppState {
             {
                 *ended_at = None;
                 *cancelled = false;
-                self.running_workflow_count = self.running_workflow_count.saturating_add(1);
             }
             // Register the new run_id so FlowDone can find this panel.
             if let StreamFrame::FlowStart { run_id, .. } = frame {
@@ -973,11 +981,15 @@ impl AppState {
                 ..
             }) = self.items.get_mut(idx)
             {
-                if ended_at.is_none() {
+                let was_open = ended_at.is_none();
+                if was_open {
                     *ended_at = Some(Instant::now());
+                }
+                // Always allow upgrading cancelled from false → true
+                // (push_user_turn closes with false; interjection handler needs true).
+                if cancelled || was_open {
                     *cancelled_flag = cancelled;
                     self.items_version = self.items_version.wrapping_add(1);
-                    self.running_workflow_count = self.running_workflow_count.saturating_sub(1);
                 }
             }
         }
