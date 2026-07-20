@@ -833,12 +833,17 @@ impl AppState {
 
     fn route_to_workflow_panel(&mut self, frame: &StreamFrame) {
         let mut mutated = false;
-        if let Some(OutputItem::WorkflowPanel { graph, .. }) = self
-            .items
-            .iter_mut()
-            .rev()
-            .find(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
-        {
+        let target = if let StreamFrame::FlowDone { run_id, .. } = frame {
+            self.workflow_run_to_panel
+                .get(run_id)
+                .and_then(|&idx| self.items.get_mut(idx))
+        } else {
+            self.items
+                .iter_mut()
+                .rev()
+                .find(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
+        };
+        if let Some(OutputItem::WorkflowPanel { graph, .. }) = target {
             graph.apply_stream_frame(frame);
             mutated = true;
         }
