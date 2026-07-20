@@ -21,80 +21,97 @@ pub enum PaletteEntryId {
 
 pub struct PaletteEntry {
     pub id: PaletteEntryId,
+    pub group: &'static str,
     pub label: &'static str,
     pub hint: &'static str,
     pub keyword: &'static str,
 }
 
 pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
+    // ── Session ──
     PaletteEntry {
         id: PaletteEntryId::SwitchSession,
+        group: "Session",
         label: "Switch Session",
         hint: "Pick a recent session to swap into",
         keyword: "session switch swap",
     },
     PaletteEntry {
         id: PaletteEntryId::NewSession,
+        group: "Session",
         label: "New Session",
         hint: "Start a fresh session in the current directory",
         keyword: "session new create",
     },
     PaletteEntry {
         id: PaletteEntryId::MoveSession,
+        group: "Session",
         label: "Move Session",
         hint: "Change this session's working directory",
         keyword: "session move cwd path",
     },
+    // ── Copy ──
     PaletteEntry {
         id: PaletteEntryId::YankMode,
+        group: "Copy",
         label: "Enter Yank Mode",
         hint: "j/k select, Enter copies via OSC 52",
         keyword: "yank copy clipboard",
     },
     PaletteEntry {
         id: PaletteEntryId::CopyLastMessage,
+        group: "Copy",
         label: "Copy Last Assistant Message",
         hint: "Push the last assistant text to the terminal clipboard",
         keyword: "copy message clipboard",
     },
     PaletteEntry {
         id: PaletteEntryId::CopyLastTool,
+        group: "Copy",
         label: "Copy Last Tool Result",
         hint: "Push the last tool_result content to the clipboard",
         keyword: "copy tool clipboard",
     },
+    // ── Context ──
     PaletteEntry {
         id: PaletteEntryId::CompactNow,
+        group: "Context",
         label: "Compact Transcript",
         hint: "Force LLM-based compaction on the current transcript",
         keyword: "compact compress",
     },
     PaletteEntry {
         id: PaletteEntryId::SearchHistory,
+        group: "Context",
         label: "Search History",
         hint: "Full-text search past turns of this session",
         keyword: "search history find",
     },
+    // ── UI ──
     PaletteEntry {
         id: PaletteEntryId::ToggleSidebar,
+        group: "UI",
         label: "Toggle Sidebar",
         hint: "Same as F2",
         keyword: "sidebar toggle panel",
     },
     PaletteEntry {
         id: PaletteEntryId::SetTrustMode,
+        group: "UI",
         label: "Set Trust Mode",
         hint: "Switch trust level (calm/steady/eager/reckless)",
         keyword: "trust mode eager deny approve allow reckless yolo",
     },
     PaletteEntry {
         id: PaletteEntryId::SetModeTheme,
+        group: "UI",
         label: "Set Mode Theme",
         hint: "Switch display theme (default/wuxia/animal/weather/drink)",
         keyword: "theme mode-theme appearance skin display wuxia animal weather drink",
     },
     PaletteEntry {
         id: PaletteEntryId::ShowHelp,
+        group: "UI",
         label: "Show Help",
         hint: "Same as F1",
         keyword: "help cheatsheet",
@@ -128,17 +145,14 @@ pub struct CommandPalette {
     pub input: String,
     pub filtered: Vec<PaletteEntryId>,
     pub selected: usize,
+    /// Display items include group headers. Only Entry variants are selectable.
+    display: Vec<PaletteItem>,
 }
 
-impl std::fmt::Debug for CommandPalette {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CommandPalette")
-            .field("open", &self.open)
-            .field("input", &self.input)
-            .field("filtered_count", &self.filtered.len())
-            .field("selected", &self.selected)
-            .finish()
-    }
+#[derive(Debug, Clone)]
+enum PaletteItem {
+    GroupHeader { name: &'static str },
+    Entry { id: PaletteEntryId },
 }
 
 impl CommandPalette {
@@ -153,6 +167,7 @@ impl CommandPalette {
         self.open = false;
         self.input.clear();
         self.filtered.clear();
+        self.display.clear();
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -166,17 +181,38 @@ impl CommandPalette {
     }
 
     pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        if self.selected == 0 {
+            return;
+        }
+        self.selected -= 1;
+        if matches!(
+            self.display.get(self.selected),
+            Some(PaletteItem::GroupHeader { .. })
+        ) && self.selected > 0
+        {
+            self.selected -= 1;
+        }
     }
 
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.filtered.len() {
+        if self.selected + 1 >= self.display.len() {
+            return;
+        }
+        self.selected += 1;
+        if matches!(
+            self.display.get(self.selected),
+            Some(PaletteItem::GroupHeader { .. })
+        ) && self.selected + 1 < self.display.len()
+        {
             self.selected += 1;
         }
     }
 
     pub fn selected(&self) -> Option<PaletteEntryId> {
-        self.filtered.get(self.selected).copied()
+        match self.display.get(self.selected) {
+            Some(PaletteItem::Entry { id }) => Some(*id),
+            _ => None,
+        }
     }
 
     fn refresh(&mut self) {
@@ -194,8 +230,24 @@ impl CommandPalette {
                 .map(|e| e.id)
                 .collect()
         };
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
+        self.build_display();
+        self.selected = self
+            .display
+            .iter()
+            .position(|item| matches!(item, PaletteItem::Entry { .. }))
+            .unwrap_or(0);
+    }
+
+    fn build_display(&mut self) {
+        self.display.clear();
+        let mut last_group: Option<&'static str> = None;
+        for id in &self.filtered {
+            let group = id.entry().group;
+            if last_group != Some(group) {
+                self.display.push(PaletteItem::GroupHeader { name: group });
+                last_group = Some(group);
+            }
+            self.display.push(PaletteItem::Entry { id: *id });
         }
     }
 }
@@ -216,7 +268,7 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
     let w = area.width.saturating_sub(4).clamp(40, 80);
-    let desired = 4 + palette.filtered.len() as u16 + 2;
+    let desired = 4 + palette.display.len() as u16 + 2;
     let h = area.height.saturating_sub(4).min(desired).max(6);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
@@ -264,20 +316,28 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
         height: inner.height.saturating_sub(1),
     };
     let items: Vec<ListItem<'static>> = palette
-        .filtered
+        .display
         .iter()
-        .map(|id| {
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{:<28}", id.label()),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    id.hint().to_string(),
-                    Style::default().fg(crate::theme::theme().subtle_fg),
-                ),
-            ]);
-            ListItem::new(line)
+        .map(|item| match item {
+            PaletteItem::GroupHeader { name } => ListItem::new(Line::from(Span::styled(
+                format!("  {name}"),
+                Style::default()
+                    .fg(crate::theme::theme().subtle_fg)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            PaletteItem::Entry { id } => {
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("    {:<26}", id.label()),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        id.hint().to_string(),
+                        Style::default().fg(crate::theme::theme().subtle_fg),
+                    ),
+                ]);
+                ListItem::new(line)
+            }
         })
         .collect();
     let list = List::new(items)
@@ -288,7 +348,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
         )
         .highlight_symbol("▶ ");
     let mut state = ListState::default();
-    if !palette.filtered.is_empty() {
+    if !palette.display.is_empty() {
         state.select(Some(palette.selected));
     }
     f.render_stateful_widget(list, list_rect, &mut state);
