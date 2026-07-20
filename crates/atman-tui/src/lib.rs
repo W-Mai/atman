@@ -62,6 +62,7 @@ impl TuiNote {
 
 pub enum TuiControl {
     CancelFlow,
+    HardStop,
     ApproveTool(String),
     DenyTool {
         tool_use_id: String,
@@ -1934,24 +1935,25 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::NudgePrefill => {
-            editor.prefill("/nudge ");
+            editor.prefill("!nudge ");
             *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::CoursePrefill => {
-            editor.prefill("/course ");
+            editor.prefill("!course-correct ");
             *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::RedirectPrefill => {
-            editor.prefill("/redirect ");
+            editor.prefill("!redirect ");
             *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::HardStop => {
-            editor.prefill("/hard-stop ");
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::HardStop);
+            }
             *interrupt_prompt = None;
-            edited = true;
         }
         KeyAction::ScrollUp | KeyAction::PageUp => {
             app.scroll_up(if matches!(action, KeyAction::PageUp) {

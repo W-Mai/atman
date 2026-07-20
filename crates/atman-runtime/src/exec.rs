@@ -84,6 +84,36 @@ pub fn exec_stmts_prefixed<'a>(
             } else {
                 format!("{prefix}.{i}")
             };
+            // Check for pending L4 stop / L3 redirect between statements.
+            if let Some(session) = ctx.session.as_ref()
+                && let Some(turn_id) = ctx.turn_id.as_ref()
+            {
+                if let Some(inj) = session.peek_pending_l2_or_higher(turn_id) {
+                    match inj.level {
+                        crate::injection::InjectionLevel::L4HardStop => {
+                            session.mark_injection_consumed(&inj.id);
+                            emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
+                            emit_flow_node_end(
+                                ctx,
+                                &node_id,
+                                &StmtOutcome::Continue,
+                                parent_node_id.as_deref(),
+                                Some("cancelled: hard stop"),
+                            );
+                            return StmtOutcome::Err(RuntimeError::Cancelled(
+                                "hard stop from user".into(),
+                            ));
+                        }
+                        crate::injection::InjectionLevel::L3Redirect => {
+                            if let Some(target) = inj.redirect_target.clone() {
+                                session.mark_injection_consumed(&inj.id);
+                                return StmtOutcome::Err(RuntimeError::Redirect(target));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             emit_flow_node_start(ctx, &node_id, stmt, parent_node_id.as_deref());
             let stmt_ctx = ctx.with_node(&node_id);
             let (outcome, preview) = exec_stmt(stmt, env, &stmt_ctx, &watches).await;
@@ -467,10 +497,18 @@ async fn eval_bind_with_watches(
         };
         let outcome = run_streaming_once(provider.as_ref(), req, &rules, ctx).await;
         match outcome {
-            StreamOutcome::L2Restart {
-                correction_text,
+            StreamOutcome::Restart {
+                level: crate::injection::InjectionLevel::L3Redirect,
+                redirect_target: Some(target),
+                ..
+            } => {
+                return Ok(Value::Err(RuntimeError::Redirect(target)));
+            }
+            StreamOutcome::Restart {
+                text: correction_text,
                 partial_output,
                 partial_tokens,
+                ..
             } if restart_count < 3 => {
                 if let Some(sink) = ctx.events {
                     sink.emit(crate::event::Event::LlmPartialCall {
@@ -489,7 +527,7 @@ async fn eval_bind_with_watches(
                 prior_partial = Some(partial_output);
                 continue;
             }
-            StreamOutcome::L2Restart { .. } => {
+            StreamOutcome::Restart { .. } => {
                 return Ok(Value::Err(RuntimeError::ToolFailed(
                     "l2 restart exhausted 3x, giving up".into(),
                 )));
@@ -501,8 +539,10 @@ async fn eval_bind_with_watches(
 
 enum StreamOutcome {
     Done(Value),
-    L2Restart {
-        correction_text: String,
+    Restart {
+        level: crate::injection::InjectionLevel,
+        text: String,
+        redirect_target: Option<String>,
         partial_output: String,
         partial_tokens: u64,
     },
@@ -532,7 +572,9 @@ async fn run_streaming_once<'a>(
     tokio::pin!(elapsed_sleep);
     let started = std::time::Instant::now();
 
+    let mut l1_nudge: Option<String> = None;
     let mut l2_correction: Option<String> = None;
+    let mut l3_redirect: Option<String> = None;
     let final_result = loop {
         tokio::select! {
             biased;
@@ -567,20 +609,27 @@ async fn run_streaming_once<'a>(
                     Err(_) => {}
                 }
             }
-            inj_msg = poll_injection(&mut inj_rx), if inj_rx.is_some() && l2_correction.is_none() => {
+            inj_msg = poll_injection(&mut inj_rx), if inj_rx.is_some() && l3_redirect.is_none() => {
                 if let Some(inj) = inj_msg
                     && ctx.turn_id.as_ref().is_some_and(|t| &inj.turn_id == t)
                 {
                     match inj.level {
+                        crate::injection::InjectionLevel::L1Nudge => {
+                            cancel.cancel();
+                            l1_nudge = Some(inj.text.clone());
+                        }
                         crate::injection::InjectionLevel::L2CourseCorrect => {
                             cancel.cancel();
                             l2_correction = Some(inj.text.clone());
+                        }
+                        crate::injection::InjectionLevel::L3Redirect => {
+                            cancel.cancel();
+                            l3_redirect = inj.redirect_target.clone();
                         }
                         crate::injection::InjectionLevel::L4HardStop => {
                             cancel.cancel();
                             break Err(RuntimeError::Cancelled("hard stop from user".into()));
                         }
-                        _ => {}
                     }
                 }
             }
@@ -625,9 +674,29 @@ async fn run_streaming_once<'a>(
         }
     }
 
+    if let Some(redirect) = l3_redirect {
+        return StreamOutcome::Restart {
+            level: crate::injection::InjectionLevel::L3Redirect,
+            text: String::new(),
+            redirect_target: Some(redirect),
+            partial_output: state.text_captured.clone(),
+            partial_tokens: state.tokens_seen,
+        };
+    }
     if let Some(correction) = l2_correction {
-        return StreamOutcome::L2Restart {
-            correction_text: correction,
+        return StreamOutcome::Restart {
+            level: crate::injection::InjectionLevel::L2CourseCorrect,
+            text: correction,
+            redirect_target: None,
+            partial_output: state.text_captured.clone(),
+            partial_tokens: state.tokens_seen,
+        };
+    }
+    if let Some(nudge) = l1_nudge {
+        return StreamOutcome::Restart {
+            level: crate::injection::InjectionLevel::L1Nudge,
+            text: nudge,
+            redirect_target: None,
             partial_output: state.text_captured.clone(),
             partial_tokens: state.tokens_seen,
         };

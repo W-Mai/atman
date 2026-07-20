@@ -1581,6 +1581,14 @@ async fn cmd_repl_once(
             while let Some(msg) = ctrl_rx.recv().await {
                 match msg {
                     atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
+                    atman_tui::TuiControl::HardStop => {
+                        session_for_ctrl.cancel_flow();
+                        let _ = session_for_ctrl.enqueue_injection_with_level(
+                            "stop",
+                            atman_runtime::injection::InjectionLevel::L4HardStop,
+                            None,
+                        );
+                    }
                     atman_tui::TuiControl::ApproveTool(id) => {
                         session_for_ctrl
                             .approval()
