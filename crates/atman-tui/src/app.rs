@@ -936,6 +936,10 @@ impl AppState {
                 *cancelled = false;
                 self.running_workflow_count = self.running_workflow_count.saturating_add(1);
             }
+            // Register the new run_id so FlowDone can find this panel.
+            if let StreamFrame::FlowStart { run_id, .. } = frame {
+                self.workflow_run_to_panel.insert(run_id.clone(), idx);
+            }
         }
         if !panel_after_user_turn {
             let turn_index = self
