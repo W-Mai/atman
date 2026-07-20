@@ -6,6 +6,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteEntryId {
     SwitchSession,
+    NewSession,
+    MoveSession,
     YankMode,
     CopyLastMessage,
     CopyLastTool,
@@ -30,6 +32,18 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Switch Session",
         hint: "Pick a recent session to swap into",
         keyword: "session switch swap",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::NewSession,
+        label: "New Session",
+        hint: "Start a fresh session in the current directory",
+        keyword: "session new create",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::MoveSession,
+        label: "Move Session",
+        hint: "Change this session's working directory",
+        keyword: "session move cwd path",
     },
     PaletteEntry {
         id: PaletteEntryId::YankMode,

@@ -1664,6 +1664,22 @@ async fn cmd_repl_once(
                         }
                         break;
                     }
+                    atman_tui::TuiControl::NewSession => {
+                        let handle = tokio::task::spawn_blocking(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .context("prebuild runtime init")?;
+                            rt.block_on(prebuild_session(None, None, None))
+                        });
+                        *switch_target_for_ctrl.lock().unwrap() = Some(handle);
+                        session_for_ctrl.cancel_flow();
+                        if let Some(tx) = sh_tx_for_ctrl.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        break;
+                    }
+                    atman_tui::TuiControl::MoveSession => {}
                     atman_tui::TuiControl::DeleteSession(sid) => {
                         delete_session_dir(&data_root_for_ctrl, &sid);
                         if let Some(idx) = session_for_ctrl.project_index() {
@@ -1679,7 +1695,19 @@ async fn cmd_repl_once(
                         }
                     }
                     atman_tui::TuiControl::FormSubmit { form_id, answer } => {
-                        let _ = session_for_ctrl.forms().submit(&form_id, answer);
+                        if form_id == "session_move_path" {
+                            if let atman_runtime::form::FormAnswer::TextEntered { text } = answer {
+                                let cwd = std::path::PathBuf::from(&text);
+                                let mut meta = atman_runtime::session_meta::SessionMeta::load(
+                                    session_for_ctrl.dir(),
+                                )
+                                .unwrap_or_default();
+                                meta.rebase(&cwd);
+                                let _ = meta.save(session_for_ctrl.dir());
+                            }
+                        } else {
+                            let _ = session_for_ctrl.forms().submit(&form_id, answer);
+                        }
                     }
                 }
             }

@@ -83,6 +83,8 @@ pub enum TuiControl {
         sid: String,
         intro: Option<app::StartupIntro>,
     },
+    NewSession,
+    MoveSession,
     DeleteSession(String),
     RenameSession {
         session_id: String,
@@ -1262,6 +1264,28 @@ fn dispatch_palette_entry(
             let scope = crate::session_switcher::SessionScope::Project;
             let rows = enumerate_session_rows(app, scope);
             app.session_switcher.open_with(rows, scope);
+        }
+        PaletteEntryId::NewSession => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::NewSession);
+            }
+        }
+        PaletteEntryId::MoveSession => {
+            if let (Some(tx), Some(session)) = (control_tx, app.session.as_ref()) {
+                let form = atman_runtime::form::PendingForm {
+                    form_id: "session_move_path".to_string(),
+                    run_id: atman_runtime::event::FlowRunId::now(),
+                    tool_use_id: "session_move_path".to_string(),
+                    kind: atman_runtime::form::FormKind::Text {
+                        prompt: "New working directory:".to_string(),
+                        placeholder: Some("/path/to/project".to_string()),
+                        multiline: false,
+                    },
+                    emitted_at: chrono::Utc::now(),
+                };
+                session.forms().request(form);
+                let _ = tx.send(TuiControl::MoveSession);
+            }
         }
         PaletteEntryId::SearchHistory => {
             app.history_search.open();
