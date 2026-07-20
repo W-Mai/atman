@@ -215,6 +215,12 @@ enum SessionAction {
         #[arg(long, default_value_t = 20, help = "Maximum results returned")]
         limit: usize,
     },
+    New,
+    Move {
+        session_id: String,
+        /// New working directory for the session.
+        cwd: PathBuf,
+    },
     Gc,
     Sanitize {
         session_id: String,
@@ -300,6 +306,12 @@ async fn main() -> Result<()> {
                     limit,
                 },
         }) => cmd_session_search(query, session, all, project, limit).await,
+        Some(Cmd::Session {
+            action: SessionAction::New,
+        }) => cmd_session_new().await,
+        Some(Cmd::Session {
+            action: SessionAction::Move { session_id, cwd },
+        }) => cmd_session_move(&session_id, &cwd).await,
         Some(Cmd::Session {
             action: SessionAction::Gc,
         }) => cmd_session_gc().await,
@@ -641,15 +653,25 @@ async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
         }
         let sid = entry.file_name().to_string_lossy().to_string();
         let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
-        let fingerprint = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
-        if let SessionListFilter::Project(ref want) = filter {
-            if fingerprint.as_deref() != Some(want.as_str()) {
+        if let SessionListFilter::Project {
+            ref fingerprint,
+            ref canonical_root,
+        } = filter
+        {
+            let stored_fp = meta.as_ref().and_then(|m| m.project_fingerprint.as_deref());
+            let stored_root = meta
+                .as_ref()
+                .and_then(|m| m.project_root.as_deref())
+                .map(atman_runtime::session_meta::canonical_root);
+            let fp_match = stored_fp == Some(fingerprint.as_str());
+            let path_match = stored_root.as_deref() == Some(canonical_root.as_path());
+            if !fp_match && !path_match {
                 continue;
             }
         }
-        let project_label = meta
+        let where_label = meta
             .as_ref()
-            .and_then(|m| m.project_root.as_deref())
+            .and_then(|m| m.start_path.as_deref().or(m.project_root.as_deref()))
             .map(short_project_path)
             .unwrap_or_else(|| "-".into());
         let events_path = entry.path().join("events.jsonl");
@@ -661,33 +683,34 @@ async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(std::time::UNIX_EPOCH);
-        rows.push((modified, sid, bytes, events, project_label));
+        rows.push((modified, sid, bytes, events, where_label));
     }
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     match &filter {
         SessionListFilter::All => {}
-        SessionListFilter::Project(fp) if rows.is_empty() => {
-            println!(
-                "no sessions match project fingerprint {fp}. Use --all to list every session."
-            );
+        SessionListFilter::Project { .. } if rows.is_empty() => {
+            println!("no sessions match this project. Use --all to list every session.");
             return Ok(());
         }
-        SessionListFilter::Project(_) => {}
+        SessionListFilter::Project { .. } => {}
     }
     let header_sid = "session_id";
     let header_events = "events";
     let header_bytes = "bytes";
-    let header_project = "project";
-    println!("{header_sid:<38} {header_events:>8} {header_bytes:>10} {header_project}");
-    for (_, sid, bytes, events, project_label) in rows {
-        println!("{sid:<38} {events:>8} {bytes:>10} {project_label}");
+    let header_where = "where";
+    println!("{header_sid:<38} {header_events:>8} {header_bytes:>10} {header_where}");
+    for (_, sid, bytes, events, where_label) in rows {
+        println!("{sid:<38} {events:>8} {bytes:>10} {where_label}");
     }
     Ok(())
 }
 
 enum SessionListFilter {
     All,
-    Project(String),
+    Project {
+        fingerprint: String,
+        canonical_root: PathBuf,
+    },
 }
 
 fn resolve_session_list_filter(all: bool, project: Option<&Path>) -> Result<SessionListFilter> {
@@ -698,18 +721,24 @@ fn resolve_session_list_filter(all: bool, project: Option<&Path>) -> Result<Sess
         if !path.exists() {
             bail!("--project path does not exist: {}", path.display());
         }
-        return Ok(SessionListFilter::Project(
-            atman_runtime::session_meta::fingerprint_from_root(path),
-        ));
+        return Ok(SessionListFilter::Project {
+            fingerprint: atman_runtime::session_meta::fingerprint_from_root(path),
+            canonical_root: atman_runtime::session_meta::canonical_root(path),
+        });
     }
     let cwd = std::env::current_dir().context("reading cwd")?;
     match atman_runtime::session_meta::find_project_root(&cwd) {
-        Some(root) => Ok(SessionListFilter::Project(
-            atman_runtime::session_meta::fingerprint_from_root(&root),
-        )),
-        None => bail!(
-            "cwd is not inside any project (looked for .atman/ or .git/). Use --all or --project PATH."
-        ),
+        Some(root) => Ok(SessionListFilter::Project {
+            fingerprint: atman_runtime::session_meta::fingerprint_from_root(&root),
+            canonical_root: atman_runtime::session_meta::canonical_root(&root),
+        }),
+        None => {
+            eprintln!(
+                "[atman] cwd is not inside any project (no .atman/ or .git/ found). \
+                 Showing all sessions. Use --project PATH to filter."
+            );
+            Ok(SessionListFilter::All)
+        }
     }
 }
 
@@ -759,6 +788,42 @@ async fn cmd_session_show(sid: String) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_session_new() -> Result<()> {
+    let root = data_dir()?;
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions)?;
+    let id = uuid::Uuid::new_v4();
+    let dir = sessions.join(id.to_string());
+    std::fs::create_dir_all(&dir)?;
+    let meta = atman_runtime::session_meta::SessionMeta::from_cwd();
+    meta.save(&dir)?;
+    println!("{}", id);
+    Ok(())
+}
+
+async fn cmd_session_move(sid: &str, new_cwd: &Path) -> Result<()> {
+    if !new_cwd.is_dir() {
+        bail!("not a directory: {}", new_cwd.display());
+    }
+    let abs_cwd = new_cwd
+        .canonicalize()
+        .with_context(|| format!("resolve path {}", new_cwd.display()))?;
+    let root = data_dir()?;
+    let resolved = resolve_session_prefix(&root, sid)?;
+    let dir = root.join("sessions").join(&resolved);
+    if !dir.is_dir() {
+        bail!("session not found: {}", dir.display());
+    }
+    let mut meta = atman_runtime::session_meta::SessionMeta::load(&dir).unwrap_or_default();
+    meta.rebase(&abs_cwd);
+    meta.save(&dir)?;
+    println!("session {} moved to {}", resolved, abs_cwd.display());
+    if let Some(ref pr) = meta.project_root {
+        println!("  project_root: {}", pr.display());
+    }
+    Ok(())
+}
+
 async fn cmd_session_search(
     query: String,
     session: Option<String>,
@@ -800,8 +865,8 @@ async fn cmd_session_search(
         session_filter = Some(sid);
     } else {
         match &filter {
-            SessionListFilter::Project(fp) => {
-                let scope = root.join("projects").join(fp);
+            SessionListFilter::Project { fingerprint, .. } => {
+                let scope = root.join("projects").join(fingerprint);
                 if scope.is_dir() {
                     project_dirs.push(scope);
                 }

@@ -103,6 +103,12 @@ async fn rebuild_session_llm_messages(
             format!("[session goal]\n{goal}\n[/session goal]"),
         ));
     }
+    if let Some(cwd_note) = working_directory_system_prompt(session) {
+        messages.push(crate::message::Message::system_text(
+            turn_id.clone(),
+            cwd_note,
+        ));
+    }
     if let Some(plan) = session.plan_system_prompt().await {
         messages.push(crate::message::Message::system_text(
             turn_id.clone(),
@@ -670,6 +676,39 @@ fn available_models_system_prompt() -> Option<String> {
     }
     lines.push("Use these names or aliases with agent.spawn's model parameter.".into());
     lines.push("[/available models]".into());
+    Some(lines.join("\n"))
+}
+
+fn working_directory_system_prompt(session: &crate::session::Session) -> Option<String> {
+    let meta = session.meta()?;
+    let cwd = meta
+        .start_path
+        .as_deref()
+        .or(meta.project_root.as_deref())?;
+    let mut lines = vec!["[working directory]".to_string()];
+    lines.push(cwd.display().to_string());
+    // Live re-detect in case .git/.atman was created after session start.
+    let live_root = crate::session_meta::find_project_root(cwd);
+    match (&live_root, &meta.project_root) {
+        (Some(live), Some(stored)) if live == stored => {
+            if Some(live.as_path()) != meta.start_path.as_deref() {
+                lines.push(format!("project root: {}", live.display()));
+            }
+        }
+        (Some(live), _) => {
+            lines.push(format!("project root: {}", live.display()));
+        }
+        (None, Some(stored)) => {
+            lines.push(format!(
+                "project root (cached): {} (no longer detected)",
+                stored.display()
+            ));
+        }
+        (None, None) => {
+            lines.push("(no project root — no .git or .atman found)".into());
+        }
+    }
+    lines.push("[/working directory]".into());
     Some(lines.join("\n"))
 }
 

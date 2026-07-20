@@ -10,6 +10,8 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
@@ -43,11 +45,20 @@ impl SessionMeta {
         let project_fingerprint = project_root.as_deref().map(fingerprint_from_root);
         Self {
             project_root,
+            start_path: start.map(|p| p.to_path_buf()),
             project_fingerprint,
             created_at: Some(Utc::now()),
             title: None,
             tags: Vec::new(),
         }
+    }
+
+    /// Recompute `project_root`, `project_fingerprint`, and `start_path`
+    /// from a new working directory.
+    pub fn rebase(&mut self, new_cwd: &Path) {
+        self.start_path = Some(new_cwd.to_path_buf());
+        self.project_root = find_project_root(new_cwd);
+        self.project_fingerprint = self.project_root.as_deref().map(fingerprint_from_root);
     }
 
     pub fn set_title(session_dir: &Path, title: Option<String>) -> std::io::Result<()> {
@@ -58,9 +69,23 @@ impl SessionMeta {
 }
 
 pub fn fingerprint_from_root(root: &Path) -> String {
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
+    let stable = root
+        .canonicalize()
+        .or_else(|_| {
+            if root.is_absolute() {
+                Ok(root.to_path_buf())
+            } else {
+                std::env::current_dir().map(|cwd| cwd.join(root))
+            }
+        })
+        .unwrap_or_else(|_| root.to_path_buf());
+    let digest = blake3::hash(stable.to_string_lossy().as_bytes());
     hex_prefix(digest.as_bytes(), 16)
+}
+
+/// Return the canonical form of the project root, falling back to the raw path.
+pub fn canonical_root(root: &Path) -> PathBuf {
+    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
 
 fn hex_prefix(bytes: &[u8], hex_chars: usize) -> String {
@@ -134,6 +159,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let meta = SessionMeta {
             project_root: Some(PathBuf::from("/tmp/foo")),
+            start_path: Some(PathBuf::from("/tmp/foo/sub")),
             project_fingerprint: Some("deadbeef".repeat(2)),
             created_at: Some(Utc::now()),
             title: Some("nice title".into()),
@@ -142,7 +168,42 @@ mod tests {
         meta.save(tmp.path()).unwrap();
         let back = SessionMeta::load(tmp.path()).unwrap();
         assert_eq!(back.project_root, meta.project_root);
+        assert_eq!(back.start_path, meta.start_path);
         assert_eq!(back.project_fingerprint, meta.project_fingerprint);
+    }
+
+    #[test]
+    fn rebase_updates_project_root_and_fingerprint() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let mut meta = SessionMeta {
+            project_root: Some(PathBuf::from("/old")),
+            start_path: Some(PathBuf::from("/old")),
+            project_fingerprint: Some("0000000000000000".into()),
+            created_at: None,
+            title: None,
+            tags: vec![],
+        };
+        meta.rebase(&sub);
+        assert_eq!(meta.start_path, Some(sub.clone()));
+        assert_eq!(
+            meta.project_root.unwrap().canonicalize().unwrap(),
+            tmp.path().canonicalize().unwrap()
+        );
+        let expected_fp = fingerprint_from_root(tmp.path());
+        assert_eq!(meta.project_fingerprint, Some(expected_fp));
+    }
+
+    #[test]
+    fn session_meta_serde_backward_compat_no_start_path() {
+        // Old meta.json without start_path should deserialize with start_path = None.
+        let json = r#"{"project_root":"/tmp/foo","project_fingerprint":"deadbeefdeadbeef","created_at":"2025-01-01T00:00:00Z"}"#;
+        let meta: SessionMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.project_root, Some(PathBuf::from("/tmp/foo")));
+        assert_eq!(meta.start_path, None);
     }
 
     #[test]
