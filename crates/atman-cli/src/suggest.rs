@@ -175,6 +175,7 @@ pub async fn generate_suggestion(
     provider: Arc<dyn Provider>,
     model: &str,
     recent_transcript: &str,
+    token_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<String> {
     let prompt = build_meta_prompt(recent_transcript);
     let req = LlmRequest {
@@ -187,11 +188,29 @@ pub async fn generate_suggestion(
         tools: Vec::new(),
         thinking_enabled: false,
     };
-    let reply = provider
-        .call(req)
-        .await
-        .map_err(|e| anyhow::anyhow!("meta-llm call: {e}"))?;
-    Ok(reply.message.text_concat())
+    if let Some(tx) = token_tx {
+        let obs = provider.call_streaming(req);
+        let mut events = obs.events;
+        let output = obs.output;
+        let stream_handle = tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                if let atman_runtime::event::NodeEvent::LlmChunk { text, .. } = event {
+                    let _ = tx.send(text);
+                }
+            }
+        });
+        let reply = output
+            .await
+            .map_err(|e| anyhow::anyhow!("meta-llm call: {e}"))?;
+        stream_handle.abort();
+        Ok(reply.message.text_concat())
+    } else {
+        let reply = provider
+            .call(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("meta-llm call: {e}"))?;
+        Ok(reply.message.text_concat())
+    }
 }
 
 pub fn recent_turns_limit() -> usize {
@@ -280,7 +299,7 @@ mod tests {
         let canned = "```atman\nflow greet(name: str) { return \"hi \" + name }\n```";
         let provider =
             Arc::new(MockProvider::new("mock").with_model("mini", Value::Str(canned.into())));
-        let reply = generate_suggestion(provider, "mini", "user: greet w-mai\n")
+        let reply = generate_suggestion(provider, "mini", "user: greet w-mai\n", None)
             .await
             .expect("mock succeeds");
         let body = extract_code_block(&reply).expect("has block");

@@ -3040,16 +3040,31 @@ async fn handle_suggest(
         .with_context(|| format!("no provider resolves model `{model}` — configure one first"))?;
 
     reporter.info(format!(
-        "[atman] :suggest — asking `{model}` to spot a reusable pattern…"
+        "[atman] :suggest — reading {} turns, asking `{model}`…",
+        suggest::recent_turns_limit()
     ));
-    let reply = suggest::generate_suggestion(provider, &model, &transcript).await?;
+
+    // Stream tokens to the reporter in real-time.
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let stream_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        while let Some(t) = token_rx.recv().await {
+            buf.push_str(&t);
+        }
+        buf
+    });
+    let reply = suggest::generate_suggestion(provider, &model, &transcript, Some(token_tx)).await?;
+    let streamed = stream_task.await.unwrap_or_default();
+    if !streamed.is_empty() {
+        reporter.info(format!("---\n{streamed}\n---"));
+    }
+
     if reply.trim() == "NO_SUGGESTION" {
         reporter.info("[atman] :suggest — model saw no reusable pattern.");
         return Ok(());
     }
     let Some(dsl_src) = suggest::extract_code_block(&reply) else {
-        reporter.info("[atman] :suggest — model reply did not contain a fenced code block:");
-        reporter.info(reply.trim().to_string());
+        reporter.info("[atman] :suggest — model reply did not contain a fenced code block.");
         return Ok(());
     };
 
@@ -3059,7 +3074,6 @@ async fn handle_suggest(
             reporter.info(format!(
                 "[atman] :suggest — suggested flow is not valid: {e}"
             ));
-            reporter.info(format!("---\n{dsl_src}\n---"));
             return Ok(());
         }
     };
@@ -3069,7 +3083,6 @@ async fn handle_suggest(
         for e in errs {
             reporter.info(format!("  · {e:?}"));
         }
-        reporter.info(format!("---\n{dsl_src}\n---"));
         return Ok(());
     }
 
@@ -3082,28 +3095,38 @@ async fn handle_suggest(
         reporter.info("[atman] note: this flow calls shell tools — accept only if you trust it.");
     }
 
-    if reporter.is_tui() {
-        reporter.info(
-            "[atman] :suggest — TUI is read-only for this flow. Exit and re-run with ATMAN_NO_TUI=1 to accept.",
-        );
-        return Ok(());
-    }
-
-    reporter.info(
-        "[atman] accept? [y] yes / [n] no / [e] print path so you can edit the buffered draft",
-    );
-
-    let choice = loop {
-        let Some(line) = input_rx.recv().await else {
-            reporter.info("[atman] :suggest — input closed, discarding.");
-            return Ok(());
+    // Accept/reject: use form modal in TUI, CLI prompt otherwise.
+    let choice = if reporter.is_tui() {
+        let form = atman_runtime::form::PendingForm {
+            form_id: "suggest_confirm".to_string(),
+            run_id: atman_runtime::event::FlowRunId::now(),
+            tool_use_id: "suggest_confirm".to_string(),
+            kind: atman_runtime::form::FormKind::Confirm {
+                prompt: format!("accept suggested flow `{flow_name}`?"),
+            },
+            emitted_at: chrono::Utc::now(),
         };
-        match line.trim() {
-            "y" | "Y" | "yes" => break 'y',
-            "n" | "N" | "no" | "" => break 'n',
-            "e" | "E" | "edit" => break 'e',
-            other => {
-                reporter.info(format!("[atman] answer with y / n / e (got `{other}`)"));
+        let rx = session.forms().request(form);
+        match rx.await {
+            Ok(atman_runtime::form::FormAnswer::Confirmed { value: true }) => 'y',
+            _ => 'n',
+        }
+    } else {
+        reporter.info(
+            "[atman] accept? [y] yes / [n] no / [e] print path so you can edit the buffered draft",
+        );
+        loop {
+            let Some(line) = input_rx.recv().await else {
+                reporter.info("[atman] :suggest — input closed, discarding.");
+                return Ok(());
+            };
+            match line.trim() {
+                "y" | "Y" | "yes" => break 'y',
+                "n" | "N" | "no" | "" => break 'n',
+                "e" | "E" | "edit" => break 'e',
+                other => {
+                    reporter.info(format!("[atman] answer with y / n / e (got `{other}`)"));
+                }
             }
         }
     };
@@ -3159,6 +3182,7 @@ async fn handle_suggest(
             target.display()
         ));
     }
+
     Ok(())
 }
 
