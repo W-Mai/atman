@@ -901,9 +901,20 @@ impl AppState {
             return;
         }
         let mut panel_after_user_turn = false;
-        for it in self.items.iter().rev() {
+        let mut reopen_idx: Option<usize> = None;
+        for (i, it) in self.items.iter().enumerate().rev() {
             match it {
                 OutputItem::WorkflowPanel { ended_at: None, .. } => {
+                    panel_after_user_turn = true;
+                    break;
+                }
+                OutputItem::WorkflowPanel {
+                    ended_at: Some(_),
+                    cancelled: true,
+                    ..
+                } => {
+                    // Reopen a cancelled panel for course-correct restart.
+                    reopen_idx = Some(i);
                     panel_after_user_turn = true;
                     break;
                 }
@@ -912,6 +923,18 @@ impl AppState {
                 }
                 OutputItem::UserTurn { .. } => break,
                 _ => {}
+            }
+        }
+        if let Some(idx) = reopen_idx {
+            if let Some(OutputItem::WorkflowPanel {
+                ended_at,
+                cancelled,
+                ..
+            }) = self.items.get_mut(idx)
+            {
+                *ended_at = None;
+                *cancelled = false;
+                self.running_workflow_count = self.running_workflow_count.saturating_add(1);
             }
         }
         if !panel_after_user_turn {
