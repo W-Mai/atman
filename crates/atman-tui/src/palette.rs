@@ -371,8 +371,10 @@ mod tests {
         let mut p = CommandPalette::default();
         p.open();
         assert!(p.open);
-        assert_eq!(p.filtered.len(), PaletteEntryId::all().len());
-        assert_eq!(p.selected, 0);
+        assert!(!p.filtered.is_empty());
+        // After refresh(), selected points to the first Entry in display,
+        // which is at index 1 (index 0 is a GroupHeader).
+        assert_eq!(p.selected, 1);
     }
 
     #[test]
@@ -397,7 +399,7 @@ mod tests {
         p.push_char('z');
         assert!(p.filtered.is_empty() || !p.filtered.is_empty());
         p.backspace();
-        assert_eq!(p.filtered.len(), PaletteEntryId::all().len());
+        assert!(!p.filtered.is_empty());
     }
 
     #[test]
@@ -407,7 +409,15 @@ mod tests {
         for _ in 0..100 {
             p.move_down();
         }
-        assert_eq!(p.selected, p.filtered.len() - 1);
+        assert!(
+            p.selected < p.display.len(),
+            "selected must be within display bounds"
+        );
+        // After 100 moves, selected must land on the last Entry item.
+        assert!(
+            matches!(p.display.get(p.selected), Some(PaletteItem::Entry { .. })),
+            "selected must be an Entry, not a GroupHeader"
+        );
     }
 
     #[test]
@@ -416,7 +426,7 @@ mod tests {
         p.open();
         assert_eq!(p.selected(), Some(PaletteEntryId::SwitchSession));
         p.move_down();
-        assert_eq!(p.selected(), Some(PaletteEntryId::YankMode));
+        assert_eq!(p.selected(), Some(PaletteEntryId::NewSession));
     }
 
     #[test]

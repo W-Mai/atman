@@ -175,6 +175,7 @@ pub struct AppState {
     pub handle_index: std::collections::HashMap<String, usize>,
     pub last_workflow_panel_idx: Option<usize>,
     pub workflow_run_to_panel: std::collections::HashMap<String, usize>,
+    pub top_level_run_ids: std::collections::HashSet<String>,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
@@ -668,9 +669,17 @@ impl AppState {
                 };
                 self.ensure_workflow_panel_and_apply(&frame);
                 if is_done {
-                    let panel_idx =
-                        done_run_id.and_then(|rid| self.workflow_run_to_panel.get(rid).copied());
-                    self.close_current_workflow_panel(cancelled, panel_idx);
+                    // Only close the panel for top-level flows — subflow
+                    // FlowDone must not close the parent panel.
+                    if done_run_id.is_some_and(|rid| self.top_level_run_ids.contains(rid)) {
+                        let panel_idx = done_run_id
+                            .and_then(|rid| self.workflow_run_to_panel.get(rid).copied());
+                        self.close_current_workflow_panel(cancelled, panel_idx);
+                        // Clean up the top-level run id.
+                        if let Some(rid) = done_run_id {
+                            self.top_level_run_ids.remove(rid);
+                        }
+                    }
                     self.streaming = false;
                 }
             }
@@ -853,6 +862,11 @@ impl AppState {
     }
 
     fn ensure_workflow_panel_and_apply(&mut self, frame: &StreamFrame) {
+        let is_panel_creator = matches!(
+            frame,
+            StreamFrame::FlowStart { .. } | StreamFrame::FlowGraph { .. }
+        );
+
         // For subflows (FlowStart with parent_run_id), find and reuse the parent's panel.
         if let StreamFrame::FlowStart {
             run_id,
@@ -868,8 +882,8 @@ impl AppState {
                         *ended_at = None;
                     }
                 }
-                self.workflow_run_to_panel
-                    .insert(run_id.clone(), parent_idx);
+                // NOTE: do NOT insert subflow run_id into workflow_run_to_panel —
+                // otherwise FlowDone for the subflow would close the parent panel.
                 if let Some(OutputItem::WorkflowPanel { graph, .. }) =
                     self.items.get_mut(parent_idx)
                 {
@@ -895,7 +909,15 @@ impl AppState {
                 ended_at: None,
                 cancelled: false,
             });
+            self.top_level_run_ids.insert(run_id.clone());
             self.workflow_run_to_panel.insert(run_id.clone(), idx);
+            self.route_to_workflow_panel(frame);
+            return;
+        }
+
+        // Non-panel-creator events (FlowNodeStart, FlowNodeEnd, etc.) must not
+        // create phantom panels. Just route to the last open panel.
+        if !is_panel_creator {
             self.route_to_workflow_panel(frame);
             return;
         }
@@ -904,7 +926,8 @@ impl AppState {
         for (i, it) in self.items.iter().enumerate().rev() {
             match it {
                 OutputItem::WorkflowPanel { ended_at: None, .. } => {
-                    panel_after_user_turn = true;
+                    // An open panel exists — stop scanning but still create a
+                    // new panel for this independent top-level flow.
                     break;
                 }
                 OutputItem::WorkflowPanel {
@@ -947,6 +970,7 @@ impl AppState {
             // Register the new run_id so FlowDone can find this panel.
             if let StreamFrame::FlowStart { run_id, .. } = frame {
                 self.workflow_run_to_panel.insert(run_id.clone(), idx);
+                self.top_level_run_ids.insert(run_id.clone());
             }
         }
         if !panel_after_user_turn {
@@ -967,6 +991,7 @@ impl AppState {
             });
             if let StreamFrame::FlowStart { run_id, .. } = frame {
                 self.workflow_run_to_panel.insert(run_id.clone(), idx);
+                self.top_level_run_ids.insert(run_id.clone());
             }
         }
         self.route_to_workflow_panel(frame);
@@ -1597,6 +1622,276 @@ mod tests {
         let stmt = panel.find_node("r1::stmt_0").unwrap();
         assert_eq!(stmt.children.len(), 1);
         assert_eq!(stmt.children[0].id, "tool:r1:tu_1");
+    }
+
+    // ── Workflow panel state machine tests ──
+
+    fn flow_start(name: &str, run_id: &str) -> StreamFrame {
+        StreamFrame::FlowStart {
+            run_id: run_id.into(),
+            flow_name: name.into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        }
+    }
+
+    fn flow_done(run_id: &str, cancelled: bool) -> StreamFrame {
+        StreamFrame::FlowDone {
+            run_id: run_id.into(),
+            flow_name: "test".into(),
+            ok: !cancelled,
+            cancelled,
+        }
+    }
+
+    fn subflow_start(name: &str, run_id: &str, parent_run_id: &str) -> StreamFrame {
+        StreamFrame::FlowStart {
+            run_id: run_id.into(),
+            flow_name: name.into(),
+            parent_run_id: Some(parent_run_id.into()),
+            parent_node_id: None,
+        }
+    }
+
+    fn workflow_panels(app: &AppState) -> Vec<(usize, bool)> {
+        app.items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| match it {
+                OutputItem::WorkflowPanel { ended_at, .. } => Some((i, ended_at.is_none())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn normal_flow_lifecycle_creates_and_closes_panel() {
+        let mut app = AppState::new("s".into(), None);
+        assert!(!app.has_running_workflow());
+
+        app.apply_stream_frame(flow_start("agent", "r1"));
+        assert!(app.has_running_workflow());
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 1);
+        assert!(panels[0].1, "panel should be open");
+
+        app.apply_stream_frame(flow_done("r1", false));
+        assert!(!app.has_running_workflow());
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 1);
+        assert!(!panels[0].1, "panel should be closed");
+    }
+
+    #[test]
+    fn subflow_reuses_parent_panel() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("agent", "r1"));
+        assert_eq!(workflow_panels(&app).len(), 1);
+
+        // Subflow with parent_run_id should reuse parent's panel.
+        app.apply_stream_frame(subflow_start("agent_loop", "r2", "r1"));
+        let panels = workflow_panels(&app);
+        assert_eq!(
+            panels.len(),
+            1,
+            "subflow must reuse parent panel, not create new one"
+        );
+    }
+
+    #[test]
+    fn subflow_orphan_parent_not_in_map_creates_new_panel() {
+        let mut app = AppState::new("s".into(), None);
+        // No parent flow Start → parent not in HashMap.
+        app.apply_stream_frame(subflow_start("orphan", "r2", "nonexistent"));
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 1, "orphan subflow creates new panel");
+    }
+
+    #[test]
+    fn course_correct_reopens_cancelled_panel() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("agent", "r1"));
+        // Flow is cancelled.
+        app.apply_stream_frame(flow_done("r1", true));
+        assert!(!app.has_running_workflow());
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 1);
+        assert!(!panels[0].1, "panel closed after cancelled FlowDone");
+
+        // New flow starts (course-correct restart).
+        app.apply_stream_frame(flow_start("agent", "r2"));
+        assert!(app.has_running_workflow());
+        let panels = workflow_panels(&app);
+        assert_eq!(
+            panels.len(),
+            1,
+            "must reopen cancelled panel, not create new"
+        );
+        assert!(panels[0].1, "panel must be reopened");
+    }
+
+    #[test]
+    fn course_correct_after_push_user_turn_peeks_past_userturn() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("agent", "r1"));
+
+        // Simulate: push_user_turn closes with cancelled:false, then
+        // interjection handler upgrades to cancelled:true.
+        app.push_user_turn("course-correct msg".into());
+        // The panel is now closed with cancelled:false via push_user_turn.
+        // But the interjection handler would call close_current_workflow_panel(true, ...)
+        // which now upgrades cancelled to true.
+        app.close_current_workflow_panel(true, None);
+
+        // New FlowStart must peek past the UserTurn to find the cancelled panel.
+        app.apply_stream_frame(flow_start("agent", "r2"));
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 1, "must reopen cancelled panel past UserTurn");
+        assert!(panels[0].1, "panel must be open");
+        // Verify the reopened panel's run_id is registered.
+        assert!(app.workflow_run_to_panel.contains_key("r2"));
+    }
+
+    #[test]
+    fn has_running_workflow_false_when_all_closed() {
+        let mut app = AppState::new("s".into(), None);
+        assert!(!app.has_running_workflow());
+
+        app.apply_stream_frame(flow_start("agent", "r1"));
+        assert!(app.has_running_workflow());
+
+        app.apply_stream_frame(flow_done("r1", false));
+        assert!(!app.has_running_workflow());
+    }
+
+    #[test]
+    fn has_running_workflow_true_with_two_open_panels() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("a", "r1"));
+        app.apply_stream_frame(flow_start("b", "r2"));
+        assert!(app.has_running_workflow());
+        assert_eq!(workflow_panels(&app).len(), 2);
+
+        // Close one panel — still running.
+        app.apply_stream_frame(flow_done("r1", false));
+        assert!(app.has_running_workflow());
+
+        // Close the other — done.
+        app.apply_stream_frame(flow_done("r2", false));
+        assert!(!app.has_running_workflow());
+    }
+
+    #[test]
+    fn close_current_workflow_panel_upgrades_cancelled_flag() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("agent", "r1"));
+
+        // push_user_turn closes with cancelled:false
+        app.push_user_turn("msg".into());
+
+        let panels = workflow_panels(&app);
+        assert!(!panels[0].1, "closed by push_user_turn");
+
+        // Interjection handler closes with cancelled:true — must upgrade.
+        app.close_current_workflow_panel(true, None);
+
+        let panel = match &app.items[panels[0].0] {
+            OutputItem::WorkflowPanel { cancelled, .. } => *cancelled,
+            _ => panic!("expected WorkflowPanel"),
+        };
+        assert!(panel, "cancelled flag must be upgraded from false to true");
+    }
+
+    #[test]
+    fn flow_done_for_non_flowstart_event_does_not_create_panel() {
+        let mut app = AppState::new("s".into(), None);
+        // FlowNodeEnd is not FlowStart or FlowDone — should not create panel.
+        app.apply_stream_frame(StreamFrame::FlowNodeEnd {
+            run_id: "r1".into(),
+            node_id: "n1".into(),
+            status: atman_runtime::event::FlowNodeStatus::Ok,
+            output_preview: None,
+            parent_node_id: None,
+        });
+        assert_eq!(workflow_panels(&app).len(), 0);
+    }
+
+    #[test]
+    fn two_consecutive_flows_without_userturn_reuses_panel() {
+        // Scenario: course-correct restarts flow immediately (no UserTurn).
+        let mut app = AppState::new("s".into(), None);
+
+        // First flow.
+        app.apply_stream_frame(flow_start("agent", "r1"));
+        app.apply_stream_frame(flow_done("r1", true)); // cancelled
+
+        // Second flow starts immediately.
+        app.apply_stream_frame(flow_start("agent", "r2"));
+        app.apply_stream_frame(flow_done("r2", false));
+
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 1, "should reuse panel, not create second");
+    }
+
+    #[test]
+    fn multiple_flow_starts_without_done_only_one_open_panel() {
+        // Simulates L1 nudges: flow restarts LLM internally, new FlowStart
+        // for each restart within same run.
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("agent", "r1"));
+
+        // L1 nudge 1: internal LLM restart — a new subflow might start
+        // but the top-level flow is unchanged.
+        app.apply_stream_frame(subflow_start("agent_loop", "s1", "r1"));
+        app.apply_stream_frame(StreamFrame::FlowDone {
+            run_id: "s1".into(),
+            flow_name: "agent_loop".into(),
+            ok: true,
+            cancelled: false,
+        });
+
+        // L1 nudge 2: another internal restart.
+        app.apply_stream_frame(subflow_start("agent_loop", "s2", "r1"));
+        app.apply_stream_frame(StreamFrame::FlowDone {
+            run_id: "s2".into(),
+            flow_name: "agent_loop".into(),
+            ok: true,
+            cancelled: false,
+        });
+
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 1, "L1 nudges must not create extra panels");
+        assert!(panels[0].1, "top-level panel still open");
+    }
+
+    #[test]
+    fn flow_done_routes_to_correct_panel_by_run_id() {
+        // Two concurrent flows: FlowDone for r1 closes panel[0], r2 stays open.
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("a", "r1"));
+        app.apply_stream_frame(flow_start("b", "r2"));
+
+        app.apply_stream_frame(flow_done("r1", false));
+
+        let panels = workflow_panels(&app);
+        assert_eq!(panels.len(), 2);
+        assert!(!panels[0].1, "panel 0 (r1) should be closed");
+        assert!(panels[1].1, "panel 1 (r2) should still be open");
+        assert!(app.has_running_workflow());
+    }
+
+    #[test]
+    fn cancel_escalates_through_all_levels() {
+        // L4 hard stop: FlowDone(cancelled:true) → panel marked cancelled.
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("agent", "r1"));
+        app.apply_stream_frame(flow_done("r1", true));
+
+        let panel = match &app.items[0] {
+            OutputItem::WorkflowPanel { cancelled, .. } => *cancelled,
+            _ => panic!("expected WorkflowPanel"),
+        };
+        assert!(panel, "L4 hard stop must mark panel as cancelled");
     }
 }
 
