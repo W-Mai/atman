@@ -2327,7 +2327,6 @@ async fn run_turn_with_interjection(
             }
         }
     };
-
     let streamed = session.take_streamed_flag();
     match result {
         Ok(v) => {
@@ -2365,7 +2364,6 @@ async fn consume_interjection_input(
     }
     if trimmed == "!stop" {
         session.cancel_flow();
-        let _compact_guard = session.acquire_compact_lock().await;
         let _ = session.enqueue_injection_with_level("stop", InjectionLevel::L4HardStop, None);
         reporter.info("[atman] stop requested; flow will abort at next node boundary");
         return true;
@@ -2376,7 +2374,6 @@ async fn consume_interjection_input(
             reporter.error("[atman] usage: !course-correct <text>");
             return true;
         }
-        let _compact_guard = session.acquire_compact_lock().await;
         match session.enqueue_injection_with_level(text, InjectionLevel::L2CourseCorrect, None) {
             Ok(id) => reporter.info(format!(
                 "[atman] course-correct queued ({id}) — llm restarts at next chunk boundary"
@@ -2391,7 +2388,6 @@ async fn consume_interjection_input(
             reporter.error("[atman] usage: !redirect <flow_name>");
             return true;
         }
-        let _compact_guard = session.acquire_compact_lock().await;
         match session.enqueue_injection_with_level(
             target,
             InjectionLevel::L3Redirect,
@@ -2408,7 +2404,6 @@ async fn consume_interjection_input(
             reporter.error("[atman] usage: !nudge <text>");
             return true;
         }
-        let _compact_guard = session.acquire_compact_lock().await;
         match session.enqueue_injection(text) {
             Ok(id) => reporter.info(format!(
                 "[atman] nudge queued ({id}) — will inject at next llm node"
@@ -2425,7 +2420,6 @@ async fn consume_interjection_input(
             );
             return true;
         }
-        let _compact_guard = session.acquire_compact_lock().await;
         match session.enqueue_injection(text) {
             Ok(id) => reporter.info(format!(
                 "[atman] nudge queued ({id}) — will inject at next llm node"
@@ -2442,7 +2436,6 @@ async fn consume_interjection_input(
     match cls.level {
         InjectionLevel::L4HardStop => {
             session.cancel_flow();
-            let _compact_guard = session.acquire_compact_lock().await;
             let _ = session.enqueue_injection_with_level(
                 trimmed,
                 InjectionLevel::L4HardStop,
@@ -2452,7 +2445,6 @@ async fn consume_interjection_input(
         }
         InjectionLevel::L3Redirect => {
             let target = cls.redirect_target.clone();
-            let _compact_guard = session.acquire_compact_lock().await;
             match session.enqueue_injection_with_level(
                 trimmed,
                 InjectionLevel::L3Redirect,
@@ -2466,7 +2458,6 @@ async fn consume_interjection_input(
             }
         }
         InjectionLevel::L2CourseCorrect => {
-            let _compact_guard = session.acquire_compact_lock().await;
             match session.enqueue_injection_with_level(
                 trimmed,
                 InjectionLevel::L2CourseCorrect,
@@ -2478,15 +2469,12 @@ async fn consume_interjection_input(
                 Err(e) => reporter.error(format!("[atman] L2 course-correct rejected: {e}")),
             }
         }
-        InjectionLevel::L1Nudge => {
-            let _compact_guard = session.acquire_compact_lock().await;
-            match session.enqueue_injection(trimmed) {
-                Ok(id) => reporter.info(format!(
-                    "[atman] L1 nudge queued ({id}, {source}): {trimmed}"
-                )),
-                Err(e) => reporter.error(format!("[atman] L1 nudge rejected: {e}")),
-            }
-        }
+        InjectionLevel::L1Nudge => match session.enqueue_injection(trimmed) {
+            Ok(id) => reporter.info(format!(
+                "[atman] L1 nudge queued ({id}, {source}): {trimmed}"
+            )),
+            Err(e) => reporter.error(format!("[atman] L1 nudge rejected: {e}")),
+        },
     }
     let _ = ClassifierSource::Default;
     true
