@@ -1887,7 +1887,9 @@ fn handle_key(
         }
         KeyAction::Submit => {
             if let Some(line) = editor.submit() {
-                app.push_user_turn(line.clone());
+                if !app.has_running_workflow() {
+                    app.push_user_turn(line.clone());
+                }
                 if let Some(tx) = submit_tx {
                     let _ = tx.send(line);
                 }

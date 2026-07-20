@@ -856,9 +856,12 @@ impl AppState {
         let mut panel_after_user_turn = false;
         for it in self.items.iter().rev() {
             match it {
-                OutputItem::WorkflowPanel { .. } => {
+                OutputItem::WorkflowPanel { ended_at: None, .. } => {
                     panel_after_user_turn = true;
                     break;
+                }
+                OutputItem::WorkflowPanel { .. } => {
+                    // closed panel — skip it, don't reuse
                 }
                 OutputItem::UserTurn { .. } => break,
                 _ => {}
