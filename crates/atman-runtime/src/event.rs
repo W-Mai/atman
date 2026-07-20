@@ -384,6 +384,7 @@ impl Event {
 pub enum FlowStatus {
     Ok,
     Errored { message: String },
+    Cancelled,
 }
 
 impl FlowStatus {

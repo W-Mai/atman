@@ -151,11 +151,19 @@ impl WorkflowGraph {
             } => {
                 let id = run_id.0.to_string();
                 if let Some(n) = find_node_mut(&mut self.root, &id) {
-                    n.status = match status {
+                    let new_status = match status {
                         FlowStatus::Ok => NodeStatus::Ok,
                         FlowStatus::Errored { .. } => NodeStatus::Err,
+                        FlowStatus::Cancelled => NodeStatus::Cancelled,
                     };
+                    n.status = new_status;
                     n.ended_at = Some(*ts);
+                    for child in n.children.iter_mut() {
+                        if matches!(child.status, NodeStatus::Running | NodeStatus::Pending) {
+                            child.status = new_status;
+                            child.ended_at = Some(*ts);
+                        }
+                    }
                 }
             }
             Event::FlowNodeStart {
