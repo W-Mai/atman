@@ -879,6 +879,26 @@ impl AppState {
                 }
                 return;
             }
+            // Parent not in HashMap (e.g. after session resume).
+            // Create a new panel for this subflow instead of falling through.
+            let turn_index = self
+                .items
+                .iter()
+                .filter(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
+                .count();
+            let idx = self.items.len();
+            self.push_item(OutputItem::WorkflowPanel {
+                turn_index,
+                graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+                expanded_nodes: HashSet::new(),
+                panel_expanded: false,
+                started_at: std::time::Instant::now(),
+                ended_at: None,
+                cancelled: false,
+            });
+            self.workflow_run_to_panel.insert(run_id.clone(), idx);
+            self.route_to_workflow_panel(frame);
+            return;
         }
         let mut panel_after_user_turn = false;
         for it in self.items.iter().rev() {
