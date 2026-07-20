@@ -575,10 +575,17 @@ async fn run_streaming_once<'a>(
     let mut l1_nudge: Option<String> = None;
     let mut l2_correction: Option<String> = None;
     let mut l3_redirect: Option<String> = None;
+    let mut events_closed = false;
     let final_result = loop {
         tokio::select! {
             biased;
-            ev = events.recv() => {
+            ev = async {
+                if events_closed {
+                    std::future::pending().await
+                } else {
+                    events.recv().await
+                }
+            }, if !events_closed => {
                 match ev {
                     Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
                         if let Some(session) = ctx.session.as_ref() {
@@ -606,7 +613,10 @@ async fn run_streaming_once<'a>(
                         state.on_done(total_tokens, started, rules, &cancel);
                     }
                     Ok(_) => {}
-                    Err(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        events_closed = true;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 }
             }
             inj_msg = poll_injection(&mut inj_rx), if inj_rx.is_some() && l3_redirect.is_none() => {
