@@ -659,13 +659,25 @@ impl AppState {
             | StreamFrame::ToolPendingApproval { .. }
             | StreamFrame::ToolApproved { .. }
             | StreamFrame::ToolDenied { .. }) => {
-                let (is_done, cancelled) = match &frame {
-                    StreamFrame::FlowDone { cancelled, .. } => (true, *cancelled),
-                    _ => (false, false),
+                let (is_done, cancelled, done_run_id) = match &frame {
+                    StreamFrame::FlowDone {
+                        cancelled, run_id, ..
+                    } => (true, *cancelled, Some(run_id.as_str())),
+                    _ => (false, false, None),
                 };
                 self.ensure_workflow_panel_and_apply(&frame);
                 if is_done {
-                    self.close_current_workflow_panel(cancelled);
+                    let panel_idx = done_run_id.and_then(|rid| {
+                        self.items.iter().enumerate().rev().find_map(|(i, it)| {
+                            if let OutputItem::WorkflowPanel { graph, .. } = it {
+                                if graph.find_node(rid).is_some() {
+                                    return Some(i);
+                                }
+                            }
+                            None
+                        })
+                    });
+                    self.close_current_workflow_panel(cancelled, panel_idx);
                     self.streaming = false;
                 }
             }
@@ -828,12 +840,21 @@ impl AppState {
 
     fn route_to_workflow_panel(&mut self, frame: &StreamFrame) {
         let mut mutated = false;
-        if let Some(OutputItem::WorkflowPanel { graph, .. }) = self
-            .items
-            .iter_mut()
-            .rev()
-            .find(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
-        {
+        // For FlowDone, find the panel by run_id instead of just the last panel.
+        // Otherwise a new flow's panel can steal the FlowDone from a previous flow.
+        let target = if let StreamFrame::FlowDone { run_id, .. } = frame {
+            self.items.iter_mut().rev().find(|it| {
+                matches!(it, OutputItem::WorkflowPanel {
+                        graph, ..
+                    } if graph.find_node(run_id).is_some())
+            })
+        } else {
+            self.items
+                .iter_mut()
+                .rev()
+                .find(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
+        };
+        if let Some(OutputItem::WorkflowPanel { graph, .. }) = target {
             graph.apply_stream_frame(frame);
             mutated = true;
         }
@@ -873,8 +894,9 @@ impl AppState {
         self.route_to_workflow_panel(frame);
     }
 
-    pub fn close_current_workflow_panel(&mut self, cancelled: bool) {
-        if let Some(idx) = self.last_workflow_panel_idx {
+    pub fn close_current_workflow_panel(&mut self, cancelled: bool, panel_idx: Option<usize>) {
+        let idx = panel_idx.or(self.last_workflow_panel_idx);
+        if let Some(idx) = idx {
             if let Some(OutputItem::WorkflowPanel {
                 ended_at,
                 cancelled: cancelled_flag,
@@ -922,7 +944,7 @@ impl AppState {
     }
 
     pub fn push_user_turn(&mut self, text: String) {
-        self.close_current_workflow_panel(false);
+        self.close_current_workflow_panel(false, None);
         self.push_item(OutputItem::UserTurn { text });
         self.waiting_for_llm = true;
     }
