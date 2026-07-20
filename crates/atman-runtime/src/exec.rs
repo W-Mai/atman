@@ -578,7 +578,6 @@ async fn run_streaming_once<'a>(
     let mut events_closed = false;
     let final_result = loop {
         tokio::select! {
-            biased;
             ev = async {
                 if events_closed {
                     std::future::pending().await
