@@ -853,6 +853,28 @@ impl AppState {
     }
 
     fn ensure_workflow_panel_and_apply(&mut self, frame: &StreamFrame) {
+        // For subflows (FlowStart with parent_run_id), find and reuse the parent's panel.
+        if let StreamFrame::FlowStart {
+            run_id,
+            parent_run_id: Some(parent_rid),
+            ..
+        } = frame
+        {
+            if let Some(&parent_idx) = self.workflow_run_to_panel.get(parent_rid) {
+                if let Some(OutputItem::WorkflowPanel { ended_at, .. }) =
+                    self.items.get_mut(parent_idx)
+                {
+                    if ended_at.is_some() {
+                        *ended_at = None;
+                        self.running_workflow_count = self.running_workflow_count.saturating_add(1);
+                    }
+                }
+                self.workflow_run_to_panel
+                    .insert(run_id.clone(), parent_idx);
+                self.route_to_workflow_panel(frame);
+                return;
+            }
+        }
         let mut panel_after_user_turn = false;
         for it in self.items.iter().rev() {
             match it {
