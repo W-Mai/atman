@@ -195,6 +195,7 @@ impl Executor {
                 run_id: run_id.0.to_string(),
                 flow_name: flow.name.name.clone(),
                 ok: matches!(status, FlowStatus::Ok),
+                cancelled: false,
             });
         }
         result

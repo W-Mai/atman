@@ -26,6 +26,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             panel_expanded: false,
             started_at: Instant::now(),
             ended_at: None,
+            cancelled: false,
         });
         let idx = out.len() - 1;
         *current = Some(idx);
@@ -231,6 +232,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         run_id: run_id.clone(),
                         flow_name: String::new(),
                         ok: *ok,
+                        cancelled: false,
                     },
                     *ts,
                 );

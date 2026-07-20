@@ -65,6 +65,7 @@ fn snapshot(width: u16, height: u16, boxed: bool) -> Buffer {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),

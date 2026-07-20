@@ -1582,6 +1582,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     (Value::Unit, crate::event::FlowStatus::Ok, true)
                 }
             };
+            let cancelled = matches!(status, crate::event::FlowStatus::Cancelled);
             if let Some(sink) = ctx.events {
                 sink.emit(crate::event::Event::FlowEnd {
                     seq: 0,
@@ -1598,6 +1599,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         run_id: sub_run_id.0.to_string(),
                         flow_name: name.name.clone(),
                         ok,
+                        cancelled,
                     });
             }
             result

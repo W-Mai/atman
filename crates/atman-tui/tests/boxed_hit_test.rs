@@ -57,6 +57,7 @@ fn build_boxed(root: WorkflowNode, width: u16) -> Vec<NodeRegion> {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),

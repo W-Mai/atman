@@ -209,6 +209,7 @@ fn render(
         graph,
         &std::collections::HashSet::new(),
         false,
+        false, // cancelled
         frame,
         splash.banner_rect.width,
     );

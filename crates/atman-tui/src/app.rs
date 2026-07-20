@@ -40,6 +40,7 @@ pub enum OutputItem {
         panel_expanded: bool,
         started_at: Instant,
         ended_at: Option<Instant>,
+        cancelled: bool,
     },
     StartupCard {
         version: String,
@@ -658,10 +659,13 @@ impl AppState {
             | StreamFrame::ToolPendingApproval { .. }
             | StreamFrame::ToolApproved { .. }
             | StreamFrame::ToolDenied { .. }) => {
-                let is_done = matches!(frame, StreamFrame::FlowDone { .. });
+                let (is_done, cancelled) = match &frame {
+                    StreamFrame::FlowDone { cancelled, .. } => (true, *cancelled),
+                    _ => (false, false),
+                };
                 self.ensure_workflow_panel_and_apply(&frame);
                 if is_done {
-                    self.close_current_workflow_panel();
+                    self.close_current_workflow_panel(cancelled);
                     self.streaming = false;
                 }
             }
@@ -863,16 +867,23 @@ impl AppState {
                 panel_expanded: false,
                 started_at: std::time::Instant::now(),
                 ended_at: None,
+                cancelled: false,
             });
         }
         self.route_to_workflow_panel(frame);
     }
 
-    pub fn close_current_workflow_panel(&mut self) {
+    pub fn close_current_workflow_panel(&mut self, cancelled: bool) {
         if let Some(idx) = self.last_workflow_panel_idx {
-            if let Some(OutputItem::WorkflowPanel { ended_at, .. }) = self.items.get_mut(idx) {
+            if let Some(OutputItem::WorkflowPanel {
+                ended_at,
+                cancelled: cancelled_flag,
+                ..
+            }) = self.items.get_mut(idx)
+            {
                 if ended_at.is_none() {
                     *ended_at = Some(Instant::now());
+                    *cancelled_flag = cancelled;
                     self.items_version = self.items_version.wrapping_add(1);
                     self.running_workflow_count = self.running_workflow_count.saturating_sub(1);
                 }
@@ -911,7 +922,7 @@ impl AppState {
     }
 
     pub fn push_user_turn(&mut self, text: String) {
-        self.close_current_workflow_panel();
+        self.close_current_workflow_panel(false);
         self.push_item(OutputItem::UserTurn { text });
         self.waiting_for_llm = true;
     }
@@ -1376,6 +1387,7 @@ mod tests {
             panel_expanded: true,
             started_at: Instant::now(),
             ended_at: None,
+            cancelled: false,
         });
         let idx = app.items.len() - 1;
         app.toggle_workflow_node(idx, "node_x");

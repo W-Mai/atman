@@ -118,6 +118,7 @@ fn run_bench(node_count: usize, iterations: u32) -> (f64, usize) {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     }];
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),

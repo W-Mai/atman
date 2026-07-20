@@ -381,6 +381,7 @@ fn item_content_hash(
             panel_expanded,
             started_at,
             ended_at,
+            ..
         } => {
             5u8.hash(&mut h);
             turn_index.hash(&mut h);
@@ -542,6 +543,7 @@ pub fn render_item_with_regions(
         graph,
         expanded_nodes,
         panel_expanded,
+        cancelled,
         ..
     } = item
     {
@@ -549,6 +551,7 @@ pub fn render_item_with_regions(
             graph,
             expanded_nodes,
             *panel_expanded,
+            *cancelled,
             ctx.animation_frame,
             ctx.panel_width,
         )
@@ -1461,11 +1464,13 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             panel_expanded,
             started_at,
             ended_at,
+            cancelled,
             ..
         } => render_workflow_panel(
             graph,
             expanded_nodes,
             *panel_expanded,
+            *cancelled,
             *started_at,
             *ended_at,
             ctx.animation_frame,
@@ -2279,10 +2284,12 @@ fn format_workflow_stats_footer(
     Line::from(Span::styled(bottom_text, border_style))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_workflow_panel(
     graph: &atman_runtime::workflow::WorkflowGraph,
     expanded_nodes: &std::collections::HashSet<String>,
     panel_expanded: bool,
+    cancelled: bool,
     _started_at: std::time::Instant,
     _ended_at: Option<std::time::Instant>,
     animation_frame: u32,
@@ -2292,6 +2299,7 @@ fn render_workflow_panel(
         graph,
         expanded_nodes,
         panel_expanded,
+        cancelled,
         animation_frame,
         panel_width,
     )
@@ -2302,11 +2310,16 @@ pub fn render_workflow_panel_with_regions(
     graph: &atman_runtime::workflow::WorkflowGraph,
     expanded_nodes: &std::collections::HashSet<String>,
     panel_expanded: bool,
+    cancelled: bool,
     animation_frame: u32,
     panel_width: u16,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let count = count_workflow_nodes(&graph.root);
-    let (status_str, status_style, running) = workflow_overall_status(&graph.root);
+    let (mut status_str, mut status_style, running) = workflow_overall_status(&graph.root);
+    if cancelled {
+        status_str = "Cancelled".to_string();
+        status_style = Style::default().fg(Color::Yellow);
+    }
     let elapsed = compute_elapsed_secs(&graph.root, running);
     let fold_glyph = if panel_expanded { "▼" } else { "▶" };
     let flow_glyph = if running {
@@ -4403,6 +4416,7 @@ mod tests {
             panel_expanded: true,
             started_at: std::time::Instant::now(),
             ended_at: Some(std::time::Instant::now()),
+            cancelled: false,
         };
         let lines = render_item(&panel, &RenderCtx::empty());
         let flat = flatten_lines(&lines);
@@ -4456,6 +4470,7 @@ mod tests {
             panel_expanded: false,
             started_at: std::time::Instant::now(),
             ended_at: Some(std::time::Instant::now()),
+            cancelled: false,
         };
         let lines = render_item(&panel, &RenderCtx::empty());
         let flat = flatten_lines(&lines);
@@ -4523,6 +4538,7 @@ mod tests {
             panel_expanded: true,
             started_at: std::time::Instant::now(),
             ended_at: Some(std::time::Instant::now()),
+            cancelled: false,
         };
         let lines = render_item(&panel, &RenderCtx::empty());
         let flat = flatten_lines(&lines);

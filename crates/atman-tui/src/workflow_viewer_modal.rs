@@ -138,6 +138,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
         &graph,
         &expanded_nodes,
         true,
+        false, // cancelled
         app.animation_frame,
         VIEWER_PANEL_WIDTH,
     );

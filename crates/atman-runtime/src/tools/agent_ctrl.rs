@@ -608,6 +608,7 @@ fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
             run_id: run_id.0.to_string(),
             flow_name: "agent.sub".into(),
             ok: matches!(status, FlowStatus::Ok),
+            cancelled: false,
         });
     }
 }

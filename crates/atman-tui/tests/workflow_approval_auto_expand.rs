@@ -61,6 +61,7 @@ fn render_boxed(root: WorkflowNode, width: u16) -> Vec<String> {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),

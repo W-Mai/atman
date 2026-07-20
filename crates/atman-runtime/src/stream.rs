@@ -76,6 +76,8 @@ pub enum StreamFrame {
         run_id: String,
         flow_name: String,
         ok: bool,
+        #[serde(default)]
+        cancelled: bool,
     },
     ToolNode {
         run_id: String,

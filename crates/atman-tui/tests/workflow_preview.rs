@@ -85,6 +85,7 @@ fn render_boxed_to_string(root: WorkflowNode, width: u16) -> String {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),
@@ -125,6 +126,7 @@ fn preview_collapsed_workflow_card() {
         panel_expanded: false,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &HashSet::new(),

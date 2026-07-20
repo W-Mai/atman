@@ -79,6 +79,7 @@ fn build_panel(
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),
@@ -117,6 +118,7 @@ fn boxed_wide_terminal_lays_fanout_branches_horizontally() {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),
@@ -168,6 +170,7 @@ fn boxed_narrow_terminal_keeps_fanout_vertical() {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),
@@ -299,6 +302,7 @@ fn layout_cache_still_composes_valid_regions() {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     };
     let ctx = RenderCtx {
         expanded_tools: &Default::default(),

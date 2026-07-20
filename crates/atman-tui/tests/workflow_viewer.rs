@@ -48,6 +48,7 @@ fn make_panel_item() -> OutputItem {
         panel_expanded: true,
         started_at: std::time::Instant::now(),
         ended_at: None,
+        cancelled: false,
     }
 }
 
