@@ -639,9 +639,20 @@ impl WorkflowGraph {
                     n.output_preview = Some(preview.clone());
                 }
             }
-            StreamFrame::FlowDone { run_id, ok, .. } => {
+            StreamFrame::FlowDone {
+                run_id,
+                ok,
+                cancelled,
+                ..
+            } => {
                 if let Some(n) = find_node_mut(&mut self.root, run_id) {
-                    let status = if *ok { NodeStatus::Ok } else { NodeStatus::Err };
+                    let status = if *cancelled {
+                        NodeStatus::Cancelled
+                    } else if *ok {
+                        NodeStatus::Ok
+                    } else {
+                        NodeStatus::Err
+                    };
                     cascade_terminate(n, status, now);
                 }
             }

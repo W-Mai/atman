@@ -37,12 +37,20 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                           frame: &StreamFrame,
                           ts: Option<chrono::DateTime<chrono::Utc>>| {
         if let Some(OutputItem::WorkflowPanel {
-            graph, ended_at, ..
+            graph,
+            ended_at,
+            cancelled,
+            ..
         }) = out.get_mut(idx)
         {
             graph.apply_stream_frame_at(frame, ts);
-            if let StreamFrame::FlowDone { .. } = frame {
+            if let StreamFrame::FlowDone {
+                cancelled: flow_cancelled,
+                ..
+            } = frame
+            {
                 *ended_at = Some(Instant::now());
+                *cancelled = *flow_cancelled;
             }
         }
     };
