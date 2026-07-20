@@ -179,10 +179,17 @@ impl Executor {
         };
         let status = match &result {
             Ok(_) => FlowStatus::Ok,
-            Err(e) => FlowStatus::Errored {
-                message: e.to_string(),
-            },
+            Err(e) => {
+                if matches!(e, RuntimeError::Cancelled(_)) {
+                    FlowStatus::Cancelled
+                } else {
+                    FlowStatus::Errored {
+                        message: e.to_string(),
+                    }
+                }
+            }
         };
+        let cancelled = matches!(status, FlowStatus::Cancelled);
         self.events.emit(Event::FlowEnd {
             seq: 0,
             run_id: run_id.clone(),
@@ -195,7 +202,7 @@ impl Executor {
                 run_id: run_id.0.to_string(),
                 flow_name: flow.name.name.clone(),
                 ok: matches!(status, FlowStatus::Ok),
-                cancelled: false,
+                cancelled,
             });
         }
         result
