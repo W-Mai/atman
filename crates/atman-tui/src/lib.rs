@@ -1287,6 +1287,11 @@ fn dispatch_palette_entry(
                 let _ = tx.send(TuiControl::MoveSession);
             }
         }
+        PaletteEntryId::DeleteSession => {
+            let scope = crate::session_switcher::SessionScope::Project;
+            let rows = enumerate_session_rows(app, scope);
+            app.session_switcher.open_with(rows, scope);
+        }
         PaletteEntryId::SearchHistory => {
             app.history_search.open();
         }

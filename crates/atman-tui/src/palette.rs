@@ -8,6 +8,7 @@ pub enum PaletteEntryId {
     SwitchSession,
     NewSession,
     MoveSession,
+    DeleteSession,
     YankMode,
     CopyLastMessage,
     CopyLastTool,
@@ -49,6 +50,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Move Session",
         hint: "Change this session's working directory",
         keyword: "session move cwd path",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::DeleteSession,
+        group: "Session",
+        label: "Delete Session",
+        hint: "Pick a session to permanently delete",
+        keyword: "session delete remove",
     },
     // ── Copy ──
     PaletteEntry {
