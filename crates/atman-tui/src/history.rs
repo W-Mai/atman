@@ -231,7 +231,12 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     *ts,
                 );
             }
-            TranscriptEntry::FlowDone { run_id, ok, ts } => {
+            TranscriptEntry::FlowDone {
+                run_id,
+                ok,
+                cancelled,
+                ts,
+            } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -240,7 +245,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         run_id: run_id.clone(),
                         flow_name: String::new(),
                         ok: *ok,
-                        cancelled: false,
+                        cancelled: *cancelled,
                     },
                     *ts,
                 );
@@ -478,6 +483,7 @@ mod tests {
             TranscriptEntry::FlowDone {
                 run_id: "r1".into(),
                 ok: true,
+                cancelled: false,
                 ts: None,
             },
         ];

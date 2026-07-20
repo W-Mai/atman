@@ -554,6 +554,7 @@ pub enum TranscriptEntry {
     FlowDone {
         run_id: String,
         ok: bool,
+        cancelled: bool,
         ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     LlmCall {
@@ -973,8 +974,14 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
             "flow_end" => {
                 let run_id = v["run_id"].as_str().unwrap_or("").to_string();
                 let ok = v["status"]["kind"].as_str() == Some("ok");
+                let cancelled = v["status"]["kind"].as_str() == Some("cancelled");
                 let ts = parse_ts(v);
-                out.push(TranscriptEntry::FlowDone { run_id, ok, ts });
+                out.push(TranscriptEntry::FlowDone {
+                    run_id,
+                    ok,
+                    cancelled,
+                    ts,
+                });
             }
             "llm_call" => {
                 let model = v["model"].as_str().unwrap_or("").to_string();

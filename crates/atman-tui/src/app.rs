@@ -871,7 +871,12 @@ impl AppState {
                 }
                 self.workflow_run_to_panel
                     .insert(run_id.clone(), parent_idx);
-                self.route_to_workflow_panel(frame);
+                if let Some(OutputItem::WorkflowPanel { graph, .. }) =
+                    self.items.get_mut(parent_idx)
+                {
+                    graph.apply_stream_frame(frame);
+                    self.items_version = self.items_version.wrapping_add(1);
+                }
                 return;
             }
         }
