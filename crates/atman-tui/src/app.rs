@@ -175,6 +175,7 @@ pub struct AppState {
     pub handle_index: std::collections::HashMap<String, usize>,
     pub running_workflow_count: u32,
     pub last_workflow_panel_idx: Option<usize>,
+    pub workflow_run_to_panel: std::collections::HashMap<String, usize>,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
@@ -659,13 +660,17 @@ impl AppState {
             | StreamFrame::ToolPendingApproval { .. }
             | StreamFrame::ToolApproved { .. }
             | StreamFrame::ToolDenied { .. }) => {
-                let (is_done, cancelled) = match &frame {
-                    StreamFrame::FlowDone { cancelled, .. } => (true, *cancelled),
-                    _ => (false, false),
+                let (is_done, cancelled, done_run_id) = match &frame {
+                    StreamFrame::FlowDone {
+                        cancelled, run_id, ..
+                    } => (true, *cancelled, Some(run_id.as_str())),
+                    _ => (false, false, None),
                 };
                 self.ensure_workflow_panel_and_apply(&frame);
                 if is_done {
-                    self.close_current_workflow_panel(cancelled);
+                    let panel_idx =
+                        done_run_id.and_then(|rid| self.workflow_run_to_panel.get(rid).copied());
+                    self.close_current_workflow_panel(cancelled, panel_idx);
                     self.streaming = false;
                 }
             }
@@ -860,6 +865,7 @@ impl AppState {
                 .iter()
                 .filter(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
                 .count();
+            let idx = self.items.len();
             self.push_item(OutputItem::WorkflowPanel {
                 turn_index,
                 graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
@@ -869,12 +875,16 @@ impl AppState {
                 ended_at: None,
                 cancelled: false,
             });
+            if let StreamFrame::FlowStart { run_id, .. } = frame {
+                self.workflow_run_to_panel.insert(run_id.clone(), idx);
+            }
         }
         self.route_to_workflow_panel(frame);
     }
 
-    pub fn close_current_workflow_panel(&mut self, cancelled: bool) {
-        if let Some(idx) = self.last_workflow_panel_idx {
+    pub fn close_current_workflow_panel(&mut self, cancelled: bool, panel_idx: Option<usize>) {
+        let idx = panel_idx.or(self.last_workflow_panel_idx);
+        if let Some(idx) = idx {
             if let Some(OutputItem::WorkflowPanel {
                 ended_at,
                 cancelled: cancelled_flag,
@@ -922,7 +932,7 @@ impl AppState {
     }
 
     pub fn push_user_turn(&mut self, text: String) {
-        self.close_current_workflow_panel(false);
+        self.close_current_workflow_panel(false, None);
         self.push_item(OutputItem::UserTurn { text });
         self.waiting_for_llm = true;
     }
