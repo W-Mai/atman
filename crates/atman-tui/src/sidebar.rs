@@ -136,7 +136,9 @@ pub fn render(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(task_heights.goal),
+            Constraint::Length(1),
             Constraint::Length(task_heights.plans),
+            Constraint::Length(1),
             Constraint::Length(task_heights.todos),
         ])
         .split(task_area);
@@ -159,17 +161,17 @@ pub fn render(
         (inputs.on_goal_scroll)(c);
     }
     if task_heights.plans > 0 {
-        result.plan_rect = Some(task_sections[1]);
+        result.plan_rect = Some(task_sections[2]);
         let header = plans_header(inputs.plans);
         let body = plans_body(inputs.plans);
-        let c = render_scrollable_section(f, task_sections[1], &header, body, inputs.plans_scroll);
+        let c = render_scrollable_section(f, task_sections[2], &header, body, inputs.plans_scroll);
         (inputs.on_plans_scroll)(c);
     }
     if task_heights.todos > 0 {
-        result.todo_rect = Some(task_sections[2]);
+        result.todo_rect = Some(task_sections[4]);
         let header = todos_header(inputs.todos);
         let body = todos_body(inputs.todos);
-        let c = render_scrollable_section(f, task_sections[2], &header, body, inputs.todos_scroll);
+        let c = render_scrollable_section(f, task_sections[4], &header, body, inputs.todos_scroll);
         (inputs.on_todos_scroll)(c);
     }
 
