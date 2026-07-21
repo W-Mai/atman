@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/atman-cli"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["W-Mai"]

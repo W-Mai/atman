@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/W-Mai/atman/actions"><img src="https://github.com/W-Mai/atman/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/W-Mai/atman/actions"><img src="https://github.com/W-Mai/atman/actions/workflows/release.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="LICENSE-APACHE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/rust-1.85+-orange.svg" alt="Rust 1.85+">
