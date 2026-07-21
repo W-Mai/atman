@@ -13,6 +13,8 @@ pub struct SidebarInputs<'a> {
     pub session_id: &'a str,
     pub session_dir: &'a str,
     pub project_root: Option<&'a str>,
+    pub app_version: &'a str,
+    pub latest_release: Option<&'a str>,
     pub streaming: bool,
     pub todos: &'a [atman_runtime::memory::todo::Todo],
     pub plans: &'a [atman_runtime::memory::plan::Plan],
@@ -87,8 +89,8 @@ pub fn render(
     let _goal_need: u16 = 7;
     let _plans_need: u16 = 3;
     let context_need: u16 = 9;
-    let session_need: u16 = 5;
-    let meta_needs = context_need + session_need;
+    let meta_need: u16 = 5; // title + pwd + version line
+    let meta_needs = context_need + meta_need;
     let total = inner.height;
     let (task_h, meta_h) = if total > meta_needs {
         (total - meta_needs, meta_needs)
@@ -188,7 +190,11 @@ pub fn render(
     }
     if meta_heights.session > 0 {
         f.render_widget(
-            session_section(inputs.session_id, inputs.session_dir, inputs.project_root),
+            meta_section(
+                inputs.project_root,
+                inputs.app_version,
+                inputs.latest_release,
+            ),
             meta_sections[1],
         );
     }
@@ -482,31 +488,52 @@ fn truncate_line(s: &str, max_chars: usize) -> String {
     out
 }
 
-fn session_section<'a>(
-    session_id: &'a str,
-    session_dir: &'a str,
+fn meta_section<'a>(
     project_root: Option<&'a str>,
+    app_version: &'a str,
+    latest_release: Option<&'a str>,
 ) -> Paragraph<'a> {
-    let mut lines: Vec<Line<'_>> = Vec::with_capacity(4);
-    lines.push(Line::from(section_title("▸ Session")));
-    lines.push(Line::from(Span::raw(format!("  {session_id}"))));
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(3);
+    lines.push(Line::from(section_title("▸ Meta")));
+
     if let Some(root) = project_root {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "  pwd ",
-                Style::default().fg(crate::theme::theme().subtle_fg),
-            ),
-            Span::styled(
-                abbreviate_dir(root),
-                Style::default().fg(crate::theme::theme().accent),
-            ),
-        ]));
+        lines.push(project_dir_line(root));
     }
-    lines.push(Line::from(Span::styled(
-        format!("  {}", abbreviate_dir(session_dir)),
-        Style::default().fg(crate::theme::theme().subtle_fg),
-    )));
+    lines.push(version_line(app_version, latest_release));
+
     Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+fn project_dir_line<'a>(dir: &str) -> Line<'a> {
+    let t = crate::theme::theme();
+    let short = abbreviate_dir(dir);
+    if let Some(slash) = short.rfind('/') {
+        let parent = short[..=slash].to_string();
+        let name = short[slash + 1..].to_string();
+        Line::from(vec![
+            Span::styled(format!("  {parent}"), Style::default().fg(t.subtle_fg)),
+            Span::styled(name, Style::default().fg(t.accent)),
+        ])
+    } else {
+        Line::from(Span::styled(
+            format!("  {short}"),
+            Style::default().fg(t.accent),
+        ))
+    }
+}
+
+fn version_line<'a>(version: &str, latest: Option<&'a str>) -> Line<'a> {
+    let t = crate::theme::theme();
+    let brand = Span::styled("  atman", Style::default().fg(t.accent));
+    let ver = Span::styled(format!(" v{version}"), Style::default().fg(t.tinted_fg));
+    match latest {
+        Some(latest_ver) if latest_ver != version => {
+            let arrow = Span::styled(" ↑ ", Style::default().fg(t.warn));
+            let latest = Span::styled(latest_ver, Style::default().fg(t.success));
+            Line::from(vec![brand, ver, arrow, latest])
+        }
+        _ => Line::from(vec![brand, ver]),
+    }
 }
 
 fn section_title(text: &str) -> Span<'_> {

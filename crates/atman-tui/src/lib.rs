@@ -250,6 +250,7 @@ async fn run_frames(
     intro_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let _reader_guard = ReaderGuard(reader_shutdown);
+    let mut update_check = tokio::spawn(check_latest_release());
     loop {
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
 
@@ -270,6 +271,9 @@ async fn run_frames(
             }
             _ = intro_tick.tick(), if app.startup_intro.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
+            }
+            latest = poll_update_check(&mut update_check), if !update_check.is_finished() => {
+                app.latest_release = latest;
             }
 
             key = key_events.recv() => {
@@ -820,6 +824,10 @@ async fn wait_shutdown(rx: Option<&mut tokio::sync::oneshot::Receiver<()>>) {
         }
         None => std::future::pending().await,
     }
+}
+
+async fn poll_update_check(handle: &mut tokio::task::JoinHandle<Option<String>>) -> Option<String> {
+    handle.await.ok().flatten()
 }
 
 fn yank_candidate_indices(app: &AppState) -> Vec<usize> {
@@ -2387,6 +2395,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 session_id: &app.session_id,
                 session_dir: &app.session_dir,
                 project_root: project_root.as_deref(),
+                app_version: env!("CARGO_PKG_VERSION"),
+                latest_release: app.latest_release.as_deref(),
                 streaming: app.streaming,
                 todos: &app.todos,
                 plans: &app.plans,
@@ -2631,4 +2641,20 @@ fn render_theme_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app:
         popup,
         &mut state,
     );
+}
+
+async fn check_latest_release() -> Option<String> {
+    let url = "https://api.github.com/repos/W-Mai/atman/releases/latest";
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .user_agent("atman")
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    let resp = client.get(url).send().await.ok()?;
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let tag = body.get("tag_name")?.as_str()?;
+    Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
 }

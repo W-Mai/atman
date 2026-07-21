@@ -132,6 +132,7 @@ pub struct AppState {
     pub goal: Option<String>,
     pub session_id: String,
     pub session_dir: String,
+    pub latest_release: Option<String>,
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,
     pub todos: Vec<atman_runtime::memory::todo::Todo>,
