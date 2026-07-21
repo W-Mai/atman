@@ -2230,7 +2230,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let injection_rows: u16 = if app.pending_injections.is_empty() {
         0
     } else {
-        (app.pending_injections.len() as u16).min(5) + 1
+        // title + N items + 2 for block borders
+        (app.pending_injections.len() as u16).min(5) + 3
     };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);

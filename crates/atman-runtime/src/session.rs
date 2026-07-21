@@ -1839,6 +1839,7 @@ impl Session {
             for inj in q.iter_mut() {
                 if inj.state == InjectionState::Pending && inj.turn_id == turn_id {
                     inj.state = InjectionState::Cancelled;
+                    let _ = self.injection_tx.send(inj.clone());
                 }
             }
             drop(q);
@@ -1892,6 +1893,7 @@ impl Session {
         for inj in q.iter_mut() {
             if inj.id == *id && inj.state == InjectionState::Pending {
                 inj.state = InjectionState::Injected;
+                let _ = self.injection_tx.send(inj.clone());
                 return;
             }
         }
@@ -1916,6 +1918,7 @@ impl Session {
         for inj in q.iter_mut() {
             if inj.state == InjectionState::Pending && inj.turn_id == *turn_id {
                 inj.state = InjectionState::Injected;
+                let _ = self.injection_tx.send(inj.clone());
                 out.push(inj.clone());
             }
         }
