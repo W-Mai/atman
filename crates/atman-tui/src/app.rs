@@ -882,8 +882,11 @@ impl AppState {
                         *ended_at = None;
                     }
                 }
-                // NOTE: do NOT insert subflow run_id into workflow_run_to_panel —
-                // otherwise FlowDone for the subflow would close the parent panel.
+                // Insert subflow run_id so nested subflows (e.g. agent.spawn)
+                // can find the parent panel. The top_level_run_ids guard in
+                // apply_stream_frame prevents subflow FlowDone from closing it.
+                self.workflow_run_to_panel
+                    .insert(run_id.clone(), parent_idx);
                 if let Some(OutputItem::WorkflowPanel { graph, .. }) =
                     self.items.get_mut(parent_idx)
                 {
