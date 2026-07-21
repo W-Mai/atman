@@ -1,5 +1,5 @@
 use atman_runtime::ContextSnapshot;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -26,6 +26,7 @@ pub struct SidebarInputs<'a> {
     pub todo_collapsed: bool,
     pub context_collapsed: bool,
     pub meta_collapsed: bool,
+    pub sidebar_collapsed: bool,
     pub on_goal_scroll: &'a dyn Fn(u16),
     pub on_plans_scroll: &'a dyn Fn(u16),
     pub on_todos_scroll: &'a dyn Fn(u16),
@@ -63,6 +64,27 @@ pub struct SidebarRenderResult {
     pub todo_hdr_rect: Option<Rect>,
     pub ctx_hdr_rect: Option<Rect>,
     pub meta_hdr_rect: Option<Rect>,
+    pub collapse_btn_rect: Option<Rect>,
+    pub expand_btn_rect: Option<Rect>,
+    pub strip_rects: std::collections::HashMap<String, Rect>,
+}
+
+impl SidebarRenderResult {
+    fn empty() -> Self {
+        Self {
+            goal_rect: None,
+            plan_rect: None,
+            todo_rect: None,
+            goal_hdr_rect: None,
+            plan_hdr_rect: None,
+            todo_hdr_rect: None,
+            ctx_hdr_rect: None,
+            meta_hdr_rect: None,
+            collapse_btn_rect: None,
+            expand_btn_rect: None,
+            strip_rects: std::collections::HashMap::new(),
+        }
+    }
 }
 
 pub fn render(
@@ -74,11 +96,15 @@ pub fn render(
     crate::sanitize_widget_edges(f, area);
     f.render_widget(ratatui::widgets::Clear, area);
 
+    if inputs.sidebar_collapsed {
+        return render_strip(f, area, inputs);
+    }
+
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(t.subtle_fg))
-        .title(" atman ")
+        .title(" ≡ ")
         .padding(ratatui::widgets::Padding {
             left: 2,
             right: 2,
@@ -88,17 +114,18 @@ pub fn render(
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
+    let mut result = SidebarRenderResult::empty();
+
+    // Hamburger button — left side of the title row (≡ in block title).
+    result.collapse_btn_rect = Some(Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: 3,
+        height: 1,
+    });
+
     if inner.height == 0 || inner.width == 0 {
-        return SidebarRenderResult {
-            goal_rect: None,
-            plan_rect: None,
-            todo_rect: None,
-            goal_hdr_rect: None,
-            plan_hdr_rect: None,
-            todo_hdr_rect: None,
-            ctx_hdr_rect: None,
-            meta_hdr_rect: None,
-        };
+        return result;
     }
 
     let _goal_need: u16 = 7;
@@ -172,16 +199,9 @@ pub fn render(
         ])
         .split(inner);
 
-    let mut result = SidebarRenderResult {
-        goal_rect: None,
-        plan_rect: None,
-        todo_rect: None,
-        goal_hdr_rect: None,
-        plan_hdr_rect: None,
-        todo_hdr_rect: None,
-        ctx_hdr_rect: None,
-        meta_hdr_rect: None,
-    };
+    let collapse_btn = result.collapse_btn_rect.take();
+    result = SidebarRenderResult::empty();
+    result.collapse_btn_rect = collapse_btn;
 
     // Goal, Plan, Todo at sections 0, 2, 4 (gaps at 1, 3)
     if goal_lines > 0 {
@@ -661,6 +681,197 @@ fn abbreviate_dir(dir: &str) -> String {
         .rev()
         .collect();
     format!("{head}…{tail}")
+}
+
+// ── collapsed strip ──
+
+fn render_strip(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    inputs: SidebarInputs<'_>,
+) -> SidebarRenderResult {
+    let t = crate::theme::theme();
+    let mut result = SidebarRenderResult::empty();
+
+    let plan = inputs.plans.iter().max_by_key(|p| p.updated_at);
+    let has_plan = plan.is_some();
+    let has_todos = !inputs.todos.is_empty();
+
+    // Layout: ctx_dot + top_pad + P(section) + gap + T(section).
+    // Each plan step / todo item gets one row, in original order.
+    let ctx_dot: u16 = 1;
+    let top_pad: u16 = if has_plan || has_todos { 1 } else { 0 };
+    let p_head: u16 = if has_plan { 1 } else { 0 };
+    let p_steps: u16 = plan.map(|p| p.steps.len() as u16).unwrap_or(0);
+    let p_gap: u16 = if has_plan && has_todos { 1 } else { 0 };
+    let t_head: u16 = if has_todos { 1 } else { 0 };
+    let t_items: u16 = inputs.todos.len() as u16;
+
+    let needed = ctx_dot + top_pad + p_head + p_steps + p_gap + t_head + t_items;
+    let inner_avail = area.height.saturating_sub(2);
+    let available = inner_avail.min(needed);
+
+    if available == 0 {
+        // No content — still render a minimal block so the
+        // hamburger remains clickable. Show context dot (D).
+        let mini = Rect { height: 3, ..area };
+        let outer = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(t.subtle_fg))
+            .title(" ≡ ");
+        let inner = outer.inner(mini);
+        f.render_widget(ratatui::widgets::Clear, mini);
+        f.render_widget(outer, mini);
+        let ctx_dot = if inputs.context.window_budget > 0
+            && inputs.context.window_tokens > inputs.context.window_budget
+        {
+            Span::styled("●", Style::default().fg(t.error))
+        } else if inputs.context.window_budget > 0
+            && inputs.context.window_tokens as f64 > inputs.context.window_budget as f64 * 0.8
+        {
+            Span::styled("●", Style::default().fg(t.warn))
+        } else {
+            Span::styled("○", Style::default().fg(t.success))
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(ctx_dot)).alignment(Alignment::Center),
+            inner,
+        );
+        result.expand_btn_rect = Some(Rect {
+            x: mini.x + 1,
+            y: mini.y,
+            width: 3,
+            height: 1,
+        });
+        return result;
+    }
+
+    let capped = Rect {
+        height: available.saturating_add(2),
+        ..area
+    };
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(t.subtle_fg))
+        .title(" ≡ ");
+    let inner = outer.inner(capped);
+    f.render_widget(ratatui::widgets::Clear, capped);
+    f.render_widget(outer, capped);
+
+    // Hamburger button — left side of the title row.
+    result.expand_btn_rect = Some(Rect {
+        x: capped.x + 1,
+        y: capped.y,
+        width: 3,
+        height: 1,
+    });
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(ctx_dot),
+            Constraint::Length(top_pad),
+            Constraint::Length(p_head),
+            Constraint::Length(p_steps),
+            Constraint::Length(p_gap),
+            Constraint::Length(t_head),
+            Constraint::Length(t_items),
+        ])
+        .split(inner);
+
+    let mut si = 0usize;
+
+    let accent = Style::default().fg(t.accent);
+    let tinted = Style::default().fg(t.tinted_fg);
+    let success = Style::default().fg(t.success);
+
+    let ctx = &inputs.context;
+    let ctx_dot_span = if ctx.window_budget > 0 && ctx.window_tokens > ctx.window_budget {
+        Span::styled("●", Style::default().fg(t.error))
+    } else if ctx.window_budget > 0 && ctx.window_tokens as f64 > ctx.window_budget as f64 * 0.8 {
+        Span::styled("●", Style::default().fg(t.warn))
+    } else {
+        Span::styled("○", Style::default().fg(t.success))
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(ctx_dot_span)).alignment(Alignment::Center),
+        sections[si],
+    );
+    si += 1;
+    si += 1;
+
+    if has_plan {
+        result.plan_hdr_rect = Some(Rect {
+            x: sections[si].x,
+            y: sections[si].y,
+            width: sections[si].width,
+            height: 1,
+        });
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled("P", accent))).alignment(Alignment::Center),
+            sections[si],
+        );
+    }
+    si += 1; // p_head
+    if has_plan {
+        let sec = sections[si];
+        if let Some(p) = plan {
+            for (r, step) in p.steps.iter().enumerate() {
+                let row_rect = Rect {
+                    y: sec.y + r as u16,
+                    height: 1,
+                    ..sec
+                };
+                let sym = if step.done { "✓" } else { "○" };
+                let style = if step.done { success } else { tinted };
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(sym, style)))
+                        .alignment(Alignment::Center),
+                    row_rect,
+                );
+            }
+        }
+    }
+    si += 1;
+    si += 1; // p_gap
+    if has_todos {
+        result.todo_hdr_rect = Some(Rect {
+            x: sections[si].x,
+            y: sections[si].y,
+            width: sections[si].width,
+            height: 1,
+        });
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled("T", accent))).alignment(Alignment::Center),
+            sections[si],
+        );
+    }
+    si += 1; // t_head
+    if has_todos {
+        let sec = sections[si];
+        for (r, todo) in inputs.todos.iter().enumerate() {
+            let row_rect = Rect {
+                y: sec.y + r as u16,
+                height: 1,
+                ..sec
+            };
+            let (sym, style) = match todo.status {
+                atman_runtime::memory::todo::TodoStatus::Done => ("✓", success),
+                atman_runtime::memory::todo::TodoStatus::Cancelled => {
+                    ("✕", Style::default().fg(t.subtle_fg))
+                }
+                _ => ("○", tinted),
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(sym, style))).alignment(Alignment::Center),
+                row_rect,
+            );
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

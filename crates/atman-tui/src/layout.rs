@@ -29,14 +29,20 @@ pub fn compute_ex(area: Rect, status_height: u16) -> AppLayout {
     }
 }
 
-pub fn compute_sidebar_rect(area: Rect, show: bool) -> Option<Rect> {
+pub const SIDEBAR_STRIP_WIDTH: u16 = 5;
+
+pub fn compute_sidebar_rect(area: Rect, show: bool, collapsed: bool) -> Option<Rect> {
     if !show {
         return None;
     }
     if area.width < SIDEBAR_MIN_TOTAL_WIDTH {
         return None;
     }
-    let width = SIDEBAR_WIDTH;
+    let width = if collapsed {
+        SIDEBAR_STRIP_WIDTH
+    } else {
+        SIDEBAR_WIDTH
+    };
     let height = area.height.saturating_sub(4);
     if height == 0 {
         return None;
@@ -233,22 +239,36 @@ mod tests {
     #[test]
     fn sidebar_hidden_when_closed() {
         let area = Rect::new(0, 0, 200, 40);
-        assert!(compute_sidebar_rect(area, false).is_none());
+        assert!(compute_sidebar_rect(area, false, false).is_none());
     }
 
     #[test]
     fn sidebar_hidden_on_narrow_terminals() {
         let area = Rect::new(0, 0, 60, 40);
-        assert!(compute_sidebar_rect(area, true).is_none());
+        assert!(compute_sidebar_rect(area, true, false).is_none());
     }
 
     #[test]
     fn sidebar_floats_in_top_right_when_open() {
         let area = Rect::new(0, 1, 140, 40);
-        let rect = compute_sidebar_rect(area, true).unwrap();
+        let rect = compute_sidebar_rect(area, true, false).unwrap();
         assert_eq!(rect.width, SIDEBAR_WIDTH);
         assert_eq!(rect.x + rect.width, area.x + area.width - 1);
         assert_eq!(rect.y, area.y + 2);
+    }
+
+    #[test]
+    fn sidebar_collapsed_uses_strip_width() {
+        let area = Rect::new(0, 0, 140, 40);
+        let rect = compute_sidebar_rect(area, true, true).unwrap();
+        assert_eq!(rect.width, SIDEBAR_STRIP_WIDTH);
+        assert_eq!(rect.x + rect.width, area.x + area.width - 1);
+    }
+
+    #[test]
+    fn sidebar_collapsed_on_narrow_terminal_still_hidden() {
+        let area = Rect::new(0, 0, 60, 40);
+        assert!(compute_sidebar_rect(area, true, true).is_none());
     }
 
     #[test]

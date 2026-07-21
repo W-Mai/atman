@@ -410,6 +410,14 @@ async fn run_frames(
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.meta_collapsed = !app.meta_collapsed;
+                                } else if let Some(r) = app.last_collapse_btn_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.sidebar_collapsed = true;
+                                } else if let Some(r) = app.last_expand_btn_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.sidebar_collapsed = false;
                                 } else if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
@@ -2044,7 +2052,7 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ToggleSidebar => {
-            app.sidebar_mode = app.sidebar_mode.toggle();
+            app.sidebar_collapsed = !app.sidebar_collapsed;
             *interrupt_prompt = None;
         }
         KeyAction::ToggleMouseCapture => {
@@ -2248,12 +2256,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         })
         .unwrap_or(1.0);
     let intro_active = app.startup_intro.is_some() && intro_progress < 1.0;
-    let wide_enough = area.width >= layout::SIDEBAR_MIN_TOTAL_WIDTH;
-    let show_sidebar = if startup_active || intro_active {
-        false
-    } else {
-        app.sidebar_mode.resolve(wide_enough)
-    };
+    let show_sidebar = !startup_active && !intro_active;
     let status_height: u16 = 1;
     let pending_count = app.pending_approvals.len();
     let approvals_rows: u16 = if pending_count == 0 {
@@ -2270,7 +2273,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         (app.pending_injections.len() as u16).min(5) + 3
     };
     let l = layout::compute_ex(area, status_height);
-    let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
+    let sidebar_rect =
+        layout::compute_sidebar_rect(l.transcript, show_sidebar, app.sidebar_collapsed);
     let transcript_content = layout::compute_content_rect(l.transcript);
     let content_w = layout::input_content_width(l.transcript.width);
     let total_input_lines = crate::input::wrapped_line_count(editor.buf(), content_w) as u16;
@@ -2429,6 +2433,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 todo_collapsed: app.todo_collapsed,
                 context_collapsed: app.context_collapsed,
                 meta_collapsed: app.meta_collapsed,
+                sidebar_collapsed: app.sidebar_collapsed,
                 on_goal_scroll: &|_c| {},
                 on_plans_scroll: &|_c| {},
                 on_todos_scroll: &|_c| {},
@@ -2443,6 +2448,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_todo_hdr_rect = sr.todo_hdr_rect;
         app.last_ctx_hdr_rect = sr.ctx_hdr_rect;
         app.last_meta_hdr_rect = sr.meta_hdr_rect;
+        app.last_collapse_btn_rect = sr.collapse_btn_rect;
+        app.last_expand_btn_rect = sr.expand_btn_rect;
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
