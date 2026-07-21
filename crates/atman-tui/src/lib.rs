@@ -2513,7 +2513,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     f.render_widget(
         ratatui::widgets::Paragraph::new(ratatui::text::Line::from(ratatui::text::Span::styled(
             "❯",
-            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+            if app.streaming {
+                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::DIM)
+            } else {
+                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD)
+            },
         ))),
         ratatui::layout::Rect {
             x: input_rect.x,
