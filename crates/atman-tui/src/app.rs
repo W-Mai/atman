@@ -137,6 +137,7 @@ pub struct AppState {
     pub todos: Vec<atman_runtime::memory::todo::Todo>,
     pub plans: Vec<atman_runtime::memory::plan::Plan>,
     pub pending_approvals: Vec<atman_runtime::session::PendingApproval>,
+    pub pending_injections: Vec<atman_runtime::injection::Injection>,
     pub yank_mode: bool,
     pub yank_index: usize,
     pub palette: crate::palette::CommandPalette,

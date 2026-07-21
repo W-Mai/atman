@@ -5,6 +5,7 @@ use atman_runtime::stream::CompactionPhase;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::{NoteLevel, OutputItem};
 
@@ -4655,5 +4656,72 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
         lines.push(Line::from(spans));
     }
     lines.push(blank);
+    lines
+}
+
+fn truncate_to_width(s: &str, max_w: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if UnicodeWidthStr::width(s) <= max_w {
+        return s.to_string();
+    }
+    let mut acc = String::with_capacity(s.len());
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > max_w {
+            acc.push('…');
+            break;
+        }
+        acc.push(ch);
+        w += cw;
+    }
+    acc
+}
+
+pub fn render_injection_queue(
+    pending: &[atman_runtime::injection::Injection],
+    width: u16,
+) -> Vec<Line<'static>> {
+    use atman_runtime::injection::InjectionLevel;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+
+    if pending.is_empty() {
+        return Vec::new();
+    }
+    let t = crate::theme::theme();
+    let max_w = width.saturating_sub(6) as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let title = format!(" ⚡ interjections · {} pending ", pending.len());
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
+    )));
+
+    for inj in pending {
+        let level_style = match inj.level {
+            InjectionLevel::L1Nudge => Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+            InjectionLevel::L2CourseCorrect => {
+                Style::default().fg(t.warn).add_modifier(Modifier::BOLD)
+            }
+            InjectionLevel::L3Redirect => {
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            }
+            InjectionLevel::L4HardStop => Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+        };
+        let level_label = match inj.level {
+            InjectionLevel::L1Nudge => "L1",
+            InjectionLevel::L2CourseCorrect => "L2",
+            InjectionLevel::L3Redirect => "L3",
+            InjectionLevel::L4HardStop => "L4",
+        };
+        let text = truncate_to_width(&inj.text, max_w.saturating_sub(6));
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(format!("[{level_label}]"), level_style),
+            Span::styled(format!(" {text}"), Style::default().fg(t.tinted_fg)),
+        ]));
+    }
     lines
 }

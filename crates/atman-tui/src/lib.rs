@@ -135,6 +135,7 @@ pub struct TuiHandle {
     pub compact_review_rx:
         Option<tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
     pub form_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
+    pub injection_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::injection::Injection>>,
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub startup_intro: Option<app::StartupIntro>,
@@ -162,6 +163,7 @@ impl TuiHandle {
             approvals_rx: Some(session.subscribe_pending_approvals()),
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
+            injection_rx: Some(session.subscribe_injections()),
             flow_names: Vec::new(),
             session: Some(session),
             startup_intro: None,
@@ -528,6 +530,19 @@ async fn run_frames(
                     app.pending_approvals = rx.borrow().clone();
                 }
             }
+            inj = recv_injection(handle.injection_rx.as_mut()) => {
+                if let Some(inj) = inj {
+                    // Keep only pending injections, drop consumed/cancelled ones.
+                    if matches!(inj.state, atman_runtime::injection::InjectionState::Pending) {
+                        if !app.pending_injections.iter().any(|i| i.id == inj.id) {
+                            app.pending_injections.push(inj);
+                        }
+                    } else {
+                        app.pending_injections.retain(|i| i.id != inj.id);
+                    }
+                    app.mark_items_dirty();
+                }
+            }
             _ = wait_compact_review_change(handle.compact_review_rx.as_mut()) => {
                 if let Some(rx) = handle.compact_review_rx.as_mut() {
                     let latest = rx.borrow().clone();
@@ -742,6 +757,15 @@ async fn wait_sigterm(_sig: Option<&mut ()>) {
 async fn recv_note(rx: Option<&mut mpsc::UnboundedReceiver<TuiNote>>) -> Option<TuiNote> {
     match rx {
         Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_injection(
+    rx: Option<&mut tokio::sync::broadcast::Receiver<atman_runtime::injection::Injection>>,
+) -> Option<atman_runtime::injection::Injection> {
+    match rx {
+        Some(r) => r.recv().await.ok(),
         None => std::future::pending().await,
     }
 }
@@ -2203,6 +2227,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         let overflow = if pending_count > 9 { 1 } else { 0 };
         items + overflow + 2
     };
+    let injection_rows: u16 = if app.pending_injections.is_empty() {
+        0
+    } else {
+        (app.pending_injections.len() as u16).min(5) + 1
+    };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect = layout::compute_sidebar_rect(l.transcript, show_sidebar);
     let transcript_content = layout::compute_content_rect(l.transcript);
@@ -2379,6 +2408,26 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         sanitize_widget_edges(f, area);
         f.render_widget(ratatui::widgets::Clear, area);
         approval_bar::render(f, area, &app.pending_approvals);
+    }
+    // Render injection queue above approvals bar / input box.
+    if injection_rows > 0 {
+        let inj_rect = layout::compute_injection_rect(
+            l.transcript,
+            input_rect,
+            approvals_rect,
+            injection_rows,
+        );
+        if let Some(area) = inj_rect {
+            sanitize_widget_edges(f, area);
+            f.render_widget(ratatui::widgets::Clear, area);
+            let lines = output::render_injection_queue(&app.pending_injections, area.width);
+            let block = ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(ratatui::style::Style::default().fg(crate::theme::theme().warn));
+            let para = ratatui::widgets::Paragraph::new(lines).block(block);
+            f.render_widget(para, area);
+        }
     }
     // Wipe splash overlay ∪ docked rect for the entire lifetime of the intro,
     // including the very last frame where progress hits 1.0 and the banner /

@@ -191,6 +191,33 @@ pub fn compute_approvals_rect(transcript: Rect, input_rect: Rect, rows: u16) -> 
     })
 }
 
+/// Compute a rect for the injection queue, stacked above the approvals bar
+/// (or directly above the input box when no approvals are shown).
+pub fn compute_injection_rect(
+    transcript: Rect,
+    input_rect: Rect,
+    approvals_rect: Option<Rect>,
+    rows: u16,
+) -> Option<Rect> {
+    if rows == 0 {
+        return None;
+    }
+    let inset: u16 = 4;
+    let width = input_rect.width.saturating_sub(inset * 2).max(20);
+    let x = input_rect.x + (input_rect.width.saturating_sub(width)) / 2;
+    let base_y = approvals_rect.map(|r| r.y).unwrap_or(input_rect.y);
+    let above = base_y.saturating_sub(rows);
+    if above <= transcript.y {
+        return None;
+    }
+    Some(Rect {
+        x,
+        y: above,
+        width,
+        height: rows,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
