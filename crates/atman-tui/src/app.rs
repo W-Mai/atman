@@ -926,8 +926,10 @@ impl AppState {
         for (i, it) in self.items.iter().enumerate().rev() {
             match it {
                 OutputItem::WorkflowPanel { ended_at: None, .. } => {
-                    // An open panel exists — stop scanning but still create a
-                    // new panel for this independent top-level flow.
+                    // FlowGraph reuses an open panel; FlowStart creates a new one.
+                    if matches!(frame, StreamFrame::FlowGraph { .. }) {
+                        panel_after_user_turn = true;
+                    }
                     break;
                 }
                 OutputItem::WorkflowPanel {
@@ -1010,12 +1012,11 @@ impl AppState {
                 if was_open {
                     *ended_at = Some(Instant::now());
                 }
-                // Always allow upgrading cancelled from false → true
-                // (push_user_turn closes with false; interjection handler needs true).
-                if cancelled || was_open {
-                    *cancelled_flag = cancelled;
-                    self.items_version = self.items_version.wrapping_add(1);
-                }
+                // Always honor the caller's intent — push_user_turn must
+                // be able to clear a stale cancelled flag from a previous
+                // flow, otherwise the scan falsely reopens the panel.
+                *cancelled_flag = cancelled;
+                self.items_version = self.items_version.wrapping_add(1);
             }
         }
     }
