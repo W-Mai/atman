@@ -24,11 +24,6 @@ pub fn input_paragraph<'a>(
     scroll_row: u16,
     trust: &'a atman_runtime::trust::TrustConfig,
 ) -> Paragraph<'a> {
-    let prompt_style = if streaming {
-        Style::default().add_modifier(Modifier::DIM)
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
-    };
     let display = trust.display();
     let mode_color = match display.color {
         atman_runtime::trust::ModeColor::Cyan => Color::Cyan,
@@ -44,11 +39,11 @@ pub fn input_paragraph<'a>(
     };
     let title = if pending_below > 0 {
         format!(
-            " atman · {} {}  ↓ {pending_below} new ",
+            "❯ atman · {} {}  ↓ {pending_below} new ",
             display.emoji, display.name
         )
     } else {
-        format!(" atman · {} {} ", display.emoji, display.name)
+        format!("❯ atman · {} {} ", display.emoji, display.name)
     };
     let title_span = Span::styled(
         title,
@@ -79,13 +74,8 @@ pub fn input_paragraph<'a>(
         input.split('\n').collect()
     };
     let mut lines: Vec<Line<'a>> = Vec::with_capacity(raw_lines.len());
-    for (i, seg) in raw_lines.iter().enumerate() {
-        let prefix = if i == 0 {
-            Span::styled("❯ ", prompt_style)
-        } else {
-            Span::raw("  ")
-        };
-        lines.push(Line::from(vec![prefix, Span::raw(*seg)]));
+    for seg in &raw_lines {
+        lines.push(Line::from(vec![Span::raw(*seg)]));
     }
 
     Paragraph::new(lines)

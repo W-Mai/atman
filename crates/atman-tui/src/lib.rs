@@ -383,11 +383,7 @@ async fn run_frames(
                                 // Strip the prompt "❯ " when clicking on the
                                 // first row so column 0 lands on the first
                                 // char, not on the arrow itself.
-                                let display_col = if inner_y == 0 {
-                                    inner_x.saturating_sub(2)
-                                } else {
-                                    inner_x
-                                };
+                                let display_col = inner_x;
                                 editor.set_cursor_by_display(inner_y as usize, display_col);
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 // Toggle sidebar section headers on click.
@@ -2517,12 +2513,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if !app.streaming {
         let raw_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());
         let raw_col = crate::input::cursor_display_col(editor.buf(), editor.cursor());
-        let prompt_w: u16 = 2;
-        let inner_x = input_rect.x.saturating_add(1).saturating_add(1);
+        let inner_x = input_rect.x.saturating_add(1);
         let inner_y = input_rect.y.saturating_add(1);
         if raw_row >= scroll_row {
             let cy = inner_y + (raw_row - scroll_row);
-            let cx = inner_x + prompt_w + raw_col;
+            let cx = inner_x + raw_col;
             if cy < input_rect.y + input_rect.height.saturating_sub(1)
                 && cx < input_rect.x + input_rect.width.saturating_sub(1)
             {
