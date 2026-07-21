@@ -21,6 +21,11 @@ pub struct SidebarInputs<'a> {
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
+    pub goal_collapsed: bool,
+    pub plan_collapsed: bool,
+    pub todo_collapsed: bool,
+    pub context_collapsed: bool,
+    pub meta_collapsed: bool,
     pub on_goal_scroll: &'a dyn Fn(u16),
     pub on_plans_scroll: &'a dyn Fn(u16),
     pub on_todos_scroll: &'a dyn Fn(u16),
@@ -53,6 +58,11 @@ pub struct SidebarRenderResult {
     pub goal_rect: Option<Rect>,
     pub plan_rect: Option<Rect>,
     pub todo_rect: Option<Rect>,
+    pub goal_hdr_rect: Option<Rect>,
+    pub plan_hdr_rect: Option<Rect>,
+    pub todo_hdr_rect: Option<Rect>,
+    pub ctx_hdr_rect: Option<Rect>,
+    pub meta_hdr_rect: Option<Rect>,
 }
 
 pub fn render(
@@ -83,13 +93,18 @@ pub fn render(
             goal_rect: None,
             plan_rect: None,
             todo_rect: None,
+            goal_hdr_rect: None,
+            plan_hdr_rect: None,
+            todo_hdr_rect: None,
+            ctx_hdr_rect: None,
+            meta_hdr_rect: None,
         };
     }
 
     let _goal_need: u16 = 7;
     let _plans_need: u16 = 3;
 
-    let goal_lines = inputs
+    let goal_lines_full = inputs
         .goal
         .map(|g| g.lines().count() as u16 + 1)
         .unwrap_or(2);
@@ -108,15 +123,37 @@ pub fn render(
         }
     };
 
-    let meta_lines: u16 = 5; // title + pwd + version line
-    let context_lines: u16 = 9;
-    let divider_gap: u16 = 1; // space between divider and context
-    let bottom_min = 1 + divider_gap + context_lines + meta_lines; // divider + gap + context + meta
+    // When collapsed, each section takes only the header line (1).
+    let goal_lines = if inputs.goal_collapsed {
+        1
+    } else {
+        goal_lines_full
+    };
+    let plan_lines_raw = if inputs.plan_collapsed {
+        1
+    } else {
+        plan_lines_full
+    };
+    let todo_lines_raw = if inputs.todo_collapsed {
+        1
+    } else {
+        todo_lines_full
+    };
+    let context_lines: u16 = if inputs.context_collapsed { 1 } else { 9 };
+    let meta_lines_full: u16 = 5; // title + pwd + version line
+    let meta_lines: u16 = if inputs.meta_collapsed {
+        1
+    } else {
+        meta_lines_full
+    };
+    let divider_gap: u16 = 1;
+
+    let bottom_min = 1 + divider_gap + context_lines + 1 + meta_lines; // divider + gap + ctx + gap + meta
 
     // Cap Plan/Todo so they don't push Meta off screen.
-    let avail = inner.height.saturating_sub(goal_lines + 3 + bottom_min); // gaps + bottom
-    let plan_lines = plan_lines_full.min(avail.saturating_sub(todo_lines_full.min(avail)).max(3));
-    let todo_lines = todo_lines_full.min(avail.saturating_sub(plan_lines).max(3));
+    let avail = inner.height.saturating_sub(goal_lines + 3 + bottom_min);
+    let plan_lines = plan_lines_raw.min(avail.saturating_sub(todo_lines_raw.min(avail)).max(1));
+    let todo_lines = todo_lines_raw.min(avail.saturating_sub(plan_lines).max(1));
 
     let task_total = goal_lines + 1 + plan_lines + 1 + todo_lines;
     let needed = task_total + bottom_min;
@@ -139,33 +176,66 @@ pub fn render(
         goal_rect: None,
         plan_rect: None,
         todo_rect: None,
+        goal_hdr_rect: None,
+        plan_hdr_rect: None,
+        todo_hdr_rect: None,
+        ctx_hdr_rect: None,
+        meta_hdr_rect: None,
     };
 
     // Goal, Plan, Todo at sections 0, 2, 4 (gaps at 1, 3)
     if goal_lines > 0 {
-        result.goal_rect = Some(sections[0]);
-        let c = render_scrollable_section(
-            f,
-            sections[0],
-            "▸ Goal",
-            goal_body(inputs.goal),
-            inputs.goal_scroll,
-        );
-        (inputs.on_goal_scroll)(c);
+        let glyph = if inputs.goal_collapsed { "▹" } else { "▸" };
+        let header = format!("{glyph} Goal");
+        result.goal_hdr_rect = Some(header_row(sections[0]));
+        if inputs.goal_collapsed {
+            f.render_widget(Paragraph::new(section_title(&header)), sections[0]);
+            result.goal_rect = None;
+        } else {
+            result.goal_rect = Some(sections[0]);
+            let c = render_scrollable_section(
+                f,
+                sections[0],
+                &header,
+                goal_body(inputs.goal),
+                inputs.goal_scroll,
+            );
+            (inputs.on_goal_scroll)(c);
+        }
     }
     if plan_lines > 0 {
-        result.plan_rect = Some(sections[2]);
-        let header = plans_header(inputs.plans);
-        let body = plans_body(inputs.plans);
-        let c = render_scrollable_section(f, sections[2], &header, body, inputs.plans_scroll);
-        (inputs.on_plans_scroll)(c);
+        let glyph = if inputs.plan_collapsed { "▹" } else { "▸" };
+        let header = format!(
+            "{glyph} {}",
+            plans_header(inputs.plans).replacen("▸ ", "", 1)
+        );
+        result.plan_hdr_rect = Some(header_row(sections[2]));
+        if inputs.plan_collapsed {
+            f.render_widget(Paragraph::new(section_title(&header)), sections[2]);
+            result.plan_rect = None;
+        } else {
+            result.plan_rect = Some(sections[2]);
+            let body = plans_body(inputs.plans);
+            let c = render_scrollable_section(f, sections[2], &header, body, inputs.plans_scroll);
+            (inputs.on_plans_scroll)(c);
+        }
     }
     if todo_lines > 0 {
-        result.todo_rect = Some(sections[4]);
-        let header = todos_header(inputs.todos);
-        let body = todos_body(inputs.todos);
-        let c = render_scrollable_section(f, sections[4], &header, body, inputs.todos_scroll);
-        (inputs.on_todos_scroll)(c);
+        let glyph = if inputs.todo_collapsed { "▹" } else { "▸" };
+        let header = format!(
+            "{glyph} {}",
+            todos_header(inputs.todos).replacen("▸ ", "", 1)
+        );
+        result.todo_hdr_rect = Some(header_row(sections[4]));
+        if inputs.todo_collapsed {
+            f.render_widget(Paragraph::new(section_title(&header)), sections[4]);
+            result.todo_rect = None;
+        } else {
+            result.todo_rect = Some(sections[4]);
+            let body = todos_body(inputs.todos);
+            let c = render_scrollable_section(f, sections[4], &header, body, inputs.todos_scroll);
+            (inputs.on_todos_scroll)(c);
+        }
     }
 
     // Bottom area: divider + gap + context + meta (at section 6)
@@ -189,20 +259,38 @@ pub fn render(
             .split(inner);
 
         if meta_heights.context > 0 {
-            f.render_widget(
-                context_section(inputs.context, inputs.attach_count, inputs.streaming),
-                meta_sections[1],
-            );
+            let glyph = if inputs.context_collapsed {
+                "▹"
+            } else {
+                "▸"
+            };
+            result.ctx_hdr_rect = Some(header_row(meta_sections[1]));
+            if inputs.context_collapsed {
+                let header = format!("{glyph} Context");
+                f.render_widget(Paragraph::new(section_title(&header)), meta_sections[1]);
+            } else {
+                f.render_widget(
+                    context_section(inputs.context, inputs.attach_count, inputs.streaming),
+                    meta_sections[1],
+                );
+            }
         }
         if meta_heights.session > 0 {
-            f.render_widget(
-                meta_section(
-                    inputs.project_root,
-                    inputs.app_version,
-                    inputs.latest_release,
-                ),
-                meta_sections[3],
-            );
+            let glyph = if inputs.meta_collapsed { "▹" } else { "▸" };
+            result.meta_hdr_rect = Some(header_row(meta_sections[3]));
+            if inputs.meta_collapsed {
+                let header = format!("{glyph} Meta");
+                f.render_widget(Paragraph::new(section_title(&header)), meta_sections[3]);
+            } else {
+                f.render_widget(
+                    meta_section(
+                        inputs.project_root,
+                        inputs.app_version,
+                        inputs.latest_release,
+                    ),
+                    meta_sections[3],
+                );
+            }
         }
     }
     result
@@ -557,6 +645,11 @@ fn section_title(text: &str) -> Span<'_> {
             .fg(crate::theme::theme().accent)
             .add_modifier(Modifier::BOLD),
     )
+}
+
+/// Return a rect covering only the first row of `area` — used for click detection.
+fn header_row(area: Rect) -> Rect {
+    Rect { height: 1, ..area }
 }
 
 fn kv_line<'a>(key: &'a str, value: String, value_style: Style) -> Line<'a> {

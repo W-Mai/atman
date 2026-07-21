@@ -389,7 +389,28 @@ async fn run_frames(
                                 };
                                 editor.set_cursor_by_display(inner_y as usize, display_col);
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
-                                if let Some((panel_idx, node_id)) =
+                                // Toggle sidebar section headers on click.
+                                if let Some(r) = app.last_goal_hdr_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.goal_collapsed = !app.goal_collapsed;
+                                } else if let Some(r) = app.last_plan_hdr_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.plan_collapsed = !app.plan_collapsed;
+                                } else if let Some(r) = app.last_todo_hdr_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.todo_collapsed = !app.todo_collapsed;
+                                } else if let Some(r) = app.last_ctx_hdr_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.context_collapsed = !app.context_collapsed;
+                                } else if let Some(r) = app.last_meta_hdr_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.meta_collapsed = !app.meta_collapsed;
+                                } else if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
                                     if node_id
@@ -2403,6 +2424,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 goal_scroll,
                 plans_scroll,
                 todos_scroll,
+                goal_collapsed: app.goal_collapsed,
+                plan_collapsed: app.plan_collapsed,
+                todo_collapsed: app.todo_collapsed,
+                context_collapsed: app.context_collapsed,
+                meta_collapsed: app.meta_collapsed,
                 on_goal_scroll: &|_c| {},
                 on_plans_scroll: &|_c| {},
                 on_todos_scroll: &|_c| {},
@@ -2412,6 +2438,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_goal_rect = sr.goal_rect;
         app.last_plan_rect = sr.plan_rect;
         app.last_todo_rect = sr.todo_rect;
+        app.last_goal_hdr_rect = sr.goal_hdr_rect;
+        app.last_plan_hdr_rect = sr.plan_hdr_rect;
+        app.last_todo_hdr_rect = sr.todo_hdr_rect;
+        app.last_ctx_hdr_rect = sr.ctx_hdr_rect;
+        app.last_meta_hdr_rect = sr.meta_hdr_rect;
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
