@@ -247,18 +247,17 @@ pub fn render(
         let inner = mp.inner(bottom_area);
         f.render_widget(mp, bottom_area);
 
-        let meta_heights = meta_section_heights(inner.height);
         let meta_sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(divider_gap),
-                Constraint::Length(meta_heights.context),
+                Constraint::Length(context_lines),
                 Constraint::Length(1), // gap between context and meta
-                Constraint::Length(meta_heights.session),
+                Constraint::Length(meta_lines),
             ])
             .split(inner);
 
-        if meta_heights.context > 0 {
+        if context_lines > 0 {
             let glyph = if inputs.context_collapsed {
                 "▸"
             } else {
@@ -275,7 +274,7 @@ pub fn render(
                 );
             }
         }
-        if meta_heights.session > 0 {
+        if meta_lines > 0 {
             let glyph = if inputs.meta_collapsed { "▸" } else { "▾" };
             result.meta_hdr_rect = Some(header_row(meta_sections[3]));
             if inputs.meta_collapsed {
@@ -294,30 +293,6 @@ pub fn render(
         }
     }
     result
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MetaHeights {
-    context: u16,
-    session: u16,
-}
-
-fn meta_section_heights(inner_h: u16) -> MetaHeights {
-    let context = 9u16;
-    let session = 5u16;
-    if inner_h >= context + session {
-        return MetaHeights { context, session };
-    }
-    if inner_h >= context {
-        return MetaHeights {
-            context,
-            session: 0,
-        };
-    }
-    MetaHeights {
-        context: inner_h,
-        session: 0,
-    }
 }
 
 fn render_scrollable_section(
@@ -713,19 +688,5 @@ mod tests {
     #[test]
     fn sidebar_mode_default_is_open() {
         assert_eq!(SidebarMode::default(), SidebarMode::Open);
-    }
-
-    #[test]
-    fn meta_heights_full() {
-        let h = meta_section_heights(20);
-        assert_eq!(h.context, 9);
-        assert_eq!(h.session, 5);
-    }
-
-    #[test]
-    fn meta_heights_tight_drops_session() {
-        let h = meta_section_heights(9);
-        assert_eq!(h.context, 9);
-        assert_eq!(h.session, 0);
     }
 }
