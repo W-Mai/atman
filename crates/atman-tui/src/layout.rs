@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn sidebar_floats_in_top_right_when_open() {
-        let area = Rect::new(0, 1, 140, 40);
+        let area = Rect::new(0, 1, 160, 40);
         let rect = compute_sidebar_rect(area, true, false).unwrap();
         assert_eq!(rect.width, SIDEBAR_WIDTH);
         assert_eq!(rect.x + rect.width, area.x + area.width - 1);

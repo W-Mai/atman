@@ -253,6 +253,7 @@ async fn run_frames(
     let mut update_check = tokio::spawn(check_latest_release());
     loop {
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
+        app.tick = app.tick.wrapping_add(1);
 
         if app.should_quit {
             break;
@@ -2532,6 +2533,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.popup.is_open() {
         completion::render_popup(f, input_rect, &app.popup);
     }
+    render_pulse_bar(f, input_rect, app.tick, app.has_running_workflow());
     if app.cheatsheet_open {
         completion::render_cheatsheet(f, area);
     }
@@ -2698,4 +2700,73 @@ async fn check_latest_release() -> Option<String> {
     let body: serde_json::Value = resp.json().await.ok()?;
     let tag = body.get("tag_name")?.as_str()?;
     Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
+}
+
+fn lerp_rgb(a: ratatui::style::Color, b: ratatui::style::Color, t: f64) -> ratatui::style::Color {
+    fn to_rgb(c: ratatui::style::Color) -> (u8, u8, u8) {
+        match c {
+            ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
+            ratatui::style::Color::Cyan => (0, 200, 200),
+            ratatui::style::Color::DarkGray => (96, 96, 96),
+            ratatui::style::Color::Gray => (128, 128, 128),
+            ratatui::style::Color::Green => (0, 200, 0),
+            ratatui::style::Color::Yellow => (200, 200, 0),
+            ratatui::style::Color::Red => (200, 0, 0),
+            ratatui::style::Color::Blue => (0, 0, 200),
+            ratatui::style::Color::Magenta => (200, 0, 200),
+            ratatui::style::Color::White => (240, 240, 240),
+            ratatui::style::Color::Black => (16, 16, 16),
+            _ => (128, 128, 128),
+        }
+    }
+    let (ar, ag, ab) = to_rgb(a);
+    let (br, bg, bb) = to_rgb(b);
+    let t = t.clamp(0.0, 1.0);
+    ratatui::style::Color::Rgb(
+        (ar as f64 + (br as f64 - ar as f64) * t).round() as u8,
+        (ag as f64 + (bg as f64 - ag as f64) * t).round() as u8,
+        (ab as f64 + (bb as f64 - ab as f64) * t).round() as u8,
+    )
+}
+
+fn render_pulse_bar(
+    f: &mut ratatui::Frame,
+    input_rect: ratatui::layout::Rect,
+    tick: u64,
+    active: bool,
+) {
+    if !active {
+        return;
+    }
+    use ratatui::style::Modifier;
+    let w = input_rect.width.saturating_sub(2);
+    if w < 8 {
+        return;
+    }
+    let t = crate::theme::theme();
+    let bar_y = input_rect.y + input_rect.height.saturating_sub(1);
+    let bar_x = input_rect.x + 1;
+    let time = tick as f64 * 0.05;
+    let sigma = (w as f64) / 6.0;
+    let pad = (w as f64) * 0.1;
+    let amp = (w as f64) / 2.0 - pad;
+    let mid = (w as f64) / 2.0;
+    let center = mid + amp * time.sin();
+
+    // Mutate the existing cells on the bottom border — keep their
+    // character but apply wave colour + optional bold.
+    let buf = f.buffer_mut();
+    for i in 0..w {
+        let x = i as f64;
+        let dx = (x - center) / sigma;
+        let wave = (-0.5 * dx * dx).exp();
+        if let Some(cell) = buf.cell_mut((bar_x + i, bar_y)) {
+            cell.fg = lerp_rgb(t.subtle_fg, t.accent, wave);
+            if wave > 0.7 {
+                cell.modifier.insert(Modifier::BOLD);
+            } else {
+                cell.modifier.remove(Modifier::BOLD);
+            }
+        }
+    }
 }
