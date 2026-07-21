@@ -3,7 +3,7 @@ use ratatui::layout::{Constraint, Direction, Layout as RatatuiLayout, Rect};
 // Kept as public constants so the palette / status bar helpers can still
 // query "will the sidebar be visible?" without duplicating the width math.
 pub const SIDEBAR_WIDTH: u16 = 40;
-pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 80;
+pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 120 + SIDEBAR_WIDTH / 3 * 2;
 
 // AppLayout only reserves status + transcript. Input, approvals, and the
 // sidebar all draw as floating overlays on top of the transcript so
@@ -35,7 +35,7 @@ pub fn compute_sidebar_rect(area: Rect, show: bool, collapsed: bool) -> Option<R
     if !show {
         return None;
     }
-    if area.width < SIDEBAR_MIN_TOTAL_WIDTH {
+    if !collapsed && area.width < SIDEBAR_MIN_TOTAL_WIDTH {
         return None;
     }
     let width = if collapsed {
@@ -266,9 +266,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_collapsed_on_narrow_terminal_still_hidden() {
+    fn sidebar_collapsed_still_shows_on_narrow_terminal() {
+        // A 5-col strip fits even on narrow terminals.
         let area = Rect::new(0, 0, 60, 40);
-        assert!(compute_sidebar_rect(area, true, true).is_none());
+        let rect = compute_sidebar_rect(area, true, true).unwrap();
+        assert_eq!(rect.width, SIDEBAR_STRIP_WIDTH);
     }
 
     #[test]

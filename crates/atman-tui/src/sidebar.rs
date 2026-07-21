@@ -93,12 +93,13 @@ pub fn render(
     inputs: SidebarInputs<'_>,
 ) -> SidebarRenderResult {
     let t = crate::theme::theme();
-    crate::sanitize_widget_edges(f, area);
-    f.render_widget(ratatui::widgets::Clear, area);
 
     if inputs.sidebar_collapsed {
         return render_strip(f, area, inputs);
     }
+
+    crate::sanitize_widget_edges(f, area);
+    f.render_widget(ratatui::widgets::Clear, area);
 
     let outer = Block::default()
         .borders(Borders::ALL)

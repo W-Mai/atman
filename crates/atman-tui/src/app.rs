@@ -187,6 +187,7 @@ pub struct AppState {
     pub context_collapsed: bool,
     pub meta_collapsed: bool,
     pub sidebar_collapsed: bool,
+    pub sidebar_collapse_locked: bool,
     pub last_goal_rect: Option<ratatui::layout::Rect>,
     pub last_plan_rect: Option<ratatui::layout::Rect>,
     pub last_todo_rect: Option<ratatui::layout::Rect>,

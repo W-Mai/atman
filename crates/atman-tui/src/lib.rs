@@ -416,6 +416,7 @@ async fn run_frames(
                                     app.sidebar_collapsed = true;
                                 } else if let Some(r) = app.last_expand_btn_rect
                                     && rect_contains(r, me.column, me.row)
+                                    && !app.sidebar_collapse_locked
                                 {
                                     app.sidebar_collapsed = false;
                                 } else if let Some((panel_idx, node_id)) =
@@ -2257,6 +2258,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         .unwrap_or(1.0);
     let intro_active = app.startup_intro.is_some() && intro_progress < 1.0;
     let show_sidebar = !startup_active && !intro_active;
+    app.sidebar_collapse_locked = show_sidebar && area.width < layout::SIDEBAR_MIN_TOTAL_WIDTH;
+    let sidebar_effective_collapsed = app.sidebar_collapsed || app.sidebar_collapse_locked;
     let status_height: u16 = 1;
     let pending_count = app.pending_approvals.len();
     let approvals_rows: u16 = if pending_count == 0 {
@@ -2274,7 +2277,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     };
     let l = layout::compute_ex(area, status_height);
     let sidebar_rect =
-        layout::compute_sidebar_rect(l.transcript, show_sidebar, app.sidebar_collapsed);
+        layout::compute_sidebar_rect(l.transcript, show_sidebar, sidebar_effective_collapsed);
     let transcript_content = layout::compute_content_rect(l.transcript);
     let content_w = layout::input_content_width(l.transcript.width);
     let total_input_lines = crate::input::wrapped_line_count(editor.buf(), content_w) as u16;
@@ -2433,7 +2436,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 todo_collapsed: app.todo_collapsed,
                 context_collapsed: app.context_collapsed,
                 meta_collapsed: app.meta_collapsed,
-                sidebar_collapsed: app.sidebar_collapsed,
+                sidebar_collapsed: sidebar_effective_collapsed,
                 on_goal_scroll: &|_c| {},
                 on_plans_scroll: &|_c| {},
                 on_todos_scroll: &|_c| {},
