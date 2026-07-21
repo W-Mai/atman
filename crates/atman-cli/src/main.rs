@@ -1583,6 +1583,11 @@ async fn cmd_repl_once(
                     atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
                     atman_tui::TuiControl::HardStop => {
                         session_for_ctrl.cancel_flow();
+                        session_for_ctrl.approval().decide_all(
+                            atman_runtime::session::ApprovalDecision::Deny {
+                                reason: "flow cancelled".into(),
+                            },
+                        );
                         let _ = session_for_ctrl.enqueue_injection_with_level(
                             "stop",
                             atman_runtime::injection::InjectionLevel::L4HardStop,
@@ -2373,6 +2378,11 @@ async fn consume_interjection_input(
     }
     if trimmed == "!stop" {
         session.cancel_flow();
+        session
+            .approval()
+            .decide_all(atman_runtime::session::ApprovalDecision::Deny {
+                reason: "flow cancelled".into(),
+            });
         let _ = session.enqueue_injection_with_level("stop", InjectionLevel::L4HardStop, None);
         reporter.info("[atman] stop requested; flow will abort at next node boundary");
         return true;
@@ -2445,6 +2455,11 @@ async fn consume_interjection_input(
     match cls.level {
         InjectionLevel::L4HardStop => {
             session.cancel_flow();
+            session
+                .approval()
+                .decide_all(atman_runtime::session::ApprovalDecision::Deny {
+                    reason: "flow cancelled".into(),
+                });
             let _ = session.enqueue_injection_with_level(
                 trimmed,
                 InjectionLevel::L4HardStop,
