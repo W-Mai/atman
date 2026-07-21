@@ -93,27 +93,33 @@ pub fn render(
         .goal
         .map(|g| g.lines().count() as u16 + 1)
         .unwrap_or(2);
-    let plan_lines = {
+    let plan_lines_full = {
         let latest = inputs.plans.iter().max_by_key(|p| p.updated_at);
         match latest {
             Some(p) => 1 + p.steps.len() as u16,
             None => 2,
         }
     };
-    let todo_lines = {
+    let todo_lines_full = {
         if inputs.todos.is_empty() {
             2
         } else {
             (inputs.todos.len() * 2 + 1) as u16
         }
     };
-    let context_lines: u16 = 9;
+
     let meta_lines: u16 = 5; // title + pwd + version line
-    let divider_lines: u16 = 1;
+    let context_lines: u16 = 9;
+    let divider_gap: u16 = 1; // space between divider and context
+    let bottom_min = 1 + divider_gap + context_lines + meta_lines; // divider + gap + context + meta
+
+    // Cap Plan/Todo so they don't push Meta off screen.
+    let avail = inner.height.saturating_sub(goal_lines + 3 + bottom_min); // gaps + bottom
+    let plan_lines = plan_lines_full.min(avail.saturating_sub(todo_lines_full.min(avail)).max(3));
+    let todo_lines = todo_lines_full.min(avail.saturating_sub(plan_lines).max(3));
 
     let task_total = goal_lines + 1 + plan_lines + 1 + todo_lines;
-    let bottom_total = divider_lines + context_lines + meta_lines;
-    let needed = task_total + bottom_total;
+    let needed = task_total + bottom_min;
     let spacing = inner.height.saturating_sub(needed);
 
     let sections = Layout::default()
@@ -125,7 +131,7 @@ pub fn render(
             Constraint::Length(1),
             Constraint::Length(todo_lines),
             Constraint::Length(spacing),
-            Constraint::Length(bottom_total),
+            Constraint::Length(bottom_min),
         ])
         .split(inner);
 
@@ -162,7 +168,7 @@ pub fn render(
         (inputs.on_todos_scroll)(c);
     }
 
-    // Bottom area: divider + context + meta (at section 6)
+    // Bottom area: divider + gap + context + meta (at section 6)
     let bottom_area = sections[6];
     {
         let mp = Block::default()
@@ -175,6 +181,7 @@ pub fn render(
         let meta_sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(divider_gap),
                 Constraint::Length(meta_heights.context),
                 Constraint::Length(meta_heights.session),
             ])
@@ -183,7 +190,7 @@ pub fn render(
         if meta_heights.context > 0 {
             f.render_widget(
                 context_section(inputs.context, inputs.attach_count, inputs.streaming),
-                meta_sections[0],
+                meta_sections[1],
             );
         }
         if meta_heights.session > 0 {
@@ -193,7 +200,7 @@ pub fn render(
                     inputs.app_version,
                     inputs.latest_release,
                 ),
-                meta_sections[1],
+                meta_sections[2],
             );
         }
     }
@@ -468,12 +475,14 @@ fn meta_section<'a>(
     app_version: &'a str,
     latest_release: Option<&'a str>,
 ) -> Paragraph<'a> {
-    let mut lines: Vec<Line<'_>> = Vec::with_capacity(3);
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(5);
     lines.push(Line::from(section_title("▸ Meta")));
 
     if let Some(root) = project_root {
+        lines.push(Line::from(""));
         lines.push(project_dir_line(root));
     }
+    lines.push(Line::from(""));
     lines.push(version_line(app_version, latest_release));
 
     Paragraph::new(lines).wrap(Wrap { trim: false })
