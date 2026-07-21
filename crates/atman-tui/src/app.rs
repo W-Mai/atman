@@ -929,8 +929,12 @@ impl AppState {
         for (i, it) in self.items.iter().enumerate().rev() {
             match it {
                 OutputItem::WorkflowPanel { ended_at: None, .. } => {
-                    // FlowGraph reuses an open panel; FlowStart creates a new one.
-                    if matches!(frame, StreamFrame::FlowGraph { .. }) {
+                    // FlowGraph reuses an open panel; FlowStart creates a new one
+                    // unless its run_id is already mapped (from a prior FlowGraph).
+                    if matches!(frame, StreamFrame::FlowGraph { .. })
+                        || matches!(frame, StreamFrame::FlowStart { run_id, .. }
+                            if self.workflow_run_to_panel.contains_key(run_id))
+                    {
                         panel_after_user_turn = true;
                     }
                     break;
