@@ -876,10 +876,15 @@ impl AppState {
         } = frame
         {
             if let Some(&parent_idx) = self.workflow_run_to_panel.get(parent_rid) {
-                if let Some(OutputItem::WorkflowPanel { ended_at, .. }) =
-                    self.items.get_mut(parent_idx)
+                if let Some(OutputItem::WorkflowPanel {
+                    ended_at,
+                    cancelled,
+                    ..
+                }) = self.items.get_mut(parent_idx)
                 {
-                    if ended_at.is_some() {
+                    // Don't reopen a cancelled panel — late subflow events
+                    // after a hard stop must not resurrect the spinner.
+                    if ended_at.is_some() && !*cancelled {
                         *ended_at = None;
                     }
                 }
@@ -964,7 +969,6 @@ impl AppState {
                 *ended_at = None;
                 *cancelled = false;
             }
-            // Register the new run_id so FlowDone can find this panel.
             if let StreamFrame::FlowStart { run_id, .. } = frame {
                 self.workflow_run_to_panel.insert(run_id.clone(), idx);
                 self.top_level_run_ids.insert(run_id.clone());
@@ -1007,9 +1011,6 @@ impl AppState {
                 if was_open {
                     *ended_at = Some(Instant::now());
                 }
-                // Always honor the caller's intent — push_user_turn must
-                // be able to clear a stale cancelled flag from a previous
-                // flow, otherwise the scan falsely reopens the panel.
                 *cancelled_flag = cancelled;
                 self.items_version = self.items_version.wrapping_add(1);
             }
