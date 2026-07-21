@@ -39,11 +39,11 @@ pub fn input_paragraph<'a>(
     };
     let title = if pending_below > 0 {
         format!(
-            "❯ atman · {} {}  ↓ {pending_below} new ",
+            " atman · {} {}  ↓ {pending_below} new ",
             display.emoji, display.name
         )
     } else {
-        format!("❯ atman · {} {} ", display.emoji, display.name)
+        format!(" atman · {} {} ", display.emoji, display.name)
     };
     let title_span = Span::styled(
         title,

@@ -2510,6 +2510,18 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         ),
         input_rect,
     );
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(ratatui::text::Line::from(ratatui::text::Span::styled(
+            "❯",
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        ))),
+        ratatui::layout::Rect {
+            x: input_rect.x,
+            y: input_rect.y + 1,
+            width: 2,
+            height: 1,
+        },
+    );
     if !app.streaming {
         let raw_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());
         let raw_col = crate::input::cursor_display_col(editor.buf(), editor.cursor());
