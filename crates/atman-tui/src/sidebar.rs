@@ -185,7 +185,7 @@ pub fn render(
 
     // Goal, Plan, Todo at sections 0, 2, 4 (gaps at 1, 3)
     if goal_lines > 0 {
-        let glyph = if inputs.goal_collapsed { "▹" } else { "▸" };
+        let glyph = if inputs.goal_collapsed { "▸" } else { "▾" };
         let header = format!("{glyph} Goal");
         result.goal_hdr_rect = Some(header_row(sections[0]));
         if inputs.goal_collapsed {
@@ -204,7 +204,7 @@ pub fn render(
         }
     }
     if plan_lines > 0 {
-        let glyph = if inputs.plan_collapsed { "▹" } else { "▸" };
+        let glyph = if inputs.plan_collapsed { "▸" } else { "▾" };
         let header = format!(
             "{glyph} {}",
             plans_header(inputs.plans).replacen("▸ ", "", 1)
@@ -221,7 +221,7 @@ pub fn render(
         }
     }
     if todo_lines > 0 {
-        let glyph = if inputs.todo_collapsed { "▹" } else { "▸" };
+        let glyph = if inputs.todo_collapsed { "▸" } else { "▾" };
         let header = format!(
             "{glyph} {}",
             todos_header(inputs.todos).replacen("▸ ", "", 1)
@@ -260,9 +260,9 @@ pub fn render(
 
         if meta_heights.context > 0 {
             let glyph = if inputs.context_collapsed {
-                "▹"
-            } else {
                 "▸"
+            } else {
+                "▾"
             };
             result.ctx_hdr_rect = Some(header_row(meta_sections[1]));
             if inputs.context_collapsed {
@@ -276,7 +276,7 @@ pub fn render(
             }
         }
         if meta_heights.session > 0 {
-            let glyph = if inputs.meta_collapsed { "▹" } else { "▸" };
+            let glyph = if inputs.meta_collapsed { "▸" } else { "▾" };
             result.meta_hdr_rect = Some(header_row(meta_sections[3]));
             if inputs.meta_collapsed {
                 let header = format!("{glyph} Meta");
