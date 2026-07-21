@@ -88,30 +88,6 @@ pub fn render(
 
     let _goal_need: u16 = 7;
     let _plans_need: u16 = 3;
-    let context_need: u16 = 9;
-    let meta_need: u16 = 5; // title + pwd + version line
-    let meta_needs = context_need + meta_need;
-    let total = inner.height;
-    let (task_h, meta_h) = if total > meta_needs {
-        (total - meta_needs, meta_needs)
-    } else {
-        (total, 0u16)
-    };
-
-    let panels = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(task_h), Constraint::Length(meta_h)])
-        .split(inner);
-
-    let task_area = panels[0];
-    let meta_area = {
-        let mp = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(t.subtle_fg));
-        let inner = mp.inner(panels[1]);
-        f.render_widget(mp, panels[1]);
-        inner
-    };
 
     let goal_lines = inputs
         .goal
@@ -131,17 +107,27 @@ pub fn render(
             (inputs.todos.len() * 2 + 1) as u16
         }
     };
-    let task_heights = task_section_heights(task_area.height, goal_lines, plan_lines, todo_lines);
-    let task_sections = Layout::default()
+    let context_lines: u16 = 9;
+    let meta_lines: u16 = 5; // title + pwd + version line
+    let divider_lines: u16 = 1;
+
+    let task_total = goal_lines + 1 + plan_lines + 1 + todo_lines;
+    let bottom_total = divider_lines + context_lines + meta_lines;
+    let needed = task_total + bottom_total;
+    let spacing = inner.height.saturating_sub(needed);
+
+    let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(task_heights.goal),
+            Constraint::Length(goal_lines),
             Constraint::Length(1),
-            Constraint::Length(task_heights.plans),
+            Constraint::Length(plan_lines),
             Constraint::Length(1),
-            Constraint::Length(task_heights.todos),
+            Constraint::Length(todo_lines),
+            Constraint::Length(spacing),
+            Constraint::Length(bottom_total),
         ])
-        .split(task_area);
+        .split(inner);
 
     let mut result = SidebarRenderResult {
         goal_rect: None,
@@ -149,78 +135,69 @@ pub fn render(
         todo_rect: None,
     };
 
-    if task_heights.goal > 0 {
-        result.goal_rect = Some(task_sections[0]);
+    // Goal, Plan, Todo at sections 0, 2, 4 (gaps at 1, 3)
+    if goal_lines > 0 {
+        result.goal_rect = Some(sections[0]);
         let c = render_scrollable_section(
             f,
-            task_sections[0],
+            sections[0],
             "▸ Goal",
             goal_body(inputs.goal),
             inputs.goal_scroll,
         );
         (inputs.on_goal_scroll)(c);
     }
-    if task_heights.plans > 0 {
-        result.plan_rect = Some(task_sections[2]);
+    if plan_lines > 0 {
+        result.plan_rect = Some(sections[2]);
         let header = plans_header(inputs.plans);
         let body = plans_body(inputs.plans);
-        let c = render_scrollable_section(f, task_sections[2], &header, body, inputs.plans_scroll);
+        let c = render_scrollable_section(f, sections[2], &header, body, inputs.plans_scroll);
         (inputs.on_plans_scroll)(c);
     }
-    if task_heights.todos > 0 {
-        result.todo_rect = Some(task_sections[4]);
+    if todo_lines > 0 {
+        result.todo_rect = Some(sections[4]);
         let header = todos_header(inputs.todos);
         let body = todos_body(inputs.todos);
-        let c = render_scrollable_section(f, task_sections[4], &header, body, inputs.todos_scroll);
+        let c = render_scrollable_section(f, sections[4], &header, body, inputs.todos_scroll);
         (inputs.on_todos_scroll)(c);
     }
 
-    let meta_heights = meta_section_heights(meta_area.height);
-    let meta_sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(meta_heights.context),
-            Constraint::Length(meta_heights.session),
-        ])
-        .split(meta_area);
+    // Bottom area: divider + context + meta (at section 6)
+    let bottom_area = sections[6];
+    {
+        let mp = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(t.subtle_fg));
+        let inner = mp.inner(bottom_area);
+        f.render_widget(mp, bottom_area);
 
-    if meta_heights.context > 0 {
-        f.render_widget(
-            context_section(inputs.context, inputs.attach_count, inputs.streaming),
-            meta_sections[0],
-        );
-    }
-    if meta_heights.session > 0 {
-        f.render_widget(
-            meta_section(
-                inputs.project_root,
-                inputs.app_version,
-                inputs.latest_release,
-            ),
-            meta_sections[1],
-        );
+        let meta_heights = meta_section_heights(inner.height);
+        let meta_sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(meta_heights.context),
+                Constraint::Length(meta_heights.session),
+            ])
+            .split(inner);
+
+        if meta_heights.context > 0 {
+            f.render_widget(
+                context_section(inputs.context, inputs.attach_count, inputs.streaming),
+                meta_sections[0],
+            );
+        }
+        if meta_heights.session > 0 {
+            f.render_widget(
+                meta_section(
+                    inputs.project_root,
+                    inputs.app_version,
+                    inputs.latest_release,
+                ),
+                meta_sections[1],
+            );
+        }
     }
     result
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TaskHeights {
-    goal: u16,
-    plans: u16,
-    todos: u16,
-}
-
-fn task_section_heights(
-    inner_h: u16,
-    goal_lines: u16,
-    plan_lines: u16,
-    todo_lines: u16,
-) -> TaskHeights {
-    // Compact: each section takes only what it needs, no expansion.
-    let goal = goal_lines.min(inner_h);
-    let plans = plan_lines.min(inner_h.saturating_sub(goal));
-    let todos = todo_lines.min(inner_h.saturating_sub(goal).saturating_sub(plans));
-    TaskHeights { goal, plans, todos }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -604,21 +581,6 @@ mod tests {
     #[test]
     fn sidebar_mode_default_is_open() {
         assert_eq!(SidebarMode::default(), SidebarMode::Open);
-    }
-
-    #[test]
-    fn task_heights_content_fits() {
-        let h = task_section_heights(30, 2, 6, 41);
-        assert!(h.goal >= 2);
-        assert!(h.plans >= 6);
-        assert!(h.todos >= 20);
-    }
-
-    #[test]
-    fn task_heights_tight_shrinks() {
-        let h = task_section_heights(9, 2, 6, 41);
-        assert_eq!(h.goal, 2);
-        assert!(h.plans + h.todos <= 7);
     }
 
     #[test]
