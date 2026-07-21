@@ -183,6 +183,7 @@ pub fn render(
             .constraints([
                 Constraint::Length(divider_gap),
                 Constraint::Length(meta_heights.context),
+                Constraint::Length(1), // gap between context and meta
                 Constraint::Length(meta_heights.session),
             ])
             .split(inner);
@@ -200,7 +201,7 @@ pub fn render(
                     inputs.app_version,
                     inputs.latest_release,
                 ),
-                meta_sections[2],
+                meta_sections[3],
             );
         }
     }
@@ -508,16 +509,45 @@ fn project_dir_line<'a>(dir: &str) -> Line<'a> {
 
 fn version_line<'a>(version: &str, latest: Option<&'a str>) -> Line<'a> {
     let t = crate::theme::theme();
-    let brand = Span::styled("  atman", Style::default().fg(t.accent));
+    let dot_color = match latest {
+        Some(latest_ver) => {
+            if version_is_newer(latest_ver, version) {
+                t.warn // newer version available — yellow
+            } else {
+                t.success // up to date — green
+            }
+        }
+        None => t.subtle_fg, // check failed / loading — gray
+    };
+    let dots = Span::styled(" ∴ ", Style::default().fg(dot_color));
+    let brand = Span::styled("atman", Style::default().fg(t.accent));
     let ver = Span::styled(format!(" v{version}"), Style::default().fg(t.tinted_fg));
     match latest {
-        Some(latest_ver) if latest_ver != version => {
-            let arrow = Span::styled(" ↑ ", Style::default().fg(t.warn));
-            let latest = Span::styled(latest_ver, Style::default().fg(t.success));
-            Line::from(vec![brand, ver, arrow, latest])
+        Some(latest_ver) if version_is_newer(latest_ver, version) => {
+            let latest = Span::styled(format!("→ v{latest_ver}"), Style::default().fg(t.success));
+            Line::from(vec![dots, brand, ver, Span::raw("  "), latest])
         }
-        _ => Line::from(vec![brand, ver]),
+        _ => Line::from(vec![dots, brand, ver]),
     }
+}
+
+/// Returns true if `candidate` is a strictly newer semver than `current`.
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    let parse =
+        |s: &str| -> Vec<u64> { s.split('.').filter_map(|p| p.parse::<u64>().ok()).collect() };
+    let c = parse(candidate);
+    let v = parse(current);
+    if c.is_empty() || v.is_empty() {
+        return false;
+    }
+    for (cv, vv) in c.iter().zip(v.iter()) {
+        match cv.cmp(vv) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    c.len() > v.len()
 }
 
 fn section_title(text: &str) -> Span<'_> {
