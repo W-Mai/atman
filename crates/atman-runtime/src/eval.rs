@@ -2947,4 +2947,108 @@ mod sanitize_tests {
             "no filler should be added when pairs complete"
         );
     }
+
+    // --- stall timeout tests ---
+    use crate::providers::mock::MockProvider;
+
+    fn stall_req(stall_secs: u64) -> crate::provider::LlmRequest {
+        crate::provider::LlmRequest {
+            model: "mock".into(),
+            messages: vec![crate::provider::user_text_message("test")],
+            system: None,
+            input: crate::value::Value::Unit,
+            schema: None,
+            cache_prompt: false,
+            tools: Vec::new(),
+            thinking_enabled: false,
+            stall_timeout_secs: stall_secs,
+        }
+    }
+
+    #[tokio::test]
+    async fn stall_timeout_fires_when_no_chunks_arrive() {
+        // chunk_delay = 3s, stall_timeout = 1s → stall fires before 2nd chunk
+        let provider = MockProvider::new("mock")
+            .with_model("mock", Value::Str("hello world test".into()))
+            .with_chunk_delay(std::time::Duration::from_secs(3));
+
+        let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
+        let result = call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx)).await;
+        match result {
+            Err(RuntimeError::ToolFailed(msg)) => {
+                assert!(
+                    msg.contains("llm stall timeout after 1s"),
+                    "expected stall message, got: {msg}"
+                );
+            }
+            other => panic!("expected ToolFailed stall timeout, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stall_timeout_does_not_fire_when_chunks_keep_coming() {
+        // chunk_delay = 100ms, stall_timeout = 2s → all chunks within 300ms, no stall
+        let provider = MockProvider::new("mock")
+            .with_model("mock", Value::Str("hello world test".into()))
+            .with_chunk_delay(std::time::Duration::from_millis(100));
+
+        let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
+        let result = call_and_maybe_stream(&provider, stall_req(2), None, Some(stream_tx)).await;
+        match result {
+            Ok(am) => {
+                assert!(am.text_concat().contains("hello"));
+            }
+            other => panic!("expected Ok, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stall_timeout_zero_disables_detection() {
+        // chunk_delay = 3s, stall_timeout = 0 → disabled, all chunks arrive
+        let provider = MockProvider::new("mock")
+            .with_model("mock", Value::Str("hello world test".into()))
+            .with_chunk_delay(std::time::Duration::from_secs(3));
+
+        let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
+        let result = call_and_maybe_stream(&provider, stall_req(0), None, Some(stream_tx)).await;
+        match result {
+            Ok(am) => {
+                assert!(am.text_concat().contains("hello"));
+            }
+            other => panic!("expected Ok (stall disabled), got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stall_timeout_resets_on_each_chunk() {
+        // 3 chunks at 800ms each. stall=1s. First chunk at t=0, second at t=800ms (<1s),
+        // third at t=1.6s (>1s from start, but only 800ms from last chunk). Should pass.
+        let provider = MockProvider::new("mock")
+            .with_model("mock", Value::Str("hello world test".into()))
+            .with_chunk_delay(std::time::Duration::from_millis(800));
+
+        let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
+        let result = call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx)).await;
+        match result {
+            Ok(am) => {
+                assert!(am.text_concat().contains("hello"));
+            }
+            other => panic!("expected Ok (timer reset each chunk), got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stall_timeout_fires_between_first_and_second_chunk() {
+        // first chunk at t≈0, then 2s gap, stall=1s fires at t=1s
+        let provider = MockProvider::new("mock")
+            .with_model("mock", Value::Str("hello world test".into()))
+            .with_chunk_delay(std::time::Duration::from_secs(2));
+
+        let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
+        let result = call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx)).await;
+        assert!(
+            matches!(&result, Err(RuntimeError::ToolFailed(msg)) if msg.contains("stall timeout")),
+            "expected stall timeout, got: {result:?}"
+        );
+    }
 }
