@@ -2043,9 +2043,16 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Interrupt => {
+            // Ctrl+C priority: clear input first, then stop flow, then quit.
             if !editor.buf().is_empty() {
                 editor.clear();
                 edited = true;
+                *interrupt_prompt = None;
+            } else if app.streaming || app.has_running_workflow() {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::HardStop);
+                }
+                app.push_note("flow stopped (Ctrl+C)", app::NoteLevel::Warn);
                 *interrupt_prompt = None;
             } else {
                 let within_window = interrupt_prompt
