@@ -40,6 +40,7 @@ fn request_with_tools() -> LlmRequest {
             },
         ],
         thinking_enabled: false,
+        stall_timeout_secs: 0,
     }
 }
 

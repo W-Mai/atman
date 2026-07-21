@@ -20,6 +20,9 @@ pub struct LlmRequest {
     pub cache_prompt: bool,
     pub tools: Vec<crate::tool::ToolSpec>,
     pub thinking_enabled: bool,
+    /// Seconds without a streaming chunk before the call is cancelled and
+    /// retried.  Default 120 s.  0 disables stall detection.
+    pub stall_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

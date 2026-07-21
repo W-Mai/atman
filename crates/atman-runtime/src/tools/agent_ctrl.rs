@@ -106,6 +106,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             cache_prompt: false,
             tools: tool_specs.clone(),
             thinking_enabled: false,
+            stall_timeout_secs: 120,
         };
         let outcome = call_streaming_sub_agent(provider.as_ref(), req, ctx).await;
         match outcome {

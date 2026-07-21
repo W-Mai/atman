@@ -493,6 +493,7 @@ async fn generate_llm_summary(
         cache_prompt: false,
         tools: Vec::new(),
         thinking_enabled: false,
+        stall_timeout_secs: 0,
     };
     let outcome = provider.call(req).await?;
     let text = outcome.text_concat();

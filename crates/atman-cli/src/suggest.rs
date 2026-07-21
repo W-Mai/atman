@@ -187,6 +187,7 @@ pub async fn generate_suggestion(
         cache_prompt: false,
         tools: Vec::new(),
         thinking_enabled: false,
+        stall_timeout_secs: 0,
     };
     if let Some(tx) = token_tx {
         let obs = provider.call_streaming(req);

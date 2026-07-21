@@ -40,6 +40,7 @@ async fn cache_prompt_true_sends_ephemeral_cache_control() {
             cache_prompt: true,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 0,
         })
         .await
         .unwrap();
@@ -79,6 +80,7 @@ async fn cache_prompt_false_sends_plain_string_content() {
             cache_prompt: false,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 0,
         })
         .await
         .unwrap();

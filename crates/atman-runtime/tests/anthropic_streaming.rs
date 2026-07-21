@@ -44,6 +44,7 @@ async fn anthropic_streaming_parses_content_block_delta() {
         cache_prompt: false,
         tools: Vec::new(),
         thinking_enabled: false,
+        stall_timeout_secs: 0,
     });
 
     let final_value = obs.output.await.unwrap();
@@ -124,6 +125,7 @@ async fn anthropic_multimodal_request_includes_image_block() {
             cache_prompt: false,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 0,
         })
         .await
         .unwrap();
@@ -161,6 +163,7 @@ async fn anthropic_non_streaming_returns_concatenated_text() {
             cache_prompt: false,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 0,
         })
         .await
         .unwrap();
@@ -187,6 +190,7 @@ async fn anthropic_http_error_becomes_tool_failed() {
             cache_prompt: false,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 0,
         })
         .await
         .unwrap_err();
@@ -220,6 +224,7 @@ async fn anthropic_real() {
         cache_prompt: false,
         tools: Vec::new(),
         thinking_enabled: false,
+        stall_timeout_secs: 0,
     });
     let value = obs.output.await.unwrap();
     let text = value.text_concat();

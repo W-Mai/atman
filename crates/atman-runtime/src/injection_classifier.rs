@@ -123,6 +123,7 @@ impl InjectionClassifier for LlmClassifier {
                 cache_prompt: false,
                 tools: Vec::new(),
                 thinking_enabled: false,
+                stall_timeout_secs: 0,
             };
             let am = match self.provider.call(req).await {
                 Ok(am) => am,

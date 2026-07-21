@@ -494,6 +494,7 @@ async fn eval_bind_with_watches(
             cache_prompt,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 120,
         };
         let outcome = run_streaming_once(provider.as_ref(), req, &rules, ctx).await;
         match outcome {
@@ -557,11 +558,17 @@ async fn run_streaming_once<'a>(
     let mut inj_rx = ctx.session.as_ref().map(|s| s.subscribe_injections());
     let stream_tx = ctx.session.as_ref().map(|s| s.stream_tx());
     let model_name = req.model.clone();
+    let stall_secs = req.stall_timeout_secs;
     let obs = provider.call_streaming(req);
     let cancel = obs.cancel.clone();
     let mut events = obs.events;
     let output = obs.output;
     tokio::pin!(output);
+
+    let stall_active = stall_secs > 0;
+    let stall_dur = std::time::Duration::from_secs(stall_secs);
+    let stall_sleep = tokio::time::sleep(stall_dur);
+    tokio::pin!(stall_sleep);
 
     let mut state = StreamMonitor::new(rules, ctx);
     let elapsed_active = rules.elapsed_ms_gt.is_some();
@@ -597,6 +604,11 @@ async fn run_streaming_once<'a>(
                             });
                         }
                         state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
+                        if stall_active {
+                            stall_sleep
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + stall_dur);
+                        }
                     }
                     Ok(NodeEvent::ThinkingChunk { text }) => {
                         if let Some(tx) = &stream_tx {
@@ -646,6 +658,13 @@ async fn run_streaming_once<'a>(
                 state.abort_reason = Some(format!("elapsed > {elapsed_deadline_ms}ms"));
                 cancel.cancel();
                 break Err(RuntimeError::Cancelled("elapsed".into()));
+            }
+            _ = &mut stall_sleep, if stall_active => {
+                cancel.cancel();
+                break Err(RuntimeError::ToolFailed(format!(
+                    "llm stall timeout after {}s",
+                    stall_secs
+                )));
             }
             result = &mut output => break result,
         }

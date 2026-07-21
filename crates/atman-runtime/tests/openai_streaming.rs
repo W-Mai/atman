@@ -35,6 +35,7 @@ async fn openai_streaming_parses_delta_content() {
         cache_prompt: false,
         tools: Vec::new(),
         thinking_enabled: false,
+        stall_timeout_secs: 0,
     });
 
     let final_value = obs.output.await.unwrap();
@@ -83,6 +84,7 @@ async fn openai_non_streaming_returns_message_content() {
             cache_prompt: false,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 0,
         })
         .await
         .unwrap();
@@ -154,6 +156,7 @@ async fn openai_multimodal_request_uses_image_url_parts() {
             cache_prompt: false,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 0,
         })
         .await
         .unwrap();
@@ -180,6 +183,7 @@ async fn openai_http_error_becomes_tool_failed() {
             cache_prompt: false,
             tools: Vec::new(),
             thinking_enabled: false,
+            stall_timeout_secs: 0,
         })
         .await
         .unwrap_err();
@@ -212,6 +216,7 @@ async fn openai_real() {
         cache_prompt: false,
         tools: Vec::new(),
         thinking_enabled: false,
+        stall_timeout_secs: 0,
     });
     let value = obs.output.await.unwrap();
     let text = value.text_concat();

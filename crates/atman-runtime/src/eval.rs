@@ -550,12 +550,18 @@ async fn call_and_maybe_stream_inner(
         return provider.call(req).await;
     };
     let model_name = req.model.clone();
+    let stall_secs = req.stall_timeout_secs;
     let request_start = std::time::Instant::now();
     let mut first_token_at: Option<std::time::Instant> = None;
     let obs = provider.call_streaming(req);
     let mut events = obs.events;
     let output = obs.output;
     tokio::pin!(output);
+
+    let stall_active = stall_secs > 0;
+    let stall_dur = std::time::Duration::from_secs(stall_secs);
+    let stall_sleep = tokio::time::sleep(stall_dur);
+    tokio::pin!(stall_sleep);
     let mark_first_token = |first: &mut Option<std::time::Instant>| {
         if first.is_none() {
             *first = Some(std::time::Instant::now());
@@ -575,6 +581,11 @@ async fn call_and_maybe_stream_inner(
                             text,
                             model: model_name.clone(),
                         });
+                        if stall_active {
+                            stall_sleep
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + stall_dur);
+                        }
                     }
                     Ok(crate::event::NodeEvent::ThinkingChunk { text }) => {
                         mark_first_token(&mut first_token_at);
@@ -585,6 +596,12 @@ async fn call_and_maybe_stream_inner(
                     }
                     Ok(_) | Err(_) => {}
                 }
+            }
+            _ = &mut stall_sleep, if stall_active => {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "llm stall timeout after {}s",
+                    stall_secs
+                )));
             }
             result = &mut output => {
                 while let Ok(ev) = events.try_recv() {
@@ -879,6 +896,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut context_mode = ContextMode::None;
             let mut fallback_expr: Option<&Expr> = None;
             let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
+            let mut stall_timeout_secs: u64 = 120;
             for (k, v) in kwargs {
                 match k.name.as_str() {
                     "schema" => continue,
@@ -1003,6 +1021,15 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         other => {
                             return Value::Err(RuntimeError::TypeMismatch {
                                 expected: "positive int".into(),
+                                actual: other.kind_name().into(),
+                            });
+                        }
+                    },
+                    "stall_timeout" => match val {
+                        Value::Int(n) if n >= 0 => stall_timeout_secs = n as u64,
+                        other => {
+                            return Value::Err(RuntimeError::TypeMismatch {
+                                expected: "non-negative int (seconds)".into(),
                                 actual: other.kind_name().into(),
                             });
                         }
@@ -1219,6 +1246,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         tools: tool_specs.clone(),
                         thinking_enabled: crate::model_registry::model_info(&model)
                             .thinking_enabled(),
+                        stall_timeout_secs,
                     };
                     let start = std::time::Instant::now();
                     let outcome = call_and_maybe_stream(
