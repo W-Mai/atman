@@ -214,14 +214,10 @@ fn task_section_heights(
     plan_lines: u16,
     todo_lines: u16,
 ) -> TaskHeights {
-    let goal_need = goal_lines.min(inner_h);
-    let plan_need = plan_lines.min(inner_h.saturating_sub(goal_need));
-    let todo_need = todo_lines.min(inner_h.saturating_sub(goal_need).saturating_sub(plan_need));
-    let used = goal_need + plan_need + todo_need;
-    let extra = inner_h.saturating_sub(used);
-    let goal = goal_need + (extra / 3);
-    let plans = plan_need + (extra / 3);
-    let todos = inner_h.saturating_sub(goal).saturating_sub(plans);
+    // Compact: each section takes only what it needs, no expansion.
+    let goal = goal_lines.min(inner_h);
+    let plans = plan_lines.min(inner_h.saturating_sub(goal));
+    let todos = todo_lines.min(inner_h.saturating_sub(goal).saturating_sub(plans));
     TaskHeights { goal, plans, todos }
 }
 
