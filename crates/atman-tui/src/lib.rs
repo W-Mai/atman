@@ -378,11 +378,8 @@ async fn run_frames(
                                 && let Some(rect) = app.input_rect
                                 && rect_contains(rect, me.column, me.row)
                             {
-                                let inner_x = me.column.saturating_sub(rect.x + 1);
+                                let inner_x = me.column.saturating_sub(rect.x + 2);
                                 let inner_y = me.row.saturating_sub(rect.y + 1);
-                                // Strip the prompt "❯ " when clicking on the
-                                // first row so column 0 lands on the first
-                                // char, not on the arrow itself.
                                 let display_col = inner_x;
                                 editor.set_cursor_by_display(inner_y as usize, display_col);
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
@@ -2529,7 +2526,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if !app.streaming {
         let raw_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());
         let raw_col = crate::input::cursor_display_col(editor.buf(), editor.cursor());
-        let inner_x = input_rect.x.saturating_add(1);
+        let inner_x = input_rect.x.saturating_add(2);
         let inner_y = input_rect.y.saturating_add(1);
         if raw_row >= scroll_row {
             let cy = inner_y + (raw_row - scroll_row);
