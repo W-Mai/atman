@@ -72,7 +72,7 @@ fn is_context_overflow_error(err: &RuntimeError) -> bool {
         || msg.contains("too many tokens")
 }
 
-async fn rebuild_session_llm_messages(
+fn rebuild_session_llm_messages(
     session: &crate::session::Session,
     context_mode: ContextMode,
     turn_id: &crate::event::TurnId,
@@ -97,33 +97,44 @@ async fn rebuild_session_llm_messages(
         ));
     }
     messages.extend_from_slice(extra_messages);
+    messages
+}
+
+async fn session_system_context(session: &crate::session::Session) -> Vec<String> {
+    let mut parts = Vec::new();
     if let Some(goal) = session.goal() {
-        messages.push(crate::message::Message::system_text(
-            turn_id.clone(),
-            format!("[session goal]\n{goal}\n[/session goal]"),
-        ));
+        parts.push(format!("[session goal]\n{goal}\n[/session goal]"));
     }
     if let Some(cwd_note) = working_directory_system_prompt(session) {
-        messages.push(crate::message::Message::system_text(
-            turn_id.clone(),
-            cwd_note,
-        ));
+        parts.push(cwd_note);
     }
     if let Some(plan) = session.plan_system_prompt().await {
-        messages.push(crate::message::Message::system_text(
-            turn_id.clone(),
-            format!(
-                "[active plan]\n{plan}\n[/active plan]\n\nCall plan.tick to mark a step done. Call plan.write to revise."
-            ),
+        parts.push(format!(
+            "[active plan]\n{plan}\n[/active plan]\n\nCall plan.tick to mark a step done. Call plan.write to revise."
         ));
     }
     if let Some(model_info) = available_models_system_prompt() {
-        messages.push(crate::message::Message::system_text(
-            turn_id.clone(),
-            model_info,
-        ));
+        parts.push(model_info);
     }
-    messages
+    parts
+}
+
+fn append_system_context(system: &mut Option<String>, parts: Vec<String>) {
+    if parts.is_empty() {
+        return;
+    }
+    match system {
+        Some(existing) if !existing.is_empty() => {
+            existing.push_str("\n\n");
+            existing.push_str(&parts.join("\n\n"));
+        }
+        Some(existing) => {
+            *existing = parts.join("\n\n");
+        }
+        None => {
+            *system = Some(parts.join("\n\n"));
+        }
+    }
 }
 
 async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
@@ -1158,6 +1169,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             }
             let prompt = prompt_for_budget;
             let mut rewrite_used = false;
+            if let Some(session) = ctx.session.as_ref() {
+                append_system_context(&mut system, session_system_context(session).await);
+            }
             if let Some(safety) = ctx.safety
                 && safety.enabled
             {
@@ -1200,30 +1214,6 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         "safety: content_filter blocked prompt (categories: {cats})"
                     )));
                 }
-            }
-            if let Some(session) = ctx.session.as_ref()
-                && let Some(goal) = session.goal()
-            {
-                final_messages.push(crate::message::Message::system_text(
-                    turn_id.clone(),
-                    format!("[session goal]\n{goal}\n[/session goal]"),
-                ));
-            }
-            if let Some(session) = ctx.session.as_ref()
-                && let Some(plan) = session.plan_system_prompt().await
-            {
-                final_messages.push(crate::message::Message::system_text(
-                    turn_id.clone(),
-                    format!(
-                        "[active plan]\n{plan}\n[/active plan]\n\nCall plan.tick to mark a step done. Call plan.write to revise."
-                    ),
-                ));
-            }
-            if let Some(model_info) = available_models_system_prompt() {
-                final_messages.push(crate::message::Message::system_text(
-                    turn_id.clone(),
-                    model_info,
-                ));
             }
             let retry_base_messages = final_messages.clone();
             let can_rebuild_from_session = !matches!(context_mode, ContextMode::None)
@@ -1376,8 +1366,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                     &turn_id,
                                     Some(prompt.as_str()),
                                     &retry_base_messages[session_messages_len..],
-                                )
-                                .await;
+                                );
                                 last_err = Some(e);
                                 continue 'llm_attempts;
                             }
