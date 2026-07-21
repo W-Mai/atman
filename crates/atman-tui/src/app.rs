@@ -945,20 +945,7 @@ impl AppState {
                     break;
                 }
                 OutputItem::WorkflowPanel { .. } => {}
-                OutputItem::UserTurn { .. } => {
-                    if i > 0 {
-                        if let Some(OutputItem::WorkflowPanel {
-                            ended_at: Some(_),
-                            cancelled: true,
-                            ..
-                        }) = self.items.get(i - 1)
-                        {
-                            reopen_idx = Some(i - 1);
-                            panel_after_user_turn = true;
-                        }
-                    }
-                    break;
-                }
+                OutputItem::UserTurn { .. } => break,
                 _ => {}
             }
         }
@@ -1739,20 +1726,23 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(flow_start("agent", "r1"));
 
-        // Simulate: push_user_turn closes with cancelled:false, then
-        // interjection handler upgrades to cancelled:true.
-        app.push_user_turn("course-correct msg".into());
-        // The panel is now closed with cancelled:false via push_user_turn.
-        // But the interjection handler would call close_current_workflow_panel(true, ...)
-        // which now upgrades cancelled to true.
+        // push_user_turn means a new user turn started — this only happens
+        // when has_running_workflow() is false. Course-correct during a
+        // running flow does NOT call push_user_turn, so this scenario
+        // represents a normal new message after a cancelled flow.
+        app.push_user_turn("new msg".into());
         app.close_current_workflow_panel(true, None);
 
-        // New FlowStart must peek past the UserTurn to find the cancelled panel.
+        // UserTurn between the old panel and FlowStart means new turn →
+        // new panel, not reopen.
         app.apply_stream_frame(flow_start("agent", "r2"));
         let panels = workflow_panels(&app);
-        assert_eq!(panels.len(), 1, "must reopen cancelled panel past UserTurn");
-        assert!(panels[0].1, "panel must be open");
-        // Verify the reopened panel's run_id is registered.
+        assert_eq!(
+            panels.len(),
+            2,
+            "UserTurn means new turn — new panel expected"
+        );
+        assert!(panels[1].1, "new panel must be open");
         assert!(app.workflow_run_to_panel.contains_key("r2"));
     }
 
