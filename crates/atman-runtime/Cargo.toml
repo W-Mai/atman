@@ -9,7 +9,7 @@ publish = true
 description = "atman flow execution runtime: values, errors, executor"
 
 [dependencies]
-atman-dsl        = { path = "../atman-dsl" }
+atman-dsl        = { path = "../atman-dsl", version = "1.1.0" }
 anyhow.workspace   = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -9,7 +9,7 @@ publish = true
 description = "atman TUI — ratatui-based REPL frontend"
 
 [dependencies]
-atman-runtime = { path = "../atman-runtime" }
+atman-runtime = { path = "../atman-runtime", version = "1.1.0" }
 anyhow.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
