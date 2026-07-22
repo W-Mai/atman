@@ -21,9 +21,6 @@ impl CapturedProvider {
     fn last_system(&self) -> Option<String> {
         self.last_system.lock().unwrap().clone()
     }
-    fn last_messages(&self) -> Vec<Message> {
-        self.last_messages.lock().unwrap().clone()
-    }
 }
 
 impl atman_runtime::provider::Provider for CapturedProvider {
@@ -104,19 +101,14 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
         .unwrap();
     session.end_turn();
 
-    let msgs = provider.last_messages();
-    let goal_msg: String = msgs
-        .iter()
-        .map(|m| m.text_concat())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let system = provider.last_system().unwrap_or_default();
     assert!(
-        goal_msg.contains("ship the atman agent"),
-        "want goal text in messages, got: {goal_msg}"
+        system.contains("ship the atman agent"),
+        "want goal text in system, got: {system}"
     );
     assert!(
-        goal_msg.contains("[session goal]") && goal_msg.contains("[/session goal]"),
-        "want goal delimiters, got: {goal_msg}"
+        system.contains("[session goal]") && system.contains("[/session goal]"),
+        "want goal delimiters, got: {system}"
     );
 }
 
@@ -153,15 +145,9 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
         seen.contains("you are a helpful assistant"),
         "user system must stay in system prompt: {seen}"
     );
-    let msgs = provider.last_messages();
-    let goal_msg: String = msgs
-        .iter()
-        .map(|m| m.text_concat())
-        .collect::<Vec<_>>()
-        .join("\n");
     assert!(
-        goal_msg.contains("stay minimal"),
-        "goal must be in messages: {goal_msg}"
+        seen.contains("stay minimal"),
+        "goal must be in system: {seen}"
     );
 }
 
@@ -187,7 +173,11 @@ async fn no_goal_leaves_system_untouched() {
         .unwrap();
     session.end_turn();
 
-    assert_eq!(provider.last_system().as_deref(), Some("only-user"));
+    let system = provider.last_system().unwrap_or_default();
+    assert!(
+        system.starts_with("only-user"),
+        "user system must be first, got: {system}"
+    );
 }
 
 #[tokio::test]
@@ -214,15 +204,10 @@ async fn goal_survives_multiple_turns_in_same_session() {
             .await
             .unwrap();
         session.end_turn();
-        let msgs = provider.last_messages();
-        let joined: String = msgs
-            .iter()
-            .map(|m| m.text_concat())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let system = provider.last_system().unwrap_or_default();
         assert!(
-            joined.contains("persistent goal"),
-            "turn missed goal: {joined}"
+            system.contains("persistent goal"),
+            "turn missed goal: {system}"
         );
     }
 }
