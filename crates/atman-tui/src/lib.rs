@@ -2592,16 +2592,37 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.popup.is_open() {
         completion::render_popup(f, input_rect, &app.popup);
     }
+    let target_border = if app.streaming {
+        Color::Rgb(96, 96, 96)
+    } else {
+        app.trust.display().color.ratatui()
+    };
+    if app.streaming != app.was_streaming {
+        app.was_streaming = app.streaming;
+        app.border_fade_at = Some(std::time::Instant::now());
+    }
+    let border_color = if let Some(start) = app.border_fade_at {
+        let elapsed = start.elapsed().as_secs_f64();
+        let prev = if app.streaming {
+            app.trust.display().color.ratatui()
+        } else {
+            Color::Rgb(96, 96, 96)
+        };
+        if elapsed >= 0.35 {
+            app.border_fade_at = None;
+            target_border
+        } else {
+            lerp_rgb(prev, target_border, (elapsed / 0.35).clamp(0.0, 1.0))
+        }
+    } else {
+        target_border
+    };
     render_pulse_bar(
         f,
         input_rect,
         app.tick,
         app.has_running_workflow(),
-        if app.streaming {
-            Color::DarkGray
-        } else {
-            app.trust.display().color.ratatui()
-        },
+        border_color,
     );
     if app.cheatsheet_open {
         completion::render_cheatsheet(f, area);

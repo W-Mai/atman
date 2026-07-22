@@ -128,6 +128,8 @@ pub struct AppState {
     pub follow_tail: bool,
     pub should_quit: bool,
     pub streaming: bool,
+    pub was_streaming: bool,
+    pub border_fade_at: Option<std::time::Instant>,
     pub waiting_for_llm: bool,
     pub goal: Option<String>,
     pub session_id: String,
