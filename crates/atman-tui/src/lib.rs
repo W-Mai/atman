@@ -2843,6 +2843,37 @@ fn render_pulse_bar(
             }
         }
     }
+
+    // Bleed the wave into the vertical borders, fading upward.
+    let left_x = input_rect.x;
+    let right_x = input_rect.x + input_rect.width.saturating_sub(1);
+    let bottom_wave_at = |col: u16| -> f64 {
+        let x = if col >= bar_x {
+            (col - bar_x) as f64
+        } else {
+            0.0
+        };
+        let dx = (x - center) / sigma;
+        (-0.5 * dx * dx).exp()
+    };
+    let bleed_rows = 4u16;
+    for dy in 0..=bleed_rows {
+        let row = bar_y.saturating_sub(dy);
+        if row <= input_rect.y {
+            break;
+        }
+        let fade = if dy == 0 { 1.0 } else { (-0.6 * dy as f64).exp() };
+        let left_wave = bottom_wave_at(left_x) * fade;
+        let right_wave = bottom_wave_at(right_x) * fade;
+        for (col, wave) in [(left_x, left_wave), (right_x, right_wave)] {
+            if wave < 0.01 {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((col, row)) {
+                cell.fg = lerp_rgb(border_color, peak, wave);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
