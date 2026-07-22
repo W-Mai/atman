@@ -21,18 +21,14 @@ pub fn cursor_display_col(input: &str, cursor: usize) -> u16 {
 pub fn input_paragraph<'a>(
     input: &'a str,
     _cursor: usize,
-    streaming: bool,
+    border_color: ratatui::style::Color,
     pending_below: u16,
     scroll_row: u16,
     trust: &'a atman_runtime::trust::TrustConfig,
 ) -> Paragraph<'a> {
     let display = trust.display();
     let mode_color = display.color.ratatui();
-    let border_style = if streaming {
-        Style::default().fg(Color::Rgb(96, 96, 96))
-    } else {
-        Style::default().fg(mode_color)
-    };
+    let border_style = Style::default().fg(border_color);
     let title = if pending_below > 0 {
         format!(
             " atman · {} {}  ↓ {pending_below} new ",
