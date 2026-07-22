@@ -39,10 +39,17 @@ mod kw {
     syn::custom_keyword!(end);
 }
 
+fn to_span(_s: proc_macro2::Span) -> crate::ast::Span {
+    // proc_macro2::Span doesn't expose line/column in stable Rust.
+    // syn errors still carry the original span; our Span is for
+    // atman's own diagnostics and defaults to (0, 0) when parsed.
+    crate::ast::Span { line: 0, column: 0 }
+}
+
 fn to_ident(id: syn::Ident) -> Ident {
     Ident {
         name: id.to_string(),
-        span: id.span(),
+        span: to_span(id.span()),
     }
 }
 
@@ -97,7 +104,7 @@ fn parse_route(input: ParseStream) -> Result<RouteDecl> {
     Ok(RouteDecl {
         pattern: pat_lit.value(),
         flow,
-        span: kw_route.span,
+        span: to_span(kw_route.span),
     })
 }
 
@@ -127,7 +134,7 @@ fn parse_default_route(input: ParseStream) -> Result<DefaultRouteDecl> {
     let flow = flow.ok_or_else(|| content.error("`default_route` missing `flow:`"))?;
     Ok(DefaultRouteDecl {
         flow,
-        span: kw_dr.span,
+        span: to_span(kw_dr.span),
     })
 }
 
@@ -157,7 +164,7 @@ fn parse_lifecycle(input: ParseStream) -> Result<LifecycleDecl> {
     Ok(LifecycleDecl {
         event,
         body,
-        span: kw_on.span,
+        span: to_span(kw_on.span),
     })
 }
 

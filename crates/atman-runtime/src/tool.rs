@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 use crate::error::RuntimeError;
 use crate::value::Value;
 
-// Not `Send`: proc-macro2 spans hold `Rc<()>`. Eval / exec await inline, never spawn.
+// `dyn Future` is deliberately *not* `Send` — AST types hold `proc_macro2::Span`
+// which contains `Rc<()>`.  Use `tokio::task::spawn_local` within a `LocalSet` when
+// you need concurrency without Send.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 pub type ToolResult = Result<Value, RuntimeError>;

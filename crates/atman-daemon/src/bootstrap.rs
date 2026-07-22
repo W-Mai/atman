@@ -122,10 +122,11 @@ pub struct BootstrapOutcome {
     pub executor: Executor,
 }
 
-/// Spawn background MCP connections.  Each server runs on a dedicated
-/// thread with its own tokio runtime so transports stay alive for the
-/// lifetime of the process.  Tools are registered as each server
-/// connects and become visible on the next LLM call via `"mcp.*"`.
+/// Spawn background MCP connections on a single thread using cooperative
+/// concurrency (tokio::task::spawn_local).  Each server connects
+/// independently — fast servers don't wait for slow ones.  Tools are
+/// registered as each server connects and become visible on the next
+/// LLM call via `"mcp.*"`.
 pub fn spawn_mcp_boot(
     executor: atman_runtime::Executor,
     session: std::sync::Arc<atman_runtime::Session>,
@@ -135,58 +136,71 @@ pub fn spawn_mcp_boot(
     if configs.is_empty() {
         return;
     }
+    let total = configs.len() as u16;
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("mcp runtime");
-        rt.block_on(async move {
-            let mut ok_count: u16 = 0;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("mcp runtime");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async move {
+            let mut tasks = Vec::new();
             for cfg in &configs {
-                let outcome = match cfg.transport {
-                    atman_runtime::mcp::TransportKind::Stdio => {
-                        atman_runtime::mcp::McpClient::connect_stdio(
-                            &cfg.name,
-                            &cfg.command,
-                            &cfg.args,
-                            cfg.timeout_ms,
-                        )
-                        .await
-                    }
-                    atman_runtime::mcp::TransportKind::Http => match cfg.url.as_deref() {
-                        Some(url) => {
-                            atman_runtime::mcp::McpClient::connect_http(
-                                &cfg.name,
-                                url,
-                                cfg.auth_token.clone(),
-                                cfg.timeout_ms,
+                let executor = executor.clone();
+                let session = session.clone();
+                let name = cfg.name.clone();
+                let command = cfg.command.clone();
+                let args = cfg.args.clone();
+                let url = cfg.url.clone();
+                let auth_token = cfg.auth_token.clone();
+                let timeout_ms = cfg.timeout_ms;
+                let tier = cfg.tier;
+                let transport = cfg.transport;
+                tasks.push(tokio::task::spawn_local(async move {
+                    let outcome = match transport {
+                        atman_runtime::mcp::TransportKind::Stdio => {
+                            atman_runtime::mcp::McpClient::connect_stdio(
+                                &name, &command, &args, timeout_ms,
                             )
                             .await
                         }
-                        None => Err(atman_runtime::mcp::McpError::Protocol(
-                            "http transport requires `url`".into(),
-                        )),
-                    },
-                };
-                match outcome {
-                    Ok(client) => {
-                        let arc_client = std::sync::Arc::new(client);
-                        for tool in &arc_client.tools {
-                            let adapter = atman_runtime::mcp::McpToolAdapter::new(
-                                arc_client.clone(),
-                                &tool.name,
-                                cfg.tier,
-                            );
-                            executor
-                                .tools
-                                .register(std::sync::Arc::new(adapter));
+                        atman_runtime::mcp::TransportKind::Http => match url.as_deref() {
+                            Some(url) => {
+                                atman_runtime::mcp::McpClient::connect_http(
+                                    &name, url, auth_token, timeout_ms,
+                                )
+                                .await
+                            }
+                            None => Err(atman_runtime::mcp::McpError::Protocol(
+                                "http transport requires `url`".into(),
+                            )),
+                        },
+                    };
+                    match outcome {
+                        Ok(client) => {
+                            let arc_client = std::sync::Arc::new(client);
+                            for tool in &arc_client.tools {
+                                let adapter = atman_runtime::mcp::McpToolAdapter::new(
+                                    arc_client.clone(),
+                                    &tool.name,
+                                    tier,
+                                );
+                                executor
+                                    .tools
+                                    .register(std::sync::Arc::new(adapter));
+                            }
+                            session.set_mcp_totals(1, total);
                         }
-                        ok_count += 1;
+                        Err(e) => {
+                            eprintln!("[atman] MCP `{}` failed: {e}", name);
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("[atman] MCP `{}` failed to connect: {e}", cfg.name);
-                    }
-                }
-                session.set_mcp_totals(ok_count, configs.len() as u16);
+                }));
             }
-            // Keep the runtime alive so transports don't get dropped.
+            for t in tasks {
+                let _ = t.await;
+            }
+            // Keep runtime alive so transports survive.
             std::future::pending::<()>().await;
         });
     });

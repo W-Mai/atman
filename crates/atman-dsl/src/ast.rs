@@ -1,4 +1,18 @@
-use proc_macro2::Span;
+use std::fmt;
+
+/// Source location.  Plain integers — `Copy + Send + Sync` — so the
+/// entire AST can be `Send`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Span {
+    pub line: u32,
+    pub column: u32,
+}
+
+impl fmt::Display for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.line, self.column)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Ident {
