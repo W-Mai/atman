@@ -52,11 +52,11 @@ trait ModeColorExt {
 impl ModeColorExt for atman_runtime::trust::ModeColor {
     fn ratatui(self) -> Color {
         match self {
-            atman_runtime::trust::ModeColor::Cyan => Color::Rgb(0, 170, 170),
-            atman_runtime::trust::ModeColor::Green => Color::Rgb(0, 170, 0),
-            atman_runtime::trust::ModeColor::Yellow => Color::Rgb(170, 170, 0),
-            atman_runtime::trust::ModeColor::Orange => Color::Rgb(208, 135, 22),
-            atman_runtime::trust::ModeColor::Red => Color::Rgb(170, 0, 0),
+            atman_runtime::trust::ModeColor::Cyan => Color::Rgb(40, 180, 180),
+            atman_runtime::trust::ModeColor::Green => Color::Rgb(70, 175, 70),
+            atman_runtime::trust::ModeColor::Yellow => Color::Rgb(190, 175, 55),
+            atman_runtime::trust::ModeColor::Orange => Color::Rgb(220, 85, 40),
+            atman_runtime::trust::ModeColor::Red => Color::Rgb(190, 65, 65),
         }
     }
 }
@@ -2774,12 +2774,12 @@ async fn check_latest_release() -> Option<String> {
 fn to_rgb(c: ratatui::style::Color) -> (u8, u8, u8) {
     match c {
         ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
-        ratatui::style::Color::Cyan => (0, 170, 170),
+        ratatui::style::Color::Cyan => (40, 180, 180),
         ratatui::style::Color::DarkGray => (96, 96, 96),
         ratatui::style::Color::Gray => (128, 128, 128),
-        ratatui::style::Color::Green => (0, 170, 0),
-        ratatui::style::Color::Yellow => (170, 170, 0),
-        ratatui::style::Color::Red => (170, 0, 0),
+        ratatui::style::Color::Green => (70, 175, 70),
+        ratatui::style::Color::Yellow => (190, 175, 55),
+        ratatui::style::Color::Red => (190, 65, 65),
         ratatui::style::Color::Blue => (0, 0, 200),
         ratatui::style::Color::Magenta => (200, 0, 200),
         ratatui::style::Color::White => (240, 240, 240),
@@ -2816,7 +2816,7 @@ fn render_pulse_bar(
     }
     let t = crate::theme::theme();
     let peak = if to_rgb(t.accent) == to_rgb(border_color) {
-        Color::Rgb(64, 192, 255)
+        Color::Rgb(100, 210, 255)
     } else {
         t.accent
     };
@@ -2862,7 +2862,11 @@ fn render_pulse_bar(
         if row <= input_rect.y {
             break;
         }
-        let fade = if dy == 0 { 1.0 } else { (-0.6 * dy as f64).exp() };
+        let fade = if dy == 0 {
+            1.0
+        } else {
+            (-0.6 * dy as f64).exp()
+        };
         let left_wave = bottom_wave_at(left_x) * fade;
         let right_wave = bottom_wave_at(right_x) * fade;
         for (col, wave) in [(left_x, left_wave), (right_x, right_wave)] {
