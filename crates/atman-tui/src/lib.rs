@@ -40,7 +40,7 @@ pub mod workflow_viewer_modal;
 
 use app::{AppState, NoteLevel, OutputItem};
 use atman_runtime::stream::StreamFrame;
-use input::{InputEditor, input_paragraph};
+use input::{InputEditor, cursor_from_wrapped, input_paragraph};
 use keys::{KeyAction, map as map_key};
 use terminal_guard::TerminalGuard;
 
@@ -317,12 +317,17 @@ async fn run_frames(
                                 .map(|r| rect_contains(r, me.column, me.row))
                                 .unwrap_or(false);
                             if over_input {
+                                let cw = if let Some(r) = app.input_rect {
+                                    r.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize
+                                } else {
+                                    80
+                                };
                                 for _ in 0..3 {
                                     if matches!(me.kind, MouseEventKind::ScrollUp) {
-                                        if !editor.move_line_up() {
+                                        if !editor.move_line_up_visual(cw) {
                                             break;
                                         }
-                                    } else if !editor.move_line_down() {
+                                    } else if !editor.move_line_down_visual(cw) {
                                         break;
                                     }
                                 }
@@ -378,10 +383,16 @@ async fn run_frames(
                                 && let Some(rect) = app.input_rect
                                 && rect_contains(rect, me.column, me.row)
                             {
-                                let inner_x = me.column.saturating_sub(rect.x + 2);
+                                let inner_x = me.column.saturating_sub(rect.x + layout::INPUT_LEFT);
                                 let inner_y = me.row.saturating_sub(rect.y + 1);
-                                let display_col = inner_x;
-                                editor.set_cursor_by_display(inner_y as usize, display_col);
+                                let cw = (rect.width.saturating_sub(layout::INPUT_H_OVERHEAD)) as usize;
+                                let pos = cursor_from_wrapped(
+                                    editor.buf(),
+                                    inner_y as usize,
+                                    inner_x as usize,
+                                    cw,
+                                );
+                                editor.set_cursor(pos);
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 // Toggle sidebar section headers on click.
                                 if let Some(r) = app.last_goal_hdr_rect
@@ -1954,14 +1965,22 @@ fn handle_key(
             edited = true;
         }
         KeyAction::HistoryUp => {
-            if !editor.move_line_up() {
+            let cw = app
+                .input_rect
+                .map(|r| r.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize)
+                .unwrap_or(80);
+            if !editor.move_line_up_visual(cw) {
                 editor.history_up();
             }
             *interrupt_prompt = None;
             edited = true;
         }
         KeyAction::HistoryDown => {
-            if !editor.move_line_down() {
+            let cw = app
+                .input_rect
+                .map(|r| r.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize)
+                .unwrap_or(80);
+            if !editor.move_line_down_visual(cw) {
                 editor.history_down();
             }
             *interrupt_prompt = None;
@@ -2274,10 +2293,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         layout::compute_sidebar_rect(l.transcript, show_sidebar, sidebar_effective_collapsed);
     let transcript_content = layout::compute_content_rect(l.transcript);
     let content_w = layout::input_content_width(l.transcript.width);
-    let total_input_lines = crate::input::wrapped_line_count(editor.buf(), content_w) as u16;
+    let total_input_lines = crate::input::visual_line_count(editor.buf(), content_w) as u16;
     let input_buf_lines = total_input_lines.min(12);
     let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
-    let cursor_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());
+    let content_w = layout::input_content_width(l.transcript.width);
+    let cursor_row =
+        crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
     let visible_rows = input_buf_lines.max(3);
     let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
     let startup_slot = if startup_active {
@@ -2524,9 +2545,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         },
     );
     if !app.streaming {
-        let raw_row = crate::input::cursor_display_row(editor.buf(), editor.cursor());
-        let raw_col = crate::input::cursor_display_col(editor.buf(), editor.cursor());
-        let inner_x = input_rect.x.saturating_add(2);
+        let raw_row =
+            crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
+        let raw_col =
+            crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
+        let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
         let inner_y = input_rect.y.saturating_add(1);
         if raw_row >= scroll_row {
             let cy = inner_y + (raw_row - scroll_row);

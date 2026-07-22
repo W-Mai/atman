@@ -124,6 +124,247 @@ pub fn wrapped_line_count(input: &str, content_width: usize) -> usize {
 }
 
 #[derive(Debug, Clone)]
+struct WrappedLine {
+    byte_range: (usize, usize),
+}
+
+/// Split input into visual lines matching ratatui's `Wrap { trim: false }`.
+fn compute_wrapped_lines(input: &str, content_width: usize) -> Vec<WrappedLine> {
+    let cw = content_width.max(1);
+    let mut lines: Vec<WrappedLine> = Vec::new();
+    let mut byte_offset = 0usize;
+
+    for logical in input.split('\n') {
+        let logical_start = byte_offset;
+        if logical.is_empty() {
+            lines.push(WrappedLine {
+                byte_range: (logical_start, logical_start),
+            });
+            byte_offset += 1;
+            continue;
+        }
+        let segments = segment_logical_line(logical);
+        if segments.is_empty() {
+            lines.push(WrappedLine {
+                byte_range: (logical_start, logical_start),
+            });
+            byte_offset += logical.len() + 1;
+            continue;
+        }
+        let mut cur_row_start = logical_start;
+        let mut cur_width: usize = 0;
+        for seg in &segments {
+            let seg_abs_start = logical_start + seg.rel_start;
+            let seg_width = UnicodeWidthStr::width(seg.text);
+            if seg.is_space {
+                cur_width += seg_width;
+            } else if cur_width == 0 {
+                if seg_width <= cw {
+                    cur_width = seg_width;
+                } else {
+                    let sub_lines = char_break_word(seg.text, seg_abs_start, cw);
+                    for (i, sub) in sub_lines.iter().enumerate() {
+                        if i > 0 || cur_width > 0 {
+                            lines.push(WrappedLine {
+                                byte_range: (cur_row_start, sub.byte_range.0),
+                            });
+                            cur_row_start = sub.byte_range.0;
+                        }
+                        cur_width = sub.width;
+                    }
+                }
+            } else {
+                if cur_width + seg_width <= cw {
+                    cur_width += seg_width;
+                } else {
+                    lines.push(WrappedLine {
+                        byte_range: (cur_row_start, seg_abs_start),
+                    });
+                    cur_row_start = seg_abs_start;
+                    cur_width = 0;
+                    if seg_width <= cw {
+                        cur_width = seg_width;
+                    } else {
+                        let sub_lines = char_break_word(seg.text, seg_abs_start, cw);
+                        for sub in &sub_lines {
+                            if cur_width > 0 {
+                                lines.push(WrappedLine {
+                                    byte_range: (cur_row_start, sub.byte_range.0),
+                                });
+                                cur_row_start = sub.byte_range.0;
+                            }
+                            cur_width = sub.width;
+                        }
+                    }
+                }
+            }
+        }
+        let logical_end = logical_start + logical.len();
+        if cur_row_start < logical_end || cur_width > 0 {
+            lines.push(WrappedLine {
+                byte_range: (cur_row_start, logical_end),
+            });
+        }
+        byte_offset = logical_start + logical.len() + 1;
+    }
+    lines
+}
+
+/// Tokenize a logical line into word and space segments.
+fn segment_logical_line(logical: &str) -> Vec<LineSegment<'_>> {
+    let mut segs = Vec::new();
+    let bytes = logical.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Collect non-space run (word).
+        let word_start = i;
+        while i < bytes.len() && bytes[i] != b' ' {
+            i += 1;
+        }
+        if i > word_start {
+            segs.push(LineSegment {
+                rel_start: word_start,
+                text: &logical[word_start..i],
+                is_space: false,
+            });
+        }
+        // Collect space run.
+        let space_start = i;
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        if i > space_start {
+            segs.push(LineSegment {
+                rel_start: space_start,
+                text: &logical[space_start..i],
+                is_space: true,
+            });
+        }
+    }
+    segs
+}
+
+/// Break a single word that is wider than `cw` into sub-lines at
+/// character boundaries. Returns a list of (byte_range_abs, width).
+fn char_break_word(word: &str, abs_base: usize, cw: usize) -> Vec<SubLine> {
+    let mut out = Vec::new();
+    let mut cur_start = 0usize;
+    let mut cur_width = 0usize;
+    for (char_offset, c) in word.char_indices() {
+        let cw_char = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if cur_width + cw_char > cw && cur_width > 0 {
+            out.push(SubLine {
+                byte_range: (abs_base + cur_start, abs_base + char_offset),
+                width: cur_width,
+            });
+            cur_start = char_offset;
+            cur_width = cw_char;
+        } else {
+            cur_width += cw_char;
+        }
+    }
+    if cur_start < word.len() || cur_width > 0 {
+        out.push(SubLine {
+            byte_range: (abs_base + cur_start, abs_base + word.len()),
+            width: cur_width,
+        });
+    }
+    out
+}
+
+struct LineSegment<'a> {
+    rel_start: usize,
+    text: &'a str,
+    is_space: bool,
+}
+
+struct SubLine {
+    byte_range: (usize, usize),
+    width: usize,
+}
+
+/// Given a visual (row, col) from a mouse click, compute the byte offset
+/// into the input string. Clamps to valid positions.
+pub fn cursor_from_wrapped(
+    input: &str,
+    visual_row: usize,
+    visual_col: usize,
+    content_width: usize,
+) -> usize {
+    let lines = compute_wrapped_lines(input, content_width);
+    if lines.is_empty() {
+        return 0;
+    }
+    if visual_row >= lines.len() {
+        return input.len();
+    }
+    let idx = visual_row.min(lines.len() - 1);
+    let line = &lines[idx];
+    let slice = &input[line.byte_range.0..line.byte_range.1];
+    let mut byte_offset = line.byte_range.0;
+    let mut used: usize = 0;
+    for c in slice.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > visual_col {
+            break;
+        }
+        used += cw;
+        byte_offset += c.len_utf8();
+        if used >= visual_col {
+            break;
+        }
+    }
+    byte_offset
+}
+
+/// Which visual (wrapped) row the cursor is on, 0-based.
+pub fn wrapped_cursor_row(input: &str, cursor: usize, content_width: usize) -> usize {
+    let cursor = cursor.min(input.len());
+    let lines = compute_wrapped_lines(input, content_width);
+    if lines.is_empty() {
+        return 0;
+    }
+    for (i, line) in lines.iter().enumerate() {
+        if cursor >= line.byte_range.0 && cursor < line.byte_range.1 {
+            return i;
+        }
+    }
+    // Cursor in a gap (at a `\n`) — assign to the preceding line.
+    for (i, line) in lines.iter().enumerate().rev() {
+        if cursor >= line.byte_range.1 {
+            return i;
+        }
+    }
+    0
+}
+
+/// Visual column within the current wrapped row, 0-based.
+pub fn wrapped_cursor_col(input: &str, cursor: usize, content_width: usize) -> usize {
+    let cursor = cursor.min(input.len());
+    let lines = compute_wrapped_lines(input, content_width);
+    for line in &lines {
+        if cursor >= line.byte_range.0 && cursor < line.byte_range.1 {
+            let slice = &input[line.byte_range.0..cursor];
+            return UnicodeWidthStr::width(slice);
+        }
+    }
+    // Cursor in a gap (at `\n`) or past all lines — return full line width.
+    for line in lines.iter().rev() {
+        if cursor >= line.byte_range.1 {
+            return UnicodeWidthStr::width(&input[line.byte_range.0..line.byte_range.1]);
+        }
+    }
+    0
+}
+
+/// Total number of visual lines after word-wrap, matching ratatui's
+/// `Wrap { trim: false }`. Replaces `wrapped_line_count` for scroll
+// calculations.
+pub fn visual_line_count(input: &str, content_width: usize) -> usize {
+    compute_wrapped_lines(input, content_width).len().max(1)
+}
+
+#[derive(Debug, Clone)]
 pub struct PastedEntry {
     pub placeholder: String,
     pub content: String,
@@ -236,9 +477,23 @@ impl InputEditor {
         self.cursor = self.buf.len();
     }
 
+    /// Set cursor to a specific byte position (clamped).
+    pub fn set_cursor(&mut self, pos: usize) {
+        self.consume_history_view();
+        self.cursor = pos.min(self.buf.len());
+    }
+
     pub fn move_line_up(&mut self) -> bool {
         use unicode_width::UnicodeWidthChar;
-        let head = &self.buf[..self.cursor];
+        // If cursor sits on a `\n`, back up one byte so rfind can find the
+        // preceding newline.
+        let effective =
+            if self.cursor > 0 && self.buf.as_bytes().get(self.cursor).copied() == Some(b'\n') {
+                self.cursor - 1
+            } else {
+                self.cursor
+            };
+        let head = &self.buf[..effective];
         let Some(cur_line_start_off) = head.rfind('\n') else {
             return false;
         };
@@ -301,6 +556,33 @@ impl InputEditor {
             }
         }
         self.cursor = byte_off;
+        true
+    }
+
+    /// Move cursor up one visual (wrapped) line, keeping the same column.
+    /// Returns false when already on the first visual row.
+    pub fn move_line_up_visual(&mut self, cw: usize) -> bool {
+        let cur_row = wrapped_cursor_row(&self.buf, self.cursor, cw);
+        if cur_row == 0 {
+            return false;
+        }
+        let cur_col = wrapped_cursor_col(&self.buf, self.cursor, cw);
+        let target_row = cur_row - 1;
+        self.cursor = cursor_from_wrapped(&self.buf, target_row, cur_col, cw);
+        true
+    }
+
+    /// Move cursor down one visual (wrapped) line, keeping the same column.
+    /// Returns false when already on the last visual row.
+    pub fn move_line_down_visual(&mut self, cw: usize) -> bool {
+        let total = visual_line_count(&self.buf, cw);
+        let cur_row = wrapped_cursor_row(&self.buf, self.cursor, cw);
+        if cur_row + 1 >= total {
+            return false;
+        }
+        let cur_col = wrapped_cursor_col(&self.buf, self.cursor, cw);
+        let target_row = cur_row + 1;
+        self.cursor = cursor_from_wrapped(&self.buf, target_row, cur_col, cw);
         true
     }
 
@@ -742,5 +1024,195 @@ mod tests {
     fn wrapped_line_count_empty_row_counts() {
         assert_eq!(wrapped_line_count("a\n\nb", 50), 3);
         assert_eq!(wrapped_line_count("", 50), 1);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_single_line_col_zero() {
+        assert_eq!(cursor_from_wrapped("hello", 0, 0, 50), 0);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_single_line_mid() {
+        // "hello" → click at col 2 should land at byte 2 (after "he")
+        assert_eq!(cursor_from_wrapped("hello", 0, 2, 50), 2);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_single_line_end() {
+        assert_eq!(cursor_from_wrapped("hello", 0, 5, 50), 5);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_past_end_of_line_clamps_to_line_end() {
+        // click at col 99 on a 5-char line → clamp to end of line
+        assert_eq!(cursor_from_wrapped("hello", 0, 99, 50), 5);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_past_last_visual_row_clamps_to_buf_end() {
+        assert_eq!(cursor_from_wrapped("hello", 10, 0, 50), 5);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_wraps_to_second_visual_row() {
+        assert_eq!(cursor_from_wrapped("hello world", 1, 0, 10), 6);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_wraps_to_mid_of_second_visual_row() {
+        // "hello world" at width 10 → row 0: "hello ", row 1: "world"
+        // Click row 1 col 2 → "wo" → cursor at byte 6 + 2 = 8
+        assert_eq!(cursor_from_wrapped("hello world", 1, 2, 10), 8);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_cjk_double_width() {
+        // "你好world" at width 50 → one visual line
+        // Click at col 4 (after "你好") → cursor at byte 6 (你=3, 好=3)
+        assert_eq!(cursor_from_wrapped("你好world", 0, 4, 50), 6);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_multiple_newlines() {
+        // "a\nb\nc" → 3 logical lines, 3 visual lines at any width
+        assert_eq!(cursor_from_wrapped("a\nb\nc", 0, 1, 50), 1); // after "a\n" → 'b'
+        assert_eq!(cursor_from_wrapped("a\nb\nc", 2, 1, 50), 5); // end of buf
+    }
+
+    #[test]
+    fn cursor_from_wrapped_empty_input() {
+        assert_eq!(cursor_from_wrapped("", 0, 0, 50), 0);
+        assert_eq!(cursor_from_wrapped("", 0, 5, 50), 0);
+        assert_eq!(cursor_from_wrapped("", 3, 0, 50), 0);
+    }
+
+    #[test]
+    fn cursor_from_wrapped_zero_content_width_graceful() {
+        // content_width == 0 → treated as 1, each char on its own line
+        assert_eq!(cursor_from_wrapped("ab", 0, 0, 0), 0); // 'a' on row 0
+        assert_eq!(cursor_from_wrapped("ab", 1, 0, 0), 1); // 'b' on row 1
+    }
+
+    #[test]
+    fn cursor_from_wrapped_round_trip() {
+        let input = "the quick brown fox jumps over the lazy dog";
+        let cw = 10;
+        let pos = cursor_from_wrapped(input, 0, 16, cw);
+        assert!(pos > 0 && pos <= input.len());
+    }
+
+    #[test]
+    fn cursor_from_wrapped_word_boundary_wrapping() {
+        let pos = cursor_from_wrapped("hello world", 0, 4, 6);
+        assert_eq!(&"hello world"[..pos], "hell");
+    }
+
+    #[test]
+    fn wrapped_cursor_row_single_unwrapped_line() {
+        // "hello" at width 50 → all on row 0
+        assert_eq!(wrapped_cursor_row("hello", 0, 50), 0);
+        assert_eq!(wrapped_cursor_row("hello", 2, 50), 0);
+        assert_eq!(wrapped_cursor_row("hello", 5, 50), 0);
+    }
+
+    #[test]
+    fn wrapped_cursor_row_wraps_to_second_row() {
+        // "hello world" at width 10 → row 0: "hello " (6 cols), row 1: "world"
+        // cursor at byte 6 ('w') → row 1
+        assert_eq!(wrapped_cursor_row("hello world", 6, 10), 1);
+        // cursor at byte 8 ('r') → still row 1
+        assert_eq!(wrapped_cursor_row("hello world", 8, 10), 1);
+        // cursor at byte 3 ('l') → row 0
+        assert_eq!(wrapped_cursor_row("hello world", 3, 10), 0);
+    }
+
+    #[test]
+    fn wrapped_cursor_row_newline_advances() {
+        // "a\nb\nc" → 3 visual rows
+        assert_eq!(wrapped_cursor_row("a\nb\nc", 0, 50), 0); // 'a'
+        assert_eq!(wrapped_cursor_row("a\nb\nc", 2, 50), 1); // 'b'
+        assert_eq!(wrapped_cursor_row("a\nb\nc", 4, 50), 2); // 'c'
+    }
+
+    #[test]
+    fn wrapped_cursor_row_cursor_at_newline() {
+        // cursor at position 1 (right after "a\n") → on row 1 (the empty-ish row? or row 1 of 'b'?)
+        // Actually cursor at byte 1 (the '\n' itself) — should be row 0 (end of "a" line)
+        // But after the newline, the cursor is effectively at start of next line.
+        // Let's define: cursor AT the '\n' byte → row 0. Cursor AFTER '\n' → row 1.
+        assert_eq!(wrapped_cursor_row("a\nb", 1, 50), 0); // at '\n'
+        assert_eq!(wrapped_cursor_row("a\nb", 2, 50), 1); // at 'b'
+    }
+
+    #[test]
+    fn wrapped_cursor_row_empty_input() {
+        assert_eq!(wrapped_cursor_row("", 0, 50), 0);
+    }
+
+    #[test]
+    fn wrapped_cursor_row_zero_width() {
+        assert_eq!(wrapped_cursor_row("ab", 0, 0), 0);
+        assert_eq!(wrapped_cursor_row("ab", 1, 0), 1);
+    }
+
+    #[test]
+    fn wrapped_cursor_col_single_unwrapped_line() {
+        assert_eq!(wrapped_cursor_col("hello", 0, 50), 0);
+        assert_eq!(wrapped_cursor_col("hello", 2, 50), 2);
+        assert_eq!(wrapped_cursor_col("hello", 5, 50), 5);
+    }
+
+    #[test]
+    fn wrapped_cursor_col_wraps_resets_on_new_visual_row() {
+        // "hello world" at width 10 → row 0: "hello " (6 cols), row 1: "world" (5 cols)
+        // cursor at byte 0 ('h') → col 0 on row 0
+        assert_eq!(wrapped_cursor_col("hello world", 0, 10), 0);
+        // cursor at byte 5 (' ') → col 5 on row 0
+        assert_eq!(wrapped_cursor_col("hello world", 5, 10), 5);
+        // cursor at byte 6 ('w') → col 0 on row 1
+        assert_eq!(wrapped_cursor_col("hello world", 6, 10), 0);
+        // cursor at byte 8 ('r') → col 2 on row 1
+        assert_eq!(wrapped_cursor_col("hello world", 8, 10), 2);
+    }
+
+    #[test]
+    fn wrapped_cursor_col_newline_resets() {
+        assert_eq!(wrapped_cursor_col("a\nb", 0, 50), 0); // 'a'
+        assert_eq!(wrapped_cursor_col("a\nb", 2, 50), 0); // 'b' — new line
+        assert_eq!(wrapped_cursor_col("a\nb", 3, 50), 1); // end of 'b'
+    }
+
+    #[test]
+    fn wrapped_cursor_col_cjk() {
+        // "你好w" — 你(2) + 好(2) + w(1)
+        assert_eq!(wrapped_cursor_col("你好w", 0, 50), 0);
+        assert_eq!(wrapped_cursor_col("你好w", 3, 50), 2); // after "你"
+        assert_eq!(wrapped_cursor_col("你好w", 6, 50), 4); // after "你好"
+    }
+
+    #[test]
+    fn wrapped_cursor_row_col_round_trip() {
+        let input = "the quick brown fox jumps over the lazy dog";
+        let cw = 10;
+        for cursor in 0..=input.len() {
+            let row = wrapped_cursor_row(input, cursor, cw);
+            let col = wrapped_cursor_col(input, cursor, cw);
+            let back = cursor_from_wrapped(input, row, col, cw);
+            assert_eq!(
+                back, cursor,
+                "round-trip failed at cursor={cursor}: (row={row}, col={col}) → {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_cursor_col_empty_input() {
+        assert_eq!(wrapped_cursor_col("", 0, 50), 0);
+    }
+
+    #[test]
+    fn wrapped_cursor_col_zero_width() {
+        assert_eq!(wrapped_cursor_col("ab", 0, 0), 0);
+        assert_eq!(wrapped_cursor_col("ab", 1, 0), 0);
     }
 }

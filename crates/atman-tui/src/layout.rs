@@ -65,6 +65,15 @@ pub fn compute_input_rect(transcript: Rect, buf_lines: u16) -> Rect {
     input_rect_at(transcript, buf_lines, InputYAnchor::Bottom)
 }
 
+/// Per-side border width (Borders::ALL → 1 on each side).
+pub const INPUT_BORDER: u16 = 1;
+/// Per-side horizontal padding (Padding::horizontal(1) → 1 on each side).
+pub const INPUT_PAD: u16 = 1;
+/// Left-edge offset: left border + left padding.
+pub const INPUT_LEFT: u16 = INPUT_BORDER + INPUT_PAD;
+/// Both-sides overhead subtracted from outer width for content width.
+pub const INPUT_H_OVERHEAD: u16 = INPUT_LEFT * 2;
+
 pub fn input_outer_width(transcript_width: u16) -> u16 {
     (transcript_width * 3 / 4)
         .clamp(50, 96)
@@ -73,7 +82,7 @@ pub fn input_outer_width(transcript_width: u16) -> u16 {
 
 pub fn input_content_width(transcript_width: u16) -> usize {
     let outer = input_outer_width(transcript_width);
-    outer.saturating_sub(2 + 2 + 2) as usize
+    outer.saturating_sub(2 + 2) as usize
 }
 
 pub fn compute_input_rect_centered(transcript: Rect, buf_lines: u16) -> Rect {
