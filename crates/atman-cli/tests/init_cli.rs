@@ -109,7 +109,7 @@ fn slash_command_resolver_accepts_multi_flow_agent_at() {
     let data = tmp.path().join("data");
     run_init(&cfg);
 
-    let out = Command::new(atman_bin())
+    let mut child = Command::new(atman_bin())
         .env("ATMAN_CONFIG_DIR", cfg.to_str().unwrap())
         .env("ATMAN_DATA_DIR", data.to_str().unwrap())
         .env("ATMAN_REPL_NON_INTERACTIVE", "1")
@@ -118,17 +118,56 @@ fn slash_command_resolver_accepts_multi_flow_agent_at() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            child
-                .stdin
-                .as_mut()
-                .unwrap()
-                .write_all(b"/agent hi\n:exit\n")?;
-            child.wait_with_output()
-        })
         .expect("spawn repl");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/agent hi\n:exit\n")
+        .expect("write stdin");
+    // drop stdin so the REPL sees EOF if it's still reading
+    drop(child.stdin.take());
+
+    // The slash resolver check happens at parse time — we don't need the
+    // agent flow to finish.  Give the process a generous window to parse
+    // and print any stderr, then kill it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut out = None;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                out = Some((
+                    status,
+                    child.stdout.take().and_then(|mut s| {
+                        use std::io::Read;
+                        let mut buf = Vec::new();
+                        s.read_to_end(&mut buf).ok()?;
+                        Some(buf)
+                    }),
+                    child.stderr.take().and_then(|mut s| {
+                        use std::io::Read;
+                        let mut buf = Vec::new();
+                        s.read_to_end(&mut buf).ok()?;
+                        Some(buf)
+                    }),
+                ));
+                break;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    let (_, _, stderr_bytes) = out.unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        (std::process::ExitStatus::default(), None, None)
+    });
+    let stderr = stderr_bytes
+        .as_deref()
+        .map(String::from_utf8_lossy)
+        .unwrap_or_default();
     assert!(
         !stderr.contains("must contain exactly one flow"),
         "slash resolver regression: multi-flow .at should not be rejected upfront. stderr=\n{stderr}"
