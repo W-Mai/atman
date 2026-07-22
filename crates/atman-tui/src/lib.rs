@@ -32,6 +32,7 @@ pub mod palette;
 pub mod prompt_resolver;
 pub mod session_switcher;
 pub mod sidebar;
+pub mod states;
 pub mod status;
 pub mod terminal_guard;
 pub mod terminal_viewer_modal;
@@ -202,6 +203,8 @@ async fn run_frames(
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
+    let ui_state = crate::states::PersistedUiState::load();
+    ui_state.apply(&mut app);
     app.startup_intro = handle.startup_intro.take();
     if let Some(rx) = handle.context_rx.as_ref() {
         app.context = rx.borrow().clone();
@@ -399,31 +402,38 @@ async fn run_frames(
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.goal_collapsed = !app.goal_collapsed;
+                                    save_ui_state(&app);
                                 } else if let Some(r) = app.last_plan_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.plan_collapsed = !app.plan_collapsed;
+                                    save_ui_state(&app);
                                 } else if let Some(r) = app.last_todo_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.todo_collapsed = !app.todo_collapsed;
+                                    save_ui_state(&app);
                                 } else if let Some(r) = app.last_ctx_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.context_collapsed = !app.context_collapsed;
+                                    save_ui_state(&app);
                                 } else if let Some(r) = app.last_meta_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.meta_collapsed = !app.meta_collapsed;
+                                    save_ui_state(&app);
                                 } else if let Some(r) = app.last_collapse_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.sidebar_collapsed = true;
+                                    save_ui_state(&app);
                                 } else if let Some(r) = app.last_expand_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                     && !app.sidebar_collapse_locked
                                 {
                                     app.sidebar_collapsed = false;
+                                    save_ui_state(&app);
                                 } else if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
@@ -1365,6 +1375,7 @@ fn dispatch_palette_entry(
         }
         PaletteEntryId::ToggleSidebar => {
             app.sidebar_mode = app.sidebar_mode.toggle();
+            save_ui_state(app);
         }
         PaletteEntryId::ShowHelp => {
             app.cheatsheet_open = true;
@@ -1850,6 +1861,7 @@ fn handle_key(
                 let prev = app.trust.mode;
                 app.trust.mode = new_mode;
                 app.trust_mode_picker_open = false;
+                save_ui_state(app);
                 if new_mode != prev {
                     if let Some(sess) = app.session.as_ref() {
                         sess.approval().set_auto_ceiling(new_mode.auto_ceiling());
@@ -1887,6 +1899,7 @@ fn handle_key(
             KeyAction::Submit | KeyAction::Char('\r') => {
                 app.trust.theme = themes[app.picker_selected.min(max - 1)];
                 app.theme_picker_open = false;
+                save_ui_state(app);
             }
             KeyAction::Quit => app.should_quit = true,
             _ => {}
@@ -2006,6 +2019,7 @@ fn handle_key(
             if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
                 app.trust.outside = app.trust.outside.next();
                 app.mark_items_dirty();
+                save_ui_state(app);
             } else if editor.expand_paste_at_cursor() {
                 edited = true;
             }
@@ -2067,10 +2081,12 @@ fn handle_key(
         }
         KeyAction::ToggleSidebar => {
             app.sidebar_collapsed = !app.sidebar_collapsed;
+            save_ui_state(app);
             *interrupt_prompt = None;
         }
         KeyAction::ToggleMouseCapture => {
             let now_on = app.toggle_mouse_capture();
+            save_ui_state(app);
             if let Err(e) = crate::terminal_guard::set_mouse_capture(now_on) {
                 app.push_note(
                     format!("mouse capture toggle failed: {e}"),
@@ -2544,21 +2560,17 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             height: 1,
         },
     );
-    if !app.streaming {
-        let raw_row =
-            crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
-        let raw_col =
-            crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
-        let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
-        let inner_y = input_rect.y.saturating_add(1);
-        if raw_row >= scroll_row {
-            let cy = inner_y + (raw_row - scroll_row);
-            let cx = inner_x + raw_col;
-            if cy < input_rect.y + input_rect.height.saturating_sub(1)
-                && cx < input_rect.x + input_rect.width.saturating_sub(1)
-            {
-                f.set_cursor_position((cx, cy));
-            }
+    let raw_row = crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
+    let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
+    let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
+    let inner_y = input_rect.y.saturating_add(1);
+    if raw_row >= scroll_row {
+        let cy = inner_y + (raw_row - scroll_row);
+        let cx = inner_x + raw_col;
+        if cy < input_rect.y + input_rect.height.saturating_sub(1)
+            && cx < input_rect.x + input_rect.width.saturating_sub(1)
+        {
+            f.set_cursor_position((cx, cy));
         }
     }
     if app.popup.is_open() {
@@ -2597,6 +2609,13 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
+    }
+}
+
+fn save_ui_state(app: &crate::app::AppState) {
+    let state = crate::states::PersistedUiState::snapshot(app);
+    if let Err(e) = state.save() {
+        eprintln!("[atman] failed to save ui state: {e}");
     }
 }
 
