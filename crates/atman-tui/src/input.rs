@@ -3,6 +3,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
+use crate::ModeColorExt;
+
 pub fn cursor_display_row(input: &str, cursor: usize) -> u16 {
     let clamped = cursor.min(input.len());
     input[..clamped].matches('\n').count() as u16
@@ -25,15 +27,9 @@ pub fn input_paragraph<'a>(
     trust: &'a atman_runtime::trust::TrustConfig,
 ) -> Paragraph<'a> {
     let display = trust.display();
-    let mode_color = match display.color {
-        atman_runtime::trust::ModeColor::Cyan => Color::Cyan,
-        atman_runtime::trust::ModeColor::Green => Color::Green,
-        atman_runtime::trust::ModeColor::Yellow => Color::Yellow,
-        atman_runtime::trust::ModeColor::Orange => Color::Rgb(208, 135, 22),
-        atman_runtime::trust::ModeColor::Red => Color::Red,
-    };
+    let mode_color = display.color.ratatui();
     let border_style = if streaming {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Rgb(96, 96, 96))
     } else {
         Style::default().fg(mode_color)
     };

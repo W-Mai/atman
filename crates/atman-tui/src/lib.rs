@@ -1391,7 +1391,7 @@ fn dispatch_palette_entry(
         }
         PaletteEntryId::ToggleSidebar => {
             app.sidebar_mode = app.sidebar_mode.toggle();
-            save_ui_state(app);
+            app.save_ui_state();
         }
         PaletteEntryId::ShowHelp => {
             app.cheatsheet_open = true;
