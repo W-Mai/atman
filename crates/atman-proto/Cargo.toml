@@ -7,6 +7,8 @@ authors.workspace = true
 license.workspace = true
 publish = true
 description = "atman JSON-RPC 2.0 protocol types"
+homepage = "https://atman.run"
+repository = "https://github.com/W-Mai/atman"
 
 [dependencies]
 serde.workspace = true
