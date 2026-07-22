@@ -2828,20 +2828,101 @@ fn render_pulse_bar(
     let mid = (w as f64) / 2.0;
     let center = mid + amp * time.sin();
 
-    // Mutate the existing cells on the bottom border — keep their
-    // character but apply wave colour + optional bold.
     let buf = f.buffer_mut();
     for i in 0..w {
         let x = i as f64;
         let dx = (x - center) / sigma;
         let wave = (-0.5 * dx * dx).exp();
         if let Some(cell) = buf.cell_mut((bar_x + i, bar_y)) {
-            cell.fg = lerp_rgb(t.subtle_fg, t.accent, wave);
+            cell.fg = lerp_rgb(border_color, peak, wave);
             if wave > 0.7 {
                 cell.modifier.insert(Modifier::BOLD);
             } else {
                 cell.modifier.remove(Modifier::BOLD);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    fn to_rgb(c: Color) -> (u8, u8, u8) {
+        match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::DarkGray => (96, 96, 96),
+            Color::Cyan => (0, 200, 200),
+            Color::Green => (0, 200, 0),
+            Color::Yellow => (200, 200, 0),
+            Color::Red => (200, 0, 0),
+            _ => (128, 128, 128),
+        }
+    }
+
+    #[test]
+    fn pulse_wave_boundary_colors_darkgray_to_fallback() {
+        let border = Color::DarkGray;
+        let peak = Color::Rgb(64, 192, 255);
+        let _below = 0.009;
+        let above = 0.011;
+
+        let above_lerped = lerp_rgb(border, peak, above);
+        let (br, bg, bb) = to_rgb(border);
+        let (pr, pg, pb) = to_rgb(peak);
+        let (lr, lg, lb) = to_rgb(above_lerped);
+
+        // Below threshold: raw DarkGray (ANSI color variant).
+        // Above threshold: lerp_rgb produces Rgb(...) — different Color variant.
+        // Even if values are close, ANSI vs RGB renders differently in terminal.
+        assert!(
+            matches!(border, Color::DarkGray),
+            "below threshold is ANSI DarkGray"
+        );
+        assert!(
+            matches!(above_lerped, Color::Rgb(..)),
+            "above threshold becomes RGB variant: {above_lerped:?} (border={br},{bg},{bb} peak={pr},{pg},{pb} → lerp={lr},{lg},{lb})"
+        );
+    }
+
+    #[test]
+    fn pulse_wave_boundary_colors_cyan_to_accent() {
+        // Cyan border → peak = accent = Cyan → same color → uses fallback.
+        let border = Color::Cyan;
+        let peak = Color::Rgb(64, 192, 255);
+
+        let _below = 0.009;
+        let above = 0.011;
+
+        eprintln!("=== Cyan border + fallback peak ===");
+        eprintln!("border  (Cyan)        = {:?}", to_rgb(border));
+        eprintln!("peak    (fallback)    = {:?}", to_rgb(peak));
+        eprintln!("wave={_below:.3} → raw border = {:?}", to_rgb(border));
+        eprintln!(
+            "wave={above:.3} → lerp_rgb   = {:?}",
+            to_rgb(lerp_rgb(border, peak, above))
+        );
+        eprintln!("jump: {:?} → {:?}", border, lerp_rgb(border, peak, above));
+    }
+
+    #[test]
+    fn pulse_wave_boundary_colors_green_to_accent() {
+        // Green border → peak = accent = Cyan.
+        let border = Color::Green;
+        let peak = Color::Cyan;
+
+        let _below = 0.009;
+        let above = 0.011;
+
+        eprintln!("=== Green border + Cyan accent ===");
+        eprintln!("border  (Green)       = {:?}", to_rgb(border));
+        eprintln!("peak    (Cyan)        = {:?}", to_rgb(peak));
+        eprintln!("wave={_below:.3} → raw border = {:?}", to_rgb(border));
+        eprintln!(
+            "wave={above:.3} → lerp_rgb   = {:?}",
+            to_rgb(lerp_rgb(border, peak, above))
+        );
+        eprintln!("jump: {:?} → {:?}", border, lerp_rgb(border, peak, above));
     }
 }
