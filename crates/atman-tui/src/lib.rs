@@ -45,6 +45,22 @@ use input::{InputEditor, cursor_from_wrapped, input_paragraph};
 use keys::{KeyAction, map as map_key};
 use terminal_guard::TerminalGuard;
 
+trait ModeColorExt {
+    fn ratatui(self) -> Color;
+}
+
+impl ModeColorExt for atman_runtime::trust::ModeColor {
+    fn ratatui(self) -> Color {
+        match self {
+            atman_runtime::trust::ModeColor::Cyan => Color::Rgb(0, 170, 170),
+            atman_runtime::trust::ModeColor::Green => Color::Rgb(0, 170, 0),
+            atman_runtime::trust::ModeColor::Yellow => Color::Rgb(170, 170, 0),
+            atman_runtime::trust::ModeColor::Orange => Color::Rgb(208, 135, 22),
+            atman_runtime::trust::ModeColor::Red => Color::Rgb(170, 0, 0),
+        }
+    }
+}
+
 pub enum TuiNote {
     Info(String),
     Warn(String),
@@ -402,38 +418,38 @@ async fn run_frames(
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.goal_collapsed = !app.goal_collapsed;
-                                    save_ui_state(&app);
+                                    app.save_ui_state();
                                 } else if let Some(r) = app.last_plan_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.plan_collapsed = !app.plan_collapsed;
-                                    save_ui_state(&app);
+                                    app.save_ui_state();
                                 } else if let Some(r) = app.last_todo_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.todo_collapsed = !app.todo_collapsed;
-                                    save_ui_state(&app);
+                                    app.save_ui_state();
                                 } else if let Some(r) = app.last_ctx_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.context_collapsed = !app.context_collapsed;
-                                    save_ui_state(&app);
+                                    app.save_ui_state();
                                 } else if let Some(r) = app.last_meta_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.meta_collapsed = !app.meta_collapsed;
-                                    save_ui_state(&app);
+                                    app.save_ui_state();
                                 } else if let Some(r) = app.last_collapse_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.sidebar_collapsed = true;
-                                    save_ui_state(&app);
+                                    app.save_ui_state();
                                 } else if let Some(r) = app.last_expand_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                     && !app.sidebar_collapse_locked
                                 {
                                     app.sidebar_collapsed = false;
-                                    save_ui_state(&app);
+                                    app.save_ui_state();
                                 } else if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
@@ -1861,7 +1877,7 @@ fn handle_key(
                 let prev = app.trust.mode;
                 app.trust.mode = new_mode;
                 app.trust_mode_picker_open = false;
-                save_ui_state(app);
+                app.save_ui_state();
                 if new_mode != prev {
                     if let Some(sess) = app.session.as_ref() {
                         sess.approval().set_auto_ceiling(new_mode.auto_ceiling());
@@ -1899,7 +1915,7 @@ fn handle_key(
             KeyAction::Submit | KeyAction::Char('\r') => {
                 app.trust.theme = themes[app.picker_selected.min(max - 1)];
                 app.theme_picker_open = false;
-                save_ui_state(app);
+                app.save_ui_state();
             }
             KeyAction::Quit => app.should_quit = true,
             _ => {}
@@ -2019,7 +2035,7 @@ fn handle_key(
             if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
                 app.trust.outside = app.trust.outside.next();
                 app.mark_items_dirty();
-                save_ui_state(app);
+                app.save_ui_state();
             } else if editor.expand_paste_at_cursor() {
                 edited = true;
             }
@@ -2081,12 +2097,12 @@ fn handle_key(
         }
         KeyAction::ToggleSidebar => {
             app.sidebar_collapsed = !app.sidebar_collapsed;
-            save_ui_state(app);
+            app.save_ui_state();
             *interrupt_prompt = None;
         }
         KeyAction::ToggleMouseCapture => {
             let now_on = app.toggle_mouse_capture();
-            save_ui_state(app);
+            app.save_ui_state();
             if let Err(e) = crate::terminal_guard::set_mouse_capture(now_on) {
                 app.push_note(
                     format!("mouse capture toggle failed: {e}"),
@@ -2576,7 +2592,17 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.popup.is_open() {
         completion::render_popup(f, input_rect, &app.popup);
     }
-    render_pulse_bar(f, input_rect, app.tick, app.has_running_workflow());
+    render_pulse_bar(
+        f,
+        input_rect,
+        app.tick,
+        app.has_running_workflow(),
+        if app.streaming {
+            Color::DarkGray
+        } else {
+            app.trust.display().color.ratatui()
+        },
+    );
     if app.cheatsheet_open {
         completion::render_cheatsheet(f, area);
     }
@@ -2609,13 +2635,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
-    }
-}
-
-fn save_ui_state(app: &crate::app::AppState) {
-    let state = crate::states::PersistedUiState::snapshot(app);
-    if let Err(e) = state.save() {
-        eprintln!("[atman] failed to save ui state: {e}");
     }
 }
 
@@ -2784,16 +2803,22 @@ fn render_pulse_bar(
     input_rect: ratatui::layout::Rect,
     tick: u64,
     active: bool,
+    border_color: ratatui::style::Color,
 ) {
     if !active {
         return;
     }
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
     let w = input_rect.width.saturating_sub(2);
     if w < 8 {
         return;
     }
     let t = crate::theme::theme();
+    let peak = if to_rgb(t.accent) == to_rgb(border_color) {
+        Color::Rgb(64, 192, 255)
+    } else {
+        t.accent
+    };
     let bar_y = input_rect.y + input_rect.height.saturating_sub(1);
     let bar_x = input_rect.x + 1;
     let time = tick as f64 * 0.05;

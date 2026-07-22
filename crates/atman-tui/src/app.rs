@@ -222,6 +222,13 @@ impl AppState {
         self.mouse_captured
     }
 
+    pub fn save_ui_state(&self) {
+        let state = crate::states::PersistedUiState::snapshot(self);
+        if let Err(e) = state.save() {
+            eprintln!("[atman] failed to save ui state: {e}");
+        }
+    }
+
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
         self.items = items;
         self.items_version = self.items_version.wrapping_add(1);
