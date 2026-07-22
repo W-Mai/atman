@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -98,6 +97,8 @@ pub struct ToolCtx {
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,
     pub current_model: Option<String>,
+    /// Called when memory.recent_turns is invoked, with the count of returned messages.
+    pub on_memory_recent: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
 }
 
 impl ToolCtx {
@@ -321,7 +322,7 @@ pub struct ToolSpec {
 
 #[derive(Default, Clone)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: std::sync::Arc<std::sync::RwLock<HashMap<String, std::sync::Arc<dyn Tool>>>>,
 }
 
 impl ToolRegistry {
@@ -329,24 +330,32 @@ impl ToolRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+    pub fn register(&self, tool: std::sync::Arc<dyn Tool>) {
+        self.tools
+            .write()
+            .unwrap()
+            .insert(tool.name().to_string(), tool);
     }
 
-    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+    pub fn get(&self, name: &str) -> Option<std::sync::Arc<dyn Tool>> {
+        self.tools.read().unwrap().get(name).cloned()
     }
 
     pub fn has(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+        self.tools.read().unwrap().contains_key(name)
     }
 
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.tools.keys().map(String::as_str)
+    pub fn names(&self) -> Vec<String> {
+        self.tools.read().unwrap().keys().cloned().collect()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &Arc<dyn Tool>)> {
-        self.tools.iter()
+    pub fn iter(&self) -> Vec<(String, std::sync::Arc<dyn Tool>)> {
+        self.tools
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 }
 

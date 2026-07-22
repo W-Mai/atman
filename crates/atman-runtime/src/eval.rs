@@ -339,6 +339,12 @@ async fn dispatch_tool_call<'a>(
         }
         c = c.with_fs_access(session_fs_access_policy(session));
         c = c.with_forms(session.forms());
+        {
+            let s = session.clone();
+            c.on_memory_recent = Some(std::sync::Arc::new(move |count| {
+                s.set_memory_recent_count(count);
+            }));
+        }
         c
     } else {
         ctx_with_anchors

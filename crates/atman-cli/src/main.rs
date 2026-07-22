@@ -564,18 +564,13 @@ async fn cmd_run(
 
     let atman_daemon::bootstrap::BootstrapOutcome {
         mut executor,
-        mcp_status,
     } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
         .await?;
-    for outcome in &mcp_status {
-        match outcome {
-            Ok(s) => eprintln!(
-                "[atman] mcp `{}` connected via {} ({} tools)",
-                s.name, s.transport, s.tool_count
-            ),
-            Err(e) => eprintln!("[atman] mcp boot: {e}"),
-        }
-    }
+    atman_daemon::bootstrap::spawn_mcp_boot(
+        executor.clone(),
+        session.clone(),
+        config_dir().ok().as_deref(),
+    );
     attach_memory_stores(&mut executor, &session, ephemeral)?;
     executor.tool_ctx.prompt_resolver = Some(std::sync::Arc::new(
         atman_runtime::rendezvous::AutoResolveResolver {
@@ -1351,7 +1346,6 @@ struct PendingUserMessage {
 struct PrebuiltSession {
     session: std::sync::Arc<atman_runtime::Session>,
     executor: Executor,
-    mcp_status: Vec<Result<atman_runtime::mcp::McpClientStatus, String>>,
     is_fresh: bool,
     root: PathBuf,
     intro: Option<atman_tui::app::StartupIntro>,
@@ -1400,7 +1394,6 @@ async fn prebuild_session(
     emit(BootStepId::BuildExecutor, true, false);
     let atman_daemon::bootstrap::BootstrapOutcome {
         mut executor,
-        mcp_status,
     } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
         .await?;
     emit(BootStepId::BuildExecutor, false, true);
@@ -1409,8 +1402,12 @@ async fn prebuild_session(
     emit(BootStepId::RegisterProviders, false, true);
 
     emit(BootStepId::AttachMcp, true, false);
-    let mcp_ok = mcp_status.iter().all(|r| r.is_ok());
-    emit(BootStepId::AttachMcp, false, mcp_ok);
+    atman_daemon::bootstrap::spawn_mcp_boot(
+        executor.clone(),
+        session.clone(),
+        config_dir().ok().as_deref(),
+    );
+    emit(BootStepId::AttachMcp, false, true);
 
     emit(BootStepId::AttachMemory, true, false);
     attach_memory_stores(&mut executor, &session, false)?;
@@ -1427,7 +1424,6 @@ async fn prebuild_session(
     Ok(PrebuiltSession {
         session,
         executor,
-        mcp_status,
         is_fresh,
         root,
         intro,
@@ -1510,20 +1506,10 @@ async fn cmd_repl_once(
     let PrebuiltSession {
         session,
         mut executor,
-        mcp_status,
         is_fresh: is_fresh_session,
         root,
         intro,
     } = prebuilt;
-    for outcome in &mcp_status {
-        match outcome {
-            Ok(s) => reporter.info(format!(
-                "[atman] mcp `{}` connected via {} ({} tools)",
-                s.name, s.transport, s.tool_count
-            )),
-            Err(e) => reporter.error(format!("[atman] mcp boot: {e}")),
-        }
-    }
 
     let lifecycles = match config_dir() {
         Ok(cfg) => atman_runtime::lifecycle::LifecycleRunner::from_dir(&cfg),

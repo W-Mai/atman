@@ -120,7 +120,75 @@ pub fn build_redactor(config_dir: Option<&Path>) -> Option<Arc<atman_runtime::re
 
 pub struct BootstrapOutcome {
     pub executor: Executor,
-    pub mcp_status: Vec<Result<atman_runtime::mcp::McpClientStatus, String>>,
+}
+
+/// Spawn MCP server connections as background tasks that register tools
+/// into the executor and update the session's sidebar totals. Does not
+/// block startup — servers that fail or time out are reported via stderr.
+pub fn spawn_mcp_boot(
+    executor: atman_runtime::Executor,
+    session: std::sync::Arc<atman_runtime::Session>,
+    config_dir: Option<&std::path::Path>,
+) {
+    let configs = load_mcp_configs(config_dir);
+    if configs.is_empty() {
+        return;
+    }
+    let total = configs.len() as u16;
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("mcp boot runtime");
+        rt.block_on(async move {
+            let mut ok_count: u16 = 0;
+            for cfg in &configs {
+                let outcome = match cfg.transport {
+                    atman_runtime::mcp::TransportKind::Stdio => {
+                        atman_runtime::mcp::McpClient::connect_stdio(
+                            &cfg.name, &cfg.command, &cfg.args, cfg.timeout_ms,
+                        )
+                        .await
+                    }
+                    atman_runtime::mcp::TransportKind::Http => match cfg.url.as_deref() {
+                        Some(url) => {
+                            atman_runtime::mcp::McpClient::connect_http(
+                                &cfg.name, url, cfg.auth_token.clone(), cfg.timeout_ms,
+                            )
+                            .await
+                        }
+                        None => Err(atman_runtime::mcp::McpError::Protocol(
+                            "http transport requires `url`".into(),
+                        )),
+                    },
+                };
+                match outcome {
+                    Ok(client) => {
+                        let tool_count = client.tools.len();
+                        let transport_kind = client.transport_kind();
+                        let arc_client = std::sync::Arc::new(client);
+                        for tool in &arc_client.tools {
+                            let adapter = atman_runtime::mcp::McpToolAdapter::new(
+                                arc_client.clone(),
+                                &tool.name,
+                                cfg.tier,
+                            );
+                            executor.tools.register(std::sync::Arc::new(adapter));
+                        }
+                        ok_count += 1;
+                        eprintln!(
+                            "[atman] mcp `{}` connected via {} ({} tools)",
+                            cfg.name, transport_kind, tool_count
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("[atman] mcp `{}` boot failed: {e}", cfg.name);
+                    }
+                }
+                session.set_mcp_totals(ok_count, total);
+            }
+        });
+    });
 }
 
 pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> {
@@ -161,13 +229,6 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
             executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
         }
     }
-    let mcp_configs = load_mcp_configs(opts.config_dir.as_deref());
-    let mcp_status_raw =
-        atman_runtime::mcp::register_from_configs(&mut executor.tools, &mcp_configs).await;
-    let mcp_status = mcp_status_raw
-        .into_iter()
-        .map(|r| r.map_err(|e| e.to_string()))
-        .collect();
     if opts.mock {
         executor.providers.register(Arc::new(
             MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
@@ -175,7 +236,6 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     }
     Ok(BootstrapOutcome {
         executor,
-        mcp_status,
     })
 }
 

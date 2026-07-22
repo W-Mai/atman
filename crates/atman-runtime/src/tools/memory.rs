@@ -141,6 +141,9 @@ impl Tool for MemoryRecentTurns {
                 .cloned()
                 .map(Value::Message)
                 .collect();
+            if let Some(cb) = &ctx.on_memory_recent {
+                cb(out.len() as u16);
+            }
             Ok(Value::List(out))
         })
     }

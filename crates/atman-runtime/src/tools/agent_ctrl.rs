@@ -389,7 +389,7 @@ fn build_tool_specs(
     let mut specs = Vec::new();
     for (name, tool) in registry.iter() {
         if let Some(allow) = filter
-            && !allow.iter().any(|n| n == name)
+            && !allow.iter().any(|n| n == &name)
         {
             continue;
         }
