@@ -5,7 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-publish = false
+publish = true
+description = "atman JSON-RPC 2.0 protocol types"
 
 [dependencies]
 serde.workspace = true

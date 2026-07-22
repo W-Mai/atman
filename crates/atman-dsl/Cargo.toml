@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = true
 description = "atman flow DSL: parser, AST, pretty-printer"
 
 [dependencies]

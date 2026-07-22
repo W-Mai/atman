@@ -5,7 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-publish = false
+publish = true
+description = "atman headless daemon — Unix socket + HTTP SSE"
 
 [[bin]]
 name = "atman-daemon"
