@@ -2771,23 +2771,24 @@ async fn check_latest_release() -> Option<String> {
     Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
 }
 
-fn lerp_rgb(a: ratatui::style::Color, b: ratatui::style::Color, t: f64) -> ratatui::style::Color {
-    fn to_rgb(c: ratatui::style::Color) -> (u8, u8, u8) {
-        match c {
-            ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
-            ratatui::style::Color::Cyan => (0, 200, 200),
-            ratatui::style::Color::DarkGray => (96, 96, 96),
-            ratatui::style::Color::Gray => (128, 128, 128),
-            ratatui::style::Color::Green => (0, 200, 0),
-            ratatui::style::Color::Yellow => (200, 200, 0),
-            ratatui::style::Color::Red => (200, 0, 0),
-            ratatui::style::Color::Blue => (0, 0, 200),
-            ratatui::style::Color::Magenta => (200, 0, 200),
-            ratatui::style::Color::White => (240, 240, 240),
-            ratatui::style::Color::Black => (16, 16, 16),
-            _ => (128, 128, 128),
-        }
+fn to_rgb(c: ratatui::style::Color) -> (u8, u8, u8) {
+    match c {
+        ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
+        ratatui::style::Color::Cyan => (0, 170, 170),
+        ratatui::style::Color::DarkGray => (96, 96, 96),
+        ratatui::style::Color::Gray => (128, 128, 128),
+        ratatui::style::Color::Green => (0, 170, 0),
+        ratatui::style::Color::Yellow => (170, 170, 0),
+        ratatui::style::Color::Red => (170, 0, 0),
+        ratatui::style::Color::Blue => (0, 0, 200),
+        ratatui::style::Color::Magenta => (200, 0, 200),
+        ratatui::style::Color::White => (240, 240, 240),
+        ratatui::style::Color::Black => (16, 16, 16),
+        _ => (128, 128, 128),
     }
+}
+
+fn lerp_rgb(a: ratatui::style::Color, b: ratatui::style::Color, t: f64) -> ratatui::style::Color {
     let (ar, ag, ab) = to_rgb(a);
     let (br, bg, bb) = to_rgb(b);
     let t = t.clamp(0.0, 1.0);
