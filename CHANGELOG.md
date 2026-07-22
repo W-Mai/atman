@@ -4,6 +4,10 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [1.1.1] — 2026-07-22
+
+- **crates.io metadata** — keywords, categories, and richer descriptions for all six crates. Homepage and repository links added to every crate manifest.
+
 ## [1.1.0] — 2026-07-22
 
 ### Runtime
