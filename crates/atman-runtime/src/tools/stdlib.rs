@@ -1538,7 +1538,7 @@ mod tests {
     }
 
     fn combinator_ctx() -> ToolCtx {
-        let mut reg = ToolRegistry::new();
+        let reg = ToolRegistry::new();
         reg.register(Arc::new(IsBig));
         reg.register(Arc::new(Double));
         reg.register(Arc::new(AddInts));

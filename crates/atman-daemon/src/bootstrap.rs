@@ -185,9 +185,7 @@ pub fn spawn_mcp_boot(
                                     &tool.name,
                                     tier,
                                 );
-                                executor
-                                    .tools
-                                    .register(std::sync::Arc::new(adapter));
+                                executor.tools.register(std::sync::Arc::new(adapter));
                             }
                             session.set_mcp_totals(1, total);
                         }

@@ -22,6 +22,13 @@ pub trait McpTransport: Send + Sync {
         params: serde_json::Value,
     ) -> BoxFut<'a, Result<serde_json::Value, McpError>>;
 
+    /// Send a JSON-RPC *notification* — no `id`, no response expected.
+    fn notify<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> BoxFut<'a, Result<(), McpError>>;
+
     fn kind(&self) -> &'static str;
 }
 
@@ -100,6 +107,14 @@ impl McpTransport for McpStdioTransport {
         params: serde_json::Value,
     ) -> BoxFut<'a, Result<serde_json::Value, McpError>> {
         Box::pin(self.call_stdio(method, params))
+    }
+
+    fn notify<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> BoxFut<'a, Result<(), McpError>> {
+        Box::pin(self.notify_stdio(method, params))
     }
 
     fn kind(&self) -> &'static str {
@@ -193,6 +208,30 @@ impl McpStdioTransport {
                 })
             }
         }
+    }
+
+    async fn notify_stdio(&self, method: &str, params: serde_json::Value) -> Result<(), McpError> {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        let line = serde_json::to_string(&req)
+            .map_err(|e| McpError::Protocol(format!("serialize: {e}")))?;
+        let mut stdin = self.stdin.lock().await;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| McpError::Io(format!("write: {e}")))?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|e| McpError::Io(format!("write newline: {e}")))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| McpError::Io(format!("flush: {e}")))?;
+        Ok(())
     }
 }
 
@@ -334,6 +373,21 @@ impl McpHttpTransport {
             }),
         }
     }
+
+    async fn notify_http(&self, method: &str, params: serde_json::Value) -> Result<(), McpError> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        let mut req = self.client.post(&self.url).json(&body);
+        if let Some(t) = &self.auth_token {
+            req = req.bearer_auth(t);
+        }
+        // Fire and forget — don't wait for response body.
+        let _ = req.send().await;
+        Ok(())
+    }
 }
 
 impl McpTransport for McpHttpTransport {
@@ -343,6 +397,14 @@ impl McpTransport for McpHttpTransport {
         params: serde_json::Value,
     ) -> BoxFut<'a, Result<serde_json::Value, McpError>> {
         Box::pin(self.call_http(method, params))
+    }
+
+    fn notify<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> BoxFut<'a, Result<(), McpError>> {
+        Box::pin(self.notify_http(method, params))
     }
 
     fn kind(&self) -> &'static str {
@@ -397,8 +459,11 @@ impl McpClient {
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
         let url_str: String = url.into();
-        let transport: Arc<dyn McpTransport> =
-            Arc::new(McpHttpTransport::new(url_str.clone(), auth_token.clone(), timeout_ms));
+        let transport: Arc<dyn McpTransport> = Arc::new(McpHttpTransport::new(
+            url_str.clone(),
+            auth_token.clone(),
+            timeout_ms,
+        ));
         let name = name.into();
         let mut client = Self::finish_connect(name.clone(), transport).await?;
         client.reconnect = Some(ReconnectConfig::Http {
@@ -426,9 +491,9 @@ impl McpClient {
             "clientInfo": {"name": "atman", "version": env!("CARGO_PKG_VERSION")}
         });
         transport.call("initialize", init_params).await?;
-        let _ = transport
-            .call("notifications/initialized", serde_json::Value::Null)
-            .await;
+        transport
+            .notify("notifications/initialized", serde_json::Value::Null)
+            .await?;
         let list = transport.call("tools/list", serde_json::json!({})).await?;
         let tools = parse_tools_list(&list)?;
         Ok(Self {
@@ -445,10 +510,7 @@ impl McpClient {
     }
 
     async fn reconnect(&self) -> Result<(), McpError> {
-        let cfg = self
-            .reconnect
-            .as_ref()
-            .ok_or(McpError::Disconnected)?;
+        let cfg = self.reconnect.as_ref().ok_or(McpError::Disconnected)?;
         let new_transport: Arc<dyn McpTransport> = match cfg {
             ReconnectConfig::Stdio {
                 cmd,
@@ -459,11 +521,7 @@ impl McpClient {
                 url,
                 auth_token,
                 timeout_ms,
-            } => Arc::new(McpHttpTransport::new(
-                url,
-                auth_token.clone(),
-                *timeout_ms,
-            )),
+            } => Arc::new(McpHttpTransport::new(url, auth_token.clone(), *timeout_ms)),
         };
         // Re-initialize the new transport.
         let init_params = serde_json::json!({
@@ -471,12 +529,10 @@ impl McpClient {
             "capabilities": {},
             "clientInfo": {"name": "atman", "version": env!("CARGO_PKG_VERSION")}
         });
+        new_transport.call("initialize", init_params).await?;
         new_transport
-            .call("initialize", init_params)
+            .notify("notifications/initialized", serde_json::Value::Null)
             .await?;
-        let _ = new_transport
-            .call("notifications/initialized", serde_json::Value::Null)
-            .await;
         *self.transport.lock().unwrap() = new_transport;
         Ok(())
     }

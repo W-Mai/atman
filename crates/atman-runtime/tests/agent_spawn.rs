@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn agent_spawn_returns_final_assistant_text_when_no_tools_used() {
-    let mut tools = ToolRegistry::new();
+    let tools = ToolRegistry::new();
     tools.register(Arc::new(AgentSpawn));
     let mut providers = ProviderRegistry::new();
     providers.register(Arc::new(
@@ -36,7 +36,7 @@ async fn agent_spawn_returns_final_assistant_text_when_no_tools_used() {
 
 #[tokio::test]
 async fn agent_spawn_reports_missing_provider_gracefully() {
-    let mut tools = ToolRegistry::new();
+    let tools = ToolRegistry::new();
     tools.register(Arc::new(AgentSpawn));
     let providers = ProviderRegistry::new();
     let ctx = ToolCtx::new()

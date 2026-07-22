@@ -2559,7 +2559,7 @@ mod tests {
         tokio::fs::write(&pa, b"AAA").await.unwrap();
         tokio::fs::write(&pb, b"BBB").await.unwrap();
 
-        let mut tools = ToolRegistry::new();
+        let tools = ToolRegistry::new();
         tools.register(Arc::new(FsRead));
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
@@ -2821,7 +2821,7 @@ flow parent(x: Int) -> Int {
         let path = dir.path().join("hi.txt");
         tokio::fs::write(&path, b"hello runtime").await.unwrap();
 
-        let mut tools = ToolRegistry::new();
+        let tools = ToolRegistry::new();
         tools.register(Arc::new(FsRead));
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
@@ -3050,14 +3050,14 @@ flow parent(x: Int) -> Int {
         // Extract the tools list from the llm node
         let body = &file.flows[0].body;
         let tools_expr = match &body[0] {
-            atman_dsl::ast::Stmt::Bind { value, .. } => {
-                match value {
-                    Expr::Node(atman_dsl::ast::Node::Llm { kwargs }) => {
-                        kwargs.iter().find(|(k, _)| k.name == "tools").map(|(_, v)| v.clone()).unwrap()
-                    }
-                    _ => panic!("expected llm node"),
-                }
-            }
+            atman_dsl::ast::Stmt::Bind { value, .. } => match value {
+                Expr::Node(atman_dsl::ast::Node::Llm { kwargs }) => kwargs
+                    .iter()
+                    .find(|(k, _)| k.name == "tools")
+                    .map(|(_, v)| v.clone())
+                    .unwrap(),
+                _ => panic!("expected llm node"),
+            },
             _ => panic!("expected bind stmt"),
         };
         let specs = resolve_tool_specs(&tools_expr, &tools).unwrap();
