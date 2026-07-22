@@ -40,7 +40,7 @@ impl Theme {
             note_warn_bg: Color::Rgb(38, 30, 16),
             note_error_bg: Color::Rgb(40, 20, 22),
             tinted_fg: Color::Gray,
-            subtle_fg: Color::DarkGray,
+            subtle_fg: Color::Rgb(96, 96, 96),
             modal_bg: Color::Rgb(12, 14, 18),
             panel_bg: Color::Rgb(28, 30, 36),
             accent: Color::Cyan,
