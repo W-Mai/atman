@@ -6,9 +6,11 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 publish = true
-description = "atman command-line interface"
+description = "atman command-line interface — AI coding agent runtime with a Turing-complete .at flow DSL"
 repository = "https://github.com/W-Mai/atman"
 homepage = "https://atman.run"
+keywords = ["atman", "cli", "agent", "ai", "coding"]
+categories = ["command-line-utilities", "development-tools"]
 
 [package.metadata.dist]
 dist = true
@@ -24,11 +26,11 @@ name = "atman"
 path = "src/main.rs"
 
 [dependencies]
-atman-dsl      = { path = "../atman-dsl", version = "1.1.0" }
-atman-runtime  = { path = "../atman-runtime", version = "1.1.0" }
-atman-daemon   = { path = "../atman-daemon", version = "1.1.0" }
-atman-proto    = { path = "../atman-proto", version = "1.1.0" }
-atman-tui      = { path = "../atman-tui", version = "1.1.0" }
+atman-dsl      = { path = "../atman-dsl", version = "1.1.1" }
+atman-runtime  = { path = "../atman-runtime", version = "1.1.1" }
+atman-daemon   = { path = "../atman-daemon", version = "1.1.1" }
+atman-proto    = { path = "../atman-proto", version = "1.1.1" }
+atman-tui      = { path = "../atman-tui", version = "1.1.1" }
 reqwest.workspace      = true
 chrono.workspace       = true
 futures.workspace      = true

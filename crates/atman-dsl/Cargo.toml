@@ -9,6 +9,8 @@ publish = true
 description = "atman flow DSL: parser, AST, pretty-printer"
 homepage = "https://atman.run"
 repository = "https://github.com/W-Mai/atman"
+keywords = ["atman", "dsl", "parser", "ast", "flow"]
+categories = ["development-tools", "parsing"]
 
 [dependencies]
 syn.workspace         = true

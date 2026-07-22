@@ -6,18 +6,20 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 publish = true
-description = "atman headless daemon — Unix socket + HTTP SSE"
+description = "atman headless daemon — Unix socket + HTTP SSE server for the atman AI coding agent"
 homepage = "https://atman.run"
 repository = "https://github.com/W-Mai/atman"
+keywords = ["atman", "daemon", "server", "headless"]
+categories = ["development-tools", "asynchronous"]
 
 [[bin]]
 name = "atman-daemon"
 path = "src/main.rs"
 
 [dependencies]
-atman-proto = { path = "../atman-proto", version = "1.1.0" }
-atman-runtime = { path = "../atman-runtime", version = "1.1.0" }
-atman-dsl = { path = "../atman-dsl", version = "1.1.0" }
+atman-proto = { path = "../atman-proto", version = "1.1.1" }
+atman-runtime = { path = "../atman-runtime", version = "1.1.1" }
+atman-dsl = { path = "../atman-dsl", version = "1.1.1" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

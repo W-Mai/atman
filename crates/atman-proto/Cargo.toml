@@ -6,9 +6,11 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 publish = true
-description = "atman JSON-RPC 2.0 protocol types"
+description = "atman JSON-RPC 2.0 protocol types for the headless daemon"
 homepage = "https://atman.run"
 repository = "https://github.com/W-Mai/atman"
+keywords = ["atman", "json-rpc", "protocol", "rpc"]
+categories = ["development-tools", "api-bindings"]
 
 [dependencies]
 serde.workspace = true

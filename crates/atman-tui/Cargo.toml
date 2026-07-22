@@ -6,12 +6,14 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 publish = true
-description = "atman TUI — ratatui-based REPL frontend"
+description = "atman TUI — ratatui-based terminal frontend for the atman AI coding agent runtime"
 homepage = "https://atman.run"
 repository = "https://github.com/W-Mai/atman"
+keywords = ["atman", "tui", "terminal", "ratatui"]
+categories = ["command-line-interface", "development-tools"]
 
 [dependencies]
-atman-runtime = { path = "../atman-runtime", version = "1.1.0" }
+atman-runtime = { path = "../atman-runtime", version = "1.1.1" }
 anyhow.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
