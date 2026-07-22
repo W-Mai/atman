@@ -290,6 +290,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "reqwest",
+ "serde",
  "serde_json",
  "similar",
  "syntect",

@@ -32,7 +32,8 @@ pub struct SidebarInputs<'a> {
     pub on_todos_scroll: &'a dyn Fn(u16),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SidebarMode {
     #[default]
     Open,
