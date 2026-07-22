@@ -352,8 +352,23 @@ impl McpTransport for McpHttpTransport {
 
 pub struct McpClient {
     pub name: String,
-    transport: Arc<dyn McpTransport>,
+    transport: std::sync::Mutex<Arc<dyn McpTransport>>,
     pub tools: Vec<McpToolSchema>,
+    reconnect: Option<ReconnectConfig>,
+}
+
+/// Config needed to re-create the transport on disconnect.
+enum ReconnectConfig {
+    Stdio {
+        cmd: String,
+        args: Vec<String>,
+        timeout_ms: u64,
+    },
+    Http {
+        url: String,
+        auth_token: Option<String>,
+        timeout_ms: u64,
+    },
 }
 
 impl McpClient {
@@ -365,7 +380,14 @@ impl McpClient {
     ) -> Result<Self, McpError> {
         let transport: Arc<dyn McpTransport> =
             Arc::new(McpStdioTransport::spawn(cmd, args, timeout_ms).await?);
-        Self::finish_connect(name.into(), transport).await
+        let name = name.into();
+        let mut client = Self::finish_connect(name.clone(), transport).await?;
+        client.reconnect = Some(ReconnectConfig::Stdio {
+            cmd: cmd.to_string(),
+            args: args.to_vec(),
+            timeout_ms,
+        });
+        Ok(client)
     }
 
     pub async fn connect_http(
@@ -374,9 +396,17 @@ impl McpClient {
         auth_token: Option<String>,
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
+        let url_str: String = url.into();
         let transport: Arc<dyn McpTransport> =
-            Arc::new(McpHttpTransport::new(url, auth_token, timeout_ms));
-        Self::finish_connect(name.into(), transport).await
+            Arc::new(McpHttpTransport::new(url_str.clone(), auth_token.clone(), timeout_ms));
+        let name = name.into();
+        let mut client = Self::finish_connect(name.clone(), transport).await?;
+        client.reconnect = Some(ReconnectConfig::Http {
+            url: url_str,
+            auth_token,
+            timeout_ms,
+        });
+        Ok(client)
     }
 
     pub async fn connect_with_transport(
@@ -403,13 +433,52 @@ impl McpClient {
         let tools = parse_tools_list(&list)?;
         Ok(Self {
             name,
-            transport,
+            transport: std::sync::Mutex::new(transport),
             tools,
+            reconnect: None,
         })
     }
 
     pub fn transport_kind(&self) -> &'static str {
-        self.transport.kind()
+        let t = self.transport.lock().unwrap();
+        t.kind()
+    }
+
+    async fn reconnect(&self) -> Result<(), McpError> {
+        let cfg = self
+            .reconnect
+            .as_ref()
+            .ok_or(McpError::Disconnected)?;
+        let new_transport: Arc<dyn McpTransport> = match cfg {
+            ReconnectConfig::Stdio {
+                cmd,
+                args,
+                timeout_ms,
+            } => Arc::new(McpStdioTransport::spawn(cmd, args, *timeout_ms).await?),
+            ReconnectConfig::Http {
+                url,
+                auth_token,
+                timeout_ms,
+            } => Arc::new(McpHttpTransport::new(
+                url,
+                auth_token.clone(),
+                *timeout_ms,
+            )),
+        };
+        // Re-initialize the new transport.
+        let init_params = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "atman", "version": env!("CARGO_PKG_VERSION")}
+        });
+        new_transport
+            .call("initialize", init_params)
+            .await?;
+        let _ = new_transport
+            .call("notifications/initialized", serde_json::Value::Null)
+            .await;
+        *self.transport.lock().unwrap() = new_transport;
+        Ok(())
     }
 
     pub async fn call_tool(
@@ -421,8 +490,17 @@ impl McpClient {
             "name": tool_name,
             "arguments": arguments,
         });
-        let result = self.transport.call("tools/call", params).await?;
-        Ok(mcp_result_to_value(result))
+        let transport = { self.transport.lock().unwrap().clone() };
+        let result = transport.call("tools/call", params.clone()).await;
+        match result {
+            Err(McpError::Disconnected) => {
+                self.reconnect().await?;
+                let transport = { self.transport.lock().unwrap().clone() };
+                let retry = transport.call("tools/call", params).await?;
+                Ok(mcp_result_to_value(retry))
+            }
+            other => Ok(mcp_result_to_value(other?)),
+        }
     }
 }
 
@@ -486,7 +564,7 @@ impl McpToolAdapter {
         tier: crate::tool::Tier,
     ) -> Self {
         let tool_name = tool_name.into();
-        let qualified_name = format!("{}.{}", client.name, tool_name);
+        let qualified_name = format!("mcp.{}.{}", client.name, tool_name);
         Self {
             qualified_name,
             tool_name,

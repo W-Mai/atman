@@ -562,10 +562,9 @@ async fn cmd_run(
 
     load_model_config_from_disk();
 
-    let atman_daemon::bootstrap::BootstrapOutcome {
-        mut executor,
-    } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
-        .await?;
+    let atman_daemon::bootstrap::BootstrapOutcome { mut executor } =
+        atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
+            .await?;
     atman_daemon::bootstrap::spawn_mcp_boot(
         executor.clone(),
         session.clone(),
@@ -1392,10 +1391,9 @@ async fn prebuild_session(
     emit(BootStepId::OpenSession, false, true);
 
     emit(BootStepId::BuildExecutor, true, false);
-    let atman_daemon::bootstrap::BootstrapOutcome {
-        mut executor,
-    } = atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
-        .await?;
+    let atman_daemon::bootstrap::BootstrapOutcome { mut executor } =
+        atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), false)?)
+            .await?;
     emit(BootStepId::BuildExecutor, false, true);
 
     emit(BootStepId::RegisterProviders, true, false);

@@ -65,7 +65,7 @@ async fn mcp_server_discovers_tools_and_calls_them_via_registry() {
     assert_eq!(status.transport, "stdio");
 
     let tool = reg
-        .get("demo.echo")
+        .get("mcp.demo.echo")
         .expect("tool should be registered under qualified name");
     let ctx = ToolCtx::new();
     let args = ToolArgs {
@@ -113,7 +113,7 @@ async fn mcp_boot_error_when_command_missing_returns_err_but_does_not_panic() {
 }
 
 #[tokio::test]
-async fn mcp_qualified_tool_name_is_server_dot_tool() {
+async fn mcp_qualified_tool_name_is_mcp_dot_server_dot_tool() {
     let dir = tempfile::tempdir().unwrap();
     let script = write_script(dir.path(), "mock_mcp2.py", MOCK_SERVER);
     let mut reg = ToolRegistry::new();
@@ -128,7 +128,7 @@ async fn mcp_qualified_tool_name_is_server_dot_tool() {
         )],
     )
     .await;
-    assert!(reg.get("srv-a.echo").is_some());
+    assert!(reg.get("mcp.srv-a.echo").is_some());
     assert!(reg.get("echo").is_none(), "bare name must not resolve");
 }
 
@@ -159,11 +159,11 @@ async fn mcp_two_servers_register_under_distinct_namespaces() {
     )
     .await;
     assert_eq!(statuses.iter().filter(|s| s.is_ok()).count(), 2);
-    assert!(reg.get("a.echo").is_some());
-    assert!(reg.get("b.echo").is_some());
+    assert!(reg.get("mcp.a.echo").is_some());
+    assert!(reg.get("mcp.b.echo").is_some());
     // both tools point at their own client — call each and ensure they respond
     let ctx = ToolCtx::new();
-    let out_a = Arc::new(reg.get("a.echo").unwrap())
+    let out_a = Arc::new(reg.get("mcp.a.echo").unwrap())
         .call(
             ToolArgs {
                 positional: vec![],
@@ -173,7 +173,7 @@ async fn mcp_two_servers_register_under_distinct_namespaces() {
         )
         .await
         .unwrap();
-    let out_b = Arc::new(reg.get("b.echo").unwrap())
+    let out_b = Arc::new(reg.get("mcp.b.echo").unwrap())
         .call(
             ToolArgs {
                 positional: vec![],

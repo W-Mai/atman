@@ -2039,11 +2039,23 @@ fn resolve_tool_specs(
     };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
+        // Handle wildcard strings like "mcp.*" or "mcp.lark.*".
+        // Expand against all registered tools whose names start with the prefix.
+        if let Some(prefix) = wildcard_prefix(item) {
+            for name in tools.names() {
+                if name.starts_with(&prefix) {
+                    if let Some(tool) = tools.get(&name) {
+                        out.push(crate::tool::tool_spec(tool.as_ref()));
+                    }
+                }
+            }
+            continue;
+        }
         let name = match tool_ref_name(item) {
             Some(n) => n,
             None => {
                 return Err(format!(
-                    "llm.tools: item is not a tool reference (want ident or ident.method): {item:?}"
+                    "llm.tools: item is not a tool reference (want ident or ident.method, or a \"ns.*\" wildcard): {item:?}"
                 ));
             }
         };
@@ -2053,6 +2065,23 @@ fn resolve_tool_specs(
         out.push(crate::tool::tool_spec(tool.as_ref()));
     }
     Ok(out)
+}
+
+/// If `expr` is a string literal ending with `.*`, return the prefix
+/// (everything before the `.*`), e.g. `"mcp.*"` → `Some("mcp.")`.
+fn wildcard_prefix(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(atman_dsl::ast::Literal::Str(s)) => s.strip_suffix(".*").map(|prefix| {
+            if prefix.is_empty() {
+                // ".*" means match everything — use empty prefix so all tools match.
+                String::new()
+            } else {
+                // "mcp.*" → prefix = "mcp", but we want "mcp." so only mcp tools match.
+                format!("{prefix}.")
+            }
+        }),
+        _ => None,
+    }
 }
 
 fn tool_ref_name(expr: &Expr) -> Option<String> {
@@ -2871,6 +2900,171 @@ flow parent(x: Int) -> Int {
             .filter(|e| matches!(e, crate::event::Event::FlowNodeEnd { .. }))
             .count();
         assert_eq!(ends, 3);
+    }
+
+    #[test]
+    fn resolve_tool_specs_wildcard_unknown_prefix_skips_silently() {
+        let tools = crate::tool::ToolRegistry::new();
+        let expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+            "nonexistent.*".into(),
+        ))]);
+        let specs = resolve_tool_specs(&expr, &tools).unwrap();
+        assert!(
+            specs.is_empty(),
+            "wildcard with no matches should return empty list"
+        );
+    }
+
+    #[test]
+    fn resolve_tool_specs_wildcard_matches_prefixed_tools() {
+        let tools = crate::tool::ToolRegistry::new();
+        struct FakeMcpTool {
+            name: String,
+            desc: String,
+            schema: serde_json::Value,
+        }
+        impl crate::tool::Tool for FakeMcpTool {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn description(&self) -> Option<&str> {
+                Some(&self.desc)
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                self.schema.clone()
+            }
+            fn tier(&self) -> crate::tool::Tier {
+                crate::tool::Tier::Zero
+            }
+            fn approval_level(
+                &self,
+                _args: &crate::tool::ToolArgs,
+                _ctx: &crate::tool::ToolCtx,
+            ) -> crate::tool::ApprovalLevel {
+                crate::tool::ApprovalLevel::Auto
+            }
+            fn call<'a>(
+                &'a self,
+                _args: crate::tool::ToolArgs,
+                _ctx: &'a crate::tool::ToolCtx,
+            ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+                Box::pin(async { Ok(crate::value::Value::Unit) })
+            }
+        }
+        tools.register(std::sync::Arc::new(FakeMcpTool {
+            name: "mcp.lark.send_mail".into(),
+            desc: "send mail".into(),
+            schema: serde_json::json!({"type":"object","properties":{}}),
+        }));
+        tools.register(std::sync::Arc::new(FakeMcpTool {
+            name: "mcp.lark.read_inbox".into(),
+            desc: "read inbox".into(),
+            schema: serde_json::json!({"type":"object","properties":{}}),
+        }));
+        tools.register(std::sync::Arc::new(FakeMcpTool {
+            name: "mcp.siyuan.search".into(),
+            desc: "search notes".into(),
+            schema: serde_json::json!({"type":"object","properties":{}}),
+        }));
+        // Non-MCP tool should NOT be matched.
+        tools.register(std::sync::Arc::new(FakeMcpTool {
+            name: "fs.read".into(),
+            desc: "read file".into(),
+            schema: serde_json::json!({"type":"object","properties":{}}),
+        }));
+
+        // "mcp.*" matches all 3 mcp.* tools, but not fs.read
+        let expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+            "mcp.*".into(),
+        ))]);
+        let specs = resolve_tool_specs(&expr, &tools).unwrap();
+        assert_eq!(specs.len(), 3, "mcp.* should match 3 MCP tools");
+        let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&"mcp.lark.send_mail".into()));
+        assert!(names.contains(&"mcp.lark.read_inbox".into()));
+        assert!(names.contains(&"mcp.siyuan.search".into()));
+
+        // "mcp.lark.*" matches only the 2 lark tools
+        let expr2 = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+            "mcp.lark.*".into(),
+        ))]);
+        let specs2 = resolve_tool_specs(&expr2, &tools).unwrap();
+        assert_eq!(specs2.len(), 2, "mcp.lark.* should match 2 lark tools");
+    }
+
+    #[test]
+    fn resolve_tool_specs_mixed_concrete_and_wildcard() {
+        let tools = crate::tool::ToolRegistry::new();
+        struct FakeMcpTool {
+            name: String,
+            desc: String,
+            schema: serde_json::Value,
+        }
+        impl crate::tool::Tool for FakeMcpTool {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn description(&self) -> Option<&str> {
+                Some(&self.desc)
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                self.schema.clone()
+            }
+            fn tier(&self) -> crate::tool::Tier {
+                crate::tool::Tier::Zero
+            }
+            fn approval_level(
+                &self,
+                _args: &crate::tool::ToolArgs,
+                _ctx: &crate::tool::ToolCtx,
+            ) -> crate::tool::ApprovalLevel {
+                crate::tool::ApprovalLevel::Auto
+            }
+            fn call<'a>(
+                &'a self,
+                _args: crate::tool::ToolArgs,
+                _ctx: &'a crate::tool::ToolCtx,
+            ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+                Box::pin(async { Ok(crate::value::Value::Unit) })
+            }
+        }
+        tools.register(std::sync::Arc::new(FakeMcpTool {
+            name: "mcp.lark.send_mail".into(),
+            desc: "send mail".into(),
+            schema: serde_json::json!({"type":"object","properties":{}}),
+        }));
+        tools.register(std::sync::Arc::new(FakeMcpTool {
+            name: "bash.exec".into(),
+            desc: "exec".into(),
+            schema: serde_json::json!({"type":"object","properties":{}}),
+        }));
+
+        // Build tools list from DSL parse so we get valid spans.
+        let src = r#"flow t() -> string {
+    reply = llm {
+        tools: [bash.exec, "mcp.*"]
+    }
+    return "ok"
+}"#;
+        let file = atman_dsl::parse::parse_file(src).unwrap();
+        // Extract the tools list from the llm node
+        let body = &file.flows[0].body;
+        let tools_expr = match &body[0] {
+            atman_dsl::ast::Stmt::Bind { value, .. } => {
+                match value {
+                    Expr::Node(atman_dsl::ast::Node::Llm { kwargs }) => {
+                        kwargs.iter().find(|(k, _)| k.name == "tools").map(|(_, v)| v.clone()).unwrap()
+                    }
+                    _ => panic!("expected llm node"),
+                }
+            }
+            _ => panic!("expected bind stmt"),
+        };
+        let specs = resolve_tool_specs(&tools_expr, &tools).unwrap();
+        assert_eq!(specs.len(), 2, "bash.exec + mcp.lark.send_mail = 2");
+        let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&"bash.exec".into()));
+        assert!(names.contains(&"mcp.lark.send_mail".into()));
     }
 }
 

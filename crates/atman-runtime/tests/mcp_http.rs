@@ -88,8 +88,8 @@ async fn http_mcp_server_completes_full_tool_registry_roundtrip() {
     assert_eq!(status.tool_count, 1);
 
     let tool = reg
-        .get("cloud.echo")
-        .expect("tool registered under `cloud.echo`");
+        .get("mcp.cloud.echo")
+        .expect("tool registered under `mcp.cloud.echo`");
     let out = tool
         .call(
             ToolArgs {

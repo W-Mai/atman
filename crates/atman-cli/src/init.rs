@@ -166,7 +166,8 @@ flow agent_loop(iteration: int) -> string {
             agent.spawn,
             form.ask,
             preview.push,
-            session.push, sleep
+            session.push, sleep,
+            "mcp.*"
         ]
     }
     tool_uses = extract_tool_uses(reply)

@@ -122,9 +122,10 @@ pub struct BootstrapOutcome {
     pub executor: Executor,
 }
 
-/// Spawn MCP server connections as background tasks that register tools
-/// into the executor and update the session's sidebar totals. Does not
-/// block startup — servers that fail or time out are reported via stderr.
+/// Spawn background MCP connections.  Each server runs on a dedicated
+/// thread with its own tokio runtime so transports stay alive for the
+/// lifetime of the process.  Tools are registered as each server
+/// connects and become visible on the next LLM call via `"mcp.*"`.
 pub fn spawn_mcp_boot(
     executor: atman_runtime::Executor,
     session: std::sync::Arc<atman_runtime::Session>,
@@ -134,26 +135,28 @@ pub fn spawn_mcp_boot(
     if configs.is_empty() {
         return;
     }
-    let total = configs.len() as u16;
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("mcp boot runtime");
+        let rt = tokio::runtime::Runtime::new().expect("mcp runtime");
         rt.block_on(async move {
             let mut ok_count: u16 = 0;
             for cfg in &configs {
                 let outcome = match cfg.transport {
                     atman_runtime::mcp::TransportKind::Stdio => {
                         atman_runtime::mcp::McpClient::connect_stdio(
-                            &cfg.name, &cfg.command, &cfg.args, cfg.timeout_ms,
+                            &cfg.name,
+                            &cfg.command,
+                            &cfg.args,
+                            cfg.timeout_ms,
                         )
                         .await
                     }
                     atman_runtime::mcp::TransportKind::Http => match cfg.url.as_deref() {
                         Some(url) => {
                             atman_runtime::mcp::McpClient::connect_http(
-                                &cfg.name, url, cfg.auth_token.clone(), cfg.timeout_ms,
+                                &cfg.name,
+                                url,
+                                cfg.auth_token.clone(),
+                                cfg.timeout_ms,
                             )
                             .await
                         }
@@ -164,8 +167,6 @@ pub fn spawn_mcp_boot(
                 };
                 match outcome {
                     Ok(client) => {
-                        let tool_count = client.tools.len();
-                        let transport_kind = client.transport_kind();
                         let arc_client = std::sync::Arc::new(client);
                         for tool in &arc_client.tools {
                             let adapter = atman_runtime::mcp::McpToolAdapter::new(
@@ -173,20 +174,20 @@ pub fn spawn_mcp_boot(
                                 &tool.name,
                                 cfg.tier,
                             );
-                            executor.tools.register(std::sync::Arc::new(adapter));
+                            executor
+                                .tools
+                                .register(std::sync::Arc::new(adapter));
                         }
                         ok_count += 1;
-                        eprintln!(
-                            "[atman] mcp `{}` connected via {} ({} tools)",
-                            cfg.name, transport_kind, tool_count
-                        );
                     }
                     Err(e) => {
-                        eprintln!("[atman] mcp `{}` boot failed: {e}", cfg.name);
+                        eprintln!("[atman] MCP `{}` failed to connect: {e}", cfg.name);
                     }
                 }
-                session.set_mcp_totals(ok_count, total);
+                session.set_mcp_totals(ok_count, configs.len() as u16);
             }
+            // Keep the runtime alive so transports don't get dropped.
+            std::future::pending::<()>().await;
         });
     });
 }
@@ -234,9 +235,7 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
             MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
         ));
     }
-    Ok(BootstrapOutcome {
-        executor,
-    })
+    Ok(BootstrapOutcome { executor })
 }
 
 fn build_sandbox(
