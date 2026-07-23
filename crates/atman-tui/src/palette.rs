@@ -15,6 +15,8 @@ pub enum PaletteEntryId {
     CompactNow,
     SearchHistory,
     ToggleSidebar,
+    ManageProviders,
+    ManageAliases,
     SetTrustMode,
     SetModeTheme,
     ShowHelp,
@@ -102,6 +104,21 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Toggle Sidebar",
         hint: "Same as F2",
         keyword: "sidebar toggle panel",
+    },
+    // ── Providers ──
+    PaletteEntry {
+        id: PaletteEntryId::ManageProviders,
+        group: "Providers",
+        label: "Manage Providers...",
+        hint: "Add, view, and remove provider logins",
+        keyword: "providers auth login codex claude github",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::ManageAliases,
+        group: "Providers",
+        label: "Manage Aliases...",
+        hint: "Add, edit, and remove model aliases",
+        keyword: "aliases alias model rename",
     },
     PaletteEntry {
         id: PaletteEntryId::SetTrustMode,

@@ -12,6 +12,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use tokio::sync::{broadcast, mpsc};
 
+pub mod alias_manager;
 pub mod app;
 pub mod approval_bar;
 pub mod boot_animation;
@@ -30,6 +31,7 @@ pub mod markdown;
 pub mod output;
 pub mod palette;
 pub mod prompt_resolver;
+pub mod provider_manager;
 pub mod session_switcher;
 pub mod sidebar;
 pub mod states;
@@ -111,6 +113,13 @@ pub enum TuiControl {
     FormSubmit {
         form_id: String,
         answer: atman_runtime::form::FormAnswer,
+    },
+    AuthLogin {
+        kind: atman_runtime::auth_store::ProviderKind,
+        name: String,
+    },
+    AuthLogout {
+        id: String,
     },
 }
 
@@ -1398,6 +1407,12 @@ fn dispatch_palette_entry(
             app.sidebar_mode = app.sidebar_mode.toggle();
             app.save_ui_state();
         }
+        PaletteEntryId::ManageProviders => {
+            app.provider_manager.toggle();
+        }
+        PaletteEntryId::ManageAliases => {
+            app.alias_manager.toggle();
+        }
         PaletteEntryId::ShowHelp => {
             app.cheatsheet_open = true;
         }
@@ -1808,6 +1823,14 @@ fn handle_key(
     }
     if app.history_search.open {
         handle_history_search_key(&action, app);
+        return;
+    }
+    if app.provider_manager.open {
+        app.provider_manager.handle_key(&action, control_tx);
+        return;
+    }
+    if app.alias_manager.open {
+        app.alias_manager.handle_key(&action, control_tx);
         return;
     }
     if app.palette.open {
@@ -2332,7 +2355,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let content_w = layout::input_content_width(l.transcript.width);
     let total_input_lines = crate::input::visual_line_count(editor.buf(), content_w) as u32;
     let input_buf_lines = total_input_lines.min(12);
-    let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines.min(u16::MAX as u32) as u16);
+    let bottom_rect =
+        layout::compute_input_rect(l.transcript, input_buf_lines.min(u16::MAX as u32) as u16);
     let content_w = layout::input_content_width(l.transcript.width);
     let cursor_row =
         crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u32;
@@ -2462,7 +2486,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_item_ranges = ranges;
         app.last_node_regions = node_regions;
         app.layout_cache = cache;
-        app.resolve_scroll(total_rows, document_visible_rows, input_overlay_rows, app.items.len());
+        app.resolve_scroll(
+            total_rows,
+            document_visible_rows,
+            input_overlay_rows,
+            app.items.len(),
+        );
         let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
         f.render_widget(paragraph, transcript_area);
     }
@@ -2656,6 +2685,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.session_switcher.open {
         session_switcher::render(f, area, &app.session_switcher);
+    }
+    if app.provider_manager.open {
+        crate::provider_manager::render(f, area, &app.provider_manager);
+    }
+    if app.alias_manager.open {
+        crate::alias_manager::render(f, area, &app.alias_manager);
     }
     if let Some(modal) = app.compact_review.as_ref() {
         compact_review_modal::render(f, area, modal);

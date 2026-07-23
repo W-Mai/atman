@@ -144,6 +144,8 @@ pub struct AppState {
     pub yank_mode: bool,
     pub yank_index: usize,
     pub palette: crate::palette::CommandPalette,
+    pub provider_manager: crate::provider_manager::ProviderManager,
+    pub alias_manager: crate::alias_manager::AliasManager,
     pub session_switcher: crate::session_switcher::SessionSwitcher,
     pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
     pub history_search: crate::history_search_modal::HistorySearchModal,
@@ -412,8 +414,7 @@ impl AppState {
         {
             return None;
         }
-        let rel = u32::from(row.saturating_sub(rect.y))
-            .saturating_add(self.scroll_offset);
+        let rel = u32::from(row.saturating_sub(rect.y)).saturating_add(self.scroll_offset);
         self.last_item_ranges
             .iter()
             .find(|r| rel >= r.start_row && rel < r.end_row)
@@ -491,8 +492,7 @@ impl AppState {
         {
             return None;
         }
-        let rel = u32::from(row.saturating_sub(rect.y))
-            .saturating_add(self.scroll_offset);
+        let rel = u32::from(row.saturating_sub(rect.y)).saturating_add(self.scroll_offset);
         let rel_col = col.saturating_sub(rect.x);
         self.last_node_regions
             .iter()
