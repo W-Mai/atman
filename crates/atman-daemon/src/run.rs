@@ -190,6 +190,14 @@ async fn run_flow_inner(
     }
     let flow_name = parsed.flows[0].name.name.clone();
 
+    if let Some(dir) = &config_dir {
+        if let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) {
+            if let Some(mc) = parse_model_config(&text) {
+                atman_runtime::model_registry::set_model_config(mc);
+            }
+        }
+    }
+
     let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
         events: session.sink().clone(),
         mock: false,
@@ -199,14 +207,6 @@ async fn run_flow_inner(
     })
     .await?;
     let mut executor = outcome.executor;
-
-    if let Some(dir) = &config_dir {
-        if let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) {
-            if let Some(mc) = parse_model_config(&text) {
-                atman_runtime::model_registry::set_model_config(mc);
-            }
-        }
-    }
 
     let lifecycles = match &config_dir {
         Some(c) => atman_runtime::lifecycle::LifecycleRunner::from_dir(c),
