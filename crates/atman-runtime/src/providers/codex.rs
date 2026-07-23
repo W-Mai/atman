@@ -612,9 +612,11 @@ struct OutputTokensDetails {
     #[serde(default)]
     reasoning_tokens: Option<u64>,
 }
-pub async fn register_from_auth(
-    executor: &mut crate::Executor,
+pub async fn create_from_auth(
     stored: &crate::auth_store::StoredProvider,
+) -> (
+    std::sync::Arc<CodexProvider>,
+    Vec<crate::provider::DiscoveredModel>,
 ) {
     let p = match crate::codex_token::refresh_if_needed(stored).await {
         Ok(Some(refreshed)) => {
@@ -632,11 +634,10 @@ pub async fn register_from_auth(
     };
     let account_id = p.account.as_deref().unwrap_or("");
     let provider = std::sync::Arc::new(CodexProvider::new("codex", &p.access_token, account_id));
-    let models = provider.discover_models().await;
-    executor.providers.register(provider);
     eprintln!(
         "[atman] registered codex provider \"{}\" (account: {})",
         p.name, account_id
     );
-    crate::model_registry::register_discovered("codex", &models);
+    let models = provider.discover_models().await;
+    (provider, models)
 }

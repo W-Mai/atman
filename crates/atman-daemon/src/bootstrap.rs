@@ -475,7 +475,9 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
     };
     for p in &store.providers {
         if p.kind == atman_runtime::auth_store::ProviderKind::Codex {
-            atman_runtime::providers::codex::register_from_auth(executor, p).await;
+            let (provider, models) = atman_runtime::providers::codex::create_from_auth(p).await;
+            executor.providers.register(provider);
+            atman_runtime::model_registry::register_discovered("codex", &models);
         }
     }
 }

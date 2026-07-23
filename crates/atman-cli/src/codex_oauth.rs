@@ -5,9 +5,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
-const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const CALLBACK_PORT: u16 = 1455;
 
@@ -74,7 +72,7 @@ fn build_auth_url(pkce: &Pkce, state: &str) -> String {
     use std::fmt::Write;
     let params: &[(&str, &str)] = &[
         ("response_type", "code"),
-        ("client_id", CLIENT_ID),
+        ("client_id", atman_runtime::codex_token::CLIENT_ID),
         ("redirect_uri", REDIRECT_URI),
         ("scope", "openid profile email offline_access"),
         ("code_challenge", &pkce.code_challenge),
@@ -215,12 +213,12 @@ struct TokenResult {
 async fn exchange_code(code: &str, pkce: &Pkce) -> Result<TokenResult> {
     let client = reqwest::Client::new();
     let resp = client
-        .post(TOKEN_URL)
+        .post(atman_runtime::codex_token::TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", REDIRECT_URI),
-            ("client_id", CLIENT_ID),
+            ("client_id", atman_runtime::codex_token::CLIENT_ID),
             ("code_verifier", &pkce.code_verifier),
         ])
         .send()

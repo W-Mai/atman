@@ -4,8 +4,8 @@ use serde::Deserialize;
 
 use crate::auth_store::{AuthStore, StoredProvider};
 
-const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 /// Refresh an expiring Codex access token and persist the updated tokens.
 /// Returns the updated `StoredProvider` on success.
