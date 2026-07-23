@@ -260,6 +260,8 @@ fn run_startup_config_migration() {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     run_startup_config_migration();
+    // Install default notifier (TUI replaces with its own sink on boot).
+    atman_runtime::notify::install(std::sync::Arc::new(atman_runtime::notify::CliSink));
     // Probe theme before raw mode so OSC 11 reply can't leak into KeyEvents.
     let _ = atman_tui::theme::theme();
     match cli.cmd {
@@ -513,7 +515,8 @@ async fn cmd_daemon_rotate_token() -> Result<()> {
     let cfg_path = atman_daemon::config::default_config_path()?;
     let cfg = atman_daemon::config::DaemonConfig::rotate(&cfg_path)?;
     println!("{}", cfg.auth_token);
-    eprintln!(
+    atman_runtime::notify!(
+        info,
         "new token written to {}. restart daemon with `atman daemon start`.",
         cfg_path.display()
     );
@@ -558,7 +561,7 @@ async fn cmd_run(
     });
 
     if let Some(path) = session.events_path() {
-        eprintln!("[atman] session={} events={}", session.id(), path.display());
+        atman_runtime::notify!(info, "session={} events={}", session.id(), path.display());
     }
 
     load_model_config_from_disk();
@@ -585,7 +588,7 @@ async fn cmd_run(
         .ok_or_else(|| anyhow::anyhow!("flow `{flow_name}` not found in {}", file.display()))?;
     if let Err(errs) = atman_runtime::validate::validate(target_flow, &executor.tools) {
         for e in &errs {
-            eprintln!("[atman] validation: {e}");
+            atman_runtime::notify!(warn, "validation: {e}");
         }
         bail!("flow validation failed with {} error(s)", errs.len());
     }
@@ -618,7 +621,7 @@ async fn cmd_run(
     session.end_turn();
     match std::sync::Arc::try_unwrap(session) {
         Ok(s) => s.shutdown().await,
-        Err(_) => eprintln!("[atman] session still had refs at shutdown; skipping graceful close"),
+        Err(_) => atman_runtime::notify!(debug, "session still had refs at shutdown; skipping graceful close"),
     }
 
     match outcome {
@@ -627,7 +630,7 @@ async fn cmd_run(
             Ok(())
         }
         Err(e) => {
-            eprintln!("flow error: {e}");
+            atman_runtime::notify!(error, "flow error: {e}");
             std::process::exit(1);
         }
     }
@@ -728,8 +731,9 @@ fn resolve_session_list_filter(all: bool, project: Option<&Path>) -> Result<Sess
             canonical_root: atman_runtime::session_meta::canonical_root(&root),
         }),
         None => {
-            eprintln!(
-                "[atman] cwd is not inside any project (no .atman/ or .git/ found). \
+            atman_runtime::notify!(
+                warn,
+                "cwd is not inside any project (no .atman/ or .git/ found). \
                  Showing all sessions. Use --project PATH to filter."
             );
             Ok(SessionListFilter::All)
@@ -1166,8 +1170,9 @@ fn resolve_toml_route_call(line: &str) -> Option<String> {
             continue;
         }
         let Some((prefix, command)) = trimmed.split_once("->") else {
-            eprintln!(
-                "[atman] routes.toml:{}: expected `<prefix> -> <command>`",
+            atman_runtime::notify!(
+                warn,
+                "routes.toml:{}: expected `<prefix> -> <command>`",
                 i + 1
             );
             continue;
@@ -1614,7 +1619,7 @@ async fn cmd_repl_once(
                             {
                                 Ok(rt) => rt,
                                 Err(e) => {
-                                    eprintln!("[atman] compact runtime init failed: {e}");
+                                    atman_runtime::notify!(error, "compact runtime init failed: {e}");
                                     return;
                                 }
                             };
@@ -1689,7 +1694,7 @@ async fn cmd_repl_once(
                         if let Err(e) =
                             atman_runtime::session_meta::SessionMeta::set_title(&dir, title)
                         {
-                            eprintln!("[atman] rename {session_id} failed: {e}");
+                            atman_runtime::notify!(error, "rename {session_id} failed: {e}");
                         }
                     }
                     atman_tui::TuiControl::FormSubmit { form_id, answer } => {
@@ -1716,22 +1721,26 @@ async fn cmd_repl_once(
                                 >(kind, &name)
                                 .await
                                 {
-                                    Ok(p) => eprintln!(
-                                        "[atman] Codex logged in as \"{}\" ({})",
+                                    Ok(p) => atman_runtime::notify!(
+                                        info,
+                                        "Codex logged in as \"{}\" ({})",
                                         p.name,
                                         p.account.as_deref().unwrap_or("unknown")
                                     ),
-                                    Err(e) => eprintln!("[atman] Codex login error: {e:#}"),
+                                    Err(e) => atman_runtime::notify!(error, "Codex login error: {e:#}"),
                                 }
                             });
                         }
-                        _ => eprintln!("[atman] Auth login for {kind:?} not yet implemented"),
+                        _ => atman_runtime::notify!(warn, "Auth login for {kind:?} not yet implemented"),
                     },
                     atman_tui::TuiControl::AuthLogout { id } => {
                         if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
                             store.remove(&id);
                             let _ = store.save();
                         }
+                    }
+                    atman_tui::TuiControl::OpenAliasManager { .. } => {
+                        // handled internally in the TUI — no-op here
                     }
                 }
             }
@@ -1933,7 +1942,7 @@ async fn cmd_repl_once(
     if let Some(handle) = tui_task {
         match handle.await {
             Ok(Ok(())) | Err(_) => {}
-            Ok(Err(e)) => eprintln!("[atman] tui exited with error: {e}"),
+            Ok(Err(e)) => atman_runtime::notify!(error, "tui exited with error: {e}"),
         }
     }
     if let Some(ct) = ctrl_task {
@@ -1953,7 +1962,7 @@ async fn cmd_repl_once(
     let session_dir = session.dir().to_path_buf();
     match std::sync::Arc::try_unwrap(session) {
         Ok(s) => s.shutdown().await,
-        Err(_) => eprintln!("[atman] session still had refs at shutdown; skipping graceful close"),
+        Err(_) => atman_runtime::notify!(debug, "session still had refs at shutdown; skipping graceful close"),
     }
     if is_fresh_session
         && user_msg_count == 0
@@ -2071,7 +2080,7 @@ fn delete_session_dir(data_root: &std::path::Path, sid: &str) {
         return;
     }
     if let Err(e) = std::fs::remove_dir_all(&dir) {
-        eprintln!("[atman] failed to delete session {}: {e}", dir.display());
+        atman_runtime::notify!(error, "failed to delete session {}: {e}", dir.display());
     }
 }
 
@@ -2170,7 +2179,7 @@ fn spawn_stdin_reader(
                 match Editor::with_config(config) {
                     Ok(e) => e,
                     Err(e) => {
-                        eprintln!("[atman] rustyline init failed: {e}");
+                        atman_runtime::notify!(error, "rustyline init failed: {e}");
                         let _ = printer_tx.send(None);
                         return;
                     }
@@ -2179,7 +2188,7 @@ fn spawn_stdin_reader(
             let printer: Option<ExternalPrinter> = match editor.create_external_printer() {
                 Ok(p) => Some(Box::new(p)),
                 Err(e) => {
-                    eprintln!("[atman] external printer unavailable: {e}");
+                    atman_runtime::notify!(warn, "external printer unavailable: {e}");
                     None
                 }
             };
@@ -2193,7 +2202,7 @@ fn spawn_stdin_reader(
                     }
                     Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => break,
                     Err(e) => {
-                        eprintln!("[atman] readline error: {e}");
+                        atman_runtime::notify!(error, "readline error: {e}");
                         break;
                     }
                 }
@@ -2250,6 +2259,7 @@ fn render_stream_frame(
             emit(printer, format!("  {mark} {tool} → {preview}\n"));
         }
         StreamFrame::Note(s) => render_note(printer, s),
+        StreamFrame::Notification(frame) => render_note(printer, frame.message),
         StreamFrame::FlowGraph { .. }
         | StreamFrame::FlowStart { .. }
         | StreamFrame::FlowNodeStart { .. }
@@ -3483,26 +3493,27 @@ fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_dsl::ast
     let registry = match atman_runtime::flow_registry::FlowRegistry::open(&project_root) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[atman] auto_snapshot: open registry failed: {e}");
+            atman_runtime::notify!(error, "auto_snapshot: open registry failed: {e}");
             return;
         }
     };
     let meta = match atman_runtime::flow_meta::FlowMeta::from_source(source_path, source) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[atman] auto_snapshot: read meta failed: {e}");
+            atman_runtime::notify!(error, "auto_snapshot: read meta failed: {e}");
             return;
         }
     };
     for flow in &parsed.flows {
         let name = &flow.name.name;
         match registry.snapshot(name, source, &meta, Some(source_path)) {
-            Ok(atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev)) => eprintln!(
-                "[atman] auto_snapshot: {name} @ {} (id={})",
+            Ok(atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev)) => atman_runtime::notify!(
+                debug,
+                "auto_snapshot: {name} @ {} (id={})",
                 rev.version, rev.id
             ),
             Ok(atman_runtime::flow_registry::SnapshotOutcome::UnchangedFromLatest(_)) => {}
-            Err(e) => eprintln!("[atman] auto_snapshot: {name}: {e}"),
+            Err(e) => atman_runtime::notify!(error, "auto_snapshot: {name}: {e}"),
         }
     }
 }
@@ -4072,12 +4083,13 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                             >(kind, &name)
                             .await
                             {
-                                Ok(p) => eprintln!(
-                                    "[atman] Codex logged in as \"{}\" ({})",
+                                Ok(p) => atman_runtime::notify!(
+                                    info,
+                                    "Codex logged in as \"{}\" ({})",
                                     p.name,
                                     p.account.as_deref().unwrap_or("unknown")
                                 ),
-                                Err(e) => eprintln!("[atman] Codex login error: {e:#}"),
+                                Err(e) => atman_runtime::notify!(error, "Codex login error: {e:#}"),
                             }
                         });
                     }
@@ -4223,7 +4235,7 @@ fn spawn_preview_scene(
             _ => false,
         };
         if !ok {
-            eprintln!("[atman] unknown tui-preview scene: {scene}. try `atman tui-preview list`.");
+            atman_runtime::notify!(warn, "unknown tui-preview scene: {scene}. try `atman tui-preview list`.");
         }
     }))
 }
@@ -4807,8 +4819,9 @@ fn open_current_project_index() -> Result<Option<std::sync::Arc<atman_runtime::i
     match atman_runtime::index::AnchorIndex::open_project(&scope) {
         Ok(idx) => Ok(Some(std::sync::Arc::new(idx))),
         Err(e) => {
-            eprintln!(
-                "[atman] project index unavailable at {} — history search disabled: {e}",
+            atman_runtime::notify!(
+                warn,
+                "project index unavailable at {} — history search disabled: {e}",
                 scope.display()
             );
             Ok(None)
@@ -4868,8 +4881,9 @@ fn build_interjection_classifier()
             ),
         )),
         Some(other) => {
-            eprintln!(
-                "[atman] unknown [interjection] classifier = `{other}` — falling back to rule"
+            atman_runtime::notify!(
+                warn,
+                "unknown [interjection] classifier = `{other}` — falling back to rule"
             );
             Some(std::sync::Arc::new(
                 atman_runtime::injection_classifier::RuleClassifier::default(),
@@ -5222,7 +5236,7 @@ async fn cmd_flow_test(path: &Path, bless: bool) -> Result<()> {
     }
     if !errors.is_empty() {
         for (name, msg) in &errors {
-            eprintln!("[atman] flow test: {name} raised {msg}");
+            atman_runtime::notify!(error, "flow test: {name} raised {msg}");
         }
         bail!("flow test: {} flow(s) errored", errors.len());
     }
@@ -5456,8 +5470,9 @@ fn cmd_flow_rollback(
         );
     }
     if let Some(git_root) = git_root_containing(target_path) {
-        eprintln!(
-            "[atman] note: {} lives inside git repo at {}. `git checkout <sha> -- {}` may be a safer rollback path.",
+        atman_runtime::notify!(
+            info,
+            "note: {} lives inside git repo at {}. `git checkout <sha> -- {}` may be a safer rollback path.",
             target_path.display(),
             git_root.display(),
             target_path.display()
@@ -5470,8 +5485,9 @@ fn cmd_flow_rollback(
         }
     }
     if target_path.exists() && !assume_yes {
-        eprintln!(
-            "[atman] refusing to overwrite {} without --yes (would replace with {} @ {}, id={})",
+        atman_runtime::notify!(
+            error,
+            "refusing to overwrite {} without --yes (would replace with {} @ {}, id={})",
             target_path.display(),
             flow_name,
             rev.version,
@@ -5530,7 +5546,7 @@ async fn cmd_logs_stream(
     let cfg = atman_daemon::config::DaemonConfig::load_or_init(&cfg_path)?;
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
-    eprintln!("[atman] streaming events for session {sid} from {base}/events");
+    atman_runtime::notify!(info, "streaming events for session {sid} from {base}/events");
     stream_daemon_events(&client, &base, &cfg.auth_token, &sid, since_seq, false).await
 }
 
@@ -5554,7 +5570,7 @@ async fn cmd_logs_tail(session_id: Option<String>, n: usize, follow: bool) -> Re
     }
 
     if follow {
-        eprintln!("[atman] --follow not yet implemented");
+        atman_runtime::notify!(warn, "--follow not yet implemented");
     }
     Ok(())
 }
