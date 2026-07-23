@@ -155,6 +155,9 @@ impl ProviderManager {
             self.handle_add_key(action, control_tx);
             return;
         }
+        // Refresh on every keystroke so newly logged-in providers appear
+        // as soon as the async OAuth flow completes.
+        self.refresh_list();
         match action {
             KeyAction::Escape => self.close(),
             KeyAction::HistoryUp | KeyAction::Char('k') => {

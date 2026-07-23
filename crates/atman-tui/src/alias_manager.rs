@@ -51,6 +51,13 @@ impl AliasManager {
             .into_iter()
             .map(|(k, _)| (k.clone(), k))
             .collect();
+        // Include models discovered from OAuth providers (e.g. Codex).
+        // discovered_models already contains the full model name (e.g. "codex/gpt-5.6-terra").
+        for id in atman_runtime::model_registry::discovered_models() {
+            if !names.iter().any(|(k, _)| *k == id) {
+                names.push((id.clone(), id));
+            }
+        }
         for (_, model) in atman_runtime::model_registry::all_aliases() {
             if !names.iter().any(|(k, _)| *k == model) {
                 names.push((model.clone(), model));
