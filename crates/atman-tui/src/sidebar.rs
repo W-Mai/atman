@@ -178,8 +178,7 @@ pub fn render(
     } else {
         meta_lines_full
     };
-    let mcp_lines_full: u16 =
-        1 + inputs.context.mcp_servers.len().min(20) as u16;
+    let mcp_lines_full: u16 = 1 + inputs.context.mcp_servers.len().min(20) as u16;
     let mcp_lines: u16 = if inputs.mcp_collapsed {
         1
     } else {
@@ -187,13 +186,7 @@ pub fn render(
     };
     let divider_gap: u16 = 1;
 
-    let bottom_min = 1
-        + divider_gap
-        + context_lines
-        + 1
-        + mcp_lines
-        + 1
-        + meta_lines; // divider + gap + ctx + gap + mcp + gap + meta
+    let bottom_min = 1 + divider_gap + context_lines + 1 + mcp_lines + 1 + meta_lines; // divider + gap + ctx + gap + mcp + gap + meta
 
     // Cap Plan/Todo so they don't push Meta off screen.
     let avail = inner.height.saturating_sub(goal_lines + 3 + bottom_min);
@@ -339,10 +332,7 @@ pub fn render(
                 let header = format!("{glyph} MCP ({ok}/{total})");
                 f.render_widget(Paragraph::new(section_title(&header)), meta_sections[3]);
             } else {
-                f.render_widget(
-                    mcp_section(&inputs.context.mcp_servers),
-                    meta_sections[3],
-                );
+                f.render_widget(mcp_section(&inputs.context.mcp_servers), meta_sections[3]);
             }
         }
     }
@@ -629,14 +619,8 @@ fn mcp_server_status_line<'a>(s: &atman_runtime::mcp::McpServerStatus) -> Line<'
         }
     };
     Line::from(vec![
-        Span::styled(
-            format!("  {glyph} "),
-            Style::default().fg(color),
-        ),
-        Span::styled(
-            format!("{:<14}", s.name),
-            Style::default().fg(t.meta_fg),
-        ),
+        Span::styled(format!("  {glyph} "), Style::default().fg(color)),
+        Span::styled(format!("{:<14}", s.name), Style::default().fg(t.meta_fg)),
         Span::styled(
             format!("{:<6}", transport),
             Style::default().fg(t.subtle_fg),

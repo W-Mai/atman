@@ -1442,11 +1442,7 @@ impl Session {
 
     pub fn update_mcp_server(&self, status: crate::mcp::McpServerStatus) {
         self.context_watch.send_modify(|snap| {
-            if let Some(existing) = snap
-                .mcp_servers
-                .iter_mut()
-                .find(|s| s.name == status.name)
-            {
+            if let Some(existing) = snap.mcp_servers.iter_mut().find(|s| s.name == status.name) {
                 *existing = status;
             } else {
                 snap.mcp_servers.push(status);

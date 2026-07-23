@@ -632,10 +632,8 @@ fn build_reconcile_plan(schema: &serde_json::Value) -> Option<ReconcilePlan> {
     for (name, prop) in props {
         let is_obj = prop.get("type").and_then(|t| t.as_str()) == Some("object");
         let has_sub_props = prop.get("properties").is_some_and(|p| p.is_object());
-        let add_props_false = prop
-            .get("additionalProperties")
-            .and_then(|a| a.as_bool())
-            == Some(false);
+        let add_props_false =
+            prop.get("additionalProperties").and_then(|a| a.as_bool()) == Some(false);
 
         if is_obj && !has_sub_props && !add_props_false {
             if catch_all.is_some() {
@@ -655,7 +653,10 @@ fn build_reconcile_plan(schema: &serde_json::Value) -> Option<ReconcilePlan> {
     })
 }
 
-fn reconcile(plan: &ReconcilePlan, flat: serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+fn reconcile(
+    plan: &ReconcilePlan,
+    flat: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
     let mut container = serde_json::Map::new();
     let mut out = serde_json::Map::new();
 
@@ -724,9 +725,7 @@ impl crate::tool::Tool for McpToolAdapter {
             let params = if let Some(plan) = &self.reconcile {
                 let map = match params {
                     serde_json::Value::Object(m) => m,
-                    _ => return Err(RuntimeError::ToolFailed(
-                        "mcp: expected object args".into()
-                    )),
+                    _ => return Err(RuntimeError::ToolFailed("mcp: expected object args".into())),
                 };
                 reconcile(plan, map)
             } else {
@@ -1108,7 +1107,9 @@ for line in sys.stdin:
             container_required: true,
         };
         let flat: serde_json::Map<_, _> = serde_json::json!({"action": "ping"})
-            .as_object().unwrap().clone();
+            .as_object()
+            .unwrap()
+            .clone();
 
         let out = reconcile(&plan, flat);
         assert_eq!(out["action"], "ping");
@@ -1123,7 +1124,9 @@ for line in sys.stdin:
             container_required: false,
         };
         let flat: serde_json::Map<_, _> = serde_json::json!({"action": "list"})
-            .as_object().unwrap().clone();
+            .as_object()
+            .unwrap()
+            .clone();
 
         let out = reconcile(&plan, flat);
         assert_eq!(out["action"], "list");
