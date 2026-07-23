@@ -217,7 +217,7 @@ pub fn spawn_mcp_boot(
                             });
                         }
                         Err(e) => {
-                            eprintln!("[atman] MCP `{}` failed: {e}", name);
+                            atman_runtime::notify!(error, "MCP `{}` failed: {e}", name);
                             session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
                                 name,
                                 transport,
@@ -310,8 +310,9 @@ fn build_sandbox(
         if cfg.strict {
             anyhow::bail!("sandbox enabled + strict, but sandbox-exec not available on this host");
         }
-        eprintln!(
-            "[atman] sandbox enabled but sandbox-exec not available; falling back to no-sandbox path"
+        atman_runtime::notify!(
+            warn,
+            "sandbox enabled but sandbox-exec not available; falling back to no-sandbox path"
         );
         return Ok(None);
     }

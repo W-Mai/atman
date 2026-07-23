@@ -94,15 +94,16 @@ impl RunLauncher {
                 Ok(scope) => match atman_runtime::index::AnchorIndex::open_project(&scope) {
                     Ok(idx) => Some(std::sync::Arc::new(idx)),
                     Err(e) => {
-                        eprintln!(
-                            "[atman-daemon] project index unavailable at {}: {e}",
+                        atman_runtime::notify!(
+                            warn,
+                            "project index unavailable at {}: {e}",
                             scope.display()
                         );
                         None
                     }
                 },
                 Err(e) => {
-                    eprintln!("[atman-daemon] resolve project scope failed: {e}");
+                    atman_runtime::notify!(error, "resolve project scope failed: {e}");
                     None
                 }
             };
@@ -152,11 +153,11 @@ impl RunLauncher {
                     )
                     .await
                     {
-                        eprintln!("[atman-daemon] flow run failed: {e:#}");
+                        atman_runtime::notify!(error, "flow run failed: {e:#}");
                     }
                     match std::sync::Arc::try_unwrap(session) {
                         Ok(s) => s.shutdown().await,
-                        Err(_) => eprintln!("[atman-daemon] session still had refs at shutdown"),
+                        Err(_) => atman_runtime::notify!(warn, "session still had refs at shutdown"),
                     }
                     state_for_task.deregister_live(&sid_for_task);
                 });
