@@ -1706,6 +1706,17 @@ async fn cmd_repl_once(
                             let _ = session_for_ctrl.forms().submit(&form_id, answer);
                         }
                     }
+                    atman_tui::TuiControl::AuthLogin { kind, name } => {
+                        eprintln!(
+                            "[atman] Auth login requested: {kind:?} \"{name}\" (OAuth not yet implemented)"
+                        );
+                    }
+                    atman_tui::TuiControl::AuthLogout { id } => {
+                        if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
+                            store.remove(&id);
+                            let _ = store.save();
+                        }
+                    }
                 }
             }
         });
@@ -3274,6 +3285,84 @@ pub fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::M
     Some(cfg)
 }
 
+// ── Alias CRUD helpers ──
+
+fn read_config_toml() -> Result<String> {
+    let path = config_dir()?.join("config.toml");
+    if path.exists() {
+        Ok(std::fs::read_to_string(&path)?)
+    } else {
+        Ok(String::new())
+    }
+}
+
+fn write_config_toml(text: &str) -> Result<()> {
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("config.toml");
+    std::fs::write(&path, text)?;
+    Ok(())
+}
+
+fn reload_model_config(text: &str) {
+    if let Some(mc) = parse_model_config(text) {
+        atman_runtime::model_registry::set_model_config(mc);
+    }
+}
+
+pub fn add_alias_to_config(alias: &str, model: &str) -> Result<()> {
+    let text = read_config_toml().unwrap_or_default();
+    let mut raw: toml::Value = if text.trim().is_empty() {
+        toml::Value::Table(toml::value::Table::new())
+    } else {
+        toml::from_str(&text).context("parse config.toml")?
+    };
+    let aliases = raw
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("config.toml is not a table"))?
+        .entry("alias")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    if let Some(table) = aliases.as_table_mut() {
+        let mut entry = toml::value::Table::new();
+        entry.insert("model".to_string(), toml::Value::String(model.to_string()));
+        table.insert(alias.to_string(), toml::Value::Table(entry));
+    }
+    let new_text = toml::to_string_pretty(&raw).context("serialize config.toml")?;
+    write_config_toml(&new_text)?;
+    reload_model_config(&new_text);
+    Ok(())
+}
+
+pub fn remove_alias_from_config(alias: &str) -> Result<()> {
+    let text = read_config_toml()?;
+    let mut raw: toml::Value = toml::from_str(&text).context("parse config.toml")?;
+    if let Some(table) = raw.get_mut("alias").and_then(|a| a.as_table_mut()) {
+        table.remove(alias);
+    }
+    let new_text = toml::to_string_pretty(&raw).context("serialize config.toml")?;
+    write_config_toml(&new_text)?;
+    reload_model_config(&new_text);
+    Ok(())
+}
+
+pub fn update_alias_in_config(old_alias: &str, new_alias: &str, new_model: &str) -> Result<()> {
+    let text = read_config_toml()?;
+    let mut raw: toml::Value = toml::from_str(&text).context("parse config.toml")?;
+    if let Some(table) = raw.get_mut("alias").and_then(|a| a.as_table_mut()) {
+        table.remove(old_alias);
+        let mut entry = toml::value::Table::new();
+        entry.insert(
+            "model".to_string(),
+            toml::Value::String(new_model.to_string()),
+        );
+        table.insert(new_alias.to_string(), toml::Value::Table(entry));
+    }
+    let new_text = toml::to_string_pretty(&raw).context("serialize config.toml")?;
+    write_config_toml(&new_text)?;
+    reload_model_config(&new_text);
+    Ok(())
+}
+
 // Reads [fs_access] mode = "..." out of the same config.toml we already
 // scan for other tiny settings. Kept as a hand-rolled section walk so
 // unrelated syntax errors elsewhere in the file don't kill boot.
@@ -3957,6 +4046,15 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                 }
                 atman_tui::TuiControl::FormSubmit { form_id, answer } => {
                     ctrl_session.forms().submit(&form_id, answer);
+                }
+                atman_tui::TuiControl::AuthLogin { kind, name } => {
+                    eprintln!("[atman] Auth login: {kind:?} \"{name}\" (not yet implemented)");
+                }
+                atman_tui::TuiControl::AuthLogout { id } => {
+                    if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
+                        store.remove(&id);
+                        let _ = store.save();
+                    }
                 }
                 atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
                     let decision = match edited {
