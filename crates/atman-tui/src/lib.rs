@@ -301,6 +301,8 @@ async fn run_frames(
     // the splash would fire ~180 times in a row and the whole slide
     // would blow past in one frame.
     intro_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut toast_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    toast_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
@@ -327,6 +329,7 @@ async fn run_frames(
             _ = intro_tick.tick(), if app.startup_intro.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
+            _ = toast_tick.tick(), if !app.toasts.is_empty() => {}
             latest = poll_update_check(&mut update_check), if !update_check.is_finished() => {
                 app.latest_release = latest;
             }
