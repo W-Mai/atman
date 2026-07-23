@@ -123,6 +123,15 @@ pub enum NoteLevel {
 }
 
 /// Toast notification displayed in the top-right corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastPosition {
+    TopRight,
+    TopLeft,
+    BottomRight,
+    BottomLeft,
+    TopCenter,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToastNote {
     pub id: String,
@@ -130,6 +139,9 @@ pub struct ToastNote {
     pub message: String,
     pub ttl: std::time::Duration,
     pub created: std::time::Instant,
+    pub position: ToastPosition,
+    pub fading: bool,
+    pub fade_started: Option<std::time::Instant>,
 }
 
 #[derive(Default)]
@@ -172,6 +184,8 @@ pub struct AppState {
     pub toasts: Vec<ToastNote>,
     /// Status bar notes keyed by slot id (e.g. "compact", "daemon").
     pub status_notes: std::collections::HashMap<String, String>,
+    /// Active modal notification (dismiss with Esc).
+    pub modal_notification: Option<String>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub trust: atman_runtime::trust::TrustConfig,
     pub trust_mode_picker_open: bool,
@@ -642,7 +656,7 @@ impl AppState {
         });
     }
 
-    pub fn push_toast(&mut self, text: impl Into<String>, level: NoteLevel, ttl: std::time::Duration) {
+    pub fn push_toast(&mut self, text: impl Into<String>, level: NoteLevel, ttl: std::time::Duration, position: ToastPosition) {
         let id = format!("toast-{}", self.toasts.len());
         self.toasts.push(ToastNote {
             id,
@@ -650,6 +664,9 @@ impl AppState {
             message: text.into(),
             ttl,
             created: std::time::Instant::now(),
+            position,
+            fading: false,
+            fade_started: None,
         });
         // Keep at most 5 toasts, remove oldest.
         if self.toasts.len() > 5 {
@@ -663,7 +680,24 @@ impl AppState {
 
     pub fn tick_toasts(&mut self) {
         let now = std::time::Instant::now();
-        self.toasts.retain(|t| now.duration_since(t.created) < t.ttl);
+        let fade_duration = std::time::Duration::from_millis(400);
+
+        // Start fading for expired toasts that aren't already fading
+        for toast in &mut self.toasts {
+            if !toast.fading && now.duration_since(toast.created) >= toast.ttl {
+                toast.fading = true;
+                toast.fade_started = Some(now);
+            }
+        }
+
+        // Remove toasts that have finished fading
+        self.toasts.retain(|t| {
+            if !t.fading {
+                return true;
+            }
+            let fade_start = t.fade_started.unwrap_or(now);
+            now.duration_since(fade_start) < fade_duration
+        });
     }
 
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
@@ -757,7 +791,7 @@ impl AppState {
                             atman_runtime::notify::NotifyLifecycle::Ttl(d) => d,
                             _ => std::time::Duration::from_secs(3),
                         };
-                        self.push_toast(text, level, ttl);
+                        self.push_toast(text, level, ttl, ToastPosition::TopRight);
                     }
                     atman_runtime::notify::NotifyLocation::Status => {
                         let key = match &frame.stack {
@@ -768,10 +802,7 @@ impl AppState {
                         self.push_status(key, text);
                     }
                     atman_runtime::notify::NotifyLocation::Modal => {
-                        self.push_item(OutputItem::SystemNote {
-                            text: format!("⚠ {}", text),
-                            level: NoteLevel::Error,
-                        });
+                        self.modal_notification = Some(text);
                     }
                     _ => {
                         self.push_item(OutputItem::SystemNote { text, level });

@@ -1830,6 +1830,12 @@ fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if app.modal_notification.is_some() {
+        if matches!(action, KeyAction::Escape) {
+            app.modal_notification = None;
+        }
+        return;
+    }
     if app.form_modal.open {
         handle_form_key(&action, app, control_tx);
         return;
@@ -2742,6 +2748,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     // Toast notifications in top-right corner
     render_toasts(f, area, app);
+    // Modal notification overlay
+    if let Some(ref msg) = app.modal_notification {
+        render_notify_modal(f, area, msg);
+    }
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
     }
@@ -2820,65 +2830,163 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
     let theme = crate::theme::theme();
     let max_w = 44u16.min(area.width / 2);
     let item_h = 4u16;
-    let x = area.x + area.width.saturating_sub(max_w + 2);
-    let y = area.y + 1;
+    let fade_duration = std::time::Duration::from_millis(400);
+    let now = std::time::Instant::now();
 
-    for (i, toast) in app.toasts.iter().enumerate() {
-        let (glyph, color, bg, label) = match toast.level {
-            NoteLevel::Error => ("✗", ratatui::style::Color::Red, theme.note_error_bg, " ERROR "),
-            NoteLevel::Warn => ("!", ratatui::style::Color::Yellow, theme.note_warn_bg, " WARN "),
-            NoteLevel::Info => ("·", ratatui::style::Color::Cyan, theme.note_info_bg, " INFO "),
-            NoteLevel::Success => ("✓", ratatui::style::Color::Green, theme.note_success_bg, " OK "),
-            NoteLevel::Debug => ("›", ratatui::style::Color::Gray, theme.note_debug_bg, " DEBUG "),
+    let positions = [
+        app::ToastPosition::TopRight,
+        app::ToastPosition::TopLeft,
+        app::ToastPosition::BottomRight,
+        app::ToastPosition::BottomLeft,
+        app::ToastPosition::TopCenter,
+    ];
+
+    for &pos in &positions {
+        let group: Vec<&app::ToastNote> = app.toasts.iter().filter(|t| t.position == pos).collect();
+        if group.is_empty() {
+            continue;
+        }
+
+        let (base_x, y_start) = match pos {
+            app::ToastPosition::TopRight => (area.x + area.width.saturating_sub(max_w + 2), area.y + 1),
+            app::ToastPosition::TopLeft => (area.x + 1, area.y + 1),
+            app::ToastPosition::BottomRight => (area.x + area.width.saturating_sub(max_w + 2), area.y + area.height.saturating_sub(group.len() as u16 * item_h + 1)),
+            app::ToastPosition::BottomLeft => (area.x + 1, area.y + area.height.saturating_sub(group.len() as u16 * item_h + 1)),
+            app::ToastPosition::TopCenter => (area.x + (area.width.saturating_sub(max_w)) / 2, area.y + 1),
         };
 
-        let elapsed = toast.created.elapsed();
-        let remaining = toast.ttl.saturating_sub(elapsed);
-        let pct = remaining.as_secs_f64() / toast.ttl.as_secs_f64().max(0.1);
-        let inner_w = max_w.saturating_sub(4);
+        // Calculate y offsets: fading toasts shift up, others close the gap
+        let mut fade_offsets = vec![0u16; group.len()];
+        for i in 0..group.len() {
+            if group[i].fading {
+                if let Some(fs) = group[i].fade_started {
+                    let progress = (now.duration_since(fs).as_millis() as f64 / fade_duration.as_millis() as f64).clamp(0.0, 1.0);
+                    fade_offsets[i] = (item_h as f64 * progress) as u16;
+                }
+            }
+        }
 
-        let rect = ratatui::layout::Rect {
-            x,
-            y: y + i as u16 * item_h,
-            width: max_w,
-            height: item_h,
-        };
+        for (i, toast) in group.iter().enumerate() {
+            let (glyph, color, bg, label) = match toast.level {
+                NoteLevel::Error => ("✗", ratatui::style::Color::Red, theme.note_error_bg, " ERROR "),
+                NoteLevel::Warn => ("!", ratatui::style::Color::Yellow, theme.note_warn_bg, " WARN "),
+                NoteLevel::Info => ("·", ratatui::style::Color::Cyan, theme.note_info_bg, " INFO "),
+                NoteLevel::Success => ("✓", ratatui::style::Color::Green, theme.note_success_bg, " OK "),
+                NoteLevel::Debug => ("›", ratatui::style::Color::Gray, theme.note_debug_bg, " DEBUG "),
+            };
 
-        f.render_widget(Clear, rect);
+            // Accumulate offset from all fading toasts before this one
+            let shift_up: u16 = fade_offsets[..i].iter().sum();
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(color))
-            .title(Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)))
-            .style(Style::default().bg(bg));
-        let inner = block.inner(rect);
-        f.render_widget(block, rect);
+            let inner_w = max_w.saturating_sub(4);
+            let rect = ratatui::layout::Rect {
+                x: base_x,
+                y: y_start + i as u16 * item_h - shift_up - fade_offsets[i],
+                width: max_w,
+                height: item_h,
+            };
 
-        // Progress bar at top of inner area
-        let bar_w = ((inner_w as f64 * pct.clamp(0.0, 1.0)) as u16).max(1);
-        let bar_rect = ratatui::layout::Rect {
-            x: inner.x,
-            y: inner.y,
-            width: bar_w,
-            height: 1,
-        };
-        let bar_block = Block::default().style(Style::default().bg(color));
-        f.render_widget(bar_block, bar_rect);
+            let mut style = Style::default();
+            let mut border_style = Style::default().fg(color);
 
-        // Message text
-        let msg = format!(" {glyph} {}", toast.message);
-        let text = Paragraph::new(Line::from(Span::styled(
-            msg,
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        let text_rect = ratatui::layout::Rect {
-            x: inner.x + 1,
-            y: inner.y + 1,
-            width: inner_w.saturating_sub(2),
-            height: 1,
-        };
-        f.render_widget(text, text_rect);
+            if toast.fading {
+                if let Some(fs) = toast.fade_started {
+                    let progress = (now.duration_since(fs).as_millis() as f64 / fade_duration.as_millis() as f64).clamp(0.0, 1.0);
+                    if progress > 0.7 {
+                        // Almost gone — hide completely
+                        continue;
+                    }
+                    style = style.add_modifier(Modifier::DIM);
+                    border_style = border_style.add_modifier(Modifier::DIM);
+                }
+            }
+
+            f.render_widget(Clear, rect);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .title(Span::styled(label, border_style.add_modifier(Modifier::BOLD)))
+                .style(style.bg(bg));
+            let inner = block.inner(rect);
+            f.render_widget(block, rect);
+
+            // Progress bar
+            let elapsed = toast.created.elapsed();
+            let remaining = toast.ttl.saturating_sub(elapsed);
+            let pct = remaining.as_secs_f64() / toast.ttl.as_secs_f64().max(0.1);
+            let bar_w = ((inner_w as f64 * pct.clamp(0.0, 1.0)) as u16).max(1);
+            let bar_rect = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y,
+                width: bar_w,
+                height: 1,
+            };
+            f.render_widget(Block::default().style(Style::default().bg(color).add_modifier(if toast.fading { Modifier::DIM } else { Modifier::empty() })), bar_rect);
+
+            let msg = format!(" {glyph} {}", toast.message);
+            let text = Paragraph::new(Line::from(Span::styled(msg, style.add_modifier(Modifier::BOLD))));
+            let text_rect = ratatui::layout::Rect {
+                x: inner.x + 1,
+                y: inner.y + 1,
+                width: inner_w.saturating_sub(2),
+                height: 1,
+            };
+            f.render_widget(text, text_rect);
+        }
     }
+}
+
+fn render_notify_modal(f: &mut ratatui::Frame, area: ratatui::layout::Rect, message: &str) {
+    use ratatui::layout::Alignment;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+
+    let theme = crate::theme::theme();
+    let w = 60u16.min(area.width.saturating_sub(8));
+    let lines: Vec<&str> = message.split('\n').collect();
+    let h = (lines.len() + 6).min(area.height.saturating_sub(4) as usize) as u16;
+    let x = area.x + (area.width - w) / 2;
+    let y = area.y + (area.height - h) / 2;
+    let rect = ratatui::layout::Rect { x, y, width: w, height: h };
+
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(ratatui::style::Color::Red))
+        .title(Span::styled(" ⚠ ERROR ", Style::default().fg(ratatui::style::Color::Red).add_modifier(Modifier::BOLD)))
+        .style(Style::default().bg(theme.note_error_bg));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let text = Paragraph::new(Line::from(Span::styled(
+        message,
+        Style::default().add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center)
+    .wrap(Wrap { trim: true });
+    let text_rect = ratatui::layout::Rect {
+        x: inner.x + 2,
+        y: inner.y + 1,
+        width: inner.width.saturating_sub(4),
+        height: inner.height.saturating_sub(2),
+    };
+    f.render_widget(text, text_rect);
+
+    let hint = Paragraph::new(Line::from(Span::styled(
+        "Press Esc to dismiss",
+        Style::default().fg(theme.subtle_fg),
+    )))
+    .alignment(Alignment::Center);
+    let hint_rect = ratatui::layout::Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    };
+    f.render_widget(hint, hint_rect);
 }
 
 fn render_theme_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {
