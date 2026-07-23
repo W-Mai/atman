@@ -202,6 +202,7 @@ async fn http_mcp_config_without_url_reports_protocol_error() {
         auth_token: None,
         tier: Tier::Three,
         timeout_ms: 500,
+        disabled: false,
     };
     let statuses = register_from_configs(&mut reg, &[cfg]).await;
     let err = match &statuses[0] {

@@ -456,8 +456,7 @@ pub struct ContextSnapshot {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub cost_usd: f64,
-    pub mcp_ok: u16,
-    pub mcp_total: u16,
+    pub mcp_servers: Vec<crate::mcp::McpServerStatus>,
     pub memory_recent_count: u16,
     pub window_tokens: u64,
     pub window_budget: u64,
@@ -1441,10 +1440,17 @@ impl Session {
         self.context_watch.borrow().model.clone()
     }
 
-    pub fn set_mcp_totals(&self, ok: u16, total: u16) {
+    pub fn update_mcp_server(&self, status: crate::mcp::McpServerStatus) {
         self.context_watch.send_modify(|snap| {
-            snap.mcp_ok = ok;
-            snap.mcp_total = total;
+            if let Some(existing) = snap
+                .mcp_servers
+                .iter_mut()
+                .find(|s| s.name == status.name)
+            {
+                *existing = status;
+            } else {
+                snap.mcp_servers.push(status);
+            }
         });
     }
 

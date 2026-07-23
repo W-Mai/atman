@@ -439,6 +439,11 @@ async fn run_frames(
                                 {
                                     app.meta_collapsed = !app.meta_collapsed;
                                     app.save_ui_state();
+                                } else if let Some(r) = app.last_mcp_hdr_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.mcp_collapsed = !app.mcp_collapsed;
+                                    app.save_ui_state();
                                 } else if let Some(r) = app.last_collapse_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -2494,6 +2499,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 todo_collapsed: app.todo_collapsed,
                 context_collapsed: app.context_collapsed,
                 meta_collapsed: app.meta_collapsed,
+                mcp_collapsed: app.mcp_collapsed,
                 sidebar_collapsed: sidebar_effective_collapsed,
                 on_goal_scroll: &|_c| {},
                 on_plans_scroll: &|_c| {},
@@ -2509,6 +2515,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_todo_hdr_rect = sr.todo_hdr_rect;
         app.last_ctx_hdr_rect = sr.ctx_hdr_rect;
         app.last_meta_hdr_rect = sr.meta_hdr_rect;
+        app.last_mcp_hdr_rect = sr.mcp_hdr_rect;
         app.last_collapse_btn_rect = sr.collapse_btn_rect;
         app.last_expand_btn_rect = sr.expand_btn_rect;
     }

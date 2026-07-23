@@ -26,6 +26,7 @@ pub struct SidebarInputs<'a> {
     pub todo_collapsed: bool,
     pub context_collapsed: bool,
     pub meta_collapsed: bool,
+    pub mcp_collapsed: bool,
     pub sidebar_collapsed: bool,
     pub on_goal_scroll: &'a dyn Fn(u16),
     pub on_plans_scroll: &'a dyn Fn(u16),
@@ -65,6 +66,7 @@ pub struct SidebarRenderResult {
     pub todo_hdr_rect: Option<Rect>,
     pub ctx_hdr_rect: Option<Rect>,
     pub meta_hdr_rect: Option<Rect>,
+    pub mcp_hdr_rect: Option<Rect>,
     pub collapse_btn_rect: Option<Rect>,
     pub expand_btn_rect: Option<Rect>,
     pub strip_rects: std::collections::HashMap<String, Rect>,
@@ -81,6 +83,7 @@ impl SidebarRenderResult {
             todo_hdr_rect: None,
             ctx_hdr_rect: None,
             meta_hdr_rect: None,
+            mcp_hdr_rect: None,
             collapse_btn_rect: None,
             expand_btn_rect: None,
             strip_rects: std::collections::HashMap::new(),
@@ -175,9 +178,22 @@ pub fn render(
     } else {
         meta_lines_full
     };
+    let mcp_lines_full: u16 =
+        1 + inputs.context.mcp_servers.len().min(20) as u16;
+    let mcp_lines: u16 = if inputs.mcp_collapsed {
+        1
+    } else {
+        mcp_lines_full
+    };
     let divider_gap: u16 = 1;
 
-    let bottom_min = 1 + divider_gap + context_lines + 1 + meta_lines; // divider + gap + ctx + gap + meta
+    let bottom_min = 1
+        + divider_gap
+        + context_lines
+        + 1
+        + mcp_lines
+        + 1
+        + meta_lines; // divider + gap + ctx + gap + mcp + gap + meta
 
     // Cap Plan/Todo so they don't push Meta off screen.
     let avail = inner.height.saturating_sub(goal_lines + 3 + bottom_min);
@@ -274,7 +290,9 @@ pub fn render(
             .constraints([
                 Constraint::Length(divider_gap),
                 Constraint::Length(context_lines),
-                Constraint::Length(1), // gap between context and meta
+                Constraint::Length(1), // gap between context and mcp
+                Constraint::Length(mcp_lines),
+                Constraint::Length(1), // gap between mcp and meta
                 Constraint::Length(meta_lines),
             ])
             .split(inner);
@@ -298,10 +316,10 @@ pub fn render(
         }
         if meta_lines > 0 {
             let glyph = if inputs.meta_collapsed { "▸" } else { "▾" };
-            result.meta_hdr_rect = Some(header_row(meta_sections[3]));
+            result.meta_hdr_rect = Some(header_row(meta_sections[5]));
             if inputs.meta_collapsed {
                 let header = format!("{glyph} Meta");
-                f.render_widget(Paragraph::new(section_title(&header)), meta_sections[3]);
+                f.render_widget(Paragraph::new(section_title(&header)), meta_sections[5]);
             } else {
                 f.render_widget(
                     meta_section(
@@ -309,6 +327,20 @@ pub fn render(
                         inputs.app_version,
                         inputs.latest_release,
                     ),
+                    meta_sections[5],
+                );
+            }
+        }
+        if mcp_lines > 0 {
+            let glyph = if inputs.mcp_collapsed { "▸" } else { "▾" };
+            result.mcp_hdr_rect = Some(header_row(meta_sections[3]));
+            if inputs.mcp_collapsed {
+                let (ok, total) = atman_runtime::mcp::mcp_counts(&inputs.context.mcp_servers);
+                let header = format!("{glyph} MCP ({ok}/{total})");
+                f.render_widget(Paragraph::new(section_title(&header)), meta_sections[3]);
+            } else {
+                f.render_widget(
+                    mcp_section(&inputs.context.mcp_servers),
                     meta_sections[3],
                 );
             }
@@ -534,7 +566,6 @@ fn context_section<'a>(
             plain,
         ),
         kv_line("attach", format!("{attach_count}"), plain),
-        kv_line("mcp", format!("{}/{}", ctx.mcp_ok, ctx.mcp_total), plain),
         kv_line(
             "memory",
             format!("recent×{}", ctx.memory_recent_count),
@@ -571,6 +602,55 @@ fn meta_section<'a>(
     lines.push(Line::from(""));
     lines.push(version_line(app_version, latest_release));
 
+    Paragraph::new(lines).wrap(Wrap { trim: false })
+}
+
+fn mcp_server_status_line<'a>(s: &atman_runtime::mcp::McpServerStatus) -> Line<'a> {
+    let t = crate::theme::theme();
+    let transport = match s.transport {
+        atman_runtime::mcp::TransportKind::Stdio => "stdio",
+        atman_runtime::mcp::TransportKind::Http => "http",
+    };
+    let (glyph, color, detail) = match &s.state {
+        atman_runtime::mcp::McpServerState::Disabled => ("◌", t.subtle_fg, String::new()),
+        atman_runtime::mcp::McpServerState::Pending => ("○", t.subtle_fg, String::new()),
+        atman_runtime::mcp::McpServerState::Connecting => ("◐", t.warn, "(connecting...)".into()),
+        atman_runtime::mcp::McpServerState::Connected { tool_count } => {
+            ("●", t.success, format!("{tool_count} tools"))
+        }
+        atman_runtime::mcp::McpServerState::Error { message } => {
+            ("✗", t.error, format!("({message})"))
+        }
+        atman_runtime::mcp::McpServerState::Disconnected { message } => {
+            ("⏏", t.error, format!("({message})"))
+        }
+        atman_runtime::mcp::McpServerState::Timeout { message } => {
+            ("⏱", t.warn, format!("({message})"))
+        }
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("  {glyph} "),
+            Style::default().fg(color),
+        ),
+        Span::styled(
+            format!("{:<14}", s.name),
+            Style::default().fg(t.meta_fg),
+        ),
+        Span::styled(
+            format!("{:<6}", transport),
+            Style::default().fg(t.subtle_fg),
+        ),
+        Span::styled(detail, Style::default().fg(t.subtle_fg)),
+    ])
+}
+
+fn mcp_section<'a>(servers: &[atman_runtime::mcp::McpServerStatus]) -> Paragraph<'a> {
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(1 + servers.len());
+    lines.push(Line::from(section_title("▸ MCP")));
+    for s in servers {
+        lines.push(mcp_server_status_line(s));
+    }
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 

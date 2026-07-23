@@ -652,6 +652,37 @@ impl crate::tool::Tool for McpToolAdapter {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerState {
+    Disabled,
+    Pending,
+    Connecting,
+    Connected { tool_count: usize },
+    Error { message: String },
+    Disconnected { message: String },
+    Timeout { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub transport: TransportKind,
+    pub state: McpServerState,
+}
+
+impl McpServerStatus {
+    pub fn is_ok(&self) -> bool {
+        matches!(self.state, McpServerState::Connected { .. })
+    }
+}
+
+/// Derive ok/total counts from a list of server statuses.
+pub fn mcp_counts(servers: &[McpServerStatus]) -> (u16, u16) {
+    let total = servers.len() as u16;
+    let ok = servers.iter().filter(|s| s.is_ok()).count() as u16;
+    (ok, total)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransportKind {
     #[default]
@@ -669,6 +700,7 @@ pub struct McpServerConfig {
     pub auth_token: Option<String>,
     pub tier: crate::tool::Tier,
     pub timeout_ms: u64,
+    pub disabled: bool,
 }
 
 impl McpServerConfig {
@@ -688,6 +720,7 @@ impl McpServerConfig {
             auth_token: None,
             tier,
             timeout_ms,
+            disabled: false,
         }
     }
 
@@ -707,6 +740,7 @@ impl McpServerConfig {
             auth_token,
             tier,
             timeout_ms,
+            disabled: false,
         }
     }
 }

@@ -123,7 +123,7 @@ pub struct BootstrapOutcome {
 }
 
 /// Spawn background MCP connections on a single thread using cooperative
-/// concurrency (tokio::task::spawn_local).  Each server connects
+/// concurrency (tokio::task::spawn_local).  Each enabled server connects
 /// independently — fast servers don't wait for slow ones.  Tools are
 /// registered as each server connects and become visible on the next
 /// LLM call via `"mcp.*"`.
@@ -136,7 +136,19 @@ pub fn spawn_mcp_boot(
     if configs.is_empty() {
         return;
     }
-    let total = configs.len() as u16;
+    // Initialise all servers: disabled → Disabled, rest → Pending.
+    for cfg in &configs {
+        let state = if cfg.disabled {
+            atman_runtime::mcp::McpServerState::Disabled
+        } else {
+            atman_runtime::mcp::McpServerState::Pending
+        };
+        session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
+            name: cfg.name.clone(),
+            transport: cfg.transport,
+            state,
+        });
+    }
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -146,6 +158,9 @@ pub fn spawn_mcp_boot(
         local.block_on(&rt, async move {
             let mut tasks = Vec::new();
             for cfg in &configs {
+                if cfg.disabled {
+                    continue;
+                }
                 let executor = executor.clone();
                 let session = session.clone();
                 let name = cfg.name.clone();
@@ -157,6 +172,12 @@ pub fn spawn_mcp_boot(
                 let tier = cfg.tier;
                 let transport = cfg.transport;
                 tasks.push(tokio::task::spawn_local(async move {
+                    // Connecting
+                    session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
+                        name: name.clone(),
+                        transport,
+                        state: atman_runtime::mcp::McpServerState::Connecting,
+                    });
                     let outcome = match transport {
                         atman_runtime::mcp::TransportKind::Stdio => {
                             atman_runtime::mcp::McpClient::connect_stdio(
@@ -178,6 +199,7 @@ pub fn spawn_mcp_boot(
                     };
                     match outcome {
                         Ok(client) => {
+                            let tool_count = client.tools.len();
                             let arc_client = std::sync::Arc::new(client);
                             for tool in &arc_client.tools {
                                 let adapter = atman_runtime::mcp::McpToolAdapter::new(
@@ -187,10 +209,23 @@ pub fn spawn_mcp_boot(
                                 );
                                 executor.tools.register(std::sync::Arc::new(adapter));
                             }
-                            session.set_mcp_totals(1, total);
+                            session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
+                                name,
+                                transport,
+                                state: atman_runtime::mcp::McpServerState::Connected {
+                                    tool_count,
+                                },
+                            });
                         }
                         Err(e) => {
                             eprintln!("[atman] MCP `{}` failed: {e}", name);
+                            session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
+                                name,
+                                transport,
+                                state: atman_runtime::mcp::McpServerState::Error {
+                                    message: e.to_string(),
+                                },
+                            });
                         }
                     }
                 }));
@@ -524,6 +559,8 @@ struct RawMcpConfig {
     tier: Option<u8>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    disabled: bool,
 }
 
 pub fn parse_mcp_configs(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig> {
@@ -547,6 +584,7 @@ pub fn parse_mcp_configs(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig>
                 auth_token: raw.auth_token,
                 tier: tier_from_int(raw.tier.unwrap_or(3)),
                 timeout_ms: raw.timeout_ms.unwrap_or(30_000),
+                disabled: raw.disabled,
             }
         })
         .collect()
