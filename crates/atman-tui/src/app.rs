@@ -118,6 +118,18 @@ pub enum NoteLevel {
     Info,
     Warn,
     Error,
+    Success,
+    Debug,
+}
+
+/// Toast notification displayed in the top-right corner.
+#[derive(Debug, Clone)]
+pub struct ToastNote {
+    pub id: String,
+    pub level: NoteLevel,
+    pub message: String,
+    pub ttl: std::time::Duration,
+    pub created: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -156,6 +168,10 @@ pub struct AppState {
     pub cheatsheet_open: bool,
     pub flow_names: Vec<(String, String)>,
     pub expanded_tools: HashSet<String>,
+    /// Toast notifications (top-right corner, auto-dismiss).
+    pub toasts: Vec<ToastNote>,
+    /// Status bar notes keyed by slot id (e.g. "compact", "daemon").
+    pub status_notes: std::collections::HashMap<String, String>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub trust: atman_runtime::trust::TrustConfig,
     pub trust_mode_picker_open: bool,
@@ -233,7 +249,7 @@ impl AppState {
     pub fn save_ui_state(&self) {
         let state = crate::states::PersistedUiState::snapshot(self);
         if let Err(e) = state.save() {
-            eprintln!("[atman] failed to save ui state: {e}");
+            atman_runtime::notify!(warn, "failed to save ui state: {e}");
         }
     }
 
@@ -626,6 +642,30 @@ impl AppState {
         });
     }
 
+    pub fn push_toast(&mut self, text: impl Into<String>, level: NoteLevel, ttl: std::time::Duration) {
+        let id = format!("toast-{}", self.toasts.len());
+        self.toasts.push(ToastNote {
+            id,
+            level,
+            message: text.into(),
+            ttl,
+            created: std::time::Instant::now(),
+        });
+        // Keep at most 5 toasts, remove oldest.
+        if self.toasts.len() > 5 {
+            self.toasts.remove(0);
+        }
+    }
+
+    pub fn push_status(&mut self, key: impl Into<String>, text: impl Into<String>) {
+        self.status_notes.insert(key.into(), text.into());
+    }
+
+    pub fn tick_toasts(&mut self) {
+        let now = std::time::Instant::now();
+        self.toasts.retain(|t| now.duration_since(t.created) < t.ttl);
+    }
+
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         match frame {
             StreamFrame::ThinkingChunk { text } => {
@@ -701,6 +741,17 @@ impl AppState {
                     text,
                     level: NoteLevel::Info,
                 });
+            }
+            StreamFrame::Notification(frame) => {
+                let text = frame.message;
+                let level = match frame.level {
+                    atman_runtime::notify::NotifyLevel::Error => NoteLevel::Error,
+                    atman_runtime::notify::NotifyLevel::Warn => NoteLevel::Warn,
+                    atman_runtime::notify::NotifyLevel::Info => NoteLevel::Info,
+                    atman_runtime::notify::NotifyLevel::Success => NoteLevel::Info, // TODO: add Success level
+                    atman_runtime::notify::NotifyLevel::Debug => NoteLevel::Info,  // TODO: handle Debug
+                };
+                self.push_item(OutputItem::SystemNote { text, level });
             }
             frame @ (StreamFrame::FlowGraph { .. }
             | StreamFrame::FlowStart { .. }
