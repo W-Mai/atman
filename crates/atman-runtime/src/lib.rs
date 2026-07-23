@@ -1,5 +1,6 @@
 pub mod approval;
 pub mod auth_store;
+pub mod codex_token;
 pub mod compaction;
 pub mod config_migration;
 pub mod cost;
