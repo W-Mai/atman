@@ -748,8 +748,8 @@ impl AppState {
                     atman_runtime::notify::NotifyLevel::Error => NoteLevel::Error,
                     atman_runtime::notify::NotifyLevel::Warn => NoteLevel::Warn,
                     atman_runtime::notify::NotifyLevel::Info => NoteLevel::Info,
-                    atman_runtime::notify::NotifyLevel::Success => NoteLevel::Info, // TODO: add Success level
-                    atman_runtime::notify::NotifyLevel::Debug => NoteLevel::Info,  // TODO: handle Debug
+                    atman_runtime::notify::NotifyLevel::Success => NoteLevel::Success,
+                    atman_runtime::notify::NotifyLevel::Debug => NoteLevel::Debug,
                 };
                 self.push_item(OutputItem::SystemNote { text, level });
             }
