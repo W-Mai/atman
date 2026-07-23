@@ -210,6 +210,14 @@ impl ProviderRegistry {
         {
             return Some(p.clone());
         }
+        // If the model is registered in the model registry, use its provider field.
+        if let Some(entry) = crate::model_registry::model_entry(model)
+            && let Some(ref provider_name) = entry.provider
+        {
+            if let Some(p) = self.providers.get(provider_name) {
+                return Some(p.clone());
+            }
+        }
         if let Some(entry) = crate::model_registry::model_entry(model) {
             let provider_name = format!("config:{}", entry.model);
             if let Some(p) = self.providers.get(&provider_name) {
@@ -227,5 +235,59 @@ impl ProviderRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Provider>> {
         self.providers.get(name).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::mock::MockProvider;
+
+    /// Helper: build a registry with a "codex" provider and an "openai" default.
+    fn fixture_registry() -> ProviderRegistry {
+        let mut reg = ProviderRegistry::new();
+        let codex = Arc::new(MockProvider::new("codex"));
+        reg.register(codex);
+        let openai = Arc::new(MockProvider::new("openai"));
+        reg.register(openai);
+        reg
+    }
+
+    #[test]
+    fn resolve_prefix_match_codex_slash_model() {
+        // "codex/gpt-5.6-terra" → split '/' → prefix "codex" → found
+        let reg = fixture_registry();
+        let p = reg.resolve("codex/gpt-5.6-terra").expect("should resolve");
+        assert_eq!(p.name(), "codex");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_default_for_unknown() {
+        let reg = fixture_registry();
+        let p = reg
+            .resolve("some-unknown-model")
+            .expect("should fall back to default");
+        // "codex" was registered first, so it's the default.
+        assert_eq!(p.name(), "codex");
+    }
+
+    #[test]
+    fn resolve_model_registry_provider_field_takes_priority() {
+        // Simulate the Codex bootstrap: register model entry with provider="codex",
+        // resolve by model name that has no '/' separator.
+        crate::model_registry::register_model_entries(vec![(
+            "codex-auto-review".into(),
+            crate::model_registry::ModelEntry {
+                model: "codex-auto-review".into(),
+                provider: Some("codex".into()),
+                ..Default::default()
+            },
+        )]);
+
+        let reg = fixture_registry();
+        let p = reg
+            .resolve("codex-auto-review")
+            .expect("should resolve via model registry provider field");
+        assert_eq!(p.name(), "codex");
     }
 }
