@@ -238,21 +238,16 @@ fn run_startup_config_migration() {
     };
     match atman_runtime::config_migration::migrate_legacy_config_if_needed(&cfg, &data) {
         Ok(Some(rep)) => {
-            eprintln!(
-                "[atman] moved {} config item(s) from {} to {}",
-                rep.moved.len(),
-                rep.from.display(),
-                rep.to.display(),
-            );
+            atman_runtime::notify!(info, "moved {} config item(s) from {} to {}", rep.moved.len(), rep.from.display(), rep.to.display());
             for name in &rep.moved {
-                eprintln!("  moved: {name}");
+                atman_runtime::notify!(info, "  moved: {name}");
             }
             for name in &rep.skipped_conflicts {
-                eprintln!("  skipped (already at destination): {name}");
+                atman_runtime::notify!(info, "  skipped (already at destination): {name}");
             }
         }
         Ok(None) => {}
-        Err(e) => eprintln!("[atman] config migration skipped: {e:#}"),
+        Err(e) => atman_runtime::notify!(error, "config migration skipped: {e:#}"),
     }
 }
 
@@ -1084,7 +1079,7 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
     }
     match std::sync::Arc::try_unwrap(session) {
         Ok(s) => s.shutdown().await,
-        Err(_) => eprintln!("sanitize: session still had refs at shutdown"),
+        Err(_) => atman_runtime::notify!(warn, "sanitize: session still had refs at shutdown"),
     }
     println!("sanitize: wrote {} degrade event(s)", findings.len());
     Ok(())
@@ -2126,9 +2121,20 @@ impl Reporter {
     fn info(&self, text: impl Into<String>) {
         let text = text.into();
         match self {
-            Self::Stdout => println!("{text}"),
+            Self::Stdout => atman_runtime::notify!(info, "{}", strip_atman_tag(&text)),
             Self::Tui(tx) => {
                 let _ = tx.send(atman_tui::TuiNote::Info(strip_atman_tag(&text).to_string()));
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn warn(&self, text: impl Into<String>) {
+        let text = text.into();
+        match self {
+            Self::Stdout => atman_runtime::notify!(warn, "{}", strip_atman_tag(&text)),
+            Self::Tui(tx) => {
+                let _ = tx.send(atman_tui::TuiNote::Warn(strip_atman_tag(&text).to_string()));
             }
         }
     }
@@ -2136,11 +2142,22 @@ impl Reporter {
     fn error(&self, text: impl Into<String>) {
         let text = text.into();
         match self {
-            Self::Stdout => eprintln!("{text}"),
+            Self::Stdout => atman_runtime::notify!(error, "{}", strip_atman_tag(&text)),
             Self::Tui(tx) => {
                 let _ = tx.send(atman_tui::TuiNote::Error(
                     strip_atman_tag(&text).to_string(),
                 ));
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn success(&self, text: impl Into<String>) {
+        let text = text.into();
+        match self {
+            Self::Stdout => atman_runtime::notify!(success, "{}", strip_atman_tag(&text)),
+            Self::Tui(tx) => {
+                let _ = tx.send(atman_tui::TuiNote::Info(strip_atman_tag(&text).to_string()));
             }
         }
     }
