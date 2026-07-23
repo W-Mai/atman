@@ -1188,7 +1188,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 let verdict = match safety.classifier.scan(&scan_text).await {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("[atman] safety scan skipped: {e}");
+                        crate::notify!(warn, "safety scan skipped: {e}");
                         crate::safety::ScanVerdict::Pass
                     }
                 };

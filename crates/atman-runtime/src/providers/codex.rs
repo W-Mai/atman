@@ -475,7 +475,7 @@ impl Provider for CodexProvider {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("[atman] fetch codex models failed: {e:#}");
+                    crate::notify!(error, "fetch codex models failed: {e:#}");
                     return vec![];
                 }
             };

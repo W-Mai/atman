@@ -84,8 +84,9 @@ pub(crate) async fn read_jsonl<T: for<'de> Deserialize<'de>>(
         }
         match serde_json::from_str::<T>(line) {
             Ok(v) => out.push(v),
-            Err(e) => eprintln!(
-                "[atman] skipping malformed jsonl line {}:{}: {e}",
+            Err(e) => crate::notify!(
+                warn,
+                "skipping malformed jsonl line {}:{}: {e}",
                 path.display(),
                 i + 1
             ),

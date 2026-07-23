@@ -114,8 +114,9 @@ impl SpecStore {
         if let Some(idx) = &self.anchor_index
             && let Err(e) = insert_entry(idx, &entry)
         {
-            eprintln!(
-                "[atman] spec entry index insert failed (id={}): {e}",
+            crate::notify!(
+                error,
+                "spec entry index insert failed (id={}): {e}",
                 entry.id
             );
         }
@@ -147,8 +148,9 @@ impl SpecStore {
         if let Some(idx) = &self.anchor_index
             && let Err(e) = insert_deviation(idx, &dev)
         {
-            eprintln!(
-                "[atman] spec deviation index insert failed (id={}): {e}",
+            crate::notify!(
+                error,
+                "spec deviation index insert failed (id={}): {e}",
                 dev.id
             );
         }

@@ -101,7 +101,7 @@ impl ConfessionStore {
         if let Some(idx) = &self.anchor_index
             && let Err(e) = insert_confession(idx, &confession)
         {
-            eprintln!("[atman] confession index insert failed (id={id}): {e}");
+            crate::notify!(error, "confession index insert failed (id={id}): {e}");
         }
         Ok(id)
     }

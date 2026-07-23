@@ -62,13 +62,13 @@ impl PersistedUiState {
             Ok(text) => match serde_json::from_str(&text) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[atman] states.json corrupt, using defaults: {e}");
+                    atman_runtime::notify!(warn, "states.json corrupt, using defaults: {e}");
                     Self::default()
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => {
-                eprintln!("[atman] states.json read failed: {e}");
+                atman_runtime::notify!(error, "states.json read failed: {e}");
                 Self::default()
             }
         }

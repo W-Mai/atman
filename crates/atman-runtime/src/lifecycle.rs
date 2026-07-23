@@ -73,10 +73,10 @@ impl LifecycleRunner {
             };
             match executor.run(&file, &flow_name, Vec::new()).await {
                 Ok(Value::Err(e)) => {
-                    eprintln!("[atman] on {} body error: {e}", lifecycle_event_slug(event));
+                    crate::notify!(error, "on {} body error: {e}", lifecycle_event_slug(event));
                 }
                 Err(e) => {
-                    eprintln!("[atman] on {} body error: {e}", lifecycle_event_slug(event));
+                    crate::notify!(error, "on {} body error: {e}", lifecycle_event_slug(event));
                 }
                 Ok(_) => {}
             }

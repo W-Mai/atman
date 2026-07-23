@@ -52,7 +52,7 @@ impl EventWriter {
                 {
                     Ok(rt) => rt,
                     Err(e) => {
-                        eprintln!("[atman] event writer rt init failed: {e}");
+                        crate::notify!(error, "event writer rt init failed: {e}");
                         return;
                     }
                 };
@@ -68,7 +68,7 @@ impl EventWriter {
                     )
                     .await
                     {
-                        eprintln!("[atman] event writer failed: {e}");
+                        crate::notify!(error, "event writer failed: {e}");
                     }
                 });
             })?;
@@ -188,8 +188,9 @@ async fn write_event(
     if let Some((idx, sid)) = indexer
         && let Err(e) = insert_project_row(idx, sid, event, &line)
     {
-        eprintln!(
-            "[atman] project index insert failed (seq={}): {e}",
+        crate::notify!(
+            error,
+            "project index insert failed (seq={}): {e}",
             event.seq()
         );
     }
