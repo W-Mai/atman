@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-mod codex_oauth;
 mod init;
+mod oauth_login;
 // meta_commands now in atman_runtime
 mod migrate_source;
 mod repl_completer;
@@ -1707,31 +1707,26 @@ async fn cmd_repl_once(
                             let _ = session_for_ctrl.forms().submit(&form_id, answer);
                         }
                     }
-                    atman_tui::TuiControl::AuthLogin { kind, name } => {
-                        if kind == atman_runtime::auth_store::ProviderKind::Codex {
+                    atman_tui::TuiControl::AuthLogin { kind, name } => match kind {
+                        atman_runtime::auth_store::ProviderKind::Codex => {
                             let name = name.clone();
                             tokio::task::spawn(async move {
-                                match crate::codex_oauth::login(&name).await {
-                                    Ok(p) => {
-                                        eprintln!(
-                                            "[atman] Codex logged in as \"{}\" ({})",
-                                            p.name,
-                                            p.account.as_deref().unwrap_or("unknown")
-                                        );
-                                    }
-                                    Err(e) => {
-                                        let msg = format!("Codex login error: {e:#}");
-                                        eprintln!("[atman] {msg}");
-                                        let _ = atman_runtime::storage::config_dir().map(|d| {
-                                            std::fs::write(d.join("codex_login_error.txt"), &msg)
-                                        });
-                                    }
+                                match crate::oauth_login::oauth_login::<
+                                    atman_runtime::providers::codex::CodexProvider,
+                                >(kind, &name)
+                                .await
+                                {
+                                    Ok(p) => eprintln!(
+                                        "[atman] Codex logged in as \"{}\" ({})",
+                                        p.name,
+                                        p.account.as_deref().unwrap_or("unknown")
+                                    ),
+                                    Err(e) => eprintln!("[atman] Codex login error: {e:#}"),
                                 }
                             });
-                        } else {
-                            eprintln!("[atman] Auth login for {kind:?} not yet implemented");
                         }
-                    }
+                        _ => eprintln!("[atman] Auth login for {kind:?} not yet implemented"),
+                    },
                     atman_tui::TuiControl::AuthLogout { id } => {
                         if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
                             store.remove(&id);
@@ -4072,19 +4067,17 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                     if kind == atman_runtime::auth_store::ProviderKind::Codex {
                         let name = name.clone();
                         tokio::task::spawn(async move {
-                            match crate::codex_oauth::login(&name).await {
+                            match crate::oauth_login::oauth_login::<
+                                atman_runtime::providers::codex::CodexProvider,
+                            >(kind, &name)
+                            .await
+                            {
                                 Ok(p) => eprintln!(
                                     "[atman] Codex logged in as \"{}\" ({})",
                                     p.name,
                                     p.account.as_deref().unwrap_or("unknown")
                                 ),
-                                Err(e) => {
-                                    let msg = format!("Codex login error: {e:#}");
-                                    eprintln!("[atman] {msg}");
-                                    let _ = atman_runtime::storage::config_dir().map(|d| {
-                                        std::fs::write(d.join("codex_login_error.txt"), &msg)
-                                    });
-                                }
+                                Err(e) => eprintln!("[atman] Codex login error: {e:#}"),
                             }
                         });
                     }

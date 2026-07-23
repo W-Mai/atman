@@ -10,6 +10,7 @@ use crate::provider::{
     TokenUsage, estimate_tokens,
 };
 use crate::tool::BoxFut;
+use anyhow::Context;
 
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
 
@@ -272,9 +273,9 @@ impl Provider for CodexProvider {
                 };
                 let status = resp.status();
                 if !status.is_success() {
-                    let body = resp.text().await.unwrap_or_default();
+                    let body_text = resp.text().await.unwrap_or_default();
                     return Err(RuntimeError::ToolFailed(format!(
-                        "codex http {status}: {body}"
+                        "codex http {status}: {body_text}"
                     )));
                 }
 
@@ -511,6 +512,117 @@ impl Provider for CodexProvider {
     }
 }
 
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+const CODEX_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+
+impl crate::oauth::OAuthProvider for CodexProvider {
+    fn authorize_url() -> (String, crate::oauth::Pkce, String) {
+        let pkce = crate::oauth::Pkce::generate();
+        let state = crate::oauth::generate_state();
+        let url = format!(
+            "{}?response_type=code&client_id={}&redirect_uri={}&code_challenge={}&code_challenge_method=S256&state={}&scope=openid+profile+email+offline_access",
+            CODEX_AUTHORIZE_URL, CODEX_CLIENT_ID, CODEX_REDIRECT_URI, pkce.challenge, state
+        );
+        (url, pkce, state)
+    }
+
+    async fn exchange_code(
+        code: &str,
+        verifier: &str,
+    ) -> anyhow::Result<crate::oauth::TokenResult> {
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(CODEX_TOKEN_URL)
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", CODEX_REDIRECT_URI),
+                ("client_id", CODEX_CLIENT_ID),
+                ("code_verifier", verifier),
+            ])
+            .send()
+            .await
+            .context("token exchange request")?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("token exchange failed (HTTP {status}): {body_text}");
+        }
+
+        #[derive(serde::Deserialize)]
+        struct R {
+            access_token: String,
+            refresh_token: Option<String>,
+            id_token: Option<String>,
+        }
+        let data: R = serde_json::from_str(&body_text).context("parse token response")?;
+
+        let expires_at = crate::oauth::parse_jwt_exp(&data.access_token)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp() + 3600);
+        let account = data
+            .id_token
+            .as_deref()
+            .and_then(crate::oauth::extract_account_from_id_token);
+
+        Ok(crate::oauth::TokenResult {
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+            expires_at,
+            account,
+        })
+    }
+
+    async fn refresh_token(token: &str) -> anyhow::Result<crate::oauth::TokenResult> {
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(CODEX_TOKEN_URL)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", token),
+                ("client_id", CODEX_CLIENT_ID),
+            ])
+            .send()
+            .await
+            .context("token refresh request")?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("token refresh failed (HTTP {status}): {body_text}");
+        }
+
+        #[derive(serde::Deserialize)]
+        struct R {
+            access_token: String,
+            refresh_token: Option<String>,
+            id_token: Option<String>,
+        }
+        let data: R = serde_json::from_str(&body_text).context("parse refresh response")?;
+
+        let expires_at = crate::oauth::parse_jwt_exp(&data.access_token)
+            .unwrap_or_else(|| chrono::Utc::now().timestamp() + 3600);
+        let account = data
+            .id_token
+            .as_deref()
+            .and_then(crate::oauth::extract_account_from_id_token);
+
+        Ok(crate::oauth::TokenResult {
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+            expires_at,
+            account,
+        })
+    }
+
+    fn from_stored(stored: &crate::auth_store::StoredProvider) -> Self {
+        let account_id = stored.account.as_deref().unwrap_or("");
+        CodexProvider::new("codex", &stored.access_token, account_id)
+    }
+}
+
 #[derive(Default)]
 struct PartialToolCall {
     id: String,
@@ -611,33 +723,4 @@ struct InputTokensDetails {
 struct OutputTokensDetails {
     #[serde(default)]
     reasoning_tokens: Option<u64>,
-}
-pub async fn create_from_auth(
-    stored: &crate::auth_store::StoredProvider,
-) -> (
-    std::sync::Arc<CodexProvider>,
-    Vec<crate::provider::DiscoveredModel>,
-) {
-    let p = match crate::codex_token::refresh_if_needed(stored).await {
-        Ok(Some(refreshed)) => {
-            eprintln!("[atman] codex token refreshed for \"{}\"", refreshed.name);
-            refreshed
-        }
-        Ok(None) => stored.clone(),
-        Err(e) => {
-            eprintln!(
-                "[atman] codex token refresh failed for \"{}\": {e:#}",
-                stored.name
-            );
-            stored.clone()
-        }
-    };
-    let account_id = p.account.as_deref().unwrap_or("");
-    let provider = std::sync::Arc::new(CodexProvider::new("codex", &p.access_token, account_id));
-    eprintln!(
-        "[atman] registered codex provider \"{}\" (account: {})",
-        p.name, account_id
-    );
-    let models = provider.discover_models().await;
-    (provider, models)
 }

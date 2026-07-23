@@ -13,8 +13,11 @@ keywords = ["atman", "runtime", "llm", "agent", "workflow"]
 categories = ["development-tools", "asynchronous"]
 
 [dependencies]
+axum.workspace = true
 atman-dsl        = { path = "../atman-dsl", version = "1.1.1" }
 anyhow.workspace   = true
+sha2 = "0.10"
+rand = "0.8"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

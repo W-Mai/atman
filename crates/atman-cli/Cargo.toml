@@ -47,9 +47,6 @@ toml.workspace = true
 unicode-width = "0.2"
 uuid.workspace = true
 axum.workspace         = true
-tower-http.workspace   = true
-sha2 = "0.10"
-rand = "0.8"
 open = "5"
 
 [dev-dependencies]
