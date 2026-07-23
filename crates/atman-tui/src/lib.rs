@@ -69,6 +69,28 @@ pub enum TuiNote {
     Error(String),
 }
 
+/// Rich notification sent from runtime/CLI to TUI.
+#[derive(Debug, Clone)]
+pub struct TuiNotification {
+    pub level: atman_runtime::notify::NotifyLevel,
+    pub location: atman_runtime::notify::NotifyLocation,
+    pub lifecycle: atman_runtime::notify::NotifyLifecycle,
+    pub stack: atman_runtime::notify::NotifyStack,
+    pub message: String,
+}
+
+impl From<atman_runtime::notify::Notification> for TuiNotification {
+    fn from(n: atman_runtime::notify::Notification) -> Self {
+        Self {
+            level: n.level,
+            location: n.location,
+            lifecycle: n.lifecycle,
+            stack: n.stack,
+            message: n.message,
+        }
+    }
+}
+
 impl TuiNote {
     fn into_parts(self) -> (String, NoteLevel) {
         match self {
@@ -120,6 +142,9 @@ pub enum TuiControl {
     },
     AuthLogout {
         id: String,
+    },
+    OpenAliasManager {
+        model: Option<String>,
     },
 }
 
@@ -280,6 +305,7 @@ async fn run_frames(
     let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
     loop {
+        app.tick_toasts();
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
         app.tick = app.tick.wrapping_add(1);
 
@@ -307,7 +333,7 @@ async fn run_frames(
 
             key = key_events.recv() => {
                 if std::env::var_os("ATMAN_TRACE_EVENTS").is_some() {
-                    eprintln!("[atman] event: {key:?}");
+                    atman_runtime::notify!(debug, "event: {key:?}");
                 }
                 let mut current = key;
                 let mut scroll_delta: i32 = 0;
@@ -1827,6 +1853,9 @@ fn handle_key(
     }
     if app.provider_manager.open {
         app.provider_manager.handle_key(&action, control_tx);
+        if let Some(model) = app.provider_manager.open_alias_model.take() {
+            app.alias_manager.open_form_with_model(&model);
+        }
         return;
     }
     if app.alias_manager.open {
@@ -2707,6 +2736,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.form_modal.open {
         form_modal::render(f, area, &app.form_modal);
     }
+    // Toast notifications in top-right corner
+    render_toasts(f, area, app);
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
     }
@@ -2771,6 +2802,59 @@ fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect,
         ),
         popup,
         &mut state,
+    );
+}
+
+fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {
+    if app.toasts.is_empty() {
+        return;
+    }
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Clear, Paragraph};
+
+    let max_w = 40u16.min(area.width / 2);
+    let count = app.toasts.len().min(5) as u16;
+    let h = count * 3 + 1;
+    let x = area.x + area.width.saturating_sub(max_w + 2);
+    let y = area.y + 2;
+    let rect = ratatui::layout::Rect { x, y, width: max_w + 2, height: h };
+
+    f.render_widget(Clear, rect);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for toast in &app.toasts {
+        let (glyph, color) = match toast.level {
+            NoteLevel::Error => ("✗", ratatui::style::Color::Red),
+            NoteLevel::Warn => ("!", ratatui::style::Color::Yellow),
+            NoteLevel::Info => ("·", ratatui::style::Color::Cyan),
+            NoteLevel::Success => ("✓", ratatui::style::Color::Green),
+            NoteLevel::Debug => ("›", ratatui::style::Color::Gray),
+        };
+        let elapsed = toast.created.elapsed();
+        let remaining = toast.ttl.saturating_sub(elapsed);
+        let pct = remaining.as_secs_f64() / toast.ttl.as_secs_f64().max(0.1);
+        let bar_w = (max_w as f64 * pct.clamp(0.0, 1.0)) as usize;
+        let bar = "▬".repeat(bar_w);
+
+        lines.push(Line::from(Span::styled(
+            format!(" {glyph} {}", toast.message),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            bar,
+            Style::default().fg(color),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::NONE),
+            ),
+        rect,
     );
 }
 
