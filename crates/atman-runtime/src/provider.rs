@@ -101,6 +101,18 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage>;
+
+    /// Discover available models from this provider. Default: empty.
+    fn discover_models(&self) -> BoxFut<'static, Vec<DiscoveredModel>> {
+        Box::pin(async { vec![] })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscoveredModel {
+    pub slug: String,
+    pub context_budget: Option<u64>,
+    pub thinking: bool,
 }
 
 pub const DEFAULT_STREAM_BUFFER: usize = 1024;

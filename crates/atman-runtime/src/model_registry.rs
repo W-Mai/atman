@@ -63,6 +63,32 @@ pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
     *guard = Some(cfg);
 }
 
+/// Build ModelEntry values from discovered models and register them.
+pub fn register_discovered(prefix: &str, models: &[crate::provider::DiscoveredModel]) {
+    let entries: Vec<(String, ModelEntry)> = models
+        .iter()
+        .map(|m| {
+            let name = if m.slug.starts_with(&format!("{prefix}-")) {
+                m.slug.clone()
+            } else {
+                format!("{prefix}/{name}", name = m.slug)
+            };
+            let entry = ModelEntry {
+                model: name.clone(),
+                provider: Some(prefix.to_string()),
+                context_budget: m.context_budget,
+                thinking: Some(m.thinking),
+                ..Default::default()
+            };
+            (name, entry)
+        })
+        .collect();
+    let slugs: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
+    register_model_entries(entries);
+    set_discovered_models(slugs.clone());
+    eprintln!("[atman] {prefix} models: {}", slugs.join(", "));
+}
+
 pub fn resolve_alias(name: &str) -> String {
     if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
         if let Some(entry) = cfg.aliases.get(name) {
