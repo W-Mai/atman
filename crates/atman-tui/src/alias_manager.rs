@@ -1,10 +1,17 @@
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Focus {
+    #[default]
+    NameInput,
+    Tree,
+}
 
 #[derive(Default)]
 pub struct AliasManager {
@@ -12,13 +19,13 @@ pub struct AliasManager {
     pub aliases: Vec<(String, String)>,
     pub selected: usize,
     show_form: bool,
-    form_title: String,
-    editor: InputEditor,
-    models: Vec<(String, String)>,
-    model_index: usize,
-    focused: usize,
-    edit_original: Option<String>,
     is_edit: bool,
+    editor: InputEditor,
+    edit_original: Option<String>,
+    groups: Vec<atman_runtime::model_registry::ProviderGroup>,
+    focus: Focus,
+    provider_idx: usize,
+    model_idx: Vec<usize>,
 }
 
 impl AliasManager {
@@ -46,168 +53,183 @@ impl AliasManager {
         self.selected = 0;
     }
 
-    fn refresh_models(&mut self) {
-        let mut names: Vec<(String, String)> = atman_runtime::model_registry::all_model_entries()
-            .into_iter()
-            .map(|(k, _)| (k.clone(), k))
-            .collect();
-        for id in atman_runtime::model_registry::discovered_models() {
-            if !names.iter().any(|(k, _)| *k == id) {
-                names.push((id.clone(), id));
-            }
-        }
-        for (_, model) in atman_runtime::model_registry::all_aliases() {
-            if !names.iter().any(|(k, _)| *k == model) {
-                names.push((model.clone(), model));
-            }
-        }
-        names.sort_by(|a, b| a.0.cmp(&b.0));
-        if names.is_empty() {
-            names = vec![
-                ("gpt-5.2-codex".into(), "gpt-5.2-codex".into()),
-                ("gpt-5.1-codex".into(), "gpt-5.1-codex".into()),
-                ("gpt-4o-mini".into(), "gpt-4o-mini".into()),
-                (
-                    "deepseek/deepseek-v4-pro".into(),
-                    "deepseek/deepseek-v4-pro".into(),
-                ),
-            ];
-        }
-        self.models = names;
+    fn refresh_groups(&mut self) {
+        self.groups = atman_runtime::model_registry::all_provider_groups();
+        self.model_idx = vec![0; self.groups.len()];
+        self.provider_idx = 0;
+        self.focus = Focus::NameInput;
+    }
+
+    pub fn open_form_with_model(&mut self, model: &str) {
+        self.open();
+        self.open_form(false, None, None);
+        self.select_model(model);
     }
 
     fn open_form(&mut self, is_edit: bool, alias: Option<&str>, model: Option<&str>) {
         self.show_form = true;
         self.is_edit = is_edit;
-        self.form_title = if is_edit {
-            "Edit Alias".into()
-        } else {
-            "Add Alias".into()
-        };
         let mut ed = InputEditor::default();
         if let Some(a) = alias {
             ed.insert_str(a);
         }
         self.editor = ed;
-        self.refresh_models();
-        self.model_index = model
-            .and_then(|m| self.models.iter().position(|(k, _)| k == m))
-            .unwrap_or(0);
-        self.focused = 0;
         self.edit_original = alias.map(|s| s.to_string());
+        self.refresh_groups();
+        self.focus = Focus::NameInput;
+        if let Some(m) = model {
+            self.select_model(m);
+        }
+    }
+
+    fn select_model(&mut self, slug: &str) {
+        for (pi, g) in self.groups.iter().enumerate() {
+            if let Some(mi) = g.models.iter().position(|m| m.slug == slug) {
+                self.provider_idx = pi;
+                self.model_idx[pi] = mi;
+                self.focus = Focus::Tree;
+                return;
+            }
+        }
+    }
+
+    fn current_model(&self) -> Option<&atman_runtime::model_registry::ModelRow> {
+        self.groups
+            .get(self.provider_idx)
+            .and_then(|g| g.models.get(self.model_idx[self.provider_idx]))
     }
 
     pub fn handle_key(
         &mut self,
         action: &KeyAction,
-        _control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if self.show_form {
-            self.handle_form_key(action);
+        if !self.show_form {
+            // Alias list mode
+            match action {
+                KeyAction::HistoryUp | KeyAction::Char('k') => {
+                    if self.selected > 0 {
+                        self.selected -= 1;
+                    }
+                }
+                KeyAction::HistoryDown | KeyAction::Char('j') => {
+                    if self.selected + 1 < self.aliases.len() {
+                        self.selected += 1;
+                    }
+                }
+                KeyAction::Char('a') => self.open_form(false, None, None),
+                KeyAction::Char('e') | KeyAction::Submit => {
+                    let selected = self.selected;
+                    if let Some((alias, _)) = self.aliases.get(selected) {
+                        let alias = alias.clone();
+                        self.open_form(true, Some(&alias), None);
+                    }
+                }
+                KeyAction::Char('d') => {
+                    if let Some((a, _)) = self.aliases.get(self.selected) {
+                        let a = a.clone();
+                        atman_runtime::model_registry::remove_alias_from_config(&a).ok();
+                        self.refresh_list();
+                    }
+                }
+                KeyAction::Escape => self.close(),
+                _ => {}
+            }
             return;
         }
-        match action {
-            KeyAction::Escape => self.close(),
-            KeyAction::HistoryUp | KeyAction::Char('k') => {
-                if self.selected > 0 {
-                    self.selected -= 1;
+
+        match self.focus {
+            Focus::NameInput => match action {
+                KeyAction::Escape => self.show_form = false,
+                KeyAction::Tab => {
+                    self.focus = Focus::Tree;
                 }
-            }
-            KeyAction::HistoryDown | KeyAction::Char('j') => {
-                if self.selected + 1 < self.aliases.len() {
-                    self.selected += 1;
+                KeyAction::Submit => self.commit_alias(control_tx),
+                KeyAction::Backspace => {
+                    self.editor.backspace();
                 }
-            }
-            KeyAction::Char('a') => self.open_form(false, None, None),
-            KeyAction::Char('e') | KeyAction::Submit => {
-                if let Some((a, m)) = self.aliases.get(self.selected) {
-                    let (a, m) = (a.clone(), m.clone());
-                    self.open_form(true, Some(&a), Some(&m));
+                KeyAction::CursorLeft => {
+                    self.editor.move_left();
                 }
-            }
-            KeyAction::Char('d') => {
-                if let Some((a, _)) = self.aliases.get(self.selected) {
-                    let a = a.clone();
-                    atman_runtime::model_registry::remove_alias_from_config(&a).ok();
-                    self.refresh_list();
+                KeyAction::CursorRight => {
+                    self.editor.move_right();
                 }
-            }
-            _ => {}
+                KeyAction::CursorHome => {
+                    self.editor.move_home();
+                }
+                KeyAction::CursorEnd => {
+                    self.editor.move_end();
+                }
+                KeyAction::Char(c) => {
+                    self.editor.insert_char(*c);
+                }
+                _ => {}
+            },
+            Focus::Tree => match action {
+                KeyAction::Escape => self.show_form = false,
+                KeyAction::Tab => {
+                    let total = self.groups.len();
+                    if total == 0 {
+                        self.focus = Focus::NameInput;
+                        return;
+                    }
+                    self.provider_idx = (self.provider_idx + 1) % total;
+                    if self.provider_idx == 0 && total > 0 {
+                        self.focus = Focus::NameInput;
+                    }
+                }
+                KeyAction::HistoryUp | KeyAction::Char('k') => {
+                    if self.groups.is_empty() {
+                        return;
+                    }
+                    if self.model_idx[self.provider_idx] > 0 {
+                        self.model_idx[self.provider_idx] -= 1;
+                    } else if self.provider_idx > 0 {
+                        self.provider_idx -= 1;
+                        let prev = &self.groups[self.provider_idx];
+                        self.model_idx[self.provider_idx] = prev.models.len().saturating_sub(1);
+                    }
+                }
+                KeyAction::HistoryDown | KeyAction::Char('j') => {
+                    if self.groups.is_empty() {
+                        return;
+                    }
+                    let g = &self.groups[self.provider_idx];
+                    if self.model_idx[self.provider_idx] + 1 < g.models.len() {
+                        self.model_idx[self.provider_idx] += 1;
+                    } else if self.provider_idx + 1 < self.groups.len() {
+                        self.provider_idx += 1;
+                        self.model_idx[self.provider_idx] = 0;
+                    }
+                }
+                KeyAction::Submit => self.commit_alias(control_tx),
+                _ => {}
+            },
         }
     }
 
-    fn handle_form_key(&mut self, action: &KeyAction) {
-        match action {
-            KeyAction::Escape => {
-                self.show_form = false;
-            }
-            KeyAction::Tab => {
-                self.focused = if self.focused == 0 { 1 } else { 0 };
-            }
-            KeyAction::Submit => self.commit_form(),
-            _ => {
-                if self.focused == 0 {
-                    match action {
-                        KeyAction::Backspace => {
-                            self.editor.backspace();
-                        }
-                        KeyAction::DeleteWordBackward => {
-                            self.editor.delete_word_backward();
-                        }
-                        KeyAction::CursorLeft => {
-                            self.editor.move_left();
-                        }
-                        KeyAction::CursorRight => {
-                            self.editor.move_right();
-                        }
-                        KeyAction::CursorHome => {
-                            self.editor.move_home();
-                        }
-                        KeyAction::CursorEnd => {
-                            self.editor.move_end();
-                        }
-                        KeyAction::Char(c) => {
-                            self.editor.insert_char(*c);
-                        }
-                        _ => {}
-                    }
-                } else {
-                    match action {
-                        KeyAction::HistoryUp | KeyAction::Char('k') => {
-                            if self.model_index > 0 {
-                                self.model_index -= 1;
-                            }
-                        }
-                        KeyAction::HistoryDown | KeyAction::Char('j') => {
-                            if self.model_index + 1 < self.models.len() {
-                                self.model_index += 1;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    fn commit_form(&mut self) {
+    fn commit_alias(
+        &mut self,
+        _control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
         let alias = self.editor.buf().trim().to_string();
         if alias.is_empty() {
             return;
         }
-        let model = self
-            .models
-            .get(self.model_index)
-            .map(|(k, _)| k.clone())
-            .unwrap_or_default();
-        if model.is_empty() {
+        let slug = {
+            self.current_model()
+                .map(|m| m.slug.clone())
+                .unwrap_or_default()
+        };
+        if slug.is_empty() {
             return;
         }
         if self.is_edit {
-            let old = self.edit_original.as_deref().unwrap_or(&alias);
-            atman_runtime::model_registry::update_alias_in_config(old, &alias, &model).ok();
+            if let Some(ref old) = self.edit_original {
+                atman_runtime::model_registry::update_alias_in_config(old, &alias, &slug).ok();
+            }
         } else {
-            atman_runtime::model_registry::add_alias_to_config(&alias, &model).ok();
+            atman_runtime::model_registry::add_alias_to_config(&alias, &slug).ok();
         }
         self.refresh_list();
         self.show_form = false;
@@ -215,8 +237,16 @@ impl AliasManager {
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
-    let w = area.width.saturating_sub(4).clamp(50, 78);
-    let h = area.height.saturating_sub(2).clamp(10, 24);
+    if !mgr.show_form {
+        render_alias_list(f, area, mgr);
+        return;
+    }
+    render_alias_form(f, area, mgr);
+}
+
+fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
+    let w = area.width.saturating_sub(4).clamp(40, 60);
+    let h = area.height.saturating_sub(2).clamp(6, 18);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
     let rect = Rect {
@@ -234,7 +264,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
-            " Aliases (Esc to close) ",
+            " Aliases ",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -242,145 +272,205 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
 
-    if inner.height < 3 {
-        return;
-    }
-
-    let content = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: inner.height.saturating_sub(1),
-    };
-
-    if mgr.show_form {
-        render_alias_form(f, content, mgr);
-    } else {
-        let items: Vec<ListItem> = mgr
-            .aliases
-            .iter()
-            .map(|(a, m)| {
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("  {:<20}", a),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("→ "),
-                    Span::styled(m.clone(), Style::default().fg(theme.subtle_fg)),
-                ]);
-                ListItem::new(line)
-            })
-            .collect();
-        let hl = Style::default()
-            .bg(theme.subtle_fg)
-            .add_modifier(Modifier::BOLD);
-        let mut state = ListState::default();
-        if !mgr.aliases.is_empty() {
-            state.select(Some(mgr.selected));
-        }
-        f.render_stateful_widget(List::new(items).highlight_style(hl), content, &mut state);
-    }
-
-    let help_rect = Rect {
-        x: inner.x,
-        y: inner.y + inner.height.saturating_sub(1),
-        width: inner.width,
-        height: 1,
-    };
-    let help = if mgr.show_form {
-        "Tab switch field  j/k pick model  Enter save  Esc cancel"
-    } else {
-        "j/k select  a add  e edit  d delete  Esc close"
-    };
-    f.render_widget(
-        Paragraph::new(Span::styled(help, Style::default().fg(theme.subtle_fg))),
-        help_rect,
-    );
+    let items: Vec<ListItem> = mgr
+        .aliases
+        .iter()
+        .enumerate()
+        .map(|(i, (a, m))| {
+            let style = if i == mgr.selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(format!(" {} → {}", a, m), style)))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(mgr.selected));
+    f.render_stateful_widget(List::new(items), inner, &mut state);
 }
 
 fn render_alias_form(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
+    let w = area.width.saturating_sub(4).clamp(60, 84);
+    let h = area.height.saturating_sub(2).clamp(14, 24);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let rect = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    crate::sanitize_widget_edges(f, rect);
+    f.render_widget(Clear, rect);
+
     let theme = crate::theme::theme();
-
-    let buf = mgr.editor.buf();
-    let cur = mgr.editor.cursor();
-    let name_line = if mgr.focused == 0 {
-        Line::from(render_cursor("  Name: ", buf, cur, theme.accent))
+    let title = if mgr.is_edit {
+        " Edit Alias "
     } else {
-        Line::from(vec![
-            Span::raw("  Name: "),
-            if buf.is_empty() {
-                Span::styled("_", Style::default().fg(theme.subtle_fg))
-            } else {
-                Span::raw(buf.to_string())
-            },
-        ])
+        " Add Alias "
     };
-
-    let model_header = if mgr.focused == 1 {
-        Span::styled(
-            "  Model:  (j/k select)",
-            Style::default().add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled("  Model:", Style::default().fg(theme.subtle_fg))
-    };
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("  {}", mgr.form_title),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::raw("")),
-        name_line,
-        Line::from(Span::raw("")),
-        Line::from(model_header),
-    ];
-
-    let available = area.height.saturating_sub(lines.len() as u16 + 2);
-    for (i, (_k, display)) in mgr.models.iter().take(available as usize).enumerate() {
-        let (pfx, style) = if mgr.focused == 1 && i == mgr.model_index {
-            ("▶ ", Style::default().add_modifier(Modifier::BOLD))
-        } else {
-            ("  ", Style::default().fg(theme.subtle_fg))
-        };
-        lines.push(Line::from(vec![
-            Span::raw(format!("    {pfx}")),
-            Span::styled(display.clone(), style),
-        ]));
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = outer.inner(rect);
+    f.render_widget(outer, rect);
+    if inner.height < 5 {
+        return;
     }
 
-    lines.push(Line::from(Span::raw("")));
-    lines.push(Line::from(Span::styled(
-        "  Enter → save   Esc → cancel",
-        Style::default().fg(theme.subtle_fg),
-    )));
-    f.render_widget(Paragraph::new(lines), area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    let panels = rows[0];
+    let footer_area = rows[1];
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(panels);
+
+    render_tree_panel(f, cols[0], mgr, &theme);
+    render_preview_panel(f, cols[1], mgr, &theme);
+
+    // Footer help
+    let help = match mgr.focus {
+        Focus::NameInput => "Tab: model tree  |  Enter: save  |  Esc: cancel",
+        Focus::Tree => "Tab: name input  |  ↑↓/jk: navigate  |  Enter: save  |  Esc: cancel",
+    };
+    let footer = Paragraph::new(Line::from(Span::styled(
+        help,
+        Style::default().fg(theme.meta_fg),
+    )))
+    .alignment(ratatui::layout::Alignment::Right);
+    f.render_widget(footer, footer_area);
 }
 
-fn render_cursor<'a>(
-    prefix: &str,
-    text: &'a str,
-    cursor_byte: usize,
-    accent: ratatui::style::Color,
-) -> Vec<Span<'a>> {
-    let mut spans: Vec<Span<'a>> = vec![Span::raw(prefix.to_string())];
-    let cursor = cursor_byte.min(text.len());
-    let before = &text[..cursor];
-    let ch = text[cursor..].chars().next();
-    let after = &text[cursor + ch.map(|c| c.len_utf8()).unwrap_or(0)..];
-    if !before.is_empty() {
-        spans.push(Span::raw(before.to_string()));
-    }
-    if let Some(ch) = ch {
-        spans.push(Span::styled(
-            ch.to_string(),
-            Style::default().bg(accent).fg(ratatui::style::Color::Black),
-        ));
+fn render_tree_panel(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    mgr: &AliasManager,
+    theme: &crate::theme::Theme,
+) {
+    let mut lines: Vec<Line> = vec![];
+
+    let name_style = if mgr.focus == Focus::NameInput {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
-        spans.push(Span::styled(" ", Style::default().bg(accent)));
+        Style::default().fg(theme.tinted_fg)
+    };
+    let cursor = if mgr.focus == Focus::NameInput {
+        "█"
+    } else {
+        ""
+    };
+    lines.push(Line::from(Span::styled(
+        format!("Name: {} {}", mgr.editor.buf(), cursor),
+        name_style,
+    )));
+    lines.push(Line::from(""));
+
+    for (pi, grp) in mgr.groups.iter().enumerate() {
+        let is_active = mgr.focus == Focus::Tree && mgr.provider_idx == pi;
+        let hdr_style = if is_active {
+            Style::default()
+                .fg(theme.heading)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.heading)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("▸ {}", grp.provider_name),
+            hdr_style,
+        )));
+
+        for (mi, m) in grp.models.iter().enumerate() {
+            let is_sel = is_active && mgr.model_idx[pi] == mi;
+            let style = if is_sel {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.tinted_fg)
+            };
+            let prefix = if is_sel { " ▶" } else { "  " };
+            lines.push(Line::from(Span::styled(
+                format!("{} {}", prefix, m.slug),
+                style,
+            )));
+        }
     }
-    if !after.is_empty() {
-        spans.push(Span::raw(after.to_string()));
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn render_preview_panel(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    mgr: &AliasManager,
+    theme: &crate::theme::Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(theme.border))
+        .title(" Preview ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines = vec![];
+
+    // Show current alias mapping if editing alias name
+    if mgr.focus == Focus::NameInput && !mgr.editor.buf().trim().is_empty() {
+        let alias_name = mgr.editor.buf().trim();
+        if let Some((_, target)) = mgr.aliases.iter().find(|(a, _)| a == alias_name) {
+            lines.push(Line::from(Span::styled(
+                format!("→ {}", target),
+                Style::default().fg(theme.meta_fg),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "New alias",
+                Style::default().fg(theme.meta_fg),
+            )));
+        }
     }
-    spans
+
+    if let Some(m) = mgr.current_model() {
+        lines.push(Line::from(Span::styled(
+            &m.slug,
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Context: {}",
+                atman_runtime::humanize::format_count(m.context_budget)
+            ),
+            Style::default().fg(theme.tinted_fg),
+        )));
+        let max_out = m
+            .max_output_tokens
+            .map(|n| format!("{}K", n / 1000))
+            .unwrap_or_else(|| "—".to_string());
+        lines.push(Line::from(Span::styled(
+            format!("Output:  {}", max_out),
+            Style::default().fg(theme.tinted_fg),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("Thinking: {}", if m.thinking { "✓" } else { "—" }),
+            Style::default().fg(theme.tinted_fg),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
