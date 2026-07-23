@@ -109,27 +109,27 @@ fn boxed_hit_test_five_coordinates_map_to_correct_paths() {
         .expect("step-b region");
 
     let hit_flow = app
-        .hit_test_node(flow.col_start + 2, flow.start_row + 1)
+        .hit_test_node(flow.col_start + 2, flow.start_row as u16 + 1)
         .expect("flow top-left interior");
     assert_eq!(hit_flow.1, "0", "top-left of flow box");
 
     let hit_a_body = app
-        .hit_test_node(a.col_start + 3, a.start_row + 1)
+        .hit_test_node(a.col_start + 3, a.start_row as u16 + 1)
         .expect("step-a interior");
     assert_eq!(hit_a_body.1, "0/0", "interior of step-a");
 
     let hit_a_border = app
-        .hit_test_node(a.col_start, a.start_row)
+        .hit_test_node(a.col_start, a.start_row as u16)
         .expect("step-a top-left border");
     assert_eq!(hit_a_border.1, "0/0", "top-left border still counts");
 
     let hit_child = app
-        .hit_test_node(a_child.col_start + 2, a_child.start_row + 1)
+        .hit_test_node(a_child.col_start + 2, a_child.start_row as u16 + 1)
         .expect("nested child interior");
     assert_eq!(hit_child.1, "0/0/0", "path-key length tiebreaker wins");
 
     let hit_b = app
-        .hit_test_node(b.col_start + 2, b.start_row + 1)
+        .hit_test_node(b.col_start + 2, b.start_row as u16 + 1)
         .expect("step-b interior");
     assert_eq!(hit_b.1, "0/1", "second sibling");
 }

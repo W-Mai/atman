@@ -526,9 +526,9 @@ async fn run_frames(
                     }
                 }
                 if scroll_delta < 0 {
-                    app.scroll_up((-scroll_delta) as u16);
+                    app.scroll_up((-scroll_delta) as u32);
                 } else if scroll_delta > 0 {
-                    app.scroll_down(scroll_delta as u16);
+                    app.scroll_down(scroll_delta as u32);
                 }
             }
             frame = handle.stream_rx.recv() => {
@@ -2325,12 +2325,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         layout::compute_sidebar_rect(l.transcript, show_sidebar, sidebar_effective_collapsed);
     let transcript_content = layout::compute_content_rect(l.transcript);
     let content_w = layout::input_content_width(l.transcript.width);
-    let total_input_lines = crate::input::visual_line_count(editor.buf(), content_w) as u16;
+    let total_input_lines = crate::input::visual_line_count(editor.buf(), content_w) as u32;
     let input_buf_lines = total_input_lines.min(12);
-    let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines);
+    let bottom_rect = layout::compute_input_rect(l.transcript, input_buf_lines.min(u16::MAX as u32) as u16);
     let content_w = layout::input_content_width(l.transcript.width);
     let cursor_row =
-        crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
+        crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u32;
     let visible_rows = input_buf_lines.max(3);
     let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
     let startup_slot = if startup_active {
@@ -2383,18 +2383,19 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     );
     let transcript_area = transcript_content;
     app.last_transcript_rect = Some(transcript_area);
-    let effective_viewport = transcript_area.height.max(1);
-    let tail_anchor = input_rect.y.saturating_sub(transcript_area.y).max(1);
+    let document_visible_rows = layout::document_visible_rows(transcript_area.height);
+    let input_overlay_rows = layout::input_overlay_rows(input_rect, transcript_area);
+    let effective_viewport = document_visible_rows.max(1);
     if startup_active {
         if let Some(crate::app::OutputItem::StartupCard { version, recent }) = app.items.first() {
             let base = output::compute_startup_overlay(l.transcript, recent).area;
             f.render_widget(ratatui::widgets::Clear, l.transcript);
             output::render_startup_overlay(f, base, version, recent, false, recent.len());
         }
-        app.resolve_scroll(0, effective_viewport);
+        app.resolve_scroll(0, effective_viewport, 0, app.items.len());
         app.last_item_ranges.clear();
     } else if app.items.is_empty() {
-        app.resolve_scroll(0, effective_viewport);
+        app.resolve_scroll(0, effective_viewport, 0, app.items.len());
         app.last_item_ranges.clear();
         // Clear the full unpadded transcript rect first — otherwise the
         // 2-col padding strip on each side of transcript_area keeps
@@ -2428,25 +2429,35 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             animation_frame: animation_key,
         };
         let mut cache = std::mem::take(&mut app.layout_cache);
-        let scroll_before = if app.follow_tail {
-            cache.cached_total_rows().saturating_sub(tail_anchor)
-        } else {
-            app.scroll_offset
+        // Two-phase: compute layout first (pass 1), then extract visible
+        // lines with the up-to-date total_rows (pass 2).  This eliminates
+        // the one-frame lag where scroll_before was based on stale
+        // cached_total_rows from the previous frame.
+        let (lines, ranges, node_regions, total_rows) = {
+            // Phase 1 – force layout refresh so cached_total_rows is current.
+            cache.get_or_build(cache_key, &app.items, &ctx, 0, 0);
+            let fresh_total = cache.cached_total_rows();
+            // Phase 2 – compute the correct scroll offset *after* layout.
+            let scroll_before = if app.follow_tail {
+                let visible_above = document_visible_rows
+                    .saturating_sub(input_overlay_rows)
+                    .max(1);
+                fresh_total.saturating_sub(visible_above)
+            } else {
+                app.scroll_offset
+            };
+            cache.get_or_build(
+                cache_key,
+                &app.items,
+                &ctx,
+                scroll_before,
+                effective_viewport,
+            )
         };
-        let (lines, ranges, node_regions, total_rows) = cache.get_or_build(
-            cache_key,
-            &app.items,
-            &ctx,
-            scroll_before,
-            effective_viewport,
-        );
         app.last_item_ranges = ranges;
         app.last_node_regions = node_regions;
         app.layout_cache = cache;
-        app.resolve_scroll(total_rows, effective_viewport);
-        if app.follow_tail {
-            app.scroll_offset = total_rows.saturating_sub(tail_anchor);
-        }
+        app.resolve_scroll(total_rows, document_visible_rows, input_overlay_rows, app.items.len());
         let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
         f.render_widget(paragraph, transcript_area);
     }
@@ -2579,8 +2590,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             editor.buf(),
             editor.cursor(),
             border_color,
-            app.pending_below_rows(),
-            scroll_row,
+            app.pending_below_rows().min(u16::MAX as u32) as u16,
+            scroll_row.min(u16::MAX as u32) as u16,
             &app.trust,
         ),
         input_rect,
@@ -2605,8 +2616,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
     let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
     let inner_y = input_rect.y.saturating_add(1);
-    if raw_row >= scroll_row {
-        let cy = inner_y + (raw_row - scroll_row);
+    if raw_row as u32 >= scroll_row {
+        let cy = inner_y + (raw_row as u32 - scroll_row) as u16;
         let cx = inner_x + raw_col;
         if cy < input_rect.y + input_rect.height.saturating_sub(1)
             && cx < input_rect.x + input_rect.width.saturating_sub(1)

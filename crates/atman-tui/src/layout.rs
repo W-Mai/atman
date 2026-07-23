@@ -65,6 +65,19 @@ pub fn compute_input_rect(transcript: Rect, buf_lines: u16) -> Rect {
     input_rect_at(transcript, buf_lines, InputYAnchor::Bottom)
 }
 
+/// Number of document rows visible in the transcript area.  The floating
+/// input overlays the bottom portion; content *can* scroll behind it.
+pub fn document_visible_rows(transcript_height: u16) -> u32 {
+    u32::from(transcript_height.max(1))
+}
+
+/// Rows consumed by the floating input overlay (borders + padding + at least
+/// one text line).  When following the tail we offset by this much so the
+/// last content line stays above the input instead of being hidden behind it.
+pub fn input_overlay_rows(input_rect: Rect, transcript_area: Rect) -> u32 {
+    u32::from(input_rect.height).min(u32::from(transcript_area.height))
+}
+
 /// Per-side border width (Borders::ALL → 1 on each side).
 pub const INPUT_BORDER: u16 = 1;
 /// Per-side horizontal padding (Padding::horizontal(1) → 1 on each side).

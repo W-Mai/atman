@@ -50,16 +50,16 @@ pub fn build_lines(items: &[OutputItem], ctx: &RenderCtx<'_>) -> Vec<Line<'stati
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemRange {
     pub item_index: usize,
-    pub start_row: u16,
-    pub end_row: u16,
+    pub start_row: u32,
+    pub end_row: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRegion {
     pub panel_item_index: usize,
     pub path_key: String,
-    pub start_row: u16,
-    pub end_row: u16,
+    pub start_row: u32,
+    pub end_row: u32,
     pub col_start: u16,
     pub col_end: u16,
 }
@@ -251,14 +251,14 @@ pub fn build_lines_with_ranges(
     ctx: &RenderCtx<'_>,
     item_cache: &mut Vec<Option<ItemCacheEntry>>,
     animation_frame: Option<u32>,
-) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u16) {
+) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u32) {
     if item_cache.len() < items.len() {
         item_cache.resize(items.len(), None);
     }
     let mut all_lines: Vec<Line<'static>> = Vec::with_capacity(items.len() * 3);
     let mut ranges: Vec<ItemRange> = Vec::with_capacity(items.len());
     let mut node_regions: Vec<NodeRegion> = Vec::new();
-    let mut cursor: u16 = 0;
+    let mut cursor: u32 = 0;
     let mut prev_kind: Option<ItemKind> = None;
     for (idx, item) in items.iter().enumerate() {
         let kind = ItemKind::of(item);
@@ -520,14 +520,14 @@ impl ItemKind {
     }
 }
 
-fn wrap_row_offsets(lines: &[Line<'static>], _width: u16) -> (u16, Vec<u16>) {
+fn wrap_row_offsets(lines: &[Line<'static>], _width: u16) -> (u32, Vec<u32>) {
     // Paragraph is rendered with .scroll() but no .wrap(), so ratatui uses
     // LineTruncator: one Line always renders as one row (long lines get
     // truncated at panel width, not wrapped). Anything else here would over-
     // estimate total_rows, put follow_tail scroll past real content, and
     // produce the "session opens on blank space, scroll up to find text" bug.
-    let mut offsets: Vec<u16> = Vec::with_capacity(lines.len() + 1);
-    let mut cursor: u16 = 0;
+    let mut offsets: Vec<u32> = Vec::with_capacity(lines.len() + 1);
+    let mut cursor: u32 = 0;
     offsets.push(0);
     for _ in lines {
         cursor = cursor.saturating_add(1);
@@ -591,10 +591,10 @@ pub struct LayoutCache {
     lines: Vec<Line<'static>>,
     ranges: Vec<ItemRange>,
     node_regions: Vec<NodeRegion>,
-    total_rows: u16,
+    total_rows: u32,
     item_cache: Vec<Option<ItemCacheEntry>>,
-    cached_total_rows: u16,
-    item_rows: Vec<u16>,
+    cached_total_rows: u32,
+    item_rows: Vec<u32>,
     cached_items_len: usize,
 }
 
@@ -602,7 +602,7 @@ pub struct LayoutCache {
 pub struct ItemCacheEntry {
     content_hash: u64,
     lines: Arc<[Line<'static>]>,
-    rows: u16,
+    rows: u32,
     regions: Vec<NodeRegion>,
 }
 
@@ -612,9 +612,9 @@ impl LayoutCache {
         key: LayoutKey,
         items: &[OutputItem],
         ctx: &RenderCtx<'_>,
-        scroll_offset: u16,
-        viewport_rows: u16,
-    ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u16) {
+        scroll_offset: u32,
+        viewport_rows: u32,
+    ) -> (Vec<Line<'static>>, Vec<ItemRange>, Vec<NodeRegion>, u32) {
         if items.is_empty() {
             self.item_cache.clear();
             self.item_rows.clear();
@@ -691,7 +691,7 @@ impl LayoutCache {
         const PRELOAD_BLOCKS: usize = 3;
 
         // Find the item index where vis_top falls, and preload above it
-        let mut cursor: u16 = 0;
+        let mut cursor: u32 = 0;
         let mut vis_start_idx: usize = 0;
         for (idx, _) in items.iter().enumerate() {
             let rows = self.item_rows[idx];
@@ -787,7 +787,7 @@ impl LayoutCache {
         )
     }
 
-    pub fn cached_total_rows(&self) -> u16 {
+    pub fn cached_total_rows(&self) -> u32 {
         self.cached_total_rows
     }
 
@@ -2630,7 +2630,7 @@ fn render_collapsed_workflow_card(
         );
     }
     apply_lens_fade(&mut body_lines);
-    let card_body_start_row = lines.len() as u16;
+    let card_body_start_row = lines.len() as u32;
     for r in regions.iter_mut() {
         r.start_row = r.start_row.saturating_add(card_body_start_row);
         r.end_row = r.end_row.saturating_add(card_body_start_row);
@@ -2639,7 +2639,7 @@ fn render_collapsed_workflow_card(
     let bottom_line = format_workflow_stats_footer(graph, outer_width, border_style);
     lines.push(bottom_line);
     lines.push(Line::raw(""));
-    let card_rows = lines.len() as u16;
+    let card_rows = lines.len() as u32;
     regions.insert(
         0,
         NodeRegion {
@@ -2782,9 +2782,9 @@ fn append_fanout_horizontal(
         child_prefix.to_string(),
         Style::default().fg(Color::DarkGray),
     )];
-    let mut cursor: u16 = 0;
+    let mut cursor: u32 = 0;
     for i in 0..branch_count {
-        let mid = cursor + col_width / 2;
+        let mid = cursor + col_width as u32 / 2;
         while cursor < mid {
             fork_spans.push(Span::styled(
                 "─".to_string(),
@@ -2798,7 +2798,7 @@ fn append_fanout_horizontal(
         ));
         cursor += 1;
         let _ = i;
-        while cursor < ((i + 1) as u16) * col_width {
+        while cursor < ((i + 1) as u32 * col_width as u32) {
             fork_spans.push(Span::styled(
                 "─".to_string(),
                 Style::default().fg(Color::Magenta),
@@ -2807,7 +2807,7 @@ fn append_fanout_horizontal(
         }
     }
     out.push(Line::from(fork_spans));
-    let body_start_row = out.len() as u16;
+    let body_start_row = out.len() as u32;
     let max_height = per_branch_lines.iter().map(|b| b.len()).max().unwrap_or(0);
     for row_i in 0..max_height {
         let mut spans: Vec<Span<'static>> = vec![Span::raw(child_prefix.to_string())];
@@ -2842,9 +2842,9 @@ fn append_fanout_horizontal(
         child_prefix.to_string(),
         Style::default().fg(Color::DarkGray),
     )];
-    let mut cursor: u16 = 0;
+    let mut cursor: u32 = 0;
     for i in 0..branch_count {
-        let mid = cursor + col_width / 2;
+        let mid = cursor + col_width as u32 / 2;
         while cursor < mid {
             merge_spans.push(Span::styled(
                 "─".to_string(),
@@ -2857,7 +2857,7 @@ fn append_fanout_horizontal(
             Style::default().fg(Color::Magenta),
         ));
         cursor += 1;
-        while cursor < ((i + 1) as u16) * col_width {
+        while cursor < ((i + 1) as u32 * col_width as u32) {
             merge_spans.push(Span::styled(
                 "─".to_string(),
                 Style::default().fg(Color::Magenta),
@@ -3022,11 +3022,11 @@ fn append_workflow_node_boxed(
     let compact_w = compact_content.min(budget as usize) as u16;
     let outer_width = if is_expanded { budget } else { compact_w };
     let mut scratch: Vec<Line<'static>> = Vec::new();
-    let start_row = out.len() as u16;
+    let start_row = out.len() as u32;
     let rect = append_box(
         &mut scratch,
         BoxSpec {
-            row0: start_row,
+            row0: start_row as u16,
             col0,
             outer_width,
             inner_lines,
@@ -3051,8 +3051,8 @@ fn append_workflow_node_boxed(
     regions.push(NodeRegion {
         panel_item_index: 0,
         path_key: path.to_string(),
-        start_row: rect.row0,
-        end_row: rect.row0.saturating_add(rect.rows),
+        start_row: rect.row0 as u32,
+        end_row: rect.row0.saturating_add(rect.rows) as u32,
         col_start: rect.col0,
         col_end: rect.col_end(),
     });
@@ -3122,7 +3122,7 @@ fn append_fanout_horizontal_boxed(
     let col_width = panel_width
         .saturating_sub(prefix_w)
         .saturating_div(branch_count as u16);
-    let start_row_before = out.len() as u16;
+    let start_row_before = out.len() as u32;
     let mut per_branch_lines: Vec<Vec<Line<'static>>> = Vec::with_capacity(branch_count);
     let mut per_branch_regions: Vec<Vec<NodeRegion>> = Vec::with_capacity(branch_count);
     for (i, branch) in branches.iter().enumerate() {
@@ -3257,7 +3257,7 @@ fn append_workflow_node(
     panel_width: u16,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
-    let start_row = out.len() as u16;
+    let start_row = out.len() as u32;
     let effective = node;
     let (branch_glyph, branch_color) = if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. })
     {

@@ -275,10 +275,10 @@ fn horizontal_hit_test_targets_the_right_branch() {
         .find(|r| r.col_start != left.col_start)
         .expect("distinct branch on the right");
     let hit_left = app
-        .hit_test_node(left.col_start + 2, left.start_row)
+        .hit_test_node(left.col_start + 2, left.start_row as u16)
         .expect("expected hit on left branch");
     let hit_right = app
-        .hit_test_node(right.col_start + 2, right.start_row)
+        .hit_test_node(right.col_start + 2, right.start_row as u16)
         .expect("expected hit on right branch");
     assert_ne!(
         hit_left.1, hit_right.1,
