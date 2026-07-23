@@ -29,6 +29,7 @@ pub mod meta_commands;
 pub mod migration;
 pub mod model_registry;
 pub mod nodegraph;
+pub mod notify;
 pub mod oauth;
 pub mod oauth_server;
 pub mod provider;
