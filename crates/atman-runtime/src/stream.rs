@@ -1,4 +1,26 @@
 use serde::{Deserialize, Serialize};
+use crate::notify::{NotifyLevel, NotifyLocation, NotifyLifecycle, NotifyStack};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationFrame {
+    pub level: NotifyLevel,
+    pub location: NotifyLocation,
+    pub lifecycle: NotifyLifecycle,
+    pub stack: NotifyStack,
+    pub message: String,
+}
+
+impl From<crate::notify::Notification> for NotificationFrame {
+    fn from(n: crate::notify::Notification) -> Self {
+        Self {
+            level: n.level,
+            location: n.location,
+            lifecycle: n.lifecycle,
+            stack: n.stack,
+            message: n.message,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +66,8 @@ pub enum StreamFrame {
         id: String,
     },
     Note(String),
+    /// Rich notification with level/location/lifecycle/stack.
+    Notification(NotificationFrame),
     FlowGraph {
         run_id: String,
         graph: crate::nodegraph::FlowGraph,
