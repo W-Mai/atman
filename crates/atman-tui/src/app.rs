@@ -759,6 +759,20 @@ impl AppState {
                         };
                         self.push_toast(text, level, ttl);
                     }
+                    atman_runtime::notify::NotifyLocation::Status => {
+                        let key = match &frame.stack {
+                            atman_runtime::notify::NotifyStack::Replace { key } => key.clone(),
+                            atman_runtime::notify::NotifyStack::Coalesce { key } => key.clone(),
+                            _ => "default".into(),
+                        };
+                        self.push_status(key, text);
+                    }
+                    atman_runtime::notify::NotifyLocation::Modal => {
+                        self.push_item(OutputItem::SystemNote {
+                            text: format!("⚠ {}", text),
+                            level: NoteLevel::Error,
+                        });
+                    }
                     _ => {
                         self.push_item(OutputItem::SystemNote { text, level });
                     }

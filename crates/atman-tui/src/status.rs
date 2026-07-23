@@ -7,6 +7,7 @@ pub struct StatusInputs<'a> {
     pub goal: Option<&'a str>,
     pub streaming: bool,
     pub waiting_for_llm: bool,
+    pub status_notes: &'a std::collections::HashMap<String, String>,
 }
 
 pub fn render_bar<'a>(inputs: StatusInputs<'a>) -> Paragraph<'a> {
@@ -51,6 +52,14 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         spans.push(Span::styled(
             label,
             Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+        ));
+    }
+    // Status notes from notify system
+    for (_key, text) in inputs.status_notes.iter() {
+        spans.push(Span::raw("  · "));
+        spans.push(Span::styled(
+            truncate(text, 60),
+            Style::default().fg(t.tinted_fg),
         ));
     }
     Line::from(spans)

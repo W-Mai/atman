@@ -4517,6 +4517,34 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
         },
         message: "rate limit approaching (48/50 rpm)".into(),
     }));
+
+    // Status bar notes — appear in bottom bar
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        level: NotifyLevel::Info,
+        location: NotifyLocation::Status,
+        lifecycle: NotifyLifecycle::UntilReplaced,
+        stack: atman_runtime::notify::NotifyStack::Replace { key: "daemon".into() },
+        message: "daemon connected".into(),
+    }));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        level: NotifyLevel::Warn,
+        location: NotifyLocation::Status,
+        lifecycle: NotifyLifecycle::UntilReplaced,
+        stack: atman_runtime::notify::NotifyStack::Replace { key: "compact".into() },
+        message: "compacting… 847 → 142 messages".into(),
+    }));
+
+    // Modal — critical error inline
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        level: NotifyLevel::Error,
+        location: NotifyLocation::Modal,
+        lifecycle: NotifyLifecycle::Persistent,
+        stack: atman_runtime::notify::NotifyStack::Append,
+        message: "authentication failed — Codex token expired".into(),
+    }));
 }
 
 async fn preview_scene_workflow(session: std::sync::Arc<Session>, cancel_midway: bool) {

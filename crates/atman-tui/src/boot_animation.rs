@@ -186,6 +186,7 @@ fn render(
             goal: None,
             streaming: false,
             waiting_for_llm: false,
+            status_notes: &std::collections::HashMap::new(),
         }),
         l.status,
     );

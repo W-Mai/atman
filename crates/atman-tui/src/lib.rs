@@ -2439,6 +2439,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             goal: app.goal.as_deref(),
             streaming: app.streaming,
             waiting_for_llm: app.waiting_for_llm,
+            status_notes: &app.status_notes,
         }),
         l.status,
     );
