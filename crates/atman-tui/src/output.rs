@@ -1384,6 +1384,8 @@ fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Lin
         NoteLevel::Info => ("·", Color::Cyan, t.note_info_bg),
         NoteLevel::Warn => ("!", Color::Yellow, t.note_warn_bg),
         NoteLevel::Error => ("✗", Color::Red, t.note_error_bg),
+        NoteLevel::Success => ("✓", Color::Green, t.note_success_bg),
+        NoteLevel::Debug => ("›", Color::Gray, t.note_debug_bg),
     };
     let cleaned = text
         .strip_prefix("[atman] ")
