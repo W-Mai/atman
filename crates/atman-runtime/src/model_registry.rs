@@ -148,6 +148,139 @@ impl ModelInfo {
     }
 }
 
+// ── Alias CRUD (writes config.toml) ──
+
+fn read_config_toml() -> Option<String> {
+    let path = crate::storage::config_dir().ok()?.join("config.toml");
+    std::fs::read_to_string(&path).ok()
+}
+
+fn write_config_toml(text: &str) -> anyhow::Result<()> {
+    let dir = crate::storage::config_dir().map_err(|e| anyhow::anyhow!("config dir: {e}"))?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("config.toml");
+    std::fs::write(&path, text)?;
+    Ok(())
+}
+
+fn reload_from_text(text: &str) {
+    if let Ok(raw) = toml::from_str::<toml::Value>(text) {
+        let mut cfg = ModelConfig::default();
+        if let Some(aliases) = raw.get("alias").and_then(|a| a.as_table()) {
+            for (name, entry) in aliases {
+                if let Some(model) = entry.get("model").and_then(|m| m.as_str()) {
+                    cfg.aliases.insert(
+                        name.clone(),
+                        AliasEntry {
+                            model: model.to_string(),
+                        },
+                    );
+                }
+            }
+        }
+        if let Some(models) = raw.get("models").and_then(|m| m.as_table()) {
+            for (name, entry) in models {
+                let provider = entry
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let api_key = entry
+                    .get("api_key")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let base_url = entry
+                    .get("base_url")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let context_budget = entry
+                    .get("context_budget")
+                    .and_then(|v| v.as_integer())
+                    .map(|n| n as u64);
+                let thinking = entry.get("thinking").and_then(|v| v.as_bool());
+                let max_tokens = entry
+                    .get("max_tokens")
+                    .and_then(|v| v.as_integer())
+                    .map(|n| n as u32);
+                let model = entry
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                cfg.models.insert(
+                    name.clone(),
+                    ModelEntry {
+                        model: model.unwrap_or_default(),
+                        provider,
+                        api_key,
+                        base_url,
+                        context_budget,
+                        compact_threshold_ratio: None,
+                        thinking,
+                        max_tokens,
+                    },
+                );
+            }
+        }
+        set_model_config(cfg);
+    }
+}
+
+pub fn add_alias_to_config(alias: &str, model: &str) -> anyhow::Result<()> {
+    let text = read_config_toml().unwrap_or_default();
+    let mut raw: toml::Value = if text.trim().is_empty() {
+        toml::Value::Table(toml::value::Table::new())
+    } else {
+        toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse config.toml: {e}"))?
+    };
+    let aliases = raw
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("config.toml is not a table"))?
+        .entry("alias")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    if let Some(table) = aliases.as_table_mut() {
+        let mut entry = toml::value::Table::new();
+        entry.insert("model".to_string(), toml::Value::String(model.to_string()));
+        table.insert(alias.to_string(), toml::Value::Table(entry));
+    }
+    let new_text = toml::to_string_pretty(&raw).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+    write_config_toml(&new_text)?;
+    reload_from_text(&new_text);
+    Ok(())
+}
+
+pub fn remove_alias_from_config(alias: &str) -> anyhow::Result<()> {
+    let text = read_config_toml().unwrap_or_default();
+    let mut raw: toml::Value = toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse: {e}"))?;
+    if let Some(table) = raw.get_mut("alias").and_then(|a| a.as_table_mut()) {
+        table.remove(alias);
+    }
+    let new_text = toml::to_string_pretty(&raw).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+    write_config_toml(&new_text)?;
+    reload_from_text(&new_text);
+    Ok(())
+}
+
+pub fn update_alias_in_config(
+    old_alias: &str,
+    new_alias: &str,
+    new_model: &str,
+) -> anyhow::Result<()> {
+    let text = read_config_toml().unwrap_or_default();
+    let mut raw: toml::Value = toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse: {e}"))?;
+    if let Some(table) = raw.get_mut("alias").and_then(|a| a.as_table_mut()) {
+        table.remove(old_alias);
+        let mut entry = toml::value::Table::new();
+        entry.insert(
+            "model".to_string(),
+            toml::Value::String(new_model.to_string()),
+        );
+        table.insert(new_alias.to_string(), toml::Value::Table(entry));
+    }
+    let new_text = toml::to_string_pretty(&raw).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+    write_config_toml(&new_text)?;
+    reload_from_text(&new_text);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
