@@ -2811,51 +2811,70 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
     }
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Clear, Paragraph};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-    let max_w = 40u16.min(area.width / 2);
-    let count = app.toasts.len().min(5) as u16;
-    let h = count * 3 + 1;
+    let theme = crate::theme::theme();
+    let max_w = 44u16.min(area.width / 2);
+    let item_h = 4u16;
     let x = area.x + area.width.saturating_sub(max_w + 2);
-    let y = area.y + 2;
-    let rect = ratatui::layout::Rect { x, y, width: max_w + 2, height: h };
+    let y = area.y + 1;
 
-    f.render_widget(Clear, rect);
-
-    let mut lines: Vec<Line> = Vec::new();
-    for toast in &app.toasts {
-        let (glyph, color) = match toast.level {
-            NoteLevel::Error => ("✗", ratatui::style::Color::Red),
-            NoteLevel::Warn => ("!", ratatui::style::Color::Yellow),
-            NoteLevel::Info => ("·", ratatui::style::Color::Cyan),
-            NoteLevel::Success => ("✓", ratatui::style::Color::Green),
-            NoteLevel::Debug => ("›", ratatui::style::Color::Gray),
+    for (i, toast) in app.toasts.iter().enumerate() {
+        let (glyph, color, bg, label) = match toast.level {
+            NoteLevel::Error => ("✗", ratatui::style::Color::Red, theme.note_error_bg, " ERROR "),
+            NoteLevel::Warn => ("!", ratatui::style::Color::Yellow, theme.note_warn_bg, " WARN "),
+            NoteLevel::Info => ("·", ratatui::style::Color::Cyan, theme.note_info_bg, " INFO "),
+            NoteLevel::Success => ("✓", ratatui::style::Color::Green, theme.note_success_bg, " OK "),
+            NoteLevel::Debug => ("›", ratatui::style::Color::Gray, theme.note_debug_bg, " DEBUG "),
         };
+
         let elapsed = toast.created.elapsed();
         let remaining = toast.ttl.saturating_sub(elapsed);
         let pct = remaining.as_secs_f64() / toast.ttl.as_secs_f64().max(0.1);
-        let bar_w = (max_w as f64 * pct.clamp(0.0, 1.0)) as usize;
-        let bar = "▬".repeat(bar_w);
+        let inner_w = max_w.saturating_sub(4);
 
-        lines.push(Line::from(Span::styled(
-            format!(" {glyph} {}", toast.message),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        let rect = ratatui::layout::Rect {
+            x,
+            y: y + i as u16 * item_h,
+            width: max_w,
+            height: item_h,
+        };
+
+        f.render_widget(Clear, rect);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(color))
+            .title(Span::styled(label, Style::default().fg(color).add_modifier(Modifier::BOLD)))
+            .style(Style::default().bg(bg));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+
+        // Progress bar at top of inner area
+        let bar_w = ((inner_w as f64 * pct.clamp(0.0, 1.0)) as u16).max(1);
+        let bar_rect = ratatui::layout::Rect {
+            x: inner.x,
+            y: inner.y,
+            width: bar_w,
+            height: 1,
+        };
+        let bar_block = Block::default().style(Style::default().bg(color));
+        f.render_widget(bar_block, bar_rect);
+
+        // Message text
+        let msg = format!(" {glyph} {}", toast.message);
+        let text = Paragraph::new(Line::from(Span::styled(
+            msg,
+            Style::default().add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(Span::styled(
-            bar,
-            Style::default().fg(color),
-        )));
-        lines.push(Line::from(""));
+        let text_rect = ratatui::layout::Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner_w.saturating_sub(2),
+            height: 1,
+        };
+        f.render_widget(text, text_rect);
     }
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                ratatui::widgets::Block::default()
-                    .borders(ratatui::widgets::Borders::NONE),
-            ),
-        rect,
-    );
 }
 
 fn render_theme_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {

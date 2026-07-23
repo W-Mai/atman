@@ -751,7 +751,18 @@ impl AppState {
                     atman_runtime::notify::NotifyLevel::Success => NoteLevel::Success,
                     atman_runtime::notify::NotifyLevel::Debug => NoteLevel::Debug,
                 };
-                self.push_item(OutputItem::SystemNote { text, level });
+                match frame.location {
+                    atman_runtime::notify::NotifyLocation::Toast => {
+                        let ttl = match frame.lifecycle {
+                            atman_runtime::notify::NotifyLifecycle::Ttl(d) => d,
+                            _ => std::time::Duration::from_secs(3),
+                        };
+                        self.push_toast(text, level, ttl);
+                    }
+                    _ => {
+                        self.push_item(OutputItem::SystemNote { text, level });
+                    }
+                }
             }
             frame @ (StreamFrame::FlowGraph { .. }
             | StreamFrame::FlowStart { .. }

@@ -4042,6 +4042,7 @@ const TUI_PREVIEW_SCENES: &[(&str, &str)] = &[
     ("form-multi-select", "checkbox-style multi select"),
     ("form-sequence", "three forms chained one after another"),
     ("notes", "info / warn / error system notes"),
+    ("notify", "all 5 levels: inline + toast + status demo"),
     ("workflow-running", "long-lived workflow with nested nodes"),
     ("workflow-cancelled", "workflow ended with Err cascade"),
     ("compact-review", "post-compaction summary review modal"),
@@ -4235,6 +4236,10 @@ fn spawn_preview_scene(
             }
             "notes" => {
                 preview_scene_notes(session).await;
+                true
+            }
+            "notify" => {
+                preview_scene_notify(session).await;
                 true
             }
             "workflow-running" => {
@@ -4455,6 +4460,63 @@ async fn preview_scene_notes(session: std::sync::Arc<Session>) {
     ));
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let _ = tx.send(StreamFrame::Note("provider returned 500 — retrying".into()));
+}
+
+async fn preview_scene_notify(session: std::sync::Arc<Session>) {
+    use atman_runtime::notify::{NotifyLevel, NotifyLocation, NotifyLifecycle};
+    use atman_runtime::stream::{NotificationFrame, StreamFrame};
+    let tx = session.stream_tx();
+
+    let send = |level, location, message: &str| {
+        let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+            level,
+            location,
+            lifecycle: NotifyLifecycle::Persistent,
+            stack: atman_runtime::notify::NotifyStack::Append,
+            message: message.into(),
+        }));
+    };
+
+    // Inline notes — all 5 levels
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    send(NotifyLevel::Error, NotifyLocation::Inline, "✗ connection to provider lost — retrying in 3s…");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    send(NotifyLevel::Warn, NotifyLocation::Inline, "! project index unavailable — history search disabled");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    send(NotifyLevel::Info, NotifyLocation::Inline, "· requested transcript compaction (847 → 142 messages)");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    send(NotifyLevel::Success, NotifyLocation::Inline, "✓ copied 247 chars to clipboard");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    send(NotifyLevel::Debug, NotifyLocation::Inline, "› auto_snapshot: agent @ 1.2.0 (id=a3f8b1c2)");
+
+    // Toast notifications
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        level: NotifyLevel::Success,
+        location: NotifyLocation::Toast,
+        lifecycle: NotifyLifecycle::Ttl(std::time::Duration::from_secs(3)),
+        stack: atman_runtime::notify::NotifyStack::Append,
+        message: "todo marked done: add notify module".into(),
+    }));
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        level: NotifyLevel::Info,
+        location: NotifyLocation::Toast,
+        lifecycle: NotifyLifecycle::Ttl(std::time::Duration::from_secs(3)),
+        stack: atman_runtime::notify::NotifyStack::Append,
+        message: "checkpoint saved at seq 1842".into(),
+    }));
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let _ = tx.send(StreamFrame::Notification(NotificationFrame {
+        level: NotifyLevel::Warn,
+        location: NotifyLocation::Toast,
+        lifecycle: NotifyLifecycle::Ttl(std::time::Duration::from_secs(5)),
+        stack: atman_runtime::notify::NotifyStack::Dedupe {
+            key: "rate-limit".into(),
+            window: std::time::Duration::from_secs(30),
+        },
+        message: "rate limit approaching (48/50 rpm)".into(),
+    }));
 }
 
 async fn preview_scene_workflow(session: std::sync::Arc<Session>, cancel_midway: bool) {
