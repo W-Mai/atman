@@ -10,6 +10,7 @@ use crate::provider::{
     TokenUsage, estimate_tokens,
 };
 use crate::tool::BoxFut;
+use anyhow::Context;
 
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
 
@@ -465,8 +466,6 @@ struct PartialToolCall {
     arguments: String,
 }
 
-// ── Wire types: Requests ──
-
 fn turn_id_from_req(req: &LlmRequest) -> TurnId {
     req.messages
         .first()
@@ -560,4 +559,117 @@ struct InputTokensDetails {
 struct OutputTokensDetails {
     #[serde(default)]
     reasoning_tokens: Option<u64>,
+}
+
+pub struct CodexModel {
+    pub slug: String,
+    pub context_budget: Option<u64>,
+    pub reasoning: bool,
+}
+
+/// Fetch available models from the Codex WHAM API.
+pub async fn fetch_models(access_token: &str, account_id: &str) -> anyhow::Result<Vec<CodexModel>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://chatgpt.com/backend-api/wham/models")
+        .query(&[("client_version", "0.0.0")])
+        .bearer_auth(access_token)
+        .header("ChatGPT-Account-Id", account_id)
+        .send()
+        .await
+        .context("fetch codex models from WHAM")?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("WHAM models endpoint HTTP {status}: {body}");
+    }
+
+    let mut models: Vec<CodexModel> = Vec::new();
+    if let Some(list) = body["models"].as_array() {
+        for m in list {
+            let slug = m["slug"].as_str().unwrap_or("").to_string();
+            let slug = slug
+                .strip_prefix("codex/")
+                .or_else(|| slug.strip_prefix("codex:"))
+                .unwrap_or(&slug)
+                .to_string();
+            let context_budget = m["context_window"].as_u64();
+            let reasoning = m["supported_reasoning_levels"]
+                .as_array()
+                .map(|a: &Vec<serde_json::Value>| !a.is_empty())
+                .unwrap_or(false);
+            if !slug.is_empty() {
+                models.push(CodexModel {
+                    slug,
+                    context_budget,
+                    reasoning,
+                });
+            }
+        }
+    }
+    Ok(models)
+}
+
+/// Fetch WHAM models and register them in the model registry.
+pub async fn register_models(access_token: &str, account_id: &str, provider_name: &str) {
+    let models = match fetch_models(access_token, account_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[atman] fetch codex models failed: {e:#}");
+            return;
+        }
+    };
+    let entries: Vec<(String, crate::model_registry::ModelEntry)> = models
+        .into_iter()
+        .map(|m| {
+            let model_name = if m.slug.starts_with("codex-") {
+                m.slug.clone()
+            } else {
+                format!("codex/{name}", name = m.slug)
+            };
+            let entry = crate::model_registry::ModelEntry {
+                model: model_name.clone(),
+                provider: Some(provider_name.to_string()),
+                context_budget: m.context_budget,
+                thinking: Some(m.reasoning),
+                ..Default::default()
+            };
+            (model_name, entry)
+        })
+        .collect();
+    let slugs: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
+    crate::model_registry::register_model_entries(entries);
+    crate::model_registry::set_discovered_models(slugs.clone());
+    eprintln!("[atman] codex models: {}", slugs.join(", "));
+}
+
+/// Full bootstrap: refresh token, create CodexProvider, register models.
+pub async fn register_from_auth(
+    executor: &mut crate::Executor,
+    stored: &crate::auth_store::StoredProvider,
+) {
+    let p = match crate::codex_token::refresh_if_needed(stored).await {
+        Ok(Some(refreshed)) => {
+            eprintln!("[atman] codex token refreshed for \"{}\"", refreshed.name);
+            refreshed
+        }
+        Ok(None) => stored.clone(),
+        Err(e) => {
+            eprintln!(
+                "[atman] codex token refresh failed for \"{}\": {e:#}",
+                stored.name
+            );
+            stored.clone()
+        }
+    };
+    let account_id = p.account.as_deref().unwrap_or("");
+    let provider = std::sync::Arc::new(CodexProvider::new("codex", &p.access_token, account_id));
+    executor.providers.register(provider);
+    eprintln!(
+        "[atman] registered codex provider \"{}\" (account: {})",
+        p.name, account_id
+    );
+    register_models(&p.access_token, account_id, "codex").await;
 }

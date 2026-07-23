@@ -4,7 +4,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use atman_runtime::event::EventSink;
 use atman_runtime::providers::anthropic::AnthropicProvider;
-use atman_runtime::providers::codex::CodexProvider;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::providers::openai::OpenAiProvider;
 use atman_runtime::sandbox::Sandbox;
@@ -476,124 +475,9 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
     };
     for p in &store.providers {
         if p.kind == atman_runtime::auth_store::ProviderKind::Codex {
-            // Refresh the access token if it's close to expiring.
-            let p = match atman_runtime::codex_token::refresh_if_needed(p).await {
-                Ok(Some(refreshed)) => {
-                    eprintln!("[atman] codex token refreshed for \"{}\"", refreshed.name);
-                    refreshed
-                }
-                Ok(None) => p.clone(),
-                Err(e) => {
-                    eprintln!(
-                        "[atman] codex token refresh failed for \"{}\": {e:#}",
-                        p.name
-                    );
-                    p.clone()
-                }
-            };
-            let provider_name = "codex".to_string();
-            let account_id = p.account.as_deref().unwrap_or("");
-            let provider = CodexProvider::new(&provider_name, &p.access_token, account_id);
-            executor.providers.register(Arc::new(provider));
-            eprintln!(
-                "[atman] registered codex provider \"{}\" (account: {})",
-                p.name, account_id
-            );
-
-            // Fetch and register models from WHAM.
-            match fetch_codex_models(&p.access_token, account_id).await {
-                Ok(models) => {
-                    let entries: Vec<(String, atman_runtime::model_registry::ModelEntry)> = models
-                        .into_iter()
-                        .map(|m| {
-                            // If the slug already starts with "codex-" (like
-                            // "codex-auto-review"), keep it as-is — it's the
-                            // model's own name, not a provider prefix.
-                            // Otherwise add the "codex/" provider prefix.
-                            let model_name = if m.slug.starts_with("codex-") {
-                                m.slug.clone()
-                            } else {
-                                format!("codex/{}", m.slug)
-                            };
-                            let entry = atman_runtime::model_registry::ModelEntry {
-                                model: model_name.clone(),
-                                provider: Some(provider_name.clone()),
-                                context_budget: m.context_budget,
-                                thinking: Some(m.reasoning),
-                                ..Default::default()
-                            };
-                            (model_name, entry)
-                        })
-                        .collect();
-                    let slugs: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
-                    atman_runtime::model_registry::register_model_entries(entries);
-                    atman_runtime::model_registry::set_discovered_models(slugs.clone());
-                    eprintln!("[atman] codex models: {}", slugs.join(", "));
-                }
-                Err(e) => {
-                    eprintln!("[atman] fetch codex models failed: {e:#}");
-                }
-            }
+            atman_runtime::providers::codex::register_from_auth(executor, p).await;
         }
     }
-}
-
-/// Fetch available models from the Codex WHAM API.
-/// Returns model slugs (e.g. "gpt-5.6-terra", "gpt-5.5").
-async fn fetch_codex_models(
-    access_token: &str,
-    account_id: &str,
-) -> anyhow::Result<Vec<CodexModel>> {
-    let client = reqwest::Client::new();
-    let resp: reqwest::Response = client
-        .get("https://chatgpt.com/backend-api/wham/models")
-        .query(&[("client_version", "0.0.0")])
-        .bearer_auth(access_token)
-        .header("ChatGPT-Account-Id", account_id)
-        .send()
-        .await
-        .context("fetch codex models from WHAM")?;
-
-    let status = resp.status();
-    let body: serde_json::Value = resp.json().await.context("parse WHAM models response")?;
-
-    if !status.is_success() {
-        anyhow::bail!("WHAM models endpoint HTTP {status}: {body}");
-    }
-
-    let mut models: Vec<CodexModel> = Vec::new();
-    if let Some(list) = body["models"].as_array() {
-        for m in list {
-            let slug = m["slug"].as_str().unwrap_or("").to_string();
-            // WHAM may return slugs with a "codex/" or "codex:" provider
-            // prefix already included. Strip it here; we add our own
-            // consistent prefix during model registration below.
-            let slug = slug
-                .strip_prefix("codex/")
-                .or_else(|| slug.strip_prefix("codex:"))
-                .unwrap_or(&slug)
-                .to_string();
-            let context_budget = m["context_window"].as_u64();
-            let reasoning = m["supported_reasoning_levels"]
-                .as_array()
-                .map(|a| !a.is_empty())
-                .unwrap_or(false);
-            if !slug.is_empty() {
-                models.push(CodexModel {
-                    slug,
-                    context_budget,
-                    reasoning,
-                });
-            }
-        }
-    }
-    Ok(models)
-}
-
-pub struct CodexModel {
-    pub slug: String,
-    pub context_budget: Option<u64>,
-    pub reasoning: bool,
 }
 
 fn register_providers_from_config(executor: &mut Executor) {

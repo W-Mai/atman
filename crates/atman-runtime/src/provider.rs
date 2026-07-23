@@ -210,7 +210,6 @@ impl ProviderRegistry {
         {
             return Some(p.clone());
         }
-        // If the model is registered in the model registry, use its provider field.
         if let Some(entry) = crate::model_registry::model_entry(model)
             && let Some(ref provider_name) = entry.provider
         {
