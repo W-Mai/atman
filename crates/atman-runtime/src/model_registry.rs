@@ -35,8 +35,32 @@ pub struct ModelConfig {
 
 static MODEL_CONFIG: RwLock<Option<ModelConfig>> = RwLock::new(None);
 
+/// Model IDs discovered from OAuth providers (e.g. Codex).
+static DISCOVERED_MODELS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+pub fn set_discovered_models(models: Vec<String>) {
+    *DISCOVERED_MODELS.write().unwrap() = models;
+}
+
+pub fn discovered_models() -> Vec<String> {
+    DISCOVERED_MODELS.read().unwrap().clone()
+}
+
+/// Set the base model configuration (from config.toml).
+/// Replaces any previously loaded config.toml settings.
+/// Use `register_model_entries` to add discovered models on top.
 pub fn set_model_config(cfg: ModelConfig) {
     *MODEL_CONFIG.write().unwrap() = Some(cfg);
+}
+
+/// Register additional model entries without clobbering existing ones.
+pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
+    let mut guard = MODEL_CONFIG.write().unwrap();
+    let mut cfg = guard.take().unwrap_or_default();
+    for (name, entry) in entries {
+        cfg.models.entry(name).or_insert(entry);
+    }
+    *guard = Some(cfg);
 }
 
 pub fn resolve_alias(name: &str) -> String {
@@ -108,6 +132,7 @@ fn builtin_budget(name: &str) -> (u64, f64) {
         None => name,
     };
     match bare {
+        n if n.starts_with("codex-") => (272_000, 0.8),
         n if n.starts_with("claude-opus") => (200_000, 0.8),
         n if n.starts_with("claude-sonnet") => (200_000, 0.8),
         n if n.starts_with("claude-haiku") => (200_000, 0.8),
