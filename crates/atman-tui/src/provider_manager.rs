@@ -1,7 +1,7 @@
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
@@ -29,12 +29,23 @@ pub enum ProviderStatus {
     EnvKey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ProviderFocus {
+    #[default]
+    ProviderList,
+    ModelList,
+}
+
 #[derive(Default)]
 pub struct ProviderManager {
     pub open: bool,
     pub providers: Vec<ProviderEntry>,
     pub selected: usize,
+    groups: Vec<atman_runtime::model_registry::ProviderGroup>,
+    model_selected: usize,
+    pub open_alias_model: Option<String>,
     show_add: bool,
+    focus: ProviderFocus,
     kinds: Vec<(
         &'static str,
         &'static str,
@@ -106,6 +117,7 @@ impl ProviderManager {
                 });
             }
         }
+        self.groups = atman_runtime::model_registry::all_provider_groups();
     }
 
     fn selected_provider_auth_id(&self) -> Option<String> {
@@ -155,31 +167,66 @@ impl ProviderManager {
             self.handle_add_key(action, control_tx);
             return;
         }
-        // Refresh on every keystroke so newly logged-in providers appear
-        // as soon as the async OAuth flow completes.
         self.refresh_list();
-        match action {
-            KeyAction::Escape => self.close(),
-            KeyAction::HistoryUp | KeyAction::Char('k') => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
-            }
-            KeyAction::HistoryDown | KeyAction::Char('j') => {
-                if self.selected + 1 < self.providers.len() {
-                    self.selected += 1;
-                }
-            }
-            KeyAction::Char('a') => self.open_add(),
-            KeyAction::Char('e') | KeyAction::Submit => {
-                if let Some(id) = self.selected_provider_auth_id() {
-                    if let Some(tx) = control_tx {
-                        let _ = tx.send(crate::TuiControl::AuthLogout { id });
+        match self.focus {
+            ProviderFocus::ProviderList => match action {
+                KeyAction::Escape => self.close(),
+                KeyAction::Tab => {
+                    if !self.groups.is_empty() {
+                        self.focus = ProviderFocus::ModelList;
+                        self.model_selected = 0;
                     }
-                    self.refresh_list();
+                }
+                KeyAction::HistoryUp | KeyAction::Char('k') => {
+                    if self.selected > 0 {
+                        self.selected -= 1;
+                    }
+                }
+                KeyAction::HistoryDown | KeyAction::Char('j') => {
+                    if self.selected + 1 < self.providers.len() {
+                        self.selected += 1;
+                    }
+                }
+                KeyAction::Char('a') => self.open_add(),
+                KeyAction::Char('e') | KeyAction::Submit => {
+                    if let Some(id) = self.selected_provider_auth_id() {
+                        if let Some(tx) = control_tx {
+                            let _ = tx.send(crate::TuiControl::AuthLogout { id });
+                        }
+                        self.refresh_list();
+                    }
+                }
+                _ => {}
+            },
+            ProviderFocus::ModelList => {
+                let g = match self.groups.get(self.selected) {
+                    Some(g) => g,
+                    None => {
+                        self.focus = ProviderFocus::ProviderList;
+                        return;
+                    }
+                };
+                match action {
+                    KeyAction::Escape => self.focus = ProviderFocus::ProviderList,
+                    KeyAction::Tab => self.focus = ProviderFocus::ProviderList,
+                    KeyAction::HistoryUp | KeyAction::Char('k') => {
+                        if self.model_selected > 0 {
+                            self.model_selected -= 1;
+                        }
+                    }
+                    KeyAction::HistoryDown | KeyAction::Char('j') => {
+                        if self.model_selected + 1 < g.models.len() {
+                            self.model_selected += 1;
+                        }
+                    }
+                    KeyAction::Char('a') => {
+                        if let Some(m) = g.models.get(self.model_selected) {
+                            self.open_alias_model = Some(m.slug.clone());
+                        }
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
         }
     }
 
@@ -257,8 +304,8 @@ impl ProviderManager {
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
-    let w = area.width.saturating_sub(4).clamp(50, 78);
-    let h = area.height.saturating_sub(2).clamp(8, 22);
+    let w = area.width.saturating_sub(4).clamp(60, 90);
+    let h = area.height.saturating_sub(2).clamp(10, 24);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
     let rect = Rect {
@@ -276,7 +323,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
-            " Providers (Esc to close) ",
+            " Provider Manager ",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -284,140 +331,190 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
 
-    if inner.height < 3 {
+    if inner.height < 4 {
         return;
     }
 
-    let content = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: inner.height.saturating_sub(1),
-    };
-
     if mgr.show_add {
-        if mgr.name_focused {
-            let buf = mgr.name_editor.buf();
-            let cur = mgr.name_editor.cursor();
-            let lines = vec![
-                Line::from(Span::styled(
-                    "  Add Provider",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::raw("")),
-                Line::from(Span::raw("  Name:")),
-                Line::from(render_cursor("  ", buf, cur, theme.accent)),
-                Line::from(Span::raw("")),
-                Line::from(Span::styled(
-                    "  Enter → confirm   Esc → back",
-                    Style::default().fg(theme.subtle_fg),
-                )),
-            ];
-            f.render_widget(Paragraph::new(lines), content);
-        } else {
-            let items: Vec<ListItem> = mgr
-                .kinds
-                .iter()
-                .enumerate()
-                .map(|(i, (l, d, _))| {
-                    let pfx = if i == mgr.kind_selected { "▶ " } else { "  " };
-                    let line = Line::from(vec![
-                        Span::raw(pfx),
-                        Span::styled(
-                            format!("{:<18}", *l),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(*d, Style::default().fg(theme.subtle_fg)),
-                    ]);
-                    ListItem::new(line)
-                })
-                .collect();
-            let mut state = ListState::default();
-            state.select(Some(mgr.kind_selected));
-            f.render_stateful_widget(List::new(items), content, &mut state);
-        }
-    } else {
-        let items: Vec<ListItem> = mgr
-            .providers
-            .iter()
-            .map(|p| {
-                let icon = match p.status {
-                    ProviderStatus::Active => "✅",
-                    ProviderStatus::Inactive => "❌",
-                    ProviderStatus::EnvKey => "🔑",
-                };
-                let line = Line::from(vec![
-                    Span::raw(format!(" {icon} ")),
-                    Span::styled(
-                        p.name.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("[{}]", p.kind),
-                        Style::default().fg(theme.subtle_fg),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(p.detail.clone(), Style::default().fg(theme.subtle_fg)),
-                ]);
-                ListItem::new(line)
-            })
-            .collect();
-        let hl = Style::default()
-            .bg(theme.subtle_fg)
-            .add_modifier(Modifier::BOLD);
-        let mut state = ListState::default();
-        if !mgr.providers.is_empty() {
-            state.select(Some(mgr.selected));
-        }
-        f.render_stateful_widget(List::new(items).highlight_style(hl), content, &mut state);
+        render_add_dialog(f, inner, mgr, &theme);
+        return;
     }
 
-    let help_rect = Rect {
-        x: inner.x,
-        y: inner.y + inner.height.saturating_sub(1),
-        width: inner.width,
-        height: 1,
-    };
-    let help = if mgr.show_add {
-        if mgr.name_focused {
-            "Enter confirm  Esc back to list"
-        } else {
-            "j/k select  Enter pick type  Esc cancel"
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    let main = rows[0];
+    let footer_area = rows[1];
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(main);
+
+    render_provider_list(f, columns[0], mgr, &theme);
+    render_model_detail(f, columns[1], mgr, &theme);
+
+    // Footer help
+    let help = match mgr.focus {
+        ProviderFocus::ProviderList => {
+            "Tab: models  |  a: add provider  |  e: toggle auth  |  Esc: close"
         }
-    } else {
-        "j/k select  a add provider  Enter login/logout  Esc close"
+        ProviderFocus::ModelList => {
+            "Tab: providers  |  a: alias this model  |  Esc: back"
+        }
     };
-    f.render_widget(
-        Paragraph::new(Span::styled(help, Style::default().fg(theme.subtle_fg))),
-        help_rect,
-    );
+    let footer = Paragraph::new(Line::from(Span::styled(
+        help,
+        Style::default().fg(theme.meta_fg),
+    )))
+    .alignment(ratatui::layout::Alignment::Right);
+    f.render_widget(footer, footer_area);
 }
 
-fn render_cursor<'a>(
-    prefix: &str,
-    text: &'a str,
-    cursor_byte: usize,
-    accent: ratatui::style::Color,
-) -> Vec<Span<'a>> {
-    let mut spans: Vec<Span<'a>> = vec![Span::raw(prefix.to_string())];
-    let cursor = cursor_byte.min(text.len());
-    let before = &text[..cursor];
-    let ch = text[cursor..].chars().next();
-    let after = &text[cursor + ch.map(|c| c.len_utf8()).unwrap_or(0)..];
-    if !before.is_empty() {
-        spans.push(Span::raw(before.to_string()));
+fn render_provider_list(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    mgr: &ProviderManager,
+    theme: &crate::theme::Theme,
+) {
+    let items: Vec<ListItem> = mgr
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let style = if i == mgr.selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let status = match p.status {
+                ProviderStatus::Active => "●",
+                ProviderStatus::EnvKey => "○",
+                ProviderStatus::Inactive => "✗",
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!(" {} {}", status, p.name),
+                style,
+            )))
+        })
+        .collect();
+
+    let mut state = ListState::default().with_selected(Some(mgr.selected));
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::default().fg(theme.border))
+        .title(" Providers ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_stateful_widget(List::new(items), inner, &mut state);
+}
+
+fn render_model_detail(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    mgr: &ProviderManager,
+    theme: &crate::theme::Theme,
+) {
+    let block = Block::default().borders(Borders::NONE).title(" Models ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Find matching provider group
+    let provider_name = mgr.providers.get(mgr.selected).map(|p| p.name.as_str());
+    let mut lines = vec![];
+    if let Some(name) = provider_name {
+        for g in &mgr.groups {
+            if g.provider_name
+                .to_lowercase()
+                .contains(&name.to_lowercase())
+                || name
+                    .to_lowercase()
+                    .contains(&g.provider_name.to_lowercase())
+                || g.provider_name == "codex" && name.to_lowercase().contains("codex")
+            {
+                lines.push(Line::from(Span::styled(
+                    format!(" {} models:", g.models.len()),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                for (mi, m) in g.models.iter().enumerate() {
+                    let max_tok = m
+                        .max_output_tokens
+                        .map(|n| format!("{}K", n / 1000))
+                        .unwrap_or_else(|| "—".to_string());
+                    let thinking = if m.thinking { "🧠" } else { "" };
+                    let is_sel = mgr.focus == ProviderFocus::ModelList && mgr.model_selected == mi;
+                    let style = if is_sel {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.tinted_fg)
+                    };
+                    let prefix = if is_sel { "▶" } else { " " };
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            " {} {}  {} ctx  {} out  {}",
+                            prefix,
+                            m.slug,
+                            atman_runtime::humanize::format_count(m.context_budget),
+                            max_tok,
+                            thinking
+                        ),
+                        style,
+                    )));
+                }
+                break;
+            }
+        }
     }
-    if let Some(ch) = ch {
-        spans.push(Span::styled(
-            ch.to_string(),
-            Style::default().bg(accent).fg(ratatui::style::Color::Black),
-        ));
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " Select a provider to view models",
+            Style::default().fg(theme.meta_fg),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_add_dialog(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    mgr: &ProviderManager,
+    theme: &crate::theme::Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::NONE)
+        .title(" Add Provider ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    // Simplified add dialog rendering — keeping existing logic
+    let mut lines = vec![];
+    if mgr.name_focused {
+        lines.push(Line::from("Name:"));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", mgr.name_editor.buf()),
+            Style::default().fg(theme.accent),
+        )));
+        lines.push(Line::from("Enter to confirm, Esc to cancel"));
     } else {
-        spans.push(Span::styled(" ", Style::default().bg(accent)));
+        for (i, (label, desc, _)) in mgr.kinds.iter().enumerate() {
+            let style = if i == mgr.kind_selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!(" {} — {}", label, desc),
+                style,
+            )));
+        }
+        lines.push(Line::from("Enter to select, Esc to cancel"));
     }
-    if !after.is_empty() {
-        spans.push(Span::raw(after.to_string()));
-    }
-    spans
+    f.render_widget(Paragraph::new(lines), inner);
 }
