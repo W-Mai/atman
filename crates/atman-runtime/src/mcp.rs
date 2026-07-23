@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -606,11 +606,83 @@ pub fn value_to_mcp_args(args: &crate::tool::ToolArgs) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
+// Some MCP servers use a schema like {action: enum, params: {type: "object"}}
+// where params is a catch-all for every argument not named at the top level.
+// atman sends flat arguments and Zod drops everything except action+params,
+// so we detect the pattern and repack unmatched keys into the container.
+
+#[derive(Debug, Clone)]
+struct ReconcilePlan {
+    explicit_keys: HashSet<String>,
+    container_key: String,
+    container_required: bool,
+}
+
+fn build_reconcile_plan(schema: &serde_json::Value) -> Option<ReconcilePlan> {
+    let props = schema.get("properties")?.as_object()?;
+    let required: HashSet<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut explicit_keys = HashSet::new();
+    let mut catch_all: Option<(&str, bool)> = None;
+
+    for (name, prop) in props {
+        let is_obj = prop.get("type").and_then(|t| t.as_str()) == Some("object");
+        let has_sub_props = prop.get("properties").is_some_and(|p| p.is_object());
+        let add_props_false = prop
+            .get("additionalProperties")
+            .and_then(|a| a.as_bool())
+            == Some(false);
+
+        if is_obj && !has_sub_props && !add_props_false {
+            if catch_all.is_some() {
+                return None;
+            }
+            catch_all = Some((name.as_str(), required.contains(name.as_str())));
+        } else {
+            explicit_keys.insert(name.clone());
+        }
+    }
+
+    let (container_key, container_required) = catch_all?;
+    Some(ReconcilePlan {
+        explicit_keys,
+        container_key: container_key.to_owned(),
+        container_required,
+    })
+}
+
+fn reconcile(plan: &ReconcilePlan, flat: serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    let mut container = serde_json::Map::new();
+    let mut out = serde_json::Map::new();
+
+    for (k, v) in flat {
+        if plan.explicit_keys.contains(&k) {
+            out.insert(k, v);
+        } else {
+            container.insert(k, v);
+        }
+    }
+
+    if !container.is_empty() || plan.container_required {
+        out.insert(
+            plan.container_key.clone(),
+            serde_json::Value::Object(container),
+        );
+    }
+
+    serde_json::Value::Object(out)
+}
+
 pub struct McpToolAdapter {
     qualified_name: String,
     tool_name: String,
     tier: crate::tool::Tier,
     client: Arc<McpClient>,
+    reconcile: Option<ReconcilePlan>,
 }
 
 impl McpToolAdapter {
@@ -618,14 +690,17 @@ impl McpToolAdapter {
         client: Arc<McpClient>,
         tool_name: impl Into<String>,
         tier: crate::tool::Tier,
+        schema: Option<&serde_json::Value>,
     ) -> Self {
         let tool_name = tool_name.into();
         let qualified_name = format!("mcp.{}.{}", client.name, tool_name);
+        let reconcile = schema.and_then(build_reconcile_plan);
         Self {
             qualified_name,
             tool_name,
             tier,
             client,
+            reconcile,
         }
     }
 }
@@ -646,6 +721,17 @@ impl crate::tool::Tool for McpToolAdapter {
     ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
         Box::pin(async move {
             let params = value_to_mcp_args(&args);
+            let params = if let Some(plan) = &self.reconcile {
+                let map = match params {
+                    serde_json::Value::Object(m) => m,
+                    _ => return Err(RuntimeError::ToolFailed(
+                        "mcp: expected object args".into()
+                    )),
+                };
+                reconcile(plan, map)
+            } else {
+                params
+            };
             let v = self.client.call_tool(&self.tool_name, params).await?;
             Ok(v)
         })
@@ -769,7 +855,12 @@ pub async fn register_from_configs(
                 let transport_kind = client.transport_kind();
                 let arc_client = Arc::new(client);
                 for tool in &arc_client.tools {
-                    let adapter = McpToolAdapter::new(arc_client.clone(), &tool.name, cfg.tier);
+                    let adapter = McpToolAdapter::new(
+                        arc_client.clone(),
+                        &tool.name,
+                        cfg.tier,
+                        tool.input_schema.as_ref(),
+                    );
                     reg.register(Arc::new(adapter));
                 }
                 out.push(Ok(McpClientStatus {
@@ -886,5 +977,156 @@ for line in sys.stdin:
         let s: McpToolSchema = serde_json::from_value(json).unwrap();
         assert_eq!(s.name, "read_file");
         assert!(s.description.as_deref().unwrap().contains("reads"));
+    }
+
+    #[test]
+    fn no_catch_all_returns_none() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "document_id": {"type": "string"}
+            },
+            "required": ["document_id"]
+        });
+        assert!(build_reconcile_plan(&schema).is_none());
+    }
+
+    #[test]
+    fn single_catch_all_builds_plan() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["get", "list", "update"]},
+                "params": {"type": "object"}
+            },
+            "required": ["action"]
+        });
+        let plan = build_reconcile_plan(&schema).expect("should build a plan");
+        assert!(plan.explicit_keys.contains("action"));
+        assert!(!plan.explicit_keys.contains("params"));
+        assert_eq!(plan.container_key, "params");
+        assert!(!plan.container_required);
+    }
+
+    #[test]
+    fn container_required_is_detected() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "params": {"type": "object"}
+            },
+            "required": ["action", "params"]
+        });
+        let plan = build_reconcile_plan(&schema).expect("should build");
+        assert!(plan.container_required);
+    }
+
+    #[test]
+    fn reconcile_moves_unmatched_into_container() {
+        let plan = ReconcilePlan {
+            explicit_keys: ["action".into()].into(),
+            container_key: "params".into(),
+            container_required: false,
+        };
+        let flat: serde_json::Map<_, _> = serde_json::json!({
+            "action": "update",
+            "guid": "abc",
+            "due": "2026-07-17"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let out = reconcile(&plan, flat);
+        assert_eq!(out["action"], "update");
+        assert_eq!(out["params"]["guid"], "abc");
+        assert_eq!(out["params"]["due"], "2026-07-17");
+    }
+
+    #[test]
+    fn reconcile_leaves_standard_schema_untouched() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "guid": {"type": "string"}
+            },
+            "required": ["action", "guid"]
+        });
+        assert!(build_reconcile_plan(&schema).is_none());
+    }
+
+    #[test]
+    fn two_catch_alls_bails() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "params": {"type": "object"},
+                "extras": {"type": "object"}
+            }
+        });
+        assert!(build_reconcile_plan(&schema).is_none());
+    }
+
+    #[test]
+    fn sealed_object_not_catch_all() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "lock": {"type": "object", "additionalProperties": false}
+            }
+        });
+        assert!(build_reconcile_plan(&schema).is_none());
+    }
+
+    #[test]
+    fn nested_object_with_properties_not_catch_all() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"},
+                "address": {
+                    "type": "object",
+                    "properties": {
+                        "street": {"type": "string"},
+                        "city": {"type": "string"}
+                    }
+                }
+            }
+        });
+        assert!(build_reconcile_plan(&schema).is_none());
+    }
+
+    #[test]
+    fn required_empty_container_still_emitted() {
+        let plan = ReconcilePlan {
+            explicit_keys: ["action".into()].into(),
+            container_key: "body".into(),
+            container_required: true,
+        };
+        let flat: serde_json::Map<_, _> = serde_json::json!({"action": "ping"})
+            .as_object().unwrap().clone();
+
+        let out = reconcile(&plan, flat);
+        assert_eq!(out["action"], "ping");
+        assert!(out.get("body").and_then(|v| v.as_object()).is_some());
+    }
+
+    #[test]
+    fn empty_non_required_container_omitted() {
+        let plan = ReconcilePlan {
+            explicit_keys: ["action".into()].into(),
+            container_key: "params".into(),
+            container_required: false,
+        };
+        let flat: serde_json::Map<_, _> = serde_json::json!({"action": "list"})
+            .as_object().unwrap().clone();
+
+        let out = reconcile(&plan, flat);
+        assert_eq!(out["action"], "list");
+        assert!(out.get("params").is_none());
     }
 }

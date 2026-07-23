@@ -206,6 +206,7 @@ pub fn spawn_mcp_boot(
                                     arc_client.clone(),
                                     &tool.name,
                                     tier,
+                                    tool.input_schema.as_ref(),
                                 );
                                 executor.tools.register(std::sync::Arc::new(adapter));
                             }
