@@ -528,92 +528,105 @@ impl crate::oauth::OAuthProvider for CodexProvider {
         (url, pkce, state)
     }
 
-    async fn exchange_code(
+    fn exchange_code(
         code: &str,
         verifier: &str,
-    ) -> anyhow::Result<crate::oauth::TokenResult> {
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(CODEX_TOKEN_URL)
-            .form(&[
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", CODEX_REDIRECT_URI),
-                ("client_id", CODEX_CLIENT_ID),
-                ("code_verifier", verifier),
-            ])
-            .send()
-            .await
-            .context("token exchange request")?;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<crate::oauth::TokenResult>> + Send>,
+    > {
+        let code = code.to_string();
+        let verifier = verifier.to_string();
+        Box::pin(async move {
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(CODEX_TOKEN_URL)
+                .form(&[
+                    ("grant_type", "authorization_code"),
+                    ("code", &code),
+                    ("redirect_uri", CODEX_REDIRECT_URI),
+                    ("client_id", CODEX_CLIENT_ID),
+                    ("code_verifier", &verifier),
+                ])
+                .send()
+                .await
+                .context("token exchange request")?;
 
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("token exchange failed (HTTP {status}): {body_text}");
-        }
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!("token exchange failed (HTTP {status}): {body_text}");
+            }
 
-        #[derive(serde::Deserialize)]
-        struct R {
-            access_token: String,
-            refresh_token: Option<String>,
-            id_token: Option<String>,
-        }
-        let data: R = serde_json::from_str(&body_text).context("parse token response")?;
+            #[derive(serde::Deserialize)]
+            struct R {
+                access_token: String,
+                refresh_token: Option<String>,
+                id_token: Option<String>,
+            }
+            let data: R = serde_json::from_str(&body_text).context("parse token response")?;
 
-        let expires_at = crate::oauth::parse_jwt_exp(&data.access_token)
-            .unwrap_or_else(|| chrono::Utc::now().timestamp() + 3600);
-        let account = data
-            .id_token
-            .as_deref()
-            .and_then(crate::oauth::extract_account_from_id_token);
+            let expires_at = crate::oauth::parse_jwt_exp(&data.access_token)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp() + 3600);
+            let account = data
+                .id_token
+                .as_deref()
+                .and_then(crate::oauth::extract_account_from_id_token);
 
-        Ok(crate::oauth::TokenResult {
-            access_token: data.access_token,
-            refresh_token: data.refresh_token,
-            expires_at,
-            account,
+            Ok(crate::oauth::TokenResult {
+                access_token: data.access_token,
+                refresh_token: data.refresh_token,
+                expires_at,
+                account,
+            })
         })
     }
 
-    async fn refresh_token(token: &str) -> anyhow::Result<crate::oauth::TokenResult> {
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(CODEX_TOKEN_URL)
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", token),
-                ("client_id", CODEX_CLIENT_ID),
-            ])
-            .send()
-            .await
-            .context("token refresh request")?;
+    fn refresh_token(
+        token: &str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<crate::oauth::TokenResult>> + Send>,
+    > {
+        let token = token.to_string();
+        Box::pin(async move {
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(CODEX_TOKEN_URL)
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", &token),
+                    ("client_id", CODEX_CLIENT_ID),
+                ])
+                .send()
+                .await
+                .context("token refresh request")?;
 
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("token refresh failed (HTTP {status}): {body_text}");
-        }
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!("token refresh failed (HTTP {status}): {body_text}");
+            }
 
-        #[derive(serde::Deserialize)]
-        struct R {
-            access_token: String,
-            refresh_token: Option<String>,
-            id_token: Option<String>,
-        }
-        let data: R = serde_json::from_str(&body_text).context("parse refresh response")?;
+            #[derive(serde::Deserialize)]
+            struct R {
+                access_token: String,
+                refresh_token: Option<String>,
+                id_token: Option<String>,
+            }
+            let data: R = serde_json::from_str(&body_text).context("parse refresh response")?;
 
-        let expires_at = crate::oauth::parse_jwt_exp(&data.access_token)
-            .unwrap_or_else(|| chrono::Utc::now().timestamp() + 3600);
-        let account = data
-            .id_token
-            .as_deref()
-            .and_then(crate::oauth::extract_account_from_id_token);
+            let expires_at = crate::oauth::parse_jwt_exp(&data.access_token)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp() + 3600);
+            let account = data
+                .id_token
+                .as_deref()
+                .and_then(crate::oauth::extract_account_from_id_token);
 
-        Ok(crate::oauth::TokenResult {
-            access_token: data.access_token,
-            refresh_token: data.refresh_token,
-            expires_at,
-            account,
+            Ok(crate::oauth::TokenResult {
+                access_token: data.access_token,
+                refresh_token: data.refresh_token,
+                expires_at,
+                account,
+            })
         })
     }
 

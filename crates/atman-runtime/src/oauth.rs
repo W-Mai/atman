@@ -40,11 +40,15 @@ pub struct TokenResult {
     pub account: Option<String>,
 }
 
-#[allow(async_fn_in_trait)]
 pub trait OAuthProvider: Provider {
     fn authorize_url() -> (String, Pkce, String);
-    async fn exchange_code(code: &str, verifier: &str) -> Result<TokenResult>;
-    async fn refresh_token(token: &str) -> Result<TokenResult>;
+    fn exchange_code(
+        code: &str,
+        verifier: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TokenResult>> + Send>>;
+    fn refresh_token(
+        token: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TokenResult>> + Send>>;
     fn from_stored(stored: &StoredProvider) -> Self;
 }
 

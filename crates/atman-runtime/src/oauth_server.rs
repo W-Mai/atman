@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,31 +9,35 @@ use anyhow::{Context, Result};
 use axum::extract::Query;
 use axum::response::Html;
 use axum::routing::get;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 
 use crate::oauth::callback_page;
+
+type ExchangeFuture = Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>;
+type ExchangeFn = Box<dyn FnOnce(String) -> ExchangeFuture + Send>;
 
 pub async fn capture_oauth_callback(
     port: u16,
     expected_state: String,
+    exchange_fn: ExchangeFn,
     timeout: Duration,
-) -> Result<String> {
-    let result: Arc<Mutex<Option<Result<String>>>> = Arc::new(Mutex::new(None));
-    let shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>> = Arc::new(Mutex::new(None));
+) -> Result<()> {
+    let exchange: Arc<Mutex<Option<ExchangeFn>>> = Arc::new(Mutex::new(Some(exchange_fn)));
+    let result: Arc<Mutex<Option<Result<()>>>> = Arc::new(Mutex::new(None));
 
     let expected = expected_state;
+    let exchange_for_handler = exchange.clone();
     let result_for_handler = result.clone();
-    let shutdown_for_handler = shutdown_tx.clone();
 
     let app = axum::Router::new().route(
         "/auth/callback",
         get(move |Query(params): Query<HashMap<String, String>>| {
+            let exchange = exchange_for_handler.clone();
             let result = result_for_handler.clone();
-            let shutdown = shutdown_for_handler.clone();
             let expected = expected.clone();
             async move {
-                let state_ok = params.get("state").map(|s| s == &expected).unwrap_or(false);
-                let (outcome, page) = if !state_ok {
+                let (outcome, page) = if params.get("state").map(|s| s != &expected).unwrap_or(true)
+                {
                     (
                         Err(anyhow::anyhow!("state mismatch")),
                         callback_page(
@@ -40,16 +46,29 @@ pub async fn capture_oauth_callback(
                             "The OAuth state parameter did not match.",
                         ),
                     )
-                } else if let Some(code) = params.get("code").cloned() {
-                    (
-                        Ok(code),
-                        callback_page(true, "认证成功", "已接入账户。您可以关闭此页面。"),
-                    )
                 } else if let Some(err) = params.get("error").cloned() {
                     (
                         Err(anyhow::anyhow!("oauth error: {err}")),
                         callback_page(false, "授权被拒绝", &format!("授权服务器返回: {err}")),
                     )
+                } else if let Some(code) = params.get("code").cloned() {
+                    let exchange_fn = exchange.lock().await.take();
+                    match exchange_fn {
+                        Some(f) => match f(code).await {
+                            Ok(()) => (
+                                Ok(()),
+                                callback_page(true, "认证成功", "已接入账户。您可以关闭此页面。"),
+                            ),
+                            Err(msg) => (
+                                Err(anyhow::anyhow!("token exchange failed: {msg}")),
+                                callback_page(false, "登录失败", &msg),
+                            ),
+                        },
+                        None => (
+                            Err(anyhow::anyhow!("duplicate callback")),
+                            callback_page(false, "请求无效", "重复的回调请求。"),
+                        ),
+                    }
                 } else {
                     (
                         Err(anyhow::anyhow!("missing code")),
@@ -57,13 +76,7 @@ pub async fn capture_oauth_callback(
                     )
                 };
                 *result.lock().await = Some(outcome);
-                let shutdown = shutdown.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    if let Some(tx) = shutdown.lock().await.take() {
-                        let _ = tx.send(());
-                    }
-                });
+
                 Html(page)
             }
         }),
@@ -78,13 +91,8 @@ pub async fn capture_oauth_callback(
         .listen(128)
         .with_context(|| format!("listen callback port {port}"))?;
 
-    let (tx, rx) = oneshot::channel();
-    *shutdown_tx.lock().await = Some(tx);
-
     tokio::select! {
-        _ = axum::serve(listener, app).with_graceful_shutdown(async {
-            let _ = rx.await;
-        }) => {}
+        _ = axum::serve(listener, app) => {}
         _ = tokio::time::sleep(timeout) => {}
     }
 
