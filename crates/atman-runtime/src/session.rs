@@ -1018,8 +1018,9 @@ fn default_project_index(root: &Path) -> Option<std::sync::Arc<crate::index::Anc
     match crate::index::AnchorIndex::open_project(root) {
         Ok(idx) => Some(std::sync::Arc::new(idx)),
         Err(e) => {
-            eprintln!(
-                "[atman] project index unavailable at {} — history search disabled: {e}",
+            crate::notify!(
+                warn,
+                "project index unavailable at {} — history search disabled: {e}",
                 root.display()
             );
             None
@@ -1055,7 +1056,7 @@ impl Session {
             Some(id.to_string()),
         )?;
         if let Err(e) = crate::session_meta::SessionMeta::from_cwd().save(&dir) {
-            eprintln!("[atman] session meta write failed: {e}");
+            crate::notify!(error, "session meta write failed: {e}");
         }
         let mut sink = EventSink::new().with_forwarder(writer.sender());
         if let Some(r) = redactor {
@@ -1482,7 +1483,7 @@ impl Session {
                 let _ = self.plans_watch.send(list);
             }
             Err(e) => {
-                eprintln!("[atman] refresh_plans_from_store_async: {e}");
+                crate::notify!(warn, "refresh_plans_from_store_async: {e}");
             }
         }
     }
@@ -1501,7 +1502,7 @@ impl Session {
                 let _ = self.todos_watch.send(list);
             }
             Some(Err(e)) => {
-                eprintln!("[atman] refresh_todos_from_store: {e}");
+                crate::notify!(warn, "refresh_todos_from_store: {e}");
             }
             None => {}
         }
@@ -1517,7 +1518,7 @@ impl Session {
                 let _ = self.todos_watch.send(list);
             }
             Err(e) => {
-                eprintln!("[atman] refresh_todos_from_store_async: {e}");
+                crate::notify!(warn, "refresh_todos_from_store_async: {e}");
             }
         }
     }
