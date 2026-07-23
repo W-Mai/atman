@@ -86,7 +86,50 @@ pub fn register_discovered(prefix: &str, models: &[crate::provider::DiscoveredMo
     let slugs: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
     register_model_entries(entries);
     set_discovered_models(slugs.clone());
-    eprintln!("[atman] {prefix} models: {}", slugs.join(", "));
+    crate::notify!(debug, "{} models: {}", prefix, slugs.join(", "));
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelRow {
+    pub slug: String,
+    pub provider_name: String,
+    pub context_budget: u64,
+    pub max_output_tokens: Option<u32>,
+    pub thinking: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderGroup {
+    pub provider_name: String,
+    pub models: Vec<ModelRow>,
+}
+
+/// Return all models grouped by provider, with complete metadata.
+/// Single canonical source for UI — no manual union of all_model_entries +
+/// discovered_models + aliases.
+pub fn all_provider_groups() -> Vec<ProviderGroup> {
+    let entries = all_model_entries();
+    let mut groups: std::collections::BTreeMap<String, Vec<ModelRow>> =
+        std::collections::BTreeMap::new();
+    for (name, entry) in entries {
+        let info = model_info(&name);
+        let provider = entry.provider.unwrap_or_else(|| "unknown".to_string());
+        let row = ModelRow {
+            slug: name,
+            provider_name: provider.clone(),
+            context_budget: info.context_budget,
+            max_output_tokens: info.max_output_tokens,
+            thinking: info.thinking_enabled(),
+        };
+        groups.entry(provider).or_default().push(row);
+    }
+    groups
+        .into_iter()
+        .map(|(provider_name, models)| ProviderGroup {
+            provider_name,
+            models,
+        })
+        .collect()
 }
 
 pub fn resolve_alias(name: &str) -> String {
