@@ -1088,74 +1088,7 @@ impl Session {
     /// Single-writer append. Emits the matching event before the in-memory push
     /// so events.jsonl remains the authority (§I5).
     pub fn append_message(&self, msg: Message, flow_run_id: Option<FlowRunId>) {
-        let flow_run_id_str = flow_run_id.as_ref().map(|r| r.0.to_string());
-        let event = match msg.role {
-            MessageRole::User => Event::UserMsg {
-                turn_id: msg.turn_id.clone(),
-                message: msg.clone(),
-            },
-            MessageRole::Assistant => {
-                let _ = self
-                    .watch
-                    .stream_tx
-                    .send(crate::stream::StreamFrame::AssistantMsg {
-                        flow_run_id: flow_run_id_str.clone(),
-                        message: msg.clone(),
-                    });
-                Event::AssistantMsg {
-                    turn_id: msg.turn_id.clone(),
-                    flow_run_id,
-                    message: msg.clone(),
-                }
-            }
-            MessageRole::Tool => {
-                let _ = self
-                    .watch
-                    .stream_tx
-                    .send(crate::stream::StreamFrame::ToolResultMsg {
-                        flow_run_id: flow_run_id_str.clone(),
-                        message: msg.clone(),
-                    });
-                Event::ToolResultMsg {
-                    turn_id: msg.turn_id.clone(),
-                    flow_run_id,
-                    message: msg.clone(),
-                }
-            }
-            MessageRole::System => Event::SystemMsg {
-                turn_id: msg.turn_id.clone(),
-                message: msg.clone(),
-            },
-        };
-        let seq = self.sink.emit_returning_seq(event);
-        if matches!(msg.role, MessageRole::User) {
-            let images: Vec<(usize, String)> = msg
-                .parts
-                .iter()
-                .enumerate()
-                .filter_map(|(i, p)| match p {
-                    crate::message::MessagePart::Image { source } => {
-                        let basename = match &source.data {
-                            crate::message::ImageData::Path { path } => path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            crate::message::ImageData::Base64 { .. } => "base64".into(),
-                        };
-                        Some((i, basename))
-                    }
-                    _ => None,
-                })
-                .collect();
-            if !images.is_empty() {
-                *self.last_image_user_msg.lock().unwrap() = Some(LastImageUserMsg {
-                    message_seq: seq,
-                    images,
-                });
-            }
-        }
-        self.messages.lock().unwrap().push(msg);
+        AppendMessageCommand { msg, flow_run_id }.execute(self);
     }
 
     pub fn emit_attachment_degrade(
@@ -1354,14 +1287,7 @@ impl Session {
     }
 
     pub fn begin_turn(&self, user_msg: Message) -> TurnId {
-        let turn_id = user_msg.turn_id.clone();
-        *self.turn.current_turn.lock().unwrap() = Some(turn_id.clone());
-        *self.turn.flow_cancel.lock().unwrap() = CancellationToken::new();
-        self.sink.emit(Event::TurnStart {
-            turn_id: turn_id.clone(),
-        });
-        self.append_message(user_msg, None);
-        turn_id
+        BeginTurnCommand { user_msg }.execute(self)
     }
 
     pub fn mark_streamed(&self) {
@@ -1508,6 +1434,109 @@ impl Session {
 pub enum EnqueueError {
     #[error("enqueue_injection called with no active turn")]
     NoActiveTurn,
+}
+
+// ── Write commands ──
+
+pub struct AppendMessageCommand {
+    pub msg: Message,
+    pub flow_run_id: Option<FlowRunId>,
+}
+
+impl AppendMessageCommand {
+    pub fn execute(&self, session: &Session) -> u64 {
+        let flow_run_id_str = self.flow_run_id.as_ref().map(|r| r.0.to_string());
+        let event = match self.msg.role {
+            MessageRole::User => Event::UserMsg {
+                turn_id: self.msg.turn_id.clone(),
+                message: self.msg.clone(),
+            },
+            MessageRole::Assistant => {
+                let _ = session
+                    .watch
+                    .stream_tx
+                    .send(crate::stream::StreamFrame::AssistantMsg {
+                        flow_run_id: flow_run_id_str.clone(),
+                        message: self.msg.clone(),
+                    });
+                Event::AssistantMsg {
+                    turn_id: self.msg.turn_id.clone(),
+                    flow_run_id: self.flow_run_id.clone(),
+                    message: self.msg.clone(),
+                }
+            }
+            MessageRole::Tool => {
+                let _ = session
+                    .watch
+                    .stream_tx
+                    .send(crate::stream::StreamFrame::ToolResultMsg {
+                        flow_run_id: flow_run_id_str.clone(),
+                        message: self.msg.clone(),
+                    });
+                Event::ToolResultMsg {
+                    turn_id: self.msg.turn_id.clone(),
+                    flow_run_id: self.flow_run_id.clone(),
+                    message: self.msg.clone(),
+                }
+            }
+            MessageRole::System => Event::SystemMsg {
+                turn_id: self.msg.turn_id.clone(),
+                message: self.msg.clone(),
+            },
+        };
+        let seq = session.sink.emit_returning_seq(event);
+        if matches!(self.msg.role, MessageRole::User) {
+            let images: Vec<(usize, String)> = self
+                .msg
+                .parts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| match p {
+                    crate::message::MessagePart::Image { source } => {
+                        let basename = match &source.data {
+                            crate::message::ImageData::Path { path } => path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            crate::message::ImageData::Base64 { .. } => "base64".into(),
+                        };
+                        Some((i, basename))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !images.is_empty() {
+                *session.last_image_user_msg.lock().unwrap() = Some(LastImageUserMsg {
+                    message_seq: seq,
+                    images,
+                });
+            }
+        }
+        session.messages.lock().unwrap().push(self.msg.clone());
+        seq
+    }
+}
+
+pub struct BeginTurnCommand {
+    pub user_msg: Message,
+}
+
+impl BeginTurnCommand {
+    pub fn execute(&self, session: &Session) -> TurnId {
+        let turn_id = self.user_msg.turn_id.clone();
+        *session.turn.current_turn.lock().unwrap() = Some(turn_id.clone());
+        *session.turn.flow_cancel.lock().unwrap() = tokio_util::sync::CancellationToken::new();
+        session.sink.emit(Event::TurnStart {
+            turn_id: turn_id.clone(),
+        });
+        AppendMessageCommand {
+            msg: self.user_msg.clone(),
+            flow_run_id: None,
+        }
+        .execute(session);
+        turn_id
+    }
 }
 
 #[cfg(test)]
