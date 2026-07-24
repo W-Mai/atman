@@ -42,6 +42,67 @@ type WatchKeepalive = (
     watch::Receiver<Vec<crate::memory::plan::Plan>>,
 );
 
+#[derive(Debug)]
+pub struct TurnState {
+    pub current_turn: Mutex<Option<TurnId>>,
+    pub flow_cancel: Mutex<CancellationToken>,
+    pub streamed: std::sync::atomic::AtomicBool,
+}
+
+impl TurnState {
+    fn new() -> Self {
+        Self {
+            current_turn: Mutex::new(None),
+            flow_cancel: Mutex::new(CancellationToken::new()),
+            streamed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+pub struct WatchHub {
+    pub stream_tx: broadcast::Sender<StreamFrame>,
+    pub context: watch::Sender<ContextSnapshot>,
+    pub goal: watch::Sender<Option<String>>,
+    pub attach: watch::Sender<usize>,
+    pub todos: watch::Sender<Vec<crate::memory::todo::Todo>>,
+    pub plans: watch::Sender<Vec<crate::memory::plan::Plan>>,
+    _keepalive: WatchKeepalive,
+}
+
+pub struct CompactionState {
+    pub manual_pending: std::sync::atomic::AtomicBool,
+    pub last_input_tokens: std::sync::atomic::AtomicU64,
+    pub review_mode: Mutex<CompactReviewMode>,
+    pub lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+impl CompactionState {
+    fn new() -> Self {
+        Self {
+            manual_pending: std::sync::atomic::AtomicBool::new(false),
+            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
+            review_mode: Mutex::new(CompactReviewMode::default()),
+            lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+}
+
+pub struct InteractionServices {
+    pub approval: std::sync::Arc<ApprovalRegistry>,
+    pub compact_reviews: std::sync::Arc<CompactReviewRegistry>,
+    pub forms: std::sync::Arc<FormRegistry>,
+}
+
+impl InteractionServices {
+    fn new() -> Self {
+        Self {
+            approval: std::sync::Arc::new(ApprovalRegistry::new()),
+            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
+            forms: std::sync::Arc::new(FormRegistry::new()),
+        }
+    }
+}
+
 pub struct Session {
     id: SessionId,
     dir: PathBuf,
@@ -49,27 +110,14 @@ pub struct Session {
     sink: EventSink,
     message_stream: crate::message_stream::MessageStream,
     messages: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
-    current_turn: Mutex<Option<TurnId>>,
+    pub turn: TurnState,
+    pub watch: WatchHub,
+    pub compaction: CompactionState,
+    pub interactions: InteractionServices,
     injection_queue: Mutex<Vec<Injection>>,
     injection_tx: broadcast::Sender<Injection>,
-    stream_tx: broadcast::Sender<StreamFrame>,
-    flow_cancel: Mutex<CancellationToken>,
-    context_watch: watch::Sender<ContextSnapshot>,
-    goal_watch: watch::Sender<Option<String>>,
-    attach_watch: watch::Sender<usize>,
-    todos_watch: watch::Sender<Vec<crate::memory::todo::Todo>>,
-    plans_watch: watch::Sender<Vec<crate::memory::plan::Plan>>,
-    _watch_keepalive: WatchKeepalive,
-    streamed_this_turn: std::sync::atomic::AtomicBool,
-    manual_compact_pending: std::sync::atomic::AtomicBool,
-    last_input_tokens: std::sync::atomic::AtomicU64,
-    compact_review_mode: Mutex<CompactReviewMode>,
-    compact_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
-    approval: std::sync::Arc<ApprovalRegistry>,
-    compact_reviews: std::sync::Arc<CompactReviewRegistry>,
-    forms: std::sync::Arc<FormRegistry>,
     fs_access_mode: Mutex<Option<crate::fs_access::FsAccessMode>>,
     project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
 }
@@ -564,29 +612,24 @@ impl Session {
             sink,
             message_stream: crate::message_stream::MessageStream::new(events_handle),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            current_turn: Mutex::new(None),
+            turn: TurnState::new(),
+            watch: WatchHub {
+                stream_tx,
+                context: context_watch,
+                goal: goal_watch,
+                attach: attach_watch,
+                todos: todos_watch,
+                plans: plans_watch,
+                _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
+            },
+            compaction: CompactionState::new(),
+            interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
-            stream_tx,
-            flow_cancel: Mutex::new(CancellationToken::new()),
-            context_watch,
-            goal_watch,
-            attach_watch,
-            todos_watch,
-            plans_watch,
-            _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
-            streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
-            manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
-            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
-            compact_review_mode: Mutex::new(CompactReviewMode::default()),
-            compact_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
-            approval: std::sync::Arc::new(ApprovalRegistry::new()),
-            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
-            forms: std::sync::Arc::new(FormRegistry::new()),
             fs_access_mode: Mutex::new(None),
             project_index,
         })
@@ -664,29 +707,24 @@ impl Session {
                 initial_msgs,
             ),
             messages: std::sync::Arc::new(std::sync::Mutex::new(messages)),
-            current_turn: Mutex::new(None),
+            turn: TurnState::new(),
+            watch: WatchHub {
+                stream_tx,
+                context: context_watch,
+                goal: goal_watch,
+                attach: attach_watch,
+                todos: todos_watch,
+                plans: plans_watch,
+                _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
+            },
+            compaction: CompactionState::new(),
+            interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
-            stream_tx,
-            flow_cancel: Mutex::new(CancellationToken::new()),
-            context_watch,
-            goal_watch,
-            attach_watch,
-            todos_watch,
-            plans_watch,
-            _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
-            streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
-            manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
-            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
-            compact_review_mode: Mutex::new(CompactReviewMode::default()),
-            compact_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
-            approval: std::sync::Arc::new(ApprovalRegistry::new()),
-            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
-            forms: std::sync::Arc::new(FormRegistry::new()),
             fs_access_mode: Mutex::new(None),
             project_index,
         })
@@ -709,29 +747,24 @@ impl Session {
             sink,
             message_stream: crate::message_stream::MessageStream::new(events_handle),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            current_turn: Mutex::new(None),
+            turn: TurnState::new(),
+            watch: WatchHub {
+                stream_tx,
+                context: context_watch,
+                goal: goal_watch,
+                attach: attach_watch,
+                todos: todos_watch,
+                plans: plans_watch,
+                _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
+            },
+            compaction: CompactionState::new(),
+            interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
-            stream_tx,
-            flow_cancel: Mutex::new(CancellationToken::new()),
-            context_watch,
-            goal_watch,
-            attach_watch,
-            todos_watch,
-            plans_watch,
-            _watch_keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
-            streamed_this_turn: std::sync::atomic::AtomicBool::new(false),
-            manual_compact_pending: std::sync::atomic::AtomicBool::new(false),
-            last_input_tokens: std::sync::atomic::AtomicU64::new(0),
-            compact_review_mode: Mutex::new(CompactReviewMode::default()),
-            compact_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             last_image_user_msg: Mutex::new(None),
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
-            approval: std::sync::Arc::new(ApprovalRegistry::new()),
-            compact_reviews: std::sync::Arc::new(CompactReviewRegistry::new()),
-            forms: std::sync::Arc::new(FormRegistry::new()),
             fs_access_mode: Mutex::new(None),
             project_index: None,
         }
@@ -742,15 +775,15 @@ impl Session {
     }
 
     pub fn approval(&self) -> std::sync::Arc<ApprovalRegistry> {
-        self.approval.clone()
+        self.interactions.approval.clone()
     }
 
     pub fn compact_reviews(&self) -> std::sync::Arc<CompactReviewRegistry> {
-        self.compact_reviews.clone()
+        self.interactions.compact_reviews.clone()
     }
 
     pub fn forms(&self) -> std::sync::Arc<FormRegistry> {
-        self.forms.clone()
+        self.interactions.forms.clone()
     }
 
     pub fn fs_access_mode(&self) -> Option<crate::fs_access::FsAccessMode> {
@@ -762,11 +795,11 @@ impl Session {
     }
 
     pub fn compact_review_mode(&self) -> CompactReviewMode {
-        *self.compact_review_mode.lock().unwrap()
+        *self.compaction.review_mode.lock().unwrap()
     }
 
     pub fn set_compact_review_mode(&self, mode: CompactReviewMode) {
-        *self.compact_review_mode.lock().unwrap() = mode;
+        *self.compaction.review_mode.lock().unwrap() = mode;
     }
 
     pub fn read_files(
@@ -785,11 +818,11 @@ impl Session {
     }
 
     pub fn stream_tx(&self) -> broadcast::Sender<StreamFrame> {
-        self.stream_tx.clone()
+        self.watch.stream_tx.clone()
     }
 
     pub fn stream_subscribe(&self) -> broadcast::Receiver<StreamFrame> {
-        self.stream_tx.subscribe()
+        self.watch.stream_tx.subscribe()
     }
 
     pub fn id(&self) -> &SessionId {
@@ -822,30 +855,30 @@ impl Session {
     }
 
     pub fn goal(&self) -> Option<String> {
-        if let Some(cached) = self.goal_watch.borrow().clone() {
+        if let Some(cached) = self.watch.goal.borrow().clone() {
             return Some(cached);
         }
         load_goal(&self.dir)
     }
 
     pub fn subscribe_goal(&self) -> watch::Receiver<Option<String>> {
-        self.goal_watch.subscribe()
+        self.watch.goal.subscribe()
     }
 
     pub fn goal_watch(&self) -> &watch::Sender<Option<String>> {
-        &self.goal_watch
+        &self.watch.goal
     }
 
     pub fn subscribe_context(&self) -> watch::Receiver<ContextSnapshot> {
-        self.context_watch.subscribe()
+        self.watch.context.subscribe()
     }
 
     pub fn subscribe_attach(&self) -> watch::Receiver<usize> {
-        self.attach_watch.subscribe()
+        self.watch.attach.subscribe()
     }
 
     pub fn subscribe_pending_approvals(&self) -> watch::Receiver<Vec<PendingApproval>> {
-        self.approval.subscribe()
+        self.interactions.approval.subscribe()
     }
 
     pub fn meta(&self) -> Option<crate::session_meta::SessionMeta> {
@@ -853,21 +886,23 @@ impl Session {
     }
 
     pub fn request_manual_compact(&self) {
-        self.manual_compact_pending
+        self.compaction
+            .manual_pending
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn take_manual_compact_request(&self) -> bool {
-        self.manual_compact_pending
+        self.compaction
+            .manual_pending
             .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_goal(&self, goal: Option<String>) {
-        let _ = self.goal_watch.send(goal);
+        let _ = self.watch.goal.send(goal);
     }
 
     pub fn set_attach_count(&self, count: usize) {
-        let _ = self.attach_watch.send(count);
+        let _ = self.watch.attach.send(count);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -881,9 +916,10 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
-        self.last_input_tokens
+        self.compaction
+            .last_input_tokens
             .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
-        self.context_watch.send_modify(|snap| {
+        self.watch.context.send_modify(|snap| {
             snap.model = model.to_string();
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);
             snap.tokens_out = snap.tokens_out.saturating_add(tokens_out);
@@ -896,24 +932,26 @@ impl Session {
     }
 
     pub fn last_input_tokens(&self) -> u64 {
-        self.last_input_tokens
+        self.compaction
+            .last_input_tokens
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn acquire_compact_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.compact_lock.lock().await
+        self.compaction.lock.lock().await
     }
 
     pub async fn acquire_compact_lock_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        self.compact_lock.clone().lock_owned().await
+        self.compaction.lock.clone().lock_owned().await
     }
 
     pub fn compact_lock_handle(&self) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-        self.compact_lock.clone()
+        self.compaction.lock.clone()
     }
 
     fn clear_last_input_tokens(&self) {
-        self.last_input_tokens
+        self.compaction
+            .last_input_tokens
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -926,28 +964,28 @@ impl Session {
             estimated
         };
         let budget = crate::model_registry::model_info(&self.last_model()).context_budget;
-        self.context_watch.send_modify(|snap| {
+        self.watch.context.send_modify(|snap| {
             snap.window_tokens = window;
             snap.window_budget = budget;
         });
     }
 
     pub fn cumulative_input_tokens(&self) -> u64 {
-        self.context_watch.borrow().tokens_in
+        self.watch.context.borrow().tokens_in
     }
 
     pub fn reset_input_tokens_to(&self, tokens: u64) {
-        self.context_watch.send_modify(|snap| {
+        self.watch.context.send_modify(|snap| {
             snap.tokens_in = tokens;
         });
     }
 
     pub fn last_model(&self) -> String {
-        self.context_watch.borrow().model.clone()
+        self.watch.context.borrow().model.clone()
     }
 
     pub fn update_mcp_server(&self, status: crate::mcp::McpServerStatus) {
-        self.context_watch.send_modify(|snap| {
+        self.watch.context.send_modify(|snap| {
             if let Some(existing) = snap.mcp_servers.iter_mut().find(|s| s.name == status.name) {
                 *existing = status;
             } else {
@@ -957,25 +995,25 @@ impl Session {
     }
 
     pub fn set_memory_recent_count(&self, count: u16) {
-        self.context_watch.send_modify(|snap| {
+        self.watch.context.send_modify(|snap| {
             snap.memory_recent_count = count;
         });
     }
 
     pub fn subscribe_todos(&self) -> watch::Receiver<Vec<crate::memory::todo::Todo>> {
-        self.todos_watch.subscribe()
+        self.watch.todos.subscribe()
     }
 
     pub fn todos_watch(&self) -> &watch::Sender<Vec<crate::memory::todo::Todo>> {
-        &self.todos_watch
+        &self.watch.todos
     }
 
     pub fn subscribe_plans(&self) -> watch::Receiver<Vec<crate::memory::plan::Plan>> {
-        self.plans_watch.subscribe()
+        self.watch.plans.subscribe()
     }
 
     pub fn plans_watch(&self) -> &watch::Sender<Vec<crate::memory::plan::Plan>> {
-        &self.plans_watch
+        &self.watch.plans
     }
 
     pub async fn refresh_plans_from_store_async(&self) {
@@ -985,7 +1023,7 @@ impl Session {
         let store = crate::memory::plan::PlanStore::at(&self.dir);
         match store.list().await {
             Ok(list) => {
-                let _ = self.plans_watch.send(list);
+                let _ = self.watch.plans.send(list);
             }
             Err(e) => {
                 crate::notify!(
@@ -1009,7 +1047,7 @@ impl Session {
                 .map(|h| h.block_on(store.list()))
         }) {
             Some(Ok(list)) => {
-                let _ = self.todos_watch.send(list);
+                let _ = self.watch.todos.send(list);
             }
             Some(Err(e)) => {
                 crate::notify!(
@@ -1030,7 +1068,7 @@ impl Session {
         let store = crate::memory::todo::TodoStore::at(&self.dir);
         match store.list().await {
             Ok(list) => {
-                let _ = self.todos_watch.send(list);
+                let _ = self.watch.todos.send(list);
             }
             Err(e) => {
                 crate::notify!(
@@ -1061,6 +1099,7 @@ impl Session {
             },
             MessageRole::Assistant => {
                 let _ = self
+                    .watch
                     .stream_tx
                     .send(crate::stream::StreamFrame::AssistantMsg {
                         flow_run_id: flow_run_id_str.clone(),
@@ -1076,6 +1115,7 @@ impl Session {
             }
             MessageRole::Tool => {
                 let _ = self
+                    .watch
                     .stream_tx
                     .send(crate::stream::StreamFrame::ToolResultMsg {
                         flow_run_id: flow_run_id_str.clone(),
@@ -1151,7 +1191,7 @@ impl Session {
         let Some(entry) = target else {
             return 0;
         };
-        let turn_id = self.current_turn.lock().unwrap().clone();
+        let turn_id = self.turn.current_turn.lock().unwrap().clone();
         let now = chrono::Utc::now();
         for (part_index, basename) in &entry.images {
             self.sink.emit(Event::AttachmentDegraded {
@@ -1201,7 +1241,10 @@ impl Session {
     }
 
     pub fn push_system_note(&self, text: String) {
-        let _ = self.stream_tx.send(crate::stream::StreamFrame::Note(text));
+        let _ = self
+            .watch
+            .stream_tx
+            .send(crate::stream::StreamFrame::Note(text));
     }
 
     pub fn approval_cooldown_ok_for_compact(&self) -> bool {
@@ -1221,7 +1264,7 @@ impl Session {
         );
         self.sink.emit(Event::WatchWarn {
             seq: 0,
-            turn_id: self.current_turn.lock().unwrap().clone(),
+            turn_id: self.turn.current_turn.lock().unwrap().clone(),
             flow_run_id: None,
             target: "context.compaction".into(),
             trigger: "auto_compact".into(),
@@ -1305,6 +1348,7 @@ impl Session {
             ts,
         });
         let _ = self
+            .watch
             .stream_tx
             .send(crate::stream::StreamFrame::CompactionSummary {
                 phase: crate::stream::CompactionPhase::Finished,
@@ -1336,8 +1380,8 @@ impl Session {
 
     pub fn begin_turn(&self, user_msg: Message) -> TurnId {
         let turn_id = user_msg.turn_id.clone();
-        *self.current_turn.lock().unwrap() = Some(turn_id.clone());
-        *self.flow_cancel.lock().unwrap() = CancellationToken::new();
+        *self.turn.current_turn.lock().unwrap() = Some(turn_id.clone());
+        *self.turn.flow_cancel.lock().unwrap() = CancellationToken::new();
         self.sink.emit(Event::TurnStart {
             seq: 0,
             turn_id: turn_id.clone(),
@@ -1348,19 +1392,22 @@ impl Session {
     }
 
     pub fn mark_streamed(&self) {
-        self.streamed_this_turn
+        self.turn
+            .streamed
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn take_streamed_flag(&self) -> bool {
-        self.streamed_this_turn
+        self.turn
+            .streamed
             .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn end_turn(&self) {
-        self.streamed_this_turn
+        self.turn
+            .streamed
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let turn_id = self.current_turn.lock().unwrap().take();
+        let turn_id = self.turn.current_turn.lock().unwrap().take();
         if let Some(turn_id) = turn_id {
             let now = chrono::Utc::now();
             let mut q = self.injection_queue.lock().unwrap();
@@ -1380,7 +1427,7 @@ impl Session {
     }
 
     pub fn current_turn(&self) -> Option<TurnId> {
-        self.current_turn.lock().unwrap().clone()
+        self.turn.current_turn.lock().unwrap().clone()
     }
 
     pub fn enqueue_injection(&self, text: impl Into<String>) -> Result<InjectionId, EnqueueError> {
@@ -1394,6 +1441,7 @@ impl Session {
         redirect_target: Option<String>,
     ) -> Result<InjectionId, EnqueueError> {
         let turn_id = self
+            .turn
             .current_turn
             .lock()
             .unwrap()
@@ -1464,11 +1512,11 @@ impl Session {
     }
 
     pub fn cancel_flow(&self) {
-        self.flow_cancel.lock().unwrap().cancel();
+        self.turn.flow_cancel.lock().unwrap().cancel();
     }
 
     pub fn flow_cancel_token(&self) -> CancellationToken {
-        self.flow_cancel.lock().unwrap().clone()
+        self.turn.flow_cancel.lock().unwrap().clone()
     }
 
     pub async fn shutdown(&self) {
