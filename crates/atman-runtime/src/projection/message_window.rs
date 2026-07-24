@@ -637,7 +637,10 @@ mod tests {
         ];
         let msgs = rows.replay_messages(Some((3, vec![summary.clone()])));
         assert_eq!(msgs.len(), 2);
-        assert!(matches!(msgs[0].parts[0], MessagePart::CompactSummary { .. }));
+        assert!(matches!(
+            msgs[0].parts[0],
+            MessagePart::CompactSummary { .. }
+        ));
         assert_eq!(msgs[1].text_concat(), "after checkpoint");
     }
 
@@ -681,7 +684,10 @@ mod tests {
         ];
         let msgs = rows.replay_messages(None);
         assert_eq!(msgs.len(), 2);
-        assert!(matches!(msgs[0].parts[0], MessagePart::CompactSummary { .. }));
+        assert!(matches!(
+            msgs[0].parts[0],
+            MessagePart::CompactSummary { .. }
+        ));
         assert_eq!(msgs[1].text_concat(), "after compact");
     }
 

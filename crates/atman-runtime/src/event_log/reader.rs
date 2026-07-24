@@ -48,6 +48,31 @@ pub fn read_event_rows(path: &Path) -> Result<Vec<RawEventRow>, SessionOpenError
     Ok(rows)
 }
 
+pub fn read_event_envelopes(
+    path: &Path,
+) -> Result<Vec<crate::event::EventEnvelope>, SessionOpenError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(SessionOpenError::Replay {
+                path: path.to_path_buf(),
+                source: e,
+            });
+        }
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(env) = serde_json::from_str::<crate::event::EventEnvelope>(line) {
+            out.push(env);
+        }
+    }
+    Ok(out)
+}
+
 pub fn parse_json_lines(text: &str) -> Vec<serde_json::Value> {
     text.lines()
         .filter_map(|line| {

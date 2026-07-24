@@ -65,7 +65,22 @@ impl serde::Serialize for EventEnvelope {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+impl<'de> serde::Deserialize<'de> for EventEnvelope {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let seq = value.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+        let ts = value
+            .get("ts")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
+        let event = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(EventEnvelope { seq, ts, event })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     FlowStart {
@@ -254,7 +269,7 @@ pub enum FlowNodeStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FlowStatus {
     Ok,
@@ -270,7 +285,7 @@ impl FlowStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmCallStatus {
     Ok,
@@ -606,5 +621,20 @@ mod tests {
             after_tokens: 3,
             summary: String::new(),
         };
+    }
+
+    #[test]
+    fn envelope_round_trips_through_json() {
+        let env = EventEnvelope::new(
+            42,
+            Event::UserMsg {
+                turn_id: TurnId::now(),
+                message: crate::message::Message::user_text(TurnId::now(), "hello"),
+            },
+        );
+        let json = serde_json::to_string(&env).unwrap();
+        let back: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.seq, 42);
+        assert!(matches!(back.event, Event::UserMsg { .. }));
     }
 }
