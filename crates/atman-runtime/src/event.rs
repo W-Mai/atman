@@ -38,6 +38,33 @@ impl std::fmt::Display for TurnId {
     }
 }
 
+/// Wraps an Event with assigned sequence number and timestamp.
+/// Serializes to the same JSONL format as the flat Event for backward compat.
+#[derive(Debug, Clone)]
+pub struct EventEnvelope {
+    pub seq: u64,
+    pub ts: chrono::DateTime<chrono::Utc>,
+    pub event: Event,
+}
+
+impl EventEnvelope {
+    pub fn new(seq: u64, event: Event) -> Self {
+        let ts = chrono::Utc::now();
+        Self { seq, ts, event }
+    }
+}
+
+impl serde::Serialize for EventEnvelope {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = serde_json::to_value(&self.event).map_err(serde::ser::Error::custom)?;
+        if let serde_json::Value::Object(ref mut map) = value {
+            map.insert("seq".into(), serde_json::Value::Number(self.seq.into()));
+            map.insert("ts".into(), serde_json::Value::String(self.ts.to_rfc3339()));
+        }
+        value.serialize(serializer)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -443,8 +470,8 @@ pub struct Observable<T> {
 
 #[derive(Default, Clone)]
 pub struct EventSink {
-    events: Arc<Mutex<Vec<Event>>>,
-    forwarder: Option<mpsc::UnboundedSender<Event>>,
+    events: Arc<Mutex<Vec<EventEnvelope>>>,
+    forwarder: Option<mpsc::UnboundedSender<EventEnvelope>>,
     seq_counter: Arc<std::sync::atomic::AtomicU64>,
     redactor: Option<Arc<crate::redact::Redactor>>,
     last_compact_at: Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>,
@@ -455,7 +482,7 @@ impl EventSink {
         Self::default()
     }
 
-    pub fn with_forwarder(mut self, tx: mpsc::UnboundedSender<Event>) -> Self {
+    pub fn with_forwarder(mut self, tx: mpsc::UnboundedSender<EventEnvelope>) -> Self {
         self.forwarder = Some(tx);
         self
     }
@@ -491,28 +518,33 @@ impl EventSink {
             .seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        let mut event = event;
-        event.set_seq(next);
+        let envelope = EventEnvelope::new(next, event);
         if let Some(tx) = &self.forwarder {
-            let _ = tx.send(event.clone());
+            let _ = tx.send(envelope.clone());
         }
-        self.events.lock().expect("event sink poisoned").push(event);
+        self.events
+            .lock()
+            .expect("event sink poisoned")
+            .push(envelope);
         next
     }
 
-    pub fn emit(&self, mut event: Event) {
+    pub fn emit(&self, event: Event) {
         let next = self
             .seq_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        event.set_seq(next);
+        let envelope = EventEnvelope::new(next, event);
         if let Some(tx) = &self.forwarder {
-            let _ = tx.send(event.clone());
+            let _ = tx.send(envelope.clone());
         }
-        self.events.lock().expect("event sink poisoned").push(event);
+        self.events
+            .lock()
+            .expect("event sink poisoned")
+            .push(envelope);
     }
 
-    pub fn events_handle(&self) -> Arc<Mutex<Vec<Event>>> {
+    pub fn events_handle(&self) -> Arc<Mutex<Vec<EventEnvelope>>> {
         self.events.clone()
     }
 
@@ -533,10 +565,22 @@ impl EventSink {
 
     pub fn drain(&self) -> Vec<Event> {
         std::mem::take(&mut *self.events.lock().expect("event sink poisoned"))
+            .into_iter()
+            .map(|envelope| envelope.event)
+            .collect()
     }
 
     pub fn snapshot(&self) -> Vec<Event> {
-        self.events.lock().expect("event sink poisoned").clone()
+        self.events
+            .lock()
+            .expect("event sink poisoned")
+            .iter()
+            .map(|envelope| {
+                let mut event = envelope.event.clone();
+                event.set_seq(envelope.seq);
+                event
+            })
+            .collect()
     }
 }
 

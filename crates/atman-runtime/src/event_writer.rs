@@ -4,13 +4,13 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::event::Event;
+use crate::event::{Event, EventEnvelope};
 use crate::index::{AnchorIndex, ProjectEventInsert};
 use crate::redact::Redactor;
 
 pub struct EventWriter {
     thread: Option<std::thread::JoinHandle<()>>,
-    tx: mpsc::UnboundedSender<Event>,
+    tx: mpsc::UnboundedSender<EventEnvelope>,
     flush_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
     stop_tx: Option<oneshot::Sender<()>>,
     events_path: PathBuf,
@@ -39,7 +39,7 @@ impl EventWriter {
         let session_dir = session_dir.as_ref().to_path_buf();
         let events_path = session_dir.join("events.jsonl");
         std::fs::create_dir_all(&session_dir)?;
-        let (tx, rx) = mpsc::unbounded_channel::<Event>();
+        let (tx, rx) = mpsc::unbounded_channel::<EventEnvelope>();
         let (flush_tx, flush_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let file_path = events_path.clone();
@@ -89,7 +89,7 @@ impl EventWriter {
         let _ = rx.await;
     }
 
-    pub fn sender(&self) -> mpsc::UnboundedSender<Event> {
+    pub fn sender(&self) -> mpsc::UnboundedSender<EventEnvelope> {
         self.tx.clone()
     }
 
@@ -122,7 +122,7 @@ impl Drop for EventWriter {
 }
 
 async fn writer_loop(
-    mut rx: mpsc::UnboundedReceiver<Event>,
+    mut rx: mpsc::UnboundedReceiver<EventEnvelope>,
     mut flush_rx: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
     mut stop_rx: oneshot::Receiver<()>,
     path: &Path,
@@ -177,38 +177,38 @@ async fn writer_loop(
 
 async fn write_event(
     file: &mut tokio::fs::File,
-    event: &Event,
+    envelope: &EventEnvelope,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
 ) -> std::io::Result<()> {
-    let line = serialize_event(event, redactor);
+    let line = serialize_event(envelope, redactor);
     file.write_all(line.as_bytes()).await?;
     file.write_all(b"\n").await?;
     file.sync_data().await?;
     if let Some((idx, sid)) = indexer
-        && let Err(e) = insert_project_row(idx, sid, event, &line)
+        && let Err(e) = insert_project_row(idx, sid, envelope, &line)
     {
         crate::notify!(
             warn,
             location = Log,
             stack = merge_count("project_index.insert_failed", 60_000),
             "project index insert failed (seq={}): {e}",
-            event.seq()
+            envelope.seq
         );
     }
     Ok(())
 }
 
-fn serialize_event(event: &Event, redactor: Option<&Redactor>) -> String {
+fn serialize_event(envelope: &EventEnvelope, redactor: Option<&Redactor>) -> String {
     let Some(r) = redactor else {
-        return serde_json::to_string(event).unwrap_or_else(|e| {
+        return serde_json::to_string(envelope).unwrap_or_else(|e| {
             format!(
                 "{{\"type\":\"encode_error\",\"error\":{:?}}}",
                 e.to_string()
             )
         });
     };
-    let mut value = match serde_json::to_value(event) {
+    let mut value = match serde_json::to_value(envelope) {
         Ok(v) => v,
         Err(e) => {
             return format!(
@@ -229,16 +229,17 @@ fn serialize_event(event: &Event, redactor: Option<&Redactor>) -> String {
 fn insert_project_row(
     index: &AnchorIndex,
     session_id: &str,
-    event: &Event,
+    envelope: &EventEnvelope,
     payload_json: &str,
 ) -> rusqlite::Result<()> {
+    let event = &envelope.event;
     let ts = extract_ts(event);
     let kind = event_kind(event);
     let (turn_id, flow_run_id) = extract_anchors(event);
     let text = extract_text_content(event).unwrap_or_default();
     index.insert_project_event_raw(ProjectEventInsert {
         session_id,
-        seq: event.seq() as i64,
+        seq: envelope.seq as i64,
         ts: &ts,
         kind,
         turn_id: turn_id.as_deref(),
@@ -426,14 +427,17 @@ mod tests {
         let writer = EventWriter::spawn(dir.path()).unwrap();
         let tx = writer.sender();
         for i in 0..5 {
-            tx.send(Event::FlowStart {
-                seq: 0,
-                run_id: FlowRunId::now(),
-                flow_name: format!("flow_{i}"),
-                parent_run_id: None,
-                parent_node_id: None,
-                ts: chrono::Utc::now(),
-            })
+            tx.send(EventEnvelope::new(
+                i as u64,
+                Event::FlowStart {
+                    seq: 0,
+                    run_id: FlowRunId::now(),
+                    flow_name: format!("flow_{i}"),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    ts: chrono::Utc::now(),
+                },
+            ))
             .unwrap();
         }
         drop(tx);
@@ -464,14 +468,17 @@ mod tests {
         .unwrap();
         let tx = writer.sender();
         for i in 0..3 {
-            tx.send(Event::FlowStart {
-                seq: (i + 1) as u64,
-                run_id: FlowRunId::now(),
-                flow_name: format!("flow_{i}"),
-                parent_run_id: None,
-                parent_node_id: None,
-                ts: chrono::Utc::now(),
-            })
+            tx.send(EventEnvelope::new(
+                (i + 1) as u64,
+                Event::FlowStart {
+                    seq: 0,
+                    run_id: FlowRunId::now(),
+                    flow_name: format!("flow_{i}"),
+                    parent_run_id: None,
+                    parent_node_id: None,
+                    ts: chrono::Utc::now(),
+                },
+            ))
             .unwrap();
         }
         drop(tx);
@@ -513,12 +520,15 @@ mod tests {
         let tid = TurnId::now();
         writer
             .sender()
-            .send(Event::UserMsg {
-                seq: 1,
-                turn_id: tid.clone(),
-                message: Message::user_text(tid, "sqlite fts full text search"),
-                ts: chrono::Utc::now(),
-            })
+            .send(EventEnvelope::new(
+                1,
+                Event::UserMsg {
+                    seq: 0,
+                    turn_id: tid.clone(),
+                    message: Message::user_text(tid, "sqlite fts full text search"),
+                    ts: chrono::Utc::now(),
+                },
+            ))
             .unwrap();
         writer.shutdown().await;
 
@@ -536,15 +546,18 @@ mod tests {
         let writer = EventWriter::spawn(dir.path()).unwrap();
         writer
             .sender()
-            .send(Event::FlowEnd {
-                seq: 0,
-                run_id: FlowRunId::now(),
-                flow_name: "t".into(),
-                status: FlowStatus::Errored {
-                    message: "boom".into(),
+            .send(EventEnvelope::new(
+                0,
+                Event::FlowEnd {
+                    seq: 0,
+                    run_id: FlowRunId::now(),
+                    flow_name: "t".into(),
+                    status: FlowStatus::Errored {
+                        message: "boom".into(),
+                    },
+                    ts: chrono::Utc::now(),
                 },
-                ts: chrono::Utc::now(),
-            })
+            ))
             .unwrap();
         writer.shutdown().await;
         let contents = tokio::fs::read_to_string(dir.path().join("events.jsonl"))

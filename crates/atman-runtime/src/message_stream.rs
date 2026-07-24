@@ -6,16 +6,16 @@
 use std::sync::{Arc, Mutex};
 
 use crate::compaction::is_compaction_summary;
-use crate::event::Event;
+use crate::event::{Event, EventEnvelope};
 use crate::message::Message;
 
 pub struct MessageStream {
-    events: Arc<Mutex<Vec<Event>>>,
+    events: Arc<Mutex<Vec<EventEnvelope>>>,
     initial_messages: Vec<Message>,
 }
 
 impl MessageStream {
-    pub fn new(events: Arc<Mutex<Vec<Event>>>) -> Self {
+    pub fn new(events: Arc<Mutex<Vec<EventEnvelope>>>) -> Self {
         Self {
             events,
             initial_messages: Vec::new(),
@@ -24,7 +24,7 @@ impl MessageStream {
 
     /// Reopened sessions use this so the stream falls back to the
     /// pre-loaded messages until new events arrive.
-    pub fn with_initial(events: Arc<Mutex<Vec<Event>>>, initial: Vec<Message>) -> Self {
+    pub fn with_initial(events: Arc<Mutex<Vec<EventEnvelope>>>, initial: Vec<Message>) -> Self {
         Self {
             events,
             initial_messages: initial,
@@ -55,10 +55,10 @@ impl MessageStream {
     }
 }
 
-fn replay_events_into(acc: &mut Vec<(u64, Message)>, events: &[Event]) {
+fn replay_events_into(acc: &mut Vec<(u64, Message)>, events: &[EventEnvelope]) {
     for ev in events {
-        let seq = ev.seq();
-        match ev {
+        let seq = ev.seq;
+        match &ev.event {
             Event::UserMsg { message, .. }
             | Event::AssistantMsg { message, .. }
             | Event::ToolResultMsg { message, .. }
@@ -120,6 +120,7 @@ fn replay_events_into(acc: &mut Vec<(u64, Message)>, events: &[Event]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::EventEnvelope;
     use crate::event::TurnId;
     use crate::message::{MessagePart, MessageRole};
 
@@ -194,11 +195,20 @@ mod tests {
         }
     }
 
+    fn event_envelopes(events: Vec<Event>) -> Arc<Mutex<Vec<EventEnvelope>>> {
+        Arc::new(Mutex::new(
+            events
+                .into_iter()
+                .map(|event| EventEnvelope::new(event.seq(), event))
+                .collect(),
+        ))
+    }
+
     #[test]
     fn full_messages_filters_only_message_events() {
         let u1 = user("hello");
         let a1 = assistant("hi there");
-        let events = Arc::new(Mutex::new(vec![
+        let events = event_envelopes(vec![
             make_msg_event("user_msg", &u1, 1),
             Event::TurnStart {
                 seq: 0,
@@ -219,7 +229,7 @@ mod tests {
                 node_id: None,
                 ts: chrono::Utc::now(),
             },
-        ]));
+        ]);
         let ms = MessageStream::new(events);
         let msgs = ms.full_messages();
         assert_eq!(msgs.len(), 2);
@@ -234,7 +244,7 @@ mod tests {
             make_msg_event("assistant_msg", &assistant("b"), 2),
             make_msg_event("user_msg", &user("c"), 3),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         assert_eq!(ms.window().len(), 3);
     }
 
@@ -248,7 +258,7 @@ mod tests {
             make_msg_event("user_msg", &user("new"), 4),
             make_msg_event("assistant_msg", &assistant("new"), 5),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         let w = ms.window();
         assert_eq!(w.len(), 3);
         assert!(matches!(w[0].parts[0], MessagePart::CompactSummary { .. }));
@@ -264,7 +274,7 @@ mod tests {
             make_msg_event("system_msg", &s2, 3),
             make_msg_event("user_msg", &user("m2"), 4),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         let w = ms.window();
         assert_eq!(w.len(), 2);
         assert!(matches!(w[0].parts[0], MessagePart::CompactSummary { .. }));
@@ -282,7 +292,7 @@ mod tests {
             make_msg_event("system_msg", &s1, 3),
             make_msg_event("user_msg", &user("new"), 4),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         let w = ms.window();
         assert_eq!(w.len(), 2);
         assert!(matches!(w[0].parts[0], MessagePart::CompactSummary { .. }));
@@ -291,7 +301,7 @@ mod tests {
 
     #[test]
     fn window_empty_stream_returns_empty() {
-        let ms = MessageStream::new(Arc::new(Mutex::new(Vec::new())));
+        let ms = MessageStream::new(event_envelopes(Vec::new()));
         assert!(ms.window().is_empty());
     }
 
@@ -305,7 +315,7 @@ mod tests {
             make_context_compact(0, 2, 100, 50, "compaction summary text", 4),
             make_msg_event("user_msg", &user("after compact"), 5),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         let w = ms.window();
         assert_eq!(w.len(), 2);
         assert!(matches!(w[0].parts[0], MessagePart::CompactSummary { .. }));
@@ -324,7 +334,7 @@ mod tests {
             make_context_compact(1, 2, 150, 80, "second summary", 6),
             make_msg_event("user_msg", &user("e"), 7),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         let w = ms.window();
         assert_eq!(w.len(), 2);
         assert!(matches!(w[0].parts[0], MessagePart::CompactSummary { .. }));
@@ -343,7 +353,7 @@ mod tests {
             make_context_compact(0, 2, 200, 100, "compact summary", 4),
             make_msg_event("user_msg", &user("new message after compact"), 5),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         let w = ms.window();
         assert_eq!(w.len(), 2);
         assert!(matches!(w[0].parts[0], MessagePart::CompactSummary { .. }));
@@ -357,7 +367,7 @@ mod tests {
             make_msg_event("assistant_msg", &assistant("second"), 2),
             make_msg_event("user_msg", &user("third"), 3),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         assert_eq!(ms.full_messages().len(), 3);
         assert_eq!(ms.window().len(), 3);
     }
@@ -377,7 +387,7 @@ mod tests {
             make_context_compact(0, 1, 70, 30, "s3 text", 7),
             make_msg_event("user_msg", &user("final"), 8),
         ];
-        let ms = MessageStream::new(Arc::new(Mutex::new(events)));
+        let ms = MessageStream::new(event_envelopes(events));
         let w = ms.window();
         assert_eq!(w.len(), 2);
         if let MessagePart::CompactSummary { summary, .. } = &w[0].parts[0] {
@@ -395,17 +405,23 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let ms = MessageStream::with_initial(events.clone(), initial);
 
-        events.lock().unwrap().push(Event::TurnStart {
-            seq: 1,
-            turn_id: TurnId::now(),
-            ts: chrono::Utc::now(),
-        });
-        events.lock().unwrap().push(Event::UserMsg {
-            seq: 2,
-            turn_id: TurnId::now(),
-            message: user("latest user"),
-            ts: chrono::Utc::now(),
-        });
+        events.lock().unwrap().push(EventEnvelope::new(
+            1,
+            Event::TurnStart {
+                seq: 0,
+                turn_id: TurnId::now(),
+                ts: chrono::Utc::now(),
+            },
+        ));
+        events.lock().unwrap().push(EventEnvelope::new(
+            2,
+            Event::UserMsg {
+                seq: 0,
+                turn_id: TurnId::now(),
+                message: user("latest user"),
+                ts: chrono::Utc::now(),
+            },
+        ));
 
         let w = ms.window();
         assert_eq!(w.len(), 3);
