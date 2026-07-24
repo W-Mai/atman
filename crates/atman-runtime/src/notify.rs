@@ -156,8 +156,28 @@ pub trait NotifySink: Send + Sync {
 
 static GLOBAL_SINK: RwLock<Option<Arc<dyn NotifySink>>> = RwLock::new(None);
 
+/// Separate log sink — always active, survives ScopedSink swaps.
+static LOG_SINK: RwLock<Option<Arc<LogSink>>> = RwLock::new(None);
+
 pub fn install(sink: Arc<dyn NotifySink>) {
-    *GLOBAL_SINK.write().unwrap() = Some(sink);
+    let log = LOG_SINK.read().unwrap().clone();
+    let composite: Arc<dyn NotifySink> = match log {
+        Some(ls) => Arc::new(CompositeSink::new(vec![sink, ls])),
+        None => sink,
+    };
+    *GLOBAL_SINK.write().unwrap() = Some(composite);
+}
+
+pub fn install_log(ls: Arc<LogSink>) {
+    *LOG_SINK.write().unwrap() = Some(ls.clone());
+    // Re-install to wrap existing user sink with the new log sink.
+    let existing = GLOBAL_SINK.write().unwrap().take();
+    let user_sink: Arc<dyn NotifySink> = existing.unwrap_or_else(|| Arc::new(NoopSink));
+    *GLOBAL_SINK.write().unwrap() = Some(Arc::new(CompositeSink::new(vec![user_sink, ls])));
+}
+
+pub fn log_sink() -> Option<Arc<LogSink>> {
+    LOG_SINK.read().unwrap().clone()
 }
 
 pub fn global() -> Arc<dyn NotifySink> {
@@ -178,7 +198,13 @@ impl ScopedSink {
     pub fn tui() -> Self {
         let mut sink = GLOBAL_SINK.write().unwrap();
         let prev = sink.take();
-        *sink = Some(Arc::new(NoopSink));
+        // Replace CLI sink with Noop but keep LogSink active.
+        let log = LOG_SINK.read().unwrap().clone();
+        let replacement: Arc<dyn NotifySink> = match log {
+            Some(ls) => Arc::new(CompositeSink::new(vec![Arc::new(NoopSink), ls])),
+            None => Arc::new(NoopSink),
+        };
+        *sink = Some(replacement);
         Self { prev }
     }
 }
@@ -213,6 +239,54 @@ impl NotifySink for CliSink {
         match note.level {
             NotifyLevel::Error | NotifyLevel::Warn => eprintln!("{line}"),
             NotifyLevel::Info | NotifyLevel::Success | NotifyLevel::Debug => println!("{line}"),
+        }
+    }
+}
+
+/// Sink that appends JSONL lines to a session log file.
+pub struct LogSink {
+    base_dir: std::path::PathBuf,
+    session_id: std::sync::RwLock<Option<String>>,
+}
+
+impl LogSink {
+    pub fn new(base_dir: std::path::PathBuf) -> Self {
+        Self { base_dir, session_id: std::sync::RwLock::new(None) }
+    }
+
+    pub fn set_session_id(&self, sid: Option<String>) {
+        *self.session_id.write().unwrap() = sid;
+    }
+
+    fn log_path(&self) -> std::path::PathBuf {
+        let sid = self.session_id.read().unwrap();
+        if let Some(ref id) = *sid {
+            self.base_dir.join("sessions").join(id).join("notify.log")
+        } else {
+            let fallback = self.base_dir.join("logs");
+            let _ = std::fs::create_dir_all(&fallback);
+            fallback.join("daemon.log")
+        }
+    }
+}
+
+impl NotifySink for LogSink {
+    fn emit(&self, note: &Notification) {
+        use std::io::Write;
+        let path = self.log_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let target = note.target.as_deref().unwrap_or("-");
+        let line = serde_json::json!({
+            "ts": ts,
+            "level": note.level.as_str(),
+            "target": target,
+            "msg": note.message,
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{line}");
         }
     }
 }

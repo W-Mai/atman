@@ -1049,6 +1049,9 @@ impl Session {
     ) -> std::io::Result<Self> {
         let id = SessionId::now();
         let dir = root.as_ref().join("sessions").join(id.to_string());
+        if let Some(ls) = crate::notify::log_sink() {
+            ls.set_session_id(Some(id.to_string()));
+        }
         let writer = EventWriter::spawn_full(
             &dir,
             redactor.clone(),
@@ -1126,6 +1129,9 @@ impl Session {
             sid: sid.to_string(),
         })?;
         let dir = root.as_ref().join("sessions").join(id.to_string());
+        if let Some(ls) = crate::notify::log_sink() {
+            ls.set_session_id(Some(id.to_string()));
+        }
         if !dir.exists() {
             return Err(SessionOpenError::NotFound {
                 sid: sid.to_string(),

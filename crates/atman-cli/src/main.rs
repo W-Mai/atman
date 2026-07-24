@@ -257,6 +257,11 @@ async fn main() -> Result<()> {
     run_startup_config_migration();
     // Install default notifier (TUI replaces with its own sink on boot).
     atman_runtime::notify::install(std::sync::Arc::new(atman_runtime::notify::CliSink));
+    if let Ok(dd) = data_dir() {
+        atman_runtime::notify::install_log(std::sync::Arc::new(
+            atman_runtime::notify::LogSink::new(dd),
+        ));
+    }
     // Probe theme before raw mode so OSC 11 reply can't leak into KeyEvents.
     let _ = atman_tui::theme::theme();
     match cli.cmd {
