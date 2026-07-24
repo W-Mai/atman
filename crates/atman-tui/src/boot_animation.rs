@@ -107,7 +107,11 @@ pub async fn run_boot_animation(
     mut rx: mpsc::UnboundedReceiver<BootProgress>,
     version: String,
     recent: Vec<crate::app::StartupSessionEntry>,
-) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+    toast_buf: std::sync::Arc<std::sync::Mutex<Vec<atman_runtime::notify::Notification>>>,
+) -> Result<(
+    Terminal<CrosstermBackend<std::io::Stdout>>,
+    Vec<atman_runtime::notify::Notification>,
+)> {
     use std::io::stdout;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -121,16 +125,53 @@ pub async fn run_boot_animation(
     let mut current_step_started: Option<(BootStepId, std::time::Instant)> = None;
     let reveal_start = std::time::Instant::now();
     let reveal_ms_per_row: u128 = 60;
-    let result: Result<Terminal<CrosstermBackend<std::io::Stdout>>> = loop {
+    let mut toasts: Vec<atman_runtime::notify::Notification> = Vec::new();
+    let mut channel_closed = false;
+    let result: Result<(
+        Terminal<CrosstermBackend<std::io::Stdout>>,
+        Vec<atman_runtime::notify::Notification>,
+    )> = loop {
         let reveal_count = ((reveal_start.elapsed().as_millis() / reveal_ms_per_row) as usize + 1)
             .min(recent.len());
         let settled = ready_at.is_some();
-        terminal.draw(|f| render(f, &graph, frame, &version, &recent, reveal_count, settled))?;
+        // Drain new toasts.
+        if let Ok(mut buf) = toast_buf.lock() {
+            toasts.append(&mut buf);
+        }
+        // Expire old toasts based on TTL.
+        let now = std::time::Instant::now();
+        toasts.retain(|t| {
+            let ttl = match t.lifecycle {
+                atman_runtime::notify::NotifyLifecycle::Ttl(d) => d,
+                _ => std::time::Duration::from_secs(10),
+            };
+            now.duration_since(t.created_at) < ttl
+        });
+        // Keep only the most recent 3.
+        while toasts.len() > 3 {
+            toasts.remove(0);
+        }
+        terminal.draw(|f| {
+            render(
+                f,
+                &graph,
+                frame,
+                &version,
+                &recent,
+                reveal_count,
+                settled,
+                &toasts,
+            )
+        })?;
         tokio::select! {
             _ = spinner_tick.tick() => {
                 frame = frame.wrapping_add(1);
             }
             ev = rx.recv() => {
+                if channel_closed {
+                    // Channel already closed; avoid tight loop.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
                 match ev {
                     Some(progress) => {
                         if let BootProgress::Finish(step, _) = &progress {
@@ -152,20 +193,24 @@ pub async fn run_boot_animation(
                             ready_at = Some(std::time::Instant::now());
                         }
                     }
-                    None => break Ok(terminal),
+                    None => {
+                        channel_closed = true;
+                    }
                 }
             }
         }
-        if ready_at
+        let can_exit = ready_at
             .map(|t| t.elapsed() >= hold_after_ready)
             .unwrap_or(false)
-        {
-            break Ok(terminal);
+            || channel_closed;
+        if can_exit {
+            break Ok((terminal, toasts));
         }
     };
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     f: &mut ratatui::Frame,
     graph: &WorkflowGraph,
@@ -174,6 +219,7 @@ fn render(
     recent: &[crate::app::StartupSessionEntry],
     reveal_count: usize,
     settled: bool,
+    toasts: &[atman_runtime::notify::Notification],
 ) {
     let area = f.area();
     if area.width < 30 || area.height < 8 {
@@ -204,6 +250,30 @@ fn render(
         splash.input_slot,
     );
     if settled {
+        // Convert Notifications to ToastNotes and delegate to shared renderer.
+        let toast_notes: Vec<crate::app::ToastNote> = toasts
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let level = match n.level {
+                    atman_runtime::notify::NotifyLevel::Error => crate::app::NoteLevel::Error,
+                    atman_runtime::notify::NotifyLevel::Warn => crate::app::NoteLevel::Warn,
+                    atman_runtime::notify::NotifyLevel::Success => crate::app::NoteLevel::Success,
+                    _ => crate::app::NoteLevel::Info,
+                };
+                crate::app::ToastNote {
+                    id: format!("boot-{i}", i = i),
+                    level,
+                    message: n.message.clone(),
+                    ttl: std::time::Duration::from_secs(10),
+                    created: n.created_at,
+                    position: crate::app::ToastPosition::TopRight,
+                    fading: false,
+                    fade_started: None,
+                }
+            })
+            .collect();
+        crate::render_toast_notes(f, area, &toast_notes);
         return;
     }
     let (mut lines, _) = crate::output::render_workflow_panel_with_regions(
@@ -223,4 +293,28 @@ fn render(
     }
     f.render_widget(ratatui::widgets::Clear, splash.banner_rect);
     f.render_widget(Paragraph::new(lines), splash.banner_rect);
+    // Convert Notifications to ToastNotes and delegate to shared renderer.
+    let toast_notes: Vec<crate::app::ToastNote> = toasts
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let level = match n.level {
+                atman_runtime::notify::NotifyLevel::Error => crate::app::NoteLevel::Error,
+                atman_runtime::notify::NotifyLevel::Warn => crate::app::NoteLevel::Warn,
+                atman_runtime::notify::NotifyLevel::Success => crate::app::NoteLevel::Success,
+                _ => crate::app::NoteLevel::Info,
+            };
+            crate::app::ToastNote {
+                id: format!("boot-{i}", i = i),
+                level,
+                message: n.message.clone(),
+                ttl: std::time::Duration::from_secs(10),
+                created: n.created_at,
+                position: crate::app::ToastPosition::TopRight,
+                fading: false,
+                fade_started: None,
+            }
+        })
+        .collect();
+    crate::render_toast_notes(f, area, &toast_notes);
 }

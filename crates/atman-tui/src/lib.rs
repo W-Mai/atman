@@ -191,6 +191,8 @@ pub struct TuiHandle {
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub startup_intro: Option<app::StartupIntro>,
     pub trust: atman_runtime::trust::TrustConfig,
+    /// Toasts collected during boot, to be pushed to app on start.
+    pub boot_toasts: Vec<app::ToastNote>,
 }
 
 impl TuiHandle {
@@ -219,6 +221,7 @@ impl TuiHandle {
             session: Some(session),
             startup_intro: None,
             trust: atman_runtime::trust::TrustConfig::default(),
+            boot_toasts: Vec::new(),
         }
     }
 }
@@ -256,6 +259,12 @@ async fn run_frames(
     let ui_state = crate::states::PersistedUiState::load();
     ui_state.apply(&mut app);
     app.startup_intro = handle.startup_intro.take();
+    // Carry boot toasts into the live app so they persist seamlessly.
+    if !handle.boot_toasts.is_empty() {
+        for toast in std::mem::take(&mut handle.boot_toasts) {
+            app.push_toast(toast.message, toast.level, toast.ttl, toast.position);
+        }
+    }
     if let Some(rx) = handle.context_rx.as_ref() {
         app.context = rx.borrow().clone();
     }
@@ -2820,7 +2829,16 @@ fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect,
 }
 
 fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {
-    if app.toasts.is_empty() {
+    render_toast_notes(f, area, &app.toasts);
+}
+
+/// Render a list of toast notes. Public so boot_animation can reuse it.
+pub(crate) fn render_toast_notes(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    toasts: &[app::ToastNote],
+) {
+    if toasts.is_empty() {
         return;
     }
     use ratatui::style::{Modifier, Style};
@@ -2842,17 +2860,27 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
     ];
 
     for &pos in &positions {
-        let group: Vec<&app::ToastNote> = app.toasts.iter().filter(|t| t.position == pos).collect();
+        let group: Vec<&app::ToastNote> = toasts.iter().filter(|t| t.position == pos).collect();
         if group.is_empty() {
             continue;
         }
 
         let (base_x, y_start) = match pos {
-            app::ToastPosition::TopRight => (area.x + area.width.saturating_sub(max_w + 2), area.y + 1),
+            app::ToastPosition::TopRight => {
+                (area.x + area.width.saturating_sub(max_w + 2), area.y + 1)
+            }
             app::ToastPosition::TopLeft => (area.x + 1, area.y + 1),
-            app::ToastPosition::BottomRight => (area.x + area.width.saturating_sub(max_w + 2), area.y + area.height.saturating_sub(group.len() as u16 * item_h + 1)),
-            app::ToastPosition::BottomLeft => (area.x + 1, area.y + area.height.saturating_sub(group.len() as u16 * item_h + 1)),
-            app::ToastPosition::TopCenter => (area.x + (area.width.saturating_sub(max_w)) / 2, area.y + 1),
+            app::ToastPosition::BottomRight => (
+                area.x + area.width.saturating_sub(max_w + 2),
+                area.y + area.height.saturating_sub(group.len() as u16 * item_h + 1),
+            ),
+            app::ToastPosition::BottomLeft => (
+                area.x + 1,
+                area.y + area.height.saturating_sub(group.len() as u16 * item_h + 1),
+            ),
+            app::ToastPosition::TopCenter => {
+                (area.x + (area.width.saturating_sub(max_w)) / 2, area.y + 1)
+            }
         };
 
         // Calculate y offsets: fading toasts shift up, others close the gap
@@ -2860,7 +2888,9 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
         for i in 0..group.len() {
             if group[i].fading {
                 if let Some(fs) = group[i].fade_started {
-                    let progress = (now.duration_since(fs).as_millis() as f64 / fade_duration.as_millis() as f64).clamp(0.0, 1.0);
+                    let progress = (now.duration_since(fs).as_millis() as f64
+                        / fade_duration.as_millis() as f64)
+                        .clamp(0.0, 1.0);
                     fade_offsets[i] = (item_h as f64 * progress) as u16;
                 }
             }
@@ -2868,11 +2898,36 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
 
         for (i, toast) in group.iter().enumerate() {
             let (glyph, color, bg, label) = match toast.level {
-                NoteLevel::Error => ("✗", ratatui::style::Color::Red, theme.note_error_bg, " ERROR "),
-                NoteLevel::Warn => ("!", ratatui::style::Color::Yellow, theme.note_warn_bg, " WARN "),
-                NoteLevel::Info => ("·", ratatui::style::Color::Cyan, theme.note_info_bg, " INFO "),
-                NoteLevel::Success => ("✓", ratatui::style::Color::Green, theme.note_success_bg, " OK "),
-                NoteLevel::Debug => ("›", ratatui::style::Color::Gray, theme.note_debug_bg, " DEBUG "),
+                NoteLevel::Error => (
+                    "✗",
+                    ratatui::style::Color::Red,
+                    theme.note_error_bg,
+                    " ERROR ",
+                ),
+                NoteLevel::Warn => (
+                    "!",
+                    ratatui::style::Color::Yellow,
+                    theme.note_warn_bg,
+                    " WARN ",
+                ),
+                NoteLevel::Info => (
+                    "·",
+                    ratatui::style::Color::Cyan,
+                    theme.note_info_bg,
+                    " INFO ",
+                ),
+                NoteLevel::Success => (
+                    "✓",
+                    ratatui::style::Color::Green,
+                    theme.note_success_bg,
+                    " OK ",
+                ),
+                NoteLevel::Debug => (
+                    "›",
+                    ratatui::style::Color::Gray,
+                    theme.note_debug_bg,
+                    " DEBUG ",
+                ),
             };
 
             // Accumulate offset from all fading toasts before this one
@@ -2881,7 +2936,9 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
             let inner_w = max_w.saturating_sub(4);
             let rect = ratatui::layout::Rect {
                 x: base_x,
-                y: (y_start + i as u16 * item_h).saturating_sub(shift_up).saturating_sub(fade_offsets[i]),
+                y: (y_start + i as u16 * item_h)
+                    .saturating_sub(shift_up)
+                    .saturating_sub(fade_offsets[i]),
                 width: max_w,
                 height: item_h,
             };
@@ -2891,7 +2948,9 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
 
             if toast.fading {
                 if let Some(fs) = toast.fade_started {
-                    let progress = (now.duration_since(fs).as_millis() as f64 / fade_duration.as_millis() as f64).clamp(0.0, 1.0);
+                    let progress = (now.duration_since(fs).as_millis() as f64
+                        / fade_duration.as_millis() as f64)
+                        .clamp(0.0, 1.0);
                     if progress > 0.7 {
                         // Almost gone — hide completely
                         continue;
@@ -2906,7 +2965,10 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)
-                .title(Span::styled(label, border_style.add_modifier(Modifier::BOLD)))
+                .title(Span::styled(
+                    label,
+                    border_style.add_modifier(Modifier::BOLD),
+                ))
                 .style(style.bg(bg));
             let inner = block.inner(rect);
             f.render_widget(block, rect);
@@ -2922,10 +2984,20 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
                 width: bar_w,
                 height: 1,
             };
-            f.render_widget(Block::default().style(Style::default().bg(color).add_modifier(if toast.fading { Modifier::DIM } else { Modifier::empty() })), bar_rect);
+            f.render_widget(
+                Block::default().style(Style::default().bg(color).add_modifier(if toast.fading {
+                    Modifier::DIM
+                } else {
+                    Modifier::empty()
+                })),
+                bar_rect,
+            );
 
             let msg = format!(" {glyph} {}", toast.message);
-            let text = Paragraph::new(Line::from(Span::styled(msg, style.add_modifier(Modifier::BOLD))));
+            let text = Paragraph::new(Line::from(Span::styled(
+                msg,
+                style.add_modifier(Modifier::BOLD),
+            )));
             let text_rect = ratatui::layout::Rect {
                 x: inner.x + 1,
                 y: inner.y + 1,
@@ -2949,14 +3021,24 @@ fn render_notify_modal(f: &mut ratatui::Frame, area: ratatui::layout::Rect, mess
     let h = (lines.len() + 6).min(area.height.saturating_sub(4) as usize) as u16;
     let x = area.x + (area.width - w) / 2;
     let y = area.y + (area.height - h) / 2;
-    let rect = ratatui::layout::Rect { x, y, width: w, height: h };
+    let rect = ratatui::layout::Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
 
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Thick)
         .border_style(Style::default().fg(ratatui::style::Color::Red))
-        .title(Span::styled(" ⚠ ERROR ", Style::default().fg(ratatui::style::Color::Red).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " ⚠ ERROR ",
+            Style::default()
+                .fg(ratatui::style::Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ))
         .style(Style::default().bg(theme.note_error_bg));
     let inner = block.inner(rect);
     f.render_widget(block, rect);

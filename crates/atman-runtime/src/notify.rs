@@ -9,9 +9,9 @@
 //! notify!(debug, target: "auto_snapshot", "{} @ {}", name, rev);
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
 
 // ── Level ──────────────────────────────────────────────────────────
 
@@ -207,6 +207,19 @@ impl ScopedSink {
         *sink = Some(replacement);
         Self { prev }
     }
+
+    /// Install any sink (wrapping LogSink) and restore the previous on drop.
+    pub fn replace_with(user: Arc<dyn NotifySink>) -> Self {
+        let mut sink = GLOBAL_SINK.write().unwrap();
+        let prev = sink.take();
+        let log = LOG_SINK.read().unwrap().clone();
+        let replacement: Arc<dyn NotifySink> = match log {
+            Some(ls) => Arc::new(CompositeSink::new(vec![user, ls])),
+            None => user,
+        };
+        *sink = Some(replacement);
+        Self { prev }
+    }
 }
 
 impl Drop for ScopedSink {
@@ -243,6 +256,50 @@ impl NotifySink for CliSink {
     }
 }
 
+/// Sink that collects notifications into a shared buffer for rendering
+/// as toasts in the boot animation. Does not print to stdout/stderr.
+pub struct ToastCollector {
+    notifications: Arc<std::sync::Mutex<Vec<Notification>>>,
+}
+
+impl ToastCollector {
+    pub fn new() -> (Self, Arc<std::sync::Mutex<Vec<Notification>>>) {
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                notifications: buf.clone(),
+            },
+            buf,
+        )
+    }
+}
+
+impl NotifySink for ToastCollector {
+    fn emit(&self, note: &Notification) {
+        if let Ok(mut buf) = self.notifications.lock() {
+            // Apply dedupe: replace existing with same target+message pattern
+            if let Some(ref target) = note.target {
+                if let Some(prev) = buf
+                    .iter_mut()
+                    .find(|n| n.target.as_deref() == Some(target.as_str()))
+                {
+                    *prev = note.clone();
+                    return;
+                }
+            }
+            buf.push(note.clone());
+        }
+    }
+}
+
+impl Clone for ToastCollector {
+    fn clone(&self) -> Self {
+        Self {
+            notifications: self.notifications.clone(),
+        }
+    }
+}
+
 /// Sink that appends JSONL lines to a session log file.
 pub struct LogSink {
     base_dir: std::path::PathBuf,
@@ -251,7 +308,10 @@ pub struct LogSink {
 
 impl LogSink {
     pub fn new(base_dir: std::path::PathBuf) -> Self {
-        Self { base_dir, session_id: std::sync::RwLock::new(None) }
+        Self {
+            base_dir,
+            session_id: std::sync::RwLock::new(None),
+        }
     }
 
     pub fn set_session_id(&self, sid: Option<String>) {
@@ -285,7 +345,11 @@ impl NotifySink for LogSink {
             "target": target,
             "msg": note.message,
         });
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = writeln!(f, "{line}");
         }
     }
@@ -354,25 +418,6 @@ macro_rules! notify {
     (@level success) => { $crate::notify::NotifyLevel::Success };
     (@level debug) => { $crate::notify::NotifyLevel::Debug };
 
-    // Level only: notify!(level, "message", args...)
-    ($level:ident, $msg:expr $(, $arg:expr)* $(,)?) => {{
-        $crate::notify::global().emit(&$crate::notify::Notification::new(
-            $crate::notify!(@level $level),
-            format!($msg $(, $arg)*),
-        ));
-    }};
-
-    // Level + location: notify!(level, location = Loc, "message", args...)
-    ($level:ident, location = $loc:ident, $msg:expr $(, $arg:expr)* $(,)?) => {{
-        $crate::notify::global().emit(
-            &$crate::notify::Notification::new(
-                $crate::notify!(@level $level),
-                format!($msg $(, $arg)*),
-            )
-            .with_location($crate::notify::NotifyLocation::$loc),
-        );
-    }};
-
     // Level + location + stack: notify!(level, location = Loc, stack = fn("key"), "msg", args...)
     ($level:ident, location = $loc:ident, stack = $stack:ident ($($sk:expr),+), $msg:expr $(, $arg:expr)* $(,)?) => {{
         $crate::notify::global().emit(
@@ -397,6 +442,17 @@ macro_rules! notify {
         );
     }};
 
+    // Level + location: notify!(level, location = Loc, "message", args...)
+    ($level:ident, location = $loc:ident, $msg:expr $(, $arg:expr)* $(,)?) => {{
+        $crate::notify::global().emit(
+            &$crate::notify::Notification::new(
+                $crate::notify!(@level $level),
+                format!($msg $(, $arg)*),
+            )
+            .with_location($crate::notify::NotifyLocation::$loc),
+        );
+    }};
+
     // Debug + target: notify!(debug, target: "target_name", "msg", args...)
     ($level:ident, target: $target:expr, $msg:expr $(, $arg:expr)* $(,)?) => {{
         $crate::notify::global().emit(
@@ -407,6 +463,14 @@ macro_rules! notify {
             .with_target($target)
             .with_location($crate::notify::NotifyLocation::Log),
         );
+    }};
+
+    // Level only: notify!(level, "message", args...)
+    ($level:ident, $msg:expr $(, $arg:expr)* $(,)?) => {{
+        $crate::notify::global().emit(&$crate::notify::Notification::new(
+            $crate::notify!(@level $level),
+            format!($msg $(, $arg)*),
+        ));
     }};
 
     // Bare: notify!("message", args...)
@@ -473,10 +537,7 @@ mod tests {
 
     #[test]
     fn composite_fanout() {
-        let sink = CompositeSink::new(vec![
-            Arc::new(NoopSink),
-            Arc::new(CliSink),
-        ]);
+        let sink = CompositeSink::new(vec![Arc::new(NoopSink), Arc::new(CliSink)]);
         let n = Notification::new(NotifyLevel::Info, "hello");
         sink.emit(&n); // no panic
     }

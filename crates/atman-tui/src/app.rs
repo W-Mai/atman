@@ -656,7 +656,13 @@ impl AppState {
         });
     }
 
-    pub fn push_toast(&mut self, text: impl Into<String>, level: NoteLevel, ttl: std::time::Duration, position: ToastPosition) {
+    pub fn push_toast(
+        &mut self,
+        text: impl Into<String>,
+        level: NoteLevel,
+        ttl: std::time::Duration,
+        position: ToastPosition,
+    ) {
         let id = format!("toast-{}", self.toasts.len());
         self.toasts.push(ToastNote {
             id,
