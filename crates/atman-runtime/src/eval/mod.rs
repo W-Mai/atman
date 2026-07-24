@@ -1,3 +1,6 @@
+mod llm_args;
+mod llm_context;
+
 use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
 use crate::env::Env;
@@ -34,7 +37,7 @@ pub fn eval_expr<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>) -> BoxF
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ContextMode {
+pub(crate) enum ContextMode {
     None,
     Session,
     SessionRecent(usize),
@@ -222,7 +225,7 @@ async fn eval_pipe<'a>(lhs: &'a Expr, rhs: &'a Expr, env: &'a Env, ctx: &'a Eval
     }
 }
 
-fn expr_shape(e: &Expr) -> &'static str {
+pub(crate) fn expr_shape(e: &Expr) -> &'static str {
     match e {
         Expr::Literal(_) => "literal",
         Expr::Ident(_) => "identifier",
@@ -901,168 +904,27 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             )),
         },
         Node::Llm { kwargs } => {
-            let mut model: Option<String> = None;
-            let mut prompt: Option<String> = None;
-            let mut messages_override: Option<Vec<crate::message::Message>> = None;
-            let mut system: Option<String> = None;
-            let mut input: Value = Value::Unit;
-            let mut retry_count: u32 = 0;
-            let mut retry_kinds: Option<std::collections::HashSet<crate::error::ErrorKind>> = None;
-            let mut cache_prompt = false;
-            let mut context_budget: Option<u64> = None;
-            let mut context_mode = ContextMode::None;
-            let mut fallback_expr: Option<&Expr> = None;
-            let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
-            let mut stall_timeout_secs: u64 = 120;
-            for (k, v) in kwargs {
-                match k.name.as_str() {
-                    "schema" => continue,
-                    "fallback" => {
-                        fallback_expr = Some(v);
-                        continue;
-                    }
-                    "retry_classified" => {
-                        let idents = match parse_error_kind_list(v) {
-                            Ok(k) => k,
-                            Err(msg) => return Value::Err(RuntimeError::ToolFailed(msg)),
-                        };
-                        retry_kinds = Some(idents);
-                        continue;
-                    }
-                    "tools" => {
-                        match resolve_tool_specs(v, ctx.tools) {
-                            Ok(specs) => tool_specs = specs,
-                            Err(msg) => return Value::Err(RuntimeError::ToolFailed(msg)),
-                        }
-                        continue;
-                    }
-                    "context" => {
-                        context_mode = match v {
-                            atman_dsl::ast::Expr::Ident(id) => parse_context_mode(&id.name),
-                            atman_dsl::ast::Expr::Member { base, field } => {
-                                let mut full = String::new();
-                                if let atman_dsl::ast::Expr::Ident(id) = base.as_ref() {
-                                    full.push_str(&id.name);
-                                }
-                                full.push('.');
-                                full.push_str(&field.name);
-                                parse_context_mode(&full)
-                            }
-                            other => {
-                                return Value::Err(RuntimeError::ToolFailed(format!(
-                                    "llm.context: expected ident like `session` or `none`, got {}",
-                                    expr_shape(other)
-                                )));
-                            }
-                        };
-                        continue;
-                    }
-                    _ => {}
-                }
-                let val = eval_expr(v, env, ctx).await;
-                if val.is_err() {
-                    return val;
-                }
-                match k.name.as_str() {
-                    "model" => match val {
-                        Value::Str(s) => model = Some(crate::model_registry::resolve_alias(&s)),
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "string".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
-                    },
-                    "prompt" => match val {
-                        Value::Str(s) => prompt = Some(s),
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "string or @\"path\"".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
-                    },
-                    "messages" => match val {
-                        Value::List(items) => {
-                            let mut msgs = Vec::with_capacity(items.len());
-                            for item in items {
-                                match item {
-                                    Value::Message(m) => msgs.push(m),
-                                    other => {
-                                        return Value::Err(RuntimeError::TypeMismatch {
-                                            expected: "message".into(),
-                                            actual: other.kind_name().into(),
-                                        });
-                                    }
-                                }
-                            }
-                            messages_override = Some(msgs);
-                        }
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "list of message".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
-                    },
-                    "system" => match val {
-                        Value::Str(s) => system = Some(s),
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "string (system prompt)".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
-                    },
-                    "input" => input = val,
-                    "retry" => match val {
-                        Value::Int(n) if n >= 0 => retry_count = n as u32,
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "non-negative int".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
-                    },
-                    "cache" => match val {
-                        Value::Bool(b) => cache_prompt = b,
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "bool".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
-                    },
-                    "context_budget" => match val {
-                        Value::Int(n) if n > 0 => context_budget = Some(n as u64),
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "positive int".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
-                    },
-                    "stall_timeout" => match val {
-                        Value::Int(n) if n >= 0 => stall_timeout_secs = n as u64,
-                        other => {
-                            return Value::Err(RuntimeError::TypeMismatch {
-                                expected: "non-negative int (seconds)".into(),
-                                actual: other.kind_name().into(),
-                            });
-                        }
-                    },
-                    _ => {}
-                }
-            }
-            let Some(model) = model else {
+            let args = match llm_args::parse_llm_args(kwargs, env, ctx).await {
+                Ok(args) => args,
+                Err(v) => return v,
+            };
+            let Some(model) = args.model.clone() else {
                 return Value::Err(RuntimeError::MissingArg("llm.model".into()));
             };
-            if messages_override.is_some() && prompt.is_some() {
+            let mut system = args.system.clone();
+            let input = args.input.clone();
+            let retry_count = args.retry_count;
+            let retry_kinds = args.retry_kinds.clone();
+            let cache_prompt = args.cache_prompt;
+            let context_mode = parse_context_mode(&args.context_mode);
+            let tool_specs = args.tool_specs.clone();
+            let stall_timeout_secs = args.stall_timeout_secs;
+            if args.messages_override.is_some() && args.prompt.is_some() {
                 return Value::Err(RuntimeError::ToolFailed(
                     "llm node: cannot specify both `messages:` and `prompt:` (pick one)".into(),
                 ));
             }
-            if !matches!(context_mode, ContextMode::None) && messages_override.is_some() {
+            if !matches!(context_mode, ContextMode::None) && args.messages_override.is_some() {
                 return Value::Err(RuntimeError::ToolFailed(
                     "llm node: cannot specify both `messages:` and `context:` (pick one)".into(),
                 ));
@@ -1072,7 +934,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     "no provider registered for model `{model}`"
                 )));
             };
-            let has_messages_override = messages_override.is_some();
+            let has_messages_override = args.messages_override.is_some();
             if !matches!(context_mode, ContextMode::None)
                 && !has_messages_override
                 && let Some(session) = ctx.session.as_ref()
@@ -1096,55 +958,20 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now);
-            let (mut final_messages, prompt_for_budget) = if let Some(msgs) = messages_override {
-                let budget_text = msgs.last().map(|m| m.text_concat()).unwrap_or_default();
-                (msgs, budget_text)
-            } else if !matches!(context_mode, ContextMode::None)
-                && let Some(session) = ctx.session.as_ref()
-            {
-                let mut history = match context_mode {
-                    ContextMode::Session => session.messages(),
-                    ContextMode::SessionRecent(n) => {
-                        let all = session.messages();
-                        let start = all.len().saturating_sub(n);
-                        all[start..].to_vec()
-                    }
-                    ContextMode::None => Vec::new(),
-                };
-                let budget_text = prompt.clone().unwrap_or_default();
-                if let Some(p) = prompt
-                    && !p.is_empty()
-                {
-                    history.push(crate::message::Message::user_text(turn_id.clone(), p));
-                }
-                (history, budget_text)
-            } else {
-                let Some(mut prompt_text) = prompt else {
-                    return Value::Err(RuntimeError::MissingArg(
-                        "llm node: either `prompt:` or `messages:` required".into(),
-                    ));
-                };
-                if let Some(budget) = context_budget {
-                    let (truncated, stat) = truncate_prompt_to_budget_tracked(prompt_text, budget);
-                    prompt_text = truncated;
-                    if let (Some(sink), Some(stat)) = (ctx.events, stat) {
-                        sink.emit(crate::event::Event::ContextTruncated {
-                            seq: 0,
-                            turn_id: Some(turn_id.clone()),
-                            flow_run_id: ctx.flow_run_id.clone(),
-                            original_chars: stat.original_chars as u64,
-                            result_chars: stat.result_chars as u64,
-                            dropped_chars: stat.dropped_chars as u64,
-                            budget_tokens: stat.budget_tokens,
-                            ts: chrono::Utc::now(),
-                        });
-                    }
-                }
-                let user_msg =
-                    crate::message::Message::user_text(turn_id.clone(), prompt_text.clone());
-                (vec![user_msg], prompt_text)
+            let llm_context = match llm_context::build_llm_context(
+                &args,
+                context_mode,
+                ctx.session.as_ref(),
+                &turn_id,
+                ctx.events,
+                ctx.flow_run_id.as_ref(),
+            ) {
+                Ok(context) => context,
+                Err(v) => return v,
             };
-            let session_messages_len = final_messages.len();
+            let mut final_messages = llm_context.messages;
+            let prompt_for_budget = llm_context.budget_text;
+            let session_messages_len = llm_context.session_messages_len;
             if let Some(session) = ctx.session.as_ref()
                 && let Some(l3_or_l2) = session.peek_pending_l2_or_higher(&turn_id)
                 && matches!(l3_or_l2.level, crate::injection::InjectionLevel::L3Redirect)
@@ -1451,7 +1278,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 }
                 break;
             }
-            if let Some(fb) = fallback_expr {
+            if let Some(fb) = args.fallback_expr.as_ref() {
                 return eval_expr(fb, env, ctx).await;
             }
             if let Some(session) = ctx.session.as_ref()
@@ -2025,7 +1852,7 @@ pub struct TruncationStat {
     pub budget_tokens: u64,
 }
 
-fn resolve_tool_specs(
+pub(crate) fn resolve_tool_specs(
     expr: &Expr,
     tools: &crate::tool::ToolRegistry,
 ) -> Result<Vec<crate::tool::ToolSpec>, String> {
@@ -2095,7 +1922,7 @@ fn tool_ref_name(expr: &Expr) -> Option<String> {
     }
 }
 
-fn parse_error_kind_list(
+pub(crate) fn parse_error_kind_list(
     expr: &Expr,
 ) -> Result<std::collections::HashSet<crate::error::ErrorKind>, String> {
     let items = match expr {
