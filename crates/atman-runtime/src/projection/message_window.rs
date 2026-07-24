@@ -475,7 +475,7 @@ impl EventEnvelopeExt for [crate::event::EventEnvelope] {
     }
 }
 
-fn replay_env_into(env: &crate::event::EventEnvelope, acc: &mut Vec<(u64, Message)>) {
+pub fn replay_env_into(env: &crate::event::EventEnvelope, acc: &mut Vec<(u64, Message)>) {
     match &env.event {
         crate::event::Event::UserMsg { message, .. }
         | crate::event::Event::AssistantMsg { message, .. }

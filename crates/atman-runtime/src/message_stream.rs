@@ -57,63 +57,7 @@ impl MessageStream {
 
 fn replay_events_into(acc: &mut Vec<(u64, Message)>, events: &[EventEnvelope]) {
     for ev in events {
-        let seq = ev.seq;
-        match &ev.event {
-            Event::UserMsg { message, .. }
-            | Event::AssistantMsg { message, .. }
-            | Event::ToolResultMsg { message, .. }
-            | Event::SystemMsg { message, .. } => {
-                acc.push((seq, message.clone()));
-            }
-            Event::ContextCompact {
-                compacted_range_start,
-                compacted_range_end,
-                replacement_msg_seq,
-                summary_text,
-                after_tokens,
-                before_tokens,
-                ..
-            } => {
-                let range_start = *compacted_range_start as usize;
-                let range_end = *compacted_range_end as usize;
-                if range_start > range_end || range_end >= acc.len() {
-                    continue;
-                }
-                let Some(rep_seq) = replacement_msg_seq else {
-                    continue;
-                };
-                let Some(rep_idx) = acc.iter().position(|(s, _)| s == rep_seq) else {
-                    continue;
-                };
-                if after_tokens >= before_tokens {
-                    continue;
-                }
-                let replacement = acc.remove(rep_idx);
-                let removed_count = range_end - range_start + 1;
-                for _ in 0..removed_count {
-                    acc.remove(range_start);
-                }
-                let insertion_idx = range_start.min(acc.len());
-                if let Some(summary) = summary_text {
-                    acc.insert(
-                        insertion_idx,
-                        (
-                            *rep_seq,
-                            Message::system_compact_summary(
-                                crate::event::TurnId::now(),
-                                summary.clone(),
-                                range_start as u64,
-                                range_end as u64,
-                                removed_count,
-                            ),
-                        ),
-                    );
-                } else {
-                    acc.insert(insertion_idx, replacement);
-                }
-            }
-            _ => {}
-        }
+        crate::projection::message_window::replay_env_into(ev, acc);
     }
 }
 
