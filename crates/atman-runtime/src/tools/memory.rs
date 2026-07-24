@@ -134,7 +134,7 @@ impl Tool for MemoryRecentTurns {
             let Some(session) = ctx.session.as_ref() else {
                 return Ok(Value::List(Vec::new()));
             };
-            let msgs = session.full_messages();
+            let msgs = session.messages_full();
             let start = msgs.len().saturating_sub(n);
             let out: Vec<Value> = msgs
                 .iter()
@@ -772,7 +772,7 @@ impl Tool for MemoryHistorySearch {
                     .map_err(|e| RuntimeError::ToolFailed(format!("memory.history.search: {e}")))?
             } else if let Some(session) = ctx.session.as_ref() {
                 // Fallback: grep current session's full messages
-                let msgs = session.full_messages();
+                let msgs = session.messages_full();
                 let mut hits = Vec::new();
                 let query_lower = query.to_lowercase();
                 for (i, msg) in msgs.iter().enumerate() {
