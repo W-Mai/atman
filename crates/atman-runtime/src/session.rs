@@ -1755,8 +1755,8 @@ impl Session {
         let msgs = self.messages();
         let tokens = crate::compaction::estimate_tokens_for_messages(&msgs);
         let info = crate::model_registry::model_info(&self.last_model());
-        let threshold = info.compact_threshold_tokens();
-        let range = crate::compaction::find_compact_range(&msgs, threshold)?;
+        let target = info.compaction_target_after();
+        let range = crate::compaction::find_compact_range(&msgs, target)?;
         self.compact_messages(summary, range, tokens)
     }
 

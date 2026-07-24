@@ -237,6 +237,31 @@ impl ModelInfo {
         (available as f64 * self.compact_threshold_ratio) as u64
     }
 
+    pub fn compaction_trigger_threshold(&self) -> u64 {
+        let budget = self.context_budget;
+
+        let configured_output = self.max_output_tokens.unwrap_or(32_000) as u64;
+        let output_cap = (budget as f64 * 0.20) as u64;
+        let output_reserve = configured_output.min(output_cap).max(8_000);
+
+        let safety = (budget as f64 * 0.05) as u64;
+        let safety_margin = safety.max(4_000);
+
+        let trigger = budget
+            .saturating_sub(output_reserve)
+            .saturating_sub(safety_margin);
+        let floor = (budget as f64 * 0.50) as u64;
+        let ceiling = (budget as f64 * 0.95) as u64;
+        trigger.clamp(floor, ceiling)
+    }
+
+    pub fn compaction_target_after(&self) -> u64 {
+        let trigger = self.compaction_trigger_threshold();
+        let budget_cap = (self.context_budget as f64 * 0.60) as u64;
+        let trigger_cap = (trigger as f64 * 0.75) as u64;
+        budget_cap.min(trigger_cap)
+    }
+
     pub fn thinking_enabled(&self) -> bool {
         self.thinking_enabled
     }
@@ -408,6 +433,27 @@ mod tests {
     }
 
     #[test]
+    fn compaction_trigger_is_near_budget_top() {
+        let info = model_info("claude-opus-4.7");
+        let trigger = info.compaction_trigger_threshold();
+        assert!(
+            trigger > 150_000 && trigger <= 190_000,
+            "trigger should be near the top of the budget, got {trigger}"
+        );
+    }
+
+    #[test]
+    fn compaction_target_is_lower_than_trigger() {
+        let info = model_info("claude-opus-4.7");
+        let trigger = info.compaction_trigger_threshold();
+        let target = info.compaction_target_after();
+        assert!(
+            target < trigger,
+            "target {target} should be less than trigger {trigger}"
+        );
+    }
+
+    #[test]
     fn alias_resolves_to_real_model() {
         let _lock = TEST_CFG_LOCK.lock().unwrap();
         let mut cfg = ModelConfig::default();
@@ -466,6 +512,11 @@ mod tests {
         set_model_config(cfg);
         let info = model_info("large-output");
         assert_eq!(info.compact_threshold_tokens(), 480_000);
+        let trigger = info.compaction_trigger_threshold();
+        assert!(
+            trigger > 700_000,
+            "trigger with capped output reserve should be > 700K, got {trigger}"
+        );
     }
 
     #[test]

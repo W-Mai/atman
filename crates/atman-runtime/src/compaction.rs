@@ -256,7 +256,8 @@ async fn maybe_auto_compact_locked(
 ) {
     let forced = session.take_manual_compact_request();
     let info = crate::model_registry::model_info(model);
-    let threshold = info.compact_threshold_tokens();
+    let trigger = info.compaction_trigger_threshold();
+    let target = info.compaction_target_after();
     let msgs = session.messages();
     let provider_tokens = session.last_input_tokens();
     let current = if provider_tokens > 0 {
@@ -264,17 +265,17 @@ async fn maybe_auto_compact_locked(
     } else {
         estimate_tokens_for_messages(&msgs)
     };
-    if !forced && current <= threshold {
+    if !forced && current <= trigger {
         return;
     }
     if !forced && !session.approval_cooldown_ok_for_compact() {
         return;
     }
-    let Some(range) = find_compact_range(&msgs, threshold) else {
+    let Some(range) = find_compact_range(&msgs, target) else {
         session.emit_compact_warning(
             model,
             current,
-            threshold,
+            trigger,
             info.context_budget,
             "no compactible span — history too short or already fully compacted",
         );
@@ -312,7 +313,7 @@ async fn maybe_auto_compact_locked(
             session.emit_compact_warning(
                 model,
                 current,
-                threshold,
+                trigger,
                 info.context_budget,
                 &format!("LLM summary failed: {err}. Degraded to placeholder."),
             );
@@ -367,7 +368,7 @@ async fn maybe_auto_compact_locked(
             session.emit_compact_warning(
                 model,
                 current,
-                threshold,
+                trigger,
                 info.context_budget,
                 "no compactible span — history too short or already fully compacted",
             );
