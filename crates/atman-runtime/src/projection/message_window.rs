@@ -461,6 +461,79 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
 
 use crate::event_log::reader::RawEventRow;
 
+pub trait EventEnvelopeExt {
+    fn replay_messages(&self) -> Vec<Message>;
+}
+
+impl EventEnvelopeExt for [crate::event::EventEnvelope] {
+    fn replay_messages(&self) -> Vec<Message> {
+        let mut acc: Vec<(u64, Message)> = Vec::new();
+        for env in self {
+            replay_env_into(env, &mut acc);
+        }
+        acc.into_iter().map(|(_, msg)| msg).collect()
+    }
+}
+
+fn replay_env_into(env: &crate::event::EventEnvelope, acc: &mut Vec<(u64, Message)>) {
+    match &env.event {
+        crate::event::Event::UserMsg { message, .. }
+        | crate::event::Event::AssistantMsg { message, .. }
+        | crate::event::Event::ToolResultMsg { message, .. }
+        | crate::event::Event::SystemMsg { message, .. } => {
+            acc.push((env.seq, message.clone()));
+        }
+        crate::event::Event::ContextCompact {
+            compacted_range_start,
+            compacted_range_end,
+            replacement_msg_seq,
+            summary_text,
+            after_tokens,
+            before_tokens,
+            ..
+        } => {
+            let range_start = *compacted_range_start as usize;
+            let range_end = *compacted_range_end as usize;
+            if range_start > range_end || range_end >= acc.len() {
+                return;
+            }
+            let Some(rep_seq) = replacement_msg_seq else {
+                return;
+            };
+            let Some(rep_idx) = acc.iter().position(|(s, _)| s == rep_seq) else {
+                return;
+            };
+            if after_tokens >= before_tokens {
+                return;
+            }
+            let replacement = acc.remove(rep_idx);
+            let removed_count = range_end - range_start + 1;
+            for _ in 0..removed_count {
+                acc.remove(range_start);
+            }
+            let insertion_idx = range_start.min(acc.len());
+            if let Some(summary) = summary_text {
+                acc.insert(
+                    insertion_idx,
+                    (
+                        *rep_seq,
+                        Message::system_compact_summary(
+                            crate::event::TurnId::now(),
+                            summary.clone(),
+                            range_start as u64,
+                            range_end as u64,
+                            removed_count,
+                        ),
+                    ),
+                );
+            } else {
+                acc.insert(insertion_idx, replacement);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub trait RawEventRowExt {
     fn find_checkpoint(&self) -> Option<(u64, Vec<Message>)>;
     fn replay_messages(&self, checkpoint: Option<(u64, Vec<Message>)>) -> Vec<Message>;
@@ -585,7 +658,7 @@ mod tests {
     use super::*;
     use crate::event::TurnId;
     use crate::event_log::reader::RawEventRow;
-    use crate::message::{MessagePart, MessageRole};
+    use crate::message::MessagePart;
     use serde_json::json;
 
     fn row(kind: &str, seq: u64, value: serde_json::Value) -> RawEventRow {
@@ -616,7 +689,7 @@ mod tests {
 
     #[test]
     fn replay_messages_composition() {
-        let rows = vec![
+        let rows = [
             user_msg_row(1, "hello"),
             assistant_msg_row(2, "hi there"),
             user_msg_row(3, "how are you"),
@@ -630,7 +703,7 @@ mod tests {
     #[test]
     fn replay_with_checkpoint_skips_old() {
         let summary = Message::system_compact_summary(TurnId::now(), "summary", 0, 3, 4);
-        let rows = vec![
+        let rows = [
             user_msg_row(1, "old1"),
             user_msg_row(2, "old2"),
             user_msg_row(5, "after checkpoint"),
@@ -647,7 +720,7 @@ mod tests {
     #[test]
     fn replay_with_attachment_degraded() {
         let turn = TurnId::now();
-        let rows = vec![
+        let rows = [
             row(
                 "user_msg",
                 1,
@@ -666,7 +739,7 @@ mod tests {
 
     #[test]
     fn replay_with_context_compact() {
-        let rows = vec![
+        let rows = [
             user_msg_row(1, "old user 1"),
             assistant_msg_row(2, "old assistant 1"),
             user_msg_row(3, "old user 2"),
@@ -693,7 +766,7 @@ mod tests {
 
     #[test]
     fn find_checkpoint_finds_last() {
-        let rows = vec![
+        let rows = [
             user_msg_row(1, "a"),
             row(
                 "checkpoint",
@@ -711,5 +784,18 @@ mod tests {
         assert_eq!(seq, 4);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text_concat(), "b");
+    }
+
+    #[test]
+    fn typed_envelope_replay() {
+        let sink = crate::event::EventSink::new();
+        sink.emit(crate::event::Event::UserMsg {
+            turn_id: TurnId::now(),
+            message: Message::user_text(TurnId::now(), "hello"),
+        });
+        let e = sink.snapshot_envelopes();
+        let msgs = e.as_slice().replay_messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text_concat(), "hello");
     }
 }

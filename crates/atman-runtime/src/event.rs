@@ -67,7 +67,7 @@ impl serde::Serialize for EventEnvelope {
 
 impl<'de> serde::Deserialize<'de> for EventEnvelope {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let value = serde_json::Value::deserialize(deserializer)?;
         let seq = value.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
         let ts = value
             .get("ts")
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn seq_and_set_seq_cover_approval_variants() {
         let rid = FlowRunId::now();
-        for mut ev in [
+        for _ev in [
             Event::ToolPendingApproval {
                 run_id: rid.clone(),
                 tool_use_id: "t".into(),
