@@ -86,7 +86,7 @@ pub fn register_discovered(prefix: &str, models: &[crate::provider::DiscoveredMo
     let slugs: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
     register_model_entries(entries);
     set_discovered_models(slugs.clone());
-    crate::notify!(debug, "{} models: {}", prefix, slugs.join(", "));
+    crate::notify!(debug, target: "model_registry", "{} models: {}", prefix, slugs.join(", "));
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +378,11 @@ pub fn update_alias_in_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    /// Tests that mutate MODEL_CONFIG must hold this lock to avoid races
+    /// when cargo test runs them in parallel.
+    static TEST_CFG_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn claude_opus_returns_200k() {
@@ -404,6 +409,7 @@ mod tests {
 
     #[test]
     fn alias_resolves_to_real_model() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
         let mut cfg = ModelConfig::default();
         cfg.aliases.insert(
             "smart".into(),
@@ -419,6 +425,7 @@ mod tests {
 
     #[test]
     fn custom_model_overrides_budget() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
         let mut cfg = ModelConfig::default();
         cfg.models.insert(
             "my-local-model".into(),
@@ -441,6 +448,7 @@ mod tests {
 
     #[test]
     fn compact_threshold_reserves_configured_output_tokens() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
         let mut cfg = ModelConfig::default();
         cfg.models.insert(
             "large-output".into(),
@@ -462,6 +470,7 @@ mod tests {
 
     #[test]
     fn alias_chains_through_custom_model() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
         let mut cfg = ModelConfig::default();
         cfg.aliases.insert(
             "default".into(),
