@@ -553,12 +553,10 @@ fn emit_child_flow_start(ctx: &ToolCtx, run_id: &FlowRunId, goal: &str) {
     let parent_node_id = ctx.current_node_id.clone();
     if let Some(sink) = &ctx.events {
         sink.emit(Event::FlowStart {
-            seq: 0,
             run_id: run_id.clone(),
             flow_name: "agent.sub".into(),
             parent_run_id: parent_run_id.clone(),
             parent_node_id: parent_node_id.clone(),
-            ts: chrono::Utc::now(),
         });
     }
     if let Some(tx) = &ctx.stream_tx {
@@ -576,12 +574,10 @@ fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
     let parent_node_id = ctx.current_node_id.clone();
     if let Some(sink) = &ctx.events {
         sink.emit(Event::FlowStart {
-            seq: 0,
             run_id: run_id.clone(),
             flow_name: flow_name.into(),
             parent_run_id: parent_run_id.clone(),
             parent_node_id: parent_node_id.clone(),
-            ts: chrono::Utc::now(),
         });
     }
     if let Some(tx) = &ctx.stream_tx {
@@ -597,11 +593,9 @@ fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
 fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
     if let Some(sink) = &ctx.events {
         sink.emit(Event::FlowEnd {
-            seq: 0,
             run_id: run_id.clone(),
             flow_name: "agent.sub".into(),
             status: status.clone(),
-            ts: chrono::Utc::now(),
         });
     }
     if let Some(tx) = &ctx.stream_tx {
@@ -622,7 +616,6 @@ fn emit_child_llm_call(
 ) {
     if let Some(sink) = &ctx.events {
         sink.emit(Event::LlmCall {
-            seq: 0,
             model: model.into(),
             provider: "sub".into(),
             usage: am.token_usage.clone(),
@@ -632,7 +625,6 @@ fn emit_child_llm_call(
             status: crate::event::LlmCallStatus::Ok,
             run_id: None,
             node_id: None,
-            ts: chrono::Utc::now(),
         });
     }
 }
@@ -641,11 +633,9 @@ fn emit_assistant_msg(ctx: &ToolCtx, run_id: &FlowRunId, message: &Message) {
     let turn_id = message.turn_id.clone();
     if let Some(sink) = &ctx.events {
         sink.emit(Event::AssistantMsg {
-            seq: 0,
             turn_id: turn_id.clone(),
             flow_run_id: Some(run_id.clone()),
             message: message.clone(),
-            ts: chrono::Utc::now(),
         });
     }
     if let Some(tx) = &ctx.stream_tx {
@@ -660,11 +650,9 @@ fn emit_tool_result_msg(ctx: &ToolCtx, run_id: &FlowRunId, message: &Message) {
     let turn_id = message.turn_id.clone();
     if let Some(sink) = &ctx.events {
         sink.emit(Event::ToolResultMsg {
-            seq: 0,
             turn_id: turn_id.clone(),
             flow_run_id: Some(run_id.clone()),
             message: message.clone(),
-            ts: chrono::Utc::now(),
         });
     }
     if let Some(tx) = &ctx.stream_tx {

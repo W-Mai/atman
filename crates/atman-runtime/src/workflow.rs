@@ -109,7 +109,6 @@ impl WorkflowGraph {
                 flow_name,
                 parent_run_id,
                 parent_node_id,
-                ts,
                 ..
             } => {
                 let run_id_str = run_id.0.to_string();
@@ -128,7 +127,7 @@ impl WorkflowGraph {
                     },
                     label: flow_name.clone(),
                     status: NodeStatus::Running,
-                    started_at: Some(*ts),
+                    started_at: Some(chrono::Utc::now()),
                     ended_at: None,
                     output_preview: None,
                     children: Vec::new(),
@@ -146,9 +145,7 @@ impl WorkflowGraph {
                     _ => self.root.push(node),
                 }
             }
-            Event::FlowEnd {
-                run_id, status, ts, ..
-            } => {
+            Event::FlowEnd { run_id, status, .. } => {
                 let id = run_id.0.to_string();
                 if let Some(n) = find_node_mut(&mut self.root, &id) {
                     let new_status = match status {
@@ -157,11 +154,11 @@ impl WorkflowGraph {
                         FlowStatus::Cancelled => NodeStatus::Cancelled,
                     };
                     n.status = new_status;
-                    n.ended_at = Some(*ts);
+                    n.ended_at = Some(chrono::Utc::now());
                     for child in n.children.iter_mut() {
                         if matches!(child.status, NodeStatus::Running | NodeStatus::Pending) {
                             child.status = new_status;
-                            child.ended_at = Some(*ts);
+                            child.ended_at = Some(chrono::Utc::now());
                         }
                     }
                 }
@@ -172,7 +169,6 @@ impl WorkflowGraph {
                 kind: nk,
                 label,
                 parent_node_id,
-                ts,
                 ..
             } => {
                 let rid = run_id.0.to_string();
@@ -193,7 +189,7 @@ impl WorkflowGraph {
                     kind,
                     label: label.clone(),
                     status: NodeStatus::Running,
-                    started_at: Some(*ts),
+                    started_at: Some(chrono::Utc::now()),
                     ended_at: None,
                     output_preview: None,
                     children: Vec::new(),
@@ -213,7 +209,6 @@ impl WorkflowGraph {
                 node_id,
                 status,
                 output_preview,
-                ts,
                 ..
             } => {
                 let scoped = scope_id(&run_id.0.to_string(), node_id);
@@ -224,14 +219,14 @@ impl WorkflowGraph {
                         FlowNodeStatus::Cancelled => NodeStatus::Cancelled,
                     };
                     n.status = new_status;
-                    n.ended_at = Some(*ts);
+                    n.ended_at = Some(chrono::Utc::now());
                     if let Some(p) = output_preview {
                         n.output_preview = Some(p.clone());
                     }
                     for child in n.children.iter_mut() {
                         if matches!(child.status, NodeStatus::Running | NodeStatus::Pending) {
                             child.status = new_status;
-                            child.ended_at = Some(*ts);
+                            child.ended_at = Some(chrono::Utc::now());
                         }
                     }
                 }
@@ -268,7 +263,6 @@ impl WorkflowGraph {
                 tool_use_id,
                 tool_name,
                 args_preview,
-                ts,
                 ..
             } => {
                 let rid = run_id.0.to_string();
@@ -284,7 +278,7 @@ impl WorkflowGraph {
                     },
                     label: tool_name.clone(),
                     status: NodeStatus::Running,
-                    started_at: Some(*ts),
+                    started_at: Some(chrono::Utc::now()),
                     ended_at: None,
                     output_preview: None,
                     children: Vec::new(),
@@ -299,7 +293,6 @@ impl WorkflowGraph {
             Event::AssistantMsg {
                 flow_run_id,
                 message,
-                ts,
                 ..
             } => {
                 let Some(flow_id) = flow_run_id.as_ref().map(|r| r.0.to_string()) else {
@@ -323,7 +316,7 @@ impl WorkflowGraph {
                             },
                             label: name.clone(),
                             status: NodeStatus::Running,
-                            started_at: Some(*ts),
+                            started_at: Some(chrono::Utc::now()),
                             ended_at: None,
                             output_preview: None,
                             children: Vec::new(),
@@ -340,7 +333,6 @@ impl WorkflowGraph {
             Event::ToolResultMsg {
                 flow_run_id,
                 message,
-                ts,
                 ..
             } => {
                 let flow_id = flow_run_id.as_ref().map(|r| r.0.to_string());
@@ -365,7 +357,7 @@ impl WorkflowGraph {
                             } else {
                                 NodeStatus::Ok
                             };
-                            n.ended_at = Some(*ts);
+                            n.ended_at = Some(chrono::Utc::now());
                             let preview: String = content.chars().take(300).collect();
                             n.output_preview = Some(preview.clone());
                             if let WorkflowNodeKind::ToolCall { result_preview, .. } = &mut n.kind {
@@ -665,20 +657,16 @@ impl WorkflowGraph {
                     return;
                 };
                 self.apply_event(&Event::AssistantMsg {
-                    seq: 0,
                     turn_id: crate::event::TurnId::now(),
                     flow_run_id: Some(crate::event::FlowRunId(uuid)),
                     message: message.clone(),
-                    ts: chrono::Utc::now(),
                 });
             }
             StreamFrame::ToolResultMsg { message, .. } => {
                 self.apply_event(&Event::ToolResultMsg {
-                    seq: 0,
                     turn_id: crate::event::TurnId::now(),
                     flow_run_id: None,
                     message: message.clone(),
-                    ts: chrono::Utc::now(),
                 });
             }
             StreamFrame::ToolPendingApproval {
@@ -803,46 +791,38 @@ mod tests {
 
     fn flow_start(run_id: FlowRunId, name: &str) -> Event {
         Event::FlowStart {
-            seq: 0,
             run_id,
             flow_name: name.into(),
             parent_run_id: None,
             parent_node_id: None,
-            ts: now(),
         }
     }
 
     fn subflow_start(child: FlowRunId, parent: FlowRunId, parent_node: &str, name: &str) -> Event {
         Event::FlowStart {
-            seq: 0,
             run_id: child,
             flow_name: name.into(),
             parent_run_id: Some(parent),
             parent_node_id: Some(parent_node.into()),
-            ts: now(),
         }
     }
 
     fn stmt_start(run_id: FlowRunId, node_id: &str, parent: Option<&str>) -> Event {
         Event::FlowNodeStart {
-            seq: 0,
             run_id,
             node_id: node_id.into(),
             kind: NodeKind::UserConfirm,
             label: node_id.into(),
             parent_node_id: parent.map(String::from),
-            ts: now(),
         }
     }
 
     fn stmt_end(run_id: FlowRunId, node_id: &str, status: FlowNodeStatus) -> Event {
         Event::FlowNodeEnd {
-            seq: 0,
             run_id,
             node_id: node_id.into(),
             status,
             output_preview: None,
-            ts: now(),
         }
     }
 
@@ -888,21 +868,17 @@ mod tests {
         g.apply_event(&flow_start(rid.clone(), "main"));
         g.apply_event(&stmt_start(rid.clone(), "stmt_0", None));
         g.apply_event(&Event::ToolNode {
-            seq: 0,
             run_id: rid.clone(),
             parent_node_id: "stmt_0".into(),
             tool_use_id: "tu_1".into(),
             tool_name: "fs.read".into(),
             args_preview: "{\"path\":\"a\"}".into(),
-            ts: now(),
         });
         g.apply_event(&stmt_end(rid.clone(), "stmt_0", FlowNodeStatus::Ok));
         g.apply_event(&Event::FlowEnd {
-            seq: 0,
             run_id: rid.clone(),
             flow_name: "main".into(),
             status: FlowStatus::Ok,
-            ts: now(),
         });
         let scoped = scope_id(&rid.0.to_string(), "stmt_0");
         let stmt = g.find_node(&scoped).unwrap();
@@ -941,13 +917,11 @@ mod tests {
         let mut g = WorkflowGraph::new(TurnId::now());
         g.apply_event(&stmt_start(FlowRunId::now(), "stmt_0", Some("missing")));
         g.apply_event(&Event::ToolNode {
-            seq: 0,
             run_id: FlowRunId::now(),
             parent_node_id: "missing".into(),
             tool_use_id: "tu".into(),
             tool_name: "t".into(),
             args_preview: "{}".into(),
-            ts: now(),
         });
         assert!(g.root.is_empty());
     }

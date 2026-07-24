@@ -50,14 +50,12 @@ pub fn build_llm_context(
             prompt_text = truncated;
             if let (Some(sink), Some(stat)) = (events, stat) {
                 sink.emit(crate::event::Event::ContextTruncated {
-                    seq: 0,
                     turn_id: Some(turn_id.clone()),
                     flow_run_id: flow_run_id.cloned(),
                     original_chars: stat.original_chars as u64,
                     result_chars: stat.result_chars as u64,
                     dropped_chars: stat.dropped_chars as u64,
                     budget_tokens: stat.budget_tokens,
-                    ts: chrono::Utc::now(),
                 });
             }
         }

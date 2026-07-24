@@ -359,13 +359,11 @@ async fn dispatch_tool_call<'a>(
         (ctx.events, ctx.flow_run_id.clone(), &ctx.current_node_id)
     {
         sink.emit(crate::event::Event::ToolNode {
-            seq: 0,
             run_id: run_id.clone(),
             parent_node_id: parent_node.clone(),
             tool_use_id: tool_call_id.clone(),
             tool_name: name.clone(),
             args_preview: args_preview.clone(),
-            ts: chrono::Utc::now(),
         });
         if let Some(tx) = &stream_tx {
             let _ = tx.send(crate::stream::StreamFrame::ToolNode {
@@ -429,14 +427,12 @@ async fn dispatch_tool_call<'a>(
             complete_diff_preview(diff_preview, &name, value)
         {
             sink.emit(crate::event::Event::DiffPreview {
-                seq: 0,
                 turn_id: ctx.turn_id.clone(),
                 flow_run_id: ctx.flow_run_id.clone(),
                 title,
                 old_content,
                 new_content,
                 unified_diff,
-                ts: chrono::Utc::now(),
             });
         }
     }
@@ -833,13 +829,11 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         };
                         if let (Some(sink), Some(run_id)) = (ctx.events, ctx.flow_run_id.clone()) {
                             sink.emit(crate::event::Event::FlowNodeStart {
-                                seq: 0,
                                 run_id: run_id.clone(),
                                 node_id: branch_id.clone(),
                                 kind: crate::nodegraph::NodeKind::UserConfirm,
                                 label: format!("branch[{i}]"),
                                 parent_node_id: parent_id.clone(),
-                                ts: chrono::Utc::now(),
                             });
                             if let Some(session) = ctx.session.as_ref() {
                                 let _ = session.stream_tx().send(
@@ -871,12 +865,10 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             crate::event::FlowNodeStatus::Ok
                         };
                         sink.emit(crate::event::Event::FlowNodeEnd {
-                            seq: 0,
                             run_id: run_id.clone(),
                             node_id: bid.clone(),
                             status: status.clone(),
                             output_preview: None,
-                            ts: chrono::Utc::now(),
                         });
                         if let Some(session) = ctx.session.as_ref() {
                             let _ =
@@ -1030,14 +1022,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     };
                     for category in verdict.categories() {
                         sink.emit(crate::event::Event::ContentFilterHit {
-                            seq: 0,
                             turn_id: Some(turn_id.clone()),
                             flow_run_id: ctx.flow_run_id.clone(),
                             provider: safety.classifier.kind().to_string(),
                             model: model.clone(),
                             category: category.clone(),
                             action: action.to_string(),
-                            ts: chrono::Utc::now(),
                         });
                     }
                 }
@@ -1114,7 +1104,6 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     };
                     if let Some(sink) = ctx.events {
                         sink.emit(crate::event::Event::LlmCall {
-                            seq: 0,
                             model: model.clone(),
                             provider: provider.name().to_string(),
                             usage: usage.clone(),
@@ -1124,7 +1113,6 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             status,
                             run_id: ctx.flow_run_id.clone(),
                             node_id: ctx.current_node_id.clone(),
-                            ts: chrono::Utc::now(),
                         });
                     }
                     if let Some(session) = ctx.session.as_ref() {
@@ -1229,14 +1217,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 }
                                 if let Some(sink) = ctx.events {
                                     sink.emit(crate::event::Event::ContentFilterHit {
-                                        seq: 0,
                                         turn_id: Some(turn_id.clone()),
                                         flow_run_id: ctx.flow_run_id.clone(),
                                         provider: provider.name().to_string(),
                                         model: model.clone(),
                                         category: "auto_rewrite".to_string(),
                                         action: "rewritten".to_string(),
-                                        ts: chrono::Utc::now(),
                                     });
                                 }
                                 last_err = Some(e);
@@ -1392,12 +1378,10 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let sub_run_id = crate::event::FlowRunId::now();
             if let Some(sink) = ctx.events {
                 sink.emit(crate::event::Event::FlowStart {
-                    seq: 0,
                     run_id: sub_run_id.clone(),
                     flow_name: name.name.clone(),
                     parent_run_id: ctx.flow_run_id.clone(),
                     parent_node_id: ctx.current_node_id.clone(),
-                    ts: chrono::Utc::now(),
                 });
             }
             if let Some(session) = ctx.session.as_ref() {
@@ -1435,11 +1419,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let cancelled = matches!(status, crate::event::FlowStatus::Cancelled);
             if let Some(sink) = ctx.events {
                 sink.emit(crate::event::Event::FlowEnd {
-                    seq: 0,
                     run_id: sub_run_id.clone(),
                     flow_name: name.name.clone(),
                     status,
-                    ts: chrono::Utc::now(),
                 });
             }
             if let Some(session) = ctx.session.as_ref() {

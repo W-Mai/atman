@@ -69,25 +69,17 @@ impl serde::Serialize for EventEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     FlowStart {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         flow_name: String,
         parent_run_id: Option<FlowRunId>,
         parent_node_id: Option<String>,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     FlowEnd {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         flow_name: String,
         status: FlowStatus,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     LlmCall {
-        #[serde(default)]
-        seq: u64,
         model: String,
         provider: String,
         usage: crate::provider::TokenUsage,
@@ -99,57 +91,36 @@ pub enum Event {
         run_id: Option<crate::event::FlowRunId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node_id: Option<String>,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     TurnStart {
-        #[serde(default)]
-        seq: u64,
         turn_id: TurnId,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     TurnEnd {
-        #[serde(default)]
-        seq: u64,
         turn_id: TurnId,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     UserMsg {
-        #[serde(default)]
-        seq: u64,
         turn_id: TurnId,
         message: crate::message::Message,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     AssistantMsg {
-        #[serde(default)]
-        seq: u64,
         turn_id: TurnId,
         flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     ToolResultMsg {
-        #[serde(default)]
-        seq: u64,
         turn_id: TurnId,
         flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     DiffPreview {
-        #[serde(default)]
-        seq: u64,
         turn_id: Option<TurnId>,
         flow_run_id: Option<FlowRunId>,
         title: String,
         old_content: Option<String>,
         new_content: Option<String>,
         unified_diff: Option<String>,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     CompactionSummary {
-        #[serde(default)]
-        seq: u64,
         session_id: String,
         range_start: u64,
         range_end: u64,
@@ -157,36 +128,24 @@ pub enum Event {
         before_tokens: u64,
         after_tokens: u64,
         summary: String,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     SystemMsg {
-        #[serde(default)]
-        seq: u64,
         turn_id: TurnId,
         message: crate::message::Message,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     UserInject {
-        #[serde(default)]
-        seq: u64,
         turn_id: TurnId,
         injection: crate::injection::Injection,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     ContentFilterHit {
-        #[serde(default)]
-        seq: u64,
         turn_id: Option<TurnId>,
         flow_run_id: Option<FlowRunId>,
         provider: String,
         model: String,
         category: String,
         action: String,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     ContextCompact {
-        #[serde(default)]
-        seq: u64,
         session_id: String,
         before_tokens: u64,
         after_tokens: u64,
@@ -196,113 +155,77 @@ pub enum Event {
         summary_text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replacement_msg_seq: Option<u64>,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     Checkpoint {
-        #[serde(default)]
-        seq: u64,
         session_id: String,
         messages: Vec<crate::message::Message>,
         window_tokens: u64,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     ContextTruncated {
-        #[serde(default)]
-        seq: u64,
         turn_id: Option<TurnId>,
         flow_run_id: Option<FlowRunId>,
         original_chars: u64,
         result_chars: u64,
         dropped_chars: u64,
         budget_tokens: u64,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     WatchWarn {
-        #[serde(default)]
-        seq: u64,
         turn_id: Option<TurnId>,
         flow_run_id: Option<FlowRunId>,
         target: String,
         trigger: String,
         message: String,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     LlmPartialCall {
-        #[serde(default)]
-        seq: u64,
         turn_id: Option<TurnId>,
         flow_run_id: Option<FlowRunId>,
         model: String,
         provider: String,
         tokens_before_abort: u64,
         restart_reason: String,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     PendingPrompt {
-        #[serde(default)]
-        seq: u64,
         prompt_id: uuid::Uuid,
         kind: String,
         payload: serde_json::Value,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     PromptResolved {
-        #[serde(default)]
-        seq: u64,
         prompt_id: uuid::Uuid,
         answer: serde_json::Value,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     FlowGraph {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         graph: crate::nodegraph::FlowGraph,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     FlowNodeStart {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         node_id: String,
         kind: crate::nodegraph::NodeKind,
         label: String,
         parent_node_id: Option<String>,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     FlowNodeEnd {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         node_id: String,
         status: FlowNodeStatus,
         output_preview: Option<String>,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     ToolNode {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         parent_node_id: String,
         tool_use_id: String,
         tool_name: String,
         args_preview: String,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     AttachmentDegraded {
-        #[serde(default)]
-        seq: u64,
         turn_id: Option<TurnId>,
         flow_run_id: Option<FlowRunId>,
         message_seq: u64,
         part_index: usize,
         file_basename: String,
         reason: String,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     ToolPendingApproval {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         tool_use_id: String,
         tool_name: String,
@@ -310,23 +233,16 @@ pub enum Event {
         level: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     ToolApproved {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         tool_use_id: String,
         decided_by: String,
-        ts: chrono::DateTime<chrono::Utc>,
     },
     ToolDenied {
-        #[serde(default)]
-        seq: u64,
         run_id: FlowRunId,
         tool_use_id: String,
         reason: String,
-        ts: chrono::DateTime<chrono::Utc>,
     },
 }
 
@@ -336,74 +252,6 @@ pub enum FlowNodeStatus {
     Ok,
     Err,
     Cancelled,
-}
-
-impl Event {
-    pub fn set_seq(&mut self, new_seq: u64) {
-        match self {
-            Event::FlowStart { seq, .. }
-            | Event::FlowEnd { seq, .. }
-            | Event::LlmCall { seq, .. }
-            | Event::TurnStart { seq, .. }
-            | Event::TurnEnd { seq, .. }
-            | Event::UserMsg { seq, .. }
-            | Event::AssistantMsg { seq, .. }
-            | Event::ToolResultMsg { seq, .. }
-            | Event::DiffPreview { seq, .. }
-            | Event::CompactionSummary { seq, .. }
-            | Event::SystemMsg { seq, .. }
-            | Event::UserInject { seq, .. }
-            | Event::ContentFilterHit { seq, .. }
-            | Event::ContextCompact { seq, .. }
-            | Event::Checkpoint { seq, .. }
-            | Event::ContextTruncated { seq, .. }
-            | Event::WatchWarn { seq, .. }
-            | Event::PendingPrompt { seq, .. }
-            | Event::PromptResolved { seq, .. }
-            | Event::LlmPartialCall { seq, .. }
-            | Event::FlowGraph { seq, .. }
-            | Event::FlowNodeStart { seq, .. }
-            | Event::FlowNodeEnd { seq, .. }
-            | Event::ToolNode { seq, .. }
-            | Event::AttachmentDegraded { seq, .. }
-            | Event::ToolPendingApproval { seq, .. }
-            | Event::ToolApproved { seq, .. }
-            | Event::ToolDenied { seq, .. } => *seq = new_seq,
-        }
-    }
-
-    pub fn seq(&self) -> u64 {
-        match self {
-            Event::FlowStart { seq, .. }
-            | Event::FlowEnd { seq, .. }
-            | Event::LlmCall { seq, .. }
-            | Event::TurnStart { seq, .. }
-            | Event::TurnEnd { seq, .. }
-            | Event::UserMsg { seq, .. }
-            | Event::AssistantMsg { seq, .. }
-            | Event::ToolResultMsg { seq, .. }
-            | Event::DiffPreview { seq, .. }
-            | Event::CompactionSummary { seq, .. }
-            | Event::SystemMsg { seq, .. }
-            | Event::UserInject { seq, .. }
-            | Event::ContentFilterHit { seq, .. }
-            | Event::ContextCompact { seq, .. }
-            | Event::Checkpoint { seq, .. }
-            | Event::ContextTruncated { seq, .. }
-            | Event::WatchWarn { seq, .. }
-            | Event::PendingPrompt { seq, .. }
-            | Event::PromptResolved { seq, .. }
-            | Event::LlmPartialCall { seq, .. }
-            | Event::FlowGraph { seq, .. }
-            | Event::FlowNodeStart { seq, .. }
-            | Event::FlowNodeEnd { seq, .. }
-            | Event::ToolNode { seq, .. }
-            | Event::AttachmentDegraded { seq, .. }
-            | Event::ToolPendingApproval { seq, .. }
-            | Event::ToolApproved { seq, .. }
-            | Event::ToolDenied { seq, .. } => *seq,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -451,11 +299,9 @@ pub enum NodeEvent {
     },
     ToolStdoutLine {
         line: String,
-        seq: u64,
     },
     ToolStderrLine {
         line: String,
-        seq: u64,
     },
     ToolDone {
         exit: i32,
@@ -575,11 +421,16 @@ impl EventSink {
             .lock()
             .expect("event sink poisoned")
             .iter()
-            .map(|envelope| {
-                let mut event = envelope.event.clone();
-                event.set_seq(envelope.seq);
-                event
-            })
+            .map(|envelope| envelope.event.clone())
+            .collect()
+    }
+
+    pub fn snapshot_envelopes(&self) -> Vec<EventEnvelope> {
+        self.events
+            .lock()
+            .expect("event sink poisoned")
+            .iter()
+            .cloned()
             .collect()
     }
 }
@@ -592,12 +443,10 @@ mod tests {
     fn flow_start_serializes_parent_linkage() {
         let parent = FlowRunId::now();
         let ev = Event::FlowStart {
-            seq: 42,
             run_id: FlowRunId::now(),
             flow_name: "child".into(),
             parent_run_id: Some(parent.clone()),
             parent_node_id: Some("stmt_3".into()),
-            ts: chrono::Utc::now(),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "flow_start");
@@ -608,13 +457,11 @@ mod tests {
     #[test]
     fn flow_node_start_carries_parent_node_id() {
         let ev = Event::FlowNodeStart {
-            seq: 7,
             run_id: FlowRunId::now(),
             node_id: "stmt_1.branch[0]".into(),
             kind: crate::nodegraph::NodeKind::UserConfirm,
             label: "fanout".into(),
             parent_node_id: Some("stmt_1".into()),
-            ts: chrono::Utc::now(),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "flow_node_start");
@@ -625,13 +472,11 @@ mod tests {
     fn tool_node_serializes_all_fields() {
         let run_id = FlowRunId::now();
         let ev = Event::ToolNode {
-            seq: 12,
             run_id: run_id.clone(),
             parent_node_id: "stmt_2".into(),
             tool_use_id: "tu_abc".into(),
             tool_name: "fs.read".into(),
             args_preview: "{\"path\":\"a.rs\"}".into(),
-            ts: chrono::Utc::now(),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "tool_node");
@@ -644,17 +489,13 @@ mod tests {
 
     #[test]
     fn seq_and_set_seq_cover_tool_node() {
-        let mut ev = Event::ToolNode {
-            seq: 0,
+        let _ev = Event::ToolNode {
             run_id: FlowRunId::now(),
             parent_node_id: "s".into(),
             tool_use_id: "t".into(),
             tool_name: "n".into(),
             args_preview: "{}".into(),
-            ts: chrono::Utc::now(),
         };
-        ev.set_seq(99);
-        assert_eq!(ev.seq(), 99);
     }
 
     #[test]
@@ -662,14 +503,12 @@ mod tests {
         let turn = TurnId::now();
         let flow = FlowRunId::now();
         let ev = Event::AttachmentDegraded {
-            seq: 55,
             turn_id: Some(turn.clone()),
             flow_run_id: Some(flow.clone()),
             message_seq: 42,
             part_index: 1,
             file_basename: "photo.png".into(),
             reason: "image_too_large".into(),
-            ts: chrono::Utc::now(),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "attachment_degraded");
@@ -683,31 +522,25 @@ mod tests {
 
     #[test]
     fn seq_and_set_seq_cover_attachment_degraded() {
-        let mut ev = Event::AttachmentDegraded {
-            seq: 0,
+        let _ev = Event::AttachmentDegraded {
             turn_id: None,
             flow_run_id: None,
             message_seq: 10,
             part_index: 0,
             file_basename: "x".into(),
             reason: "y".into(),
-            ts: chrono::Utc::now(),
         };
-        ev.set_seq(101);
-        assert_eq!(ev.seq(), 101);
     }
 
     #[test]
     fn tool_pending_approval_round_trip() {
         let ev = Event::ToolPendingApproval {
-            seq: 5,
             run_id: FlowRunId::now(),
             tool_use_id: "tu1".into(),
             tool_name: "fs.write".into(),
             args_preview: "{}".into(),
             level: "approve".into(),
             preview: None,
-            ts: chrono::Utc::now(),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "tool_pending_approval");
@@ -720,39 +553,29 @@ mod tests {
         let rid = FlowRunId::now();
         for mut ev in [
             Event::ToolPendingApproval {
-                seq: 0,
                 run_id: rid.clone(),
                 tool_use_id: "t".into(),
                 tool_name: "n".into(),
                 args_preview: "{}".into(),
                 level: "approve".into(),
                 preview: None,
-                ts: chrono::Utc::now(),
             },
             Event::ToolApproved {
-                seq: 0,
                 run_id: rid.clone(),
                 tool_use_id: "t".into(),
                 decided_by: "user".into(),
-                ts: chrono::Utc::now(),
             },
             Event::ToolDenied {
-                seq: 0,
                 run_id: rid.clone(),
                 tool_use_id: "t".into(),
                 reason: "no".into(),
-                ts: chrono::Utc::now(),
             },
-        ] {
-            ev.set_seq(77);
-            assert_eq!(ev.seq(), 77);
-        }
+        ] {}
     }
 
     #[test]
     fn compaction_summary_serializes_all_fields() {
         let ev = Event::CompactionSummary {
-            seq: 9,
             session_id: "sess".into(),
             range_start: 2,
             range_end: 8,
@@ -760,7 +583,6 @@ mod tests {
             before_tokens: 1000,
             after_tokens: 250,
             summary: "gist".into(),
-            ts: chrono::Utc::now(),
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "compaction_summary");
@@ -775,8 +597,7 @@ mod tests {
 
     #[test]
     fn seq_and_set_seq_cover_compaction_summary() {
-        let mut ev = Event::CompactionSummary {
-            seq: 0,
+        let _ev = Event::CompactionSummary {
             session_id: "sess".into(),
             range_start: 0,
             range_end: 1,
@@ -784,9 +605,6 @@ mod tests {
             before_tokens: 10,
             after_tokens: 3,
             summary: String::new(),
-            ts: chrono::Utc::now(),
         };
-        ev.set_seq(123);
-        assert_eq!(ev.seq(), 123);
     }
 }

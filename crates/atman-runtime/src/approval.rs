@@ -105,14 +105,12 @@ pub async fn request_approval(
     let rx = approval.request(pending);
     if let Some(sink) = ctx.events.as_ref() {
         sink.emit(crate::event::Event::ToolPendingApproval {
-            seq: 0,
             run_id: run_id.clone(),
             tool_use_id: id.to_string(),
             tool_name: name.to_string(),
             args_preview: args_preview.clone(),
             level: level_str(level).into(),
             preview: preview.clone(),
-            ts: chrono::Utc::now(),
         });
     }
     if let Some(tx) = &ctx.stream_tx {
@@ -132,11 +130,9 @@ pub async fn request_approval(
         crate::session::ApprovalDecision::Approve => {
             if let Some(sink) = ctx.events.as_ref() {
                 sink.emit(crate::event::Event::ToolApproved {
-                    seq: 0,
                     run_id: run_id.clone(),
                     tool_use_id: id.to_string(),
                     decided_by: "user".into(),
-                    ts: chrono::Utc::now(),
                 });
             }
             if let Some(tx) = &ctx.stream_tx {
@@ -151,11 +147,9 @@ pub async fn request_approval(
         crate::session::ApprovalDecision::Deny { reason } => {
             if let Some(sink) = ctx.events.as_ref() {
                 sink.emit(crate::event::Event::ToolDenied {
-                    seq: 0,
                     run_id: run_id.clone(),
                     tool_use_id: id.to_string(),
                     reason: reason.clone(),
-                    ts: chrono::Utc::now(),
                 });
             }
             if let Some(tx) = &ctx.stream_tx {

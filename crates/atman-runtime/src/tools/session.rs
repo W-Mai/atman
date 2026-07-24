@@ -2,7 +2,6 @@ use crate::error::RuntimeError;
 use crate::message::{Message, MessageRole};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
-use chrono::Utc;
 
 pub struct SessionPush;
 
@@ -97,34 +96,25 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
     let Some(sink) = &ctx.events else {
         return;
     };
-    let ts = Utc::now();
     let turn_id = ctx.turn_id.clone().unwrap_or_else(TurnId::now);
     let event = match msg.role {
         MessageRole::User => Event::UserMsg {
-            seq: 0,
             turn_id,
             message: msg.clone(),
-            ts,
         },
         MessageRole::Assistant => Event::AssistantMsg {
-            seq: 0,
             turn_id,
             flow_run_id: ctx.flow_run_id.clone(),
             message: msg.clone(),
-            ts,
         },
         MessageRole::Tool => Event::ToolResultMsg {
-            seq: 0,
             turn_id,
             flow_run_id: ctx.flow_run_id.clone(),
             message: msg.clone(),
-            ts,
         },
         MessageRole::System => Event::SystemMsg {
-            seq: 0,
             turn_id,
             message: msg.clone(),
-            ts,
         },
     };
     sink.emit(event);

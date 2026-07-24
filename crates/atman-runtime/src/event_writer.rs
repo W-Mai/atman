@@ -233,7 +233,7 @@ fn insert_project_row(
     payload_json: &str,
 ) -> rusqlite::Result<()> {
     let event = &envelope.event;
-    let ts = extract_ts(event);
+    let ts = extract_ts(envelope);
     let kind = event_kind(event);
     let (turn_id, flow_run_id) = extract_anchors(event);
     let text = extract_text_content(event).unwrap_or_default();
@@ -250,37 +250,8 @@ fn insert_project_row(
     Ok(())
 }
 
-pub(crate) fn extract_ts(event: &Event) -> String {
-    match event {
-        Event::FlowStart { ts, .. }
-        | Event::FlowEnd { ts, .. }
-        | Event::LlmCall { ts, .. }
-        | Event::TurnStart { ts, .. }
-        | Event::TurnEnd { ts, .. }
-        | Event::UserMsg { ts, .. }
-        | Event::AssistantMsg { ts, .. }
-        | Event::ToolResultMsg { ts, .. }
-        | Event::DiffPreview { ts, .. }
-        | Event::CompactionSummary { ts, .. }
-        | Event::SystemMsg { ts, .. }
-        | Event::UserInject { ts, .. }
-        | Event::ContentFilterHit { ts, .. }
-        | Event::ContextCompact { ts, .. }
-        | Event::Checkpoint { ts, .. }
-        | Event::ContextTruncated { ts, .. }
-        | Event::WatchWarn { ts, .. }
-        | Event::PendingPrompt { ts, .. }
-        | Event::PromptResolved { ts, .. }
-        | Event::LlmPartialCall { ts, .. }
-        | Event::FlowGraph { ts, .. }
-        | Event::FlowNodeStart { ts, .. }
-        | Event::FlowNodeEnd { ts, .. }
-        | Event::ToolNode { ts, .. }
-        | Event::AttachmentDegraded { ts, .. }
-        | Event::ToolPendingApproval { ts, .. }
-        | Event::ToolApproved { ts, .. }
-        | Event::ToolDenied { ts, .. } => ts.to_rfc3339(),
-    }
+pub(crate) fn extract_ts(envelope: &EventEnvelope) -> String {
+    envelope.ts.to_rfc3339()
 }
 
 pub(crate) fn event_kind(event: &Event) -> &'static str {
@@ -430,12 +401,10 @@ mod tests {
             tx.send(EventEnvelope::new(
                 i as u64,
                 Event::FlowStart {
-                    seq: 0,
                     run_id: FlowRunId::now(),
                     flow_name: format!("flow_{i}"),
                     parent_run_id: None,
                     parent_node_id: None,
-                    ts: chrono::Utc::now(),
                 },
             ))
             .unwrap();
@@ -471,12 +440,10 @@ mod tests {
             tx.send(EventEnvelope::new(
                 (i + 1) as u64,
                 Event::FlowStart {
-                    seq: 0,
                     run_id: FlowRunId::now(),
                     flow_name: format!("flow_{i}"),
                     parent_run_id: None,
                     parent_node_id: None,
-                    ts: chrono::Utc::now(),
                 },
             ))
             .unwrap();
@@ -523,10 +490,8 @@ mod tests {
             .send(EventEnvelope::new(
                 1,
                 Event::UserMsg {
-                    seq: 0,
                     turn_id: tid.clone(),
                     message: Message::user_text(tid, "sqlite fts full text search"),
-                    ts: chrono::Utc::now(),
                 },
             ))
             .unwrap();
@@ -549,13 +514,11 @@ mod tests {
             .send(EventEnvelope::new(
                 0,
                 Event::FlowEnd {
-                    seq: 0,
                     run_id: FlowRunId::now(),
                     flow_name: "t".into(),
                     status: FlowStatus::Errored {
                         message: "boom".into(),
                     },
-                    ts: chrono::Utc::now(),
                 },
             ))
             .unwrap();

@@ -77,11 +77,9 @@ impl DaemonState {
             },
         );
         sink.emit(Event::PendingPrompt {
-            seq: 0,
             prompt_id: id.0,
             kind: kind.to_string(),
             payload,
-            ts: chrono::Utc::now(),
         });
         rx
     }
@@ -92,10 +90,8 @@ impl DaemonState {
         };
         if let Some(sink) = &entry.broadcast_sink {
             sink.emit(Event::PromptResolved {
-                seq: 0,
                 prompt_id: id.0,
                 answer: answer.clone(),
-                ts: chrono::Utc::now(),
             });
         }
         entry.tx.send(answer).is_ok()
@@ -106,10 +102,8 @@ impl DaemonState {
             && let Some(sink) = &entry.broadcast_sink
         {
             sink.emit(Event::PromptResolved {
-                seq: 0,
                 prompt_id: id.0,
                 answer: serde_json::Value::Null,
-                ts: chrono::Utc::now(),
             });
         }
     }

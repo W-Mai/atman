@@ -147,13 +147,11 @@ fn emit_flow_node_start(
         && ctx.session.is_some()
     {
         sink.emit(crate::event::Event::FlowNodeStart {
-            seq: 0,
             run_id: run_id.clone(),
             node_id: node_id.to_string(),
             kind: kind.clone(),
             label: label.clone(),
             parent_node_id: parent_node_id.map(String::from),
-            ts: chrono::Utc::now(),
         });
     }
     if let Some(session) = ctx.session.as_ref() {
@@ -233,12 +231,10 @@ fn emit_flow_node_end(
         && ctx.session.is_some()
     {
         sink.emit(crate::event::Event::FlowNodeEnd {
-            seq: 0,
             run_id: run_id.clone(),
             node_id: node_id.to_string(),
             status: status.clone(),
             output_preview: preview_owned.clone(),
-            ts: chrono::Utc::now(),
         });
     }
     if let Some(session) = ctx.session.as_ref() {
@@ -447,14 +443,12 @@ async fn eval_bind_with_watches(
         prompt = truncated;
         if let (Some(sink), Some(stat)) = (ctx.events, stat) {
             sink.emit(crate::event::Event::ContextTruncated {
-                seq: 0,
                 turn_id: ctx.turn_id.clone(),
                 flow_run_id: ctx.flow_run_id.clone(),
                 original_chars: stat.original_chars as u64,
                 result_chars: stat.result_chars as u64,
                 dropped_chars: stat.dropped_chars as u64,
                 budget_tokens: stat.budget_tokens,
-                ts: chrono::Utc::now(),
             });
         }
     }
@@ -513,14 +507,12 @@ async fn eval_bind_with_watches(
             } if restart_count < 3 => {
                 if let Some(sink) = ctx.events {
                     sink.emit(crate::event::Event::LlmPartialCall {
-                        seq: 0,
                         turn_id: ctx.turn_id.clone(),
                         flow_run_id: ctx.flow_run_id.clone(),
                         model: model.clone(),
                         provider: provider.name().to_string(),
                         tokens_before_abort: partial_tokens,
                         restart_reason: "l2_course_correct".to_string(),
-                        ts: chrono::Utc::now(),
                     });
                 }
                 restart_count += 1;
@@ -814,13 +806,11 @@ impl<'a> StreamMonitor<'a> {
     fn emit_warn(&self, rule: &WarnRule, trigger: &str) {
         if let Some(sink) = self.ctx.events {
             sink.emit(crate::event::Event::WatchWarn {
-                seq: 0,
                 turn_id: self.ctx.turn_id.clone(),
                 flow_run_id: self.ctx.flow_run_id.clone(),
                 target: rule.target.clone(),
                 trigger: trigger.to_string(),
                 message: rule.message.clone(),
-                ts: chrono::Utc::now(),
             });
         }
     }

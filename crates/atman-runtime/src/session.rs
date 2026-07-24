@@ -1088,14 +1088,11 @@ impl Session {
     /// Single-writer append. Emits the matching event before the in-memory push
     /// so events.jsonl remains the authority (§I5).
     pub fn append_message(&self, msg: Message, flow_run_id: Option<FlowRunId>) {
-        let ts = chrono::Utc::now();
         let flow_run_id_str = flow_run_id.as_ref().map(|r| r.0.to_string());
         let event = match msg.role {
             MessageRole::User => Event::UserMsg {
-                seq: 0,
                 turn_id: msg.turn_id.clone(),
                 message: msg.clone(),
-                ts,
             },
             MessageRole::Assistant => {
                 let _ = self
@@ -1106,11 +1103,9 @@ impl Session {
                         message: msg.clone(),
                     });
                 Event::AssistantMsg {
-                    seq: 0,
                     turn_id: msg.turn_id.clone(),
                     flow_run_id,
                     message: msg.clone(),
-                    ts,
                 }
             }
             MessageRole::Tool => {
@@ -1122,18 +1117,14 @@ impl Session {
                         message: msg.clone(),
                     });
                 Event::ToolResultMsg {
-                    seq: 0,
                     turn_id: msg.turn_id.clone(),
                     flow_run_id,
                     message: msg.clone(),
-                    ts,
                 }
             }
             MessageRole::System => Event::SystemMsg {
-                seq: 0,
                 turn_id: msg.turn_id.clone(),
                 message: msg.clone(),
-                ts,
             },
         };
         let seq = self.sink.emit_returning_seq(event);
@@ -1175,14 +1166,12 @@ impl Session {
         reason: String,
     ) {
         self.sink.emit(Event::AttachmentDegraded {
-            seq: 0,
             turn_id: None,
             flow_run_id: None,
             message_seq,
             part_index,
             file_basename,
             reason,
-            ts: chrono::Utc::now(),
         });
     }
 
@@ -1192,17 +1181,14 @@ impl Session {
             return 0;
         };
         let turn_id = self.turn.current_turn.lock().unwrap().clone();
-        let now = chrono::Utc::now();
         for (part_index, basename) in &entry.images {
             self.sink.emit(Event::AttachmentDegraded {
-                seq: 0,
                 turn_id: turn_id.clone(),
                 flow_run_id: None,
                 message_seq: entry.message_seq,
                 part_index: *part_index,
                 file_basename: basename.clone(),
                 reason: reason.into(),
-                ts: now,
             });
         }
         if let Ok(mut msgs) = self.messages.lock() {
@@ -1263,13 +1249,11 @@ impl Session {
             "context {current_tokens} > threshold {threshold} (budget {budget}, model {model}); skipping compaction: {reason}"
         );
         self.sink.emit(Event::WatchWarn {
-            seq: 0,
             turn_id: self.turn.current_turn.lock().unwrap().clone(),
             flow_run_id: None,
             target: "context.compaction".into(),
             trigger: "auto_compact".into(),
             message,
-            ts: chrono::Utc::now(),
         });
         self.push_system_note(format!("[warn] compaction skipped: {reason}"));
     }
@@ -1318,15 +1302,11 @@ impl Session {
         });
         self.sink.mark_compacted();
         let replacement_seq = self.sink.next_seq_peek();
-        let ts = chrono::Utc::now();
         self.sink.emit(Event::SystemMsg {
-            seq: 0,
             turn_id: turn_id.clone(),
             message: replacement_msg,
-            ts,
         });
         self.sink.emit(Event::ContextCompact {
-            seq: 0,
             session_id: self.id.to_string(),
             before_tokens,
             after_tokens,
@@ -1334,10 +1314,8 @@ impl Session {
             compacted_range_end: range.end.saturating_sub(1) as u64,
             summary_text: Some(summary.clone()),
             replacement_msg_seq: Some(replacement_seq),
-            ts,
         });
         self.sink.emit(Event::CompactionSummary {
-            seq: 0,
             session_id: self.id.to_string(),
             range_start: range.start as u64,
             range_end: range.end.saturating_sub(1) as u64,
@@ -1345,7 +1323,6 @@ impl Session {
             before_tokens,
             after_tokens,
             summary: summary.clone(),
-            ts,
         });
         let _ = self
             .watch
@@ -1364,11 +1341,9 @@ impl Session {
         let checkpoint_messages = self.messages();
         let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
         self.sink.emit(Event::Checkpoint {
-            seq: 0,
             session_id: self.id.to_string(),
             messages: checkpoint_messages,
             window_tokens,
-            ts: chrono::Utc::now(),
         });
         Some(CompactResult {
             before_tokens,
@@ -1383,9 +1358,7 @@ impl Session {
         *self.turn.current_turn.lock().unwrap() = Some(turn_id.clone());
         *self.turn.flow_cancel.lock().unwrap() = CancellationToken::new();
         self.sink.emit(Event::TurnStart {
-            seq: 0,
             turn_id: turn_id.clone(),
-            ts: chrono::Utc::now(),
         });
         self.append_message(user_msg, None);
         turn_id
@@ -1409,7 +1382,6 @@ impl Session {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let turn_id = self.turn.current_turn.lock().unwrap().take();
         if let Some(turn_id) = turn_id {
-            let now = chrono::Utc::now();
             let mut q = self.injection_queue.lock().unwrap();
             for inj in q.iter_mut() {
                 if inj.state == InjectionState::Pending && inj.turn_id == turn_id {
@@ -1418,11 +1390,7 @@ impl Session {
                 }
             }
             drop(q);
-            self.sink.emit(Event::TurnEnd {
-                seq: 0,
-                turn_id,
-                ts: now,
-            });
+            self.sink.emit(Event::TurnEnd { turn_id });
         }
     }
 
@@ -1450,10 +1418,8 @@ impl Session {
         let inj = Injection::with_level(turn_id.clone(), text, level, redirect_target);
         let id = inj.id.clone();
         self.sink.emit(Event::UserInject {
-            seq: 0,
             turn_id,
             injection: inj.clone(),
-            ts: inj.created_at,
         });
         self.injection_queue.lock().unwrap().push(inj.clone());
         let _ = self.injection_tx.send(inj);

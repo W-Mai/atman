@@ -761,14 +761,12 @@ async fn request_fs_write_approval(
     let run_id_for_emit = ctx.flow_run_id.clone();
     if let (Some(sink), Some(rid)) = (ctx.events.as_ref(), run_id_for_emit) {
         sink.emit(crate::event::Event::ToolPendingApproval {
-            seq: 0,
             run_id: rid,
             tool_use_id: id,
             tool_name: "fs.write".into(),
             args_preview: path.display().to_string(),
             level: "dangerous".into(),
             preview: Some(reason.to_string()),
-            ts: chrono::Utc::now(),
         });
     }
     match rx.await {

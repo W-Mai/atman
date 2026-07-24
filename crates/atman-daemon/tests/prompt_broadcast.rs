@@ -109,13 +109,14 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
 
     let mut pending_seq = None;
     let mut resolved_seq = None;
-    for e in &events {
-        match e {
-            Event::PendingPrompt { seq, prompt_id, .. } if *prompt_id == pending_id => {
-                pending_seq = Some(*seq);
+    let envelopes = sink.snapshot_envelopes();
+    for e in &envelopes {
+        match &e.event {
+            Event::PendingPrompt { prompt_id, .. } if *prompt_id == pending_id => {
+                pending_seq = Some(e.seq);
             }
-            Event::PromptResolved { seq, prompt_id, .. } if *prompt_id == pending_id => {
-                resolved_seq = Some(*seq);
+            Event::PromptResolved { prompt_id, .. } if *prompt_id == pending_id => {
+                resolved_seq = Some(e.seq);
             }
             _ => {}
         }

@@ -266,7 +266,6 @@ impl Tool for ReplaceMessagesRange {
             if let Some(sink) = &ctx.events {
                 sink.mark_compacted();
                 sink.emit(crate::event::Event::ContextCompact {
-                    seq: 0,
                     session_id: ctx
                         .turn_id
                         .as_ref()
@@ -278,7 +277,6 @@ impl Tool for ReplaceMessagesRange {
                     compacted_range_end: seq_span.1,
                     summary_text: None,
                     replacement_msg_seq: None,
-                    ts: chrono::Utc::now(),
                 });
             }
             if let Some(tx) = &ctx.lifecycle_fire_tx {
@@ -1023,14 +1021,12 @@ fn emit_diff_preview_if_relevant(ctx: &ToolCtx, tool_name: &str, value: &Value) 
     };
     if let Some((title, old_content, new_content, unified_diff)) = data {
         sink.emit(crate::event::Event::DiffPreview {
-            seq: 0,
             turn_id: ctx.turn_id.clone(),
             flow_run_id: ctx.flow_run_id.clone(),
             title,
             old_content,
             new_content,
             unified_diff,
-            ts: chrono::Utc::now(),
         });
     }
 }
@@ -1060,13 +1056,11 @@ fn emit_tool_node(ctx: &ToolCtx, id: &str, name: &str, input: &Value) {
             .take(4000)
             .collect::<String>();
         sink.emit(crate::event::Event::ToolNode {
-            seq: 0,
             run_id: run_id.clone(),
             parent_node_id: parent_node.clone(),
             tool_use_id: id.to_string(),
             tool_name: name.to_string(),
             args_preview: args_preview.clone(),
-            ts: chrono::Utc::now(),
         });
         if let Some(tx) = &ctx.stream_tx {
             let _ = tx.send(crate::stream::StreamFrame::ToolNode {
@@ -1113,11 +1107,9 @@ fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) {
         return;
     };
     sink.emit(crate::event::Event::ToolResultMsg {
-        seq: 0,
         turn_id: msg.turn_id.clone(),
         flow_run_id: ctx.flow_run_id.clone(),
         message: msg.clone(),
-        ts: chrono::Utc::now(),
     });
     if let Some(tx) = &ctx.stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {

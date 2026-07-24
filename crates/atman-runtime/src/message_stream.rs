@@ -148,27 +148,20 @@ mod tests {
         Message::system_compact_summary(TurnId::now(), text, 0, 1, 2)
     }
 
-    fn make_msg_event(ty: &str, msg: &Message, seq: u64) -> Event {
-        let ts = chrono::Utc::now();
+    fn make_msg_event(ty: &str, msg: &Message, _seq: u64) -> Event {
         match ty {
             "user_msg" => Event::UserMsg {
-                seq,
                 turn_id: msg.turn_id.clone(),
                 message: msg.clone(),
-                ts,
             },
             "assistant_msg" => Event::AssistantMsg {
-                seq,
                 turn_id: msg.turn_id.clone(),
                 flow_run_id: None,
                 message: msg.clone(),
-                ts,
             },
             "system_msg" => Event::SystemMsg {
-                seq,
                 turn_id: msg.turn_id.clone(),
                 message: msg.clone(),
-                ts,
             },
             _ => unreachable!(),
         }
@@ -183,7 +176,6 @@ mod tests {
         replacement_msg_seq: u64,
     ) -> Event {
         Event::ContextCompact {
-            seq: 0,
             session_id: "test".into(),
             before_tokens,
             after_tokens,
@@ -191,7 +183,6 @@ mod tests {
             compacted_range_end: range_end,
             summary_text: Some(summary_text.into()),
             replacement_msg_seq: Some(replacement_msg_seq),
-            ts: chrono::Utc::now(),
         }
     }
 
@@ -199,7 +190,8 @@ mod tests {
         Arc::new(Mutex::new(
             events
                 .into_iter()
-                .map(|event| EventEnvelope::new(event.seq(), event))
+                .enumerate()
+                .map(|(i, event)| EventEnvelope::new((i + 1) as u64, event))
                 .collect(),
         ))
     }
@@ -211,13 +203,10 @@ mod tests {
         let events = event_envelopes(vec![
             make_msg_event("user_msg", &u1, 1),
             Event::TurnStart {
-                seq: 0,
                 turn_id: TurnId::now(),
-                ts: chrono::Utc::now(),
             },
             make_msg_event("assistant_msg", &a1, 2),
             Event::LlmCall {
-                seq: 0,
                 model: "m".into(),
                 provider: "p".into(),
                 usage: crate::provider::TokenUsage::default(),
@@ -227,7 +216,6 @@ mod tests {
                 status: crate::event::LlmCallStatus::Ok,
                 run_id: None,
                 node_id: None,
-                ts: chrono::Utc::now(),
             },
         ]);
         let ms = MessageStream::new(events);
@@ -381,10 +369,10 @@ mod tests {
             make_context_compact(0, 1, 100, 50, "s1 text", 3),
             make_msg_event("user_msg", &user("c"), 4),
             make_msg_event("system_msg", &compact_summary("s2"), 5),
-            make_context_compact(0, 1, 80, 40, "s2 text", 5),
+            make_context_compact(0, 1, 80, 40, "s2 text", 6),
             make_msg_event("user_msg", &user("d"), 6),
             make_msg_event("system_msg", &compact_summary("s3"), 7),
-            make_context_compact(0, 1, 70, 30, "s3 text", 7),
+            make_context_compact(0, 1, 70, 30, "s3 text", 9),
             make_msg_event("user_msg", &user("final"), 8),
         ];
         let ms = MessageStream::new(event_envelopes(events));
@@ -408,18 +396,14 @@ mod tests {
         events.lock().unwrap().push(EventEnvelope::new(
             1,
             Event::TurnStart {
-                seq: 0,
                 turn_id: TurnId::now(),
-                ts: chrono::Utc::now(),
             },
         ));
         events.lock().unwrap().push(EventEnvelope::new(
             2,
             Event::UserMsg {
-                seq: 0,
                 turn_id: TurnId::now(),
                 message: user("latest user"),
-                ts: chrono::Utc::now(),
             },
         ));
 

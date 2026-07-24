@@ -122,12 +122,10 @@ impl Executor {
     ) -> Result<Value, RuntimeError> {
         let run_id = run_id.unwrap_or_else(FlowRunId::now);
         self.events.emit(Event::FlowStart {
-            seq: 0,
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
             parent_run_id: None,
             parent_node_id: None,
-            ts: chrono::Utc::now(),
         });
         if let Some(sess) = session.as_ref() {
             let _ = sess
@@ -141,10 +139,8 @@ impl Executor {
         }
         let graph = crate::nodegraph::extract_graph(flow);
         self.events.emit(Event::FlowGraph {
-            seq: 0,
             run_id: run_id.clone(),
             graph: graph.clone(),
-            ts: chrono::Utc::now(),
         });
         if let Some(sess) = session.as_ref() {
             let _ = sess
@@ -199,11 +195,9 @@ impl Executor {
         };
         let cancelled = matches!(status, FlowStatus::Cancelled);
         self.events.emit(Event::FlowEnd {
-            seq: 0,
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
             status: status.clone(),
-            ts: chrono::Utc::now(),
         });
         if let Some(sess) = session.as_ref() {
             let _ = sess.stream_tx().send(crate::stream::StreamFrame::FlowDone {

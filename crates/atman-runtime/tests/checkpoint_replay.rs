@@ -99,17 +99,17 @@ async fn checkpoint_restores_seq_counter_on_reopen() {
     }
 
     let session = Session::open_existing(tmp.path(), &sid).unwrap();
-    let events = session.sink().snapshot();
-    let max_existing_seq = events.iter().map(|e| e.seq()).max().unwrap_or(0);
+    let events = session.sink().snapshot_envelopes();
+    let max_existing_seq = events.iter().map(|e| e.seq).max().unwrap_or(0);
     session.append_message(
         Message::user_text(atman_runtime::event::TurnId::now(), "new msg".to_string()),
         None,
     );
-    let events_after = session.sink().snapshot();
+    let events_after = session.sink().snapshot_envelopes();
     let new_seq = events_after
         .iter()
-        .find(|e| matches!(e, Event::UserMsg { .. }))
-        .map(|e| e.seq())
+        .find(|e| matches!(e.event, Event::UserMsg { .. }))
+        .map(|e| e.seq)
         .expect("new UserMsg event");
     assert!(
         new_seq > max_existing_seq,

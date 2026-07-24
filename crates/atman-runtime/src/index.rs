@@ -45,11 +45,11 @@ impl AnchorIndex {
         event: &crate::event::Event,
         payload_json: &str,
     ) -> rusqlite::Result<i64> {
-        let ts = crate::event_writer::extract_ts(event);
+        let ts = chrono::Utc::now().to_rfc3339();
         let kind = crate::event_writer::event_kind(event);
         let (turn_id, flow_run_id) = crate::event_writer::extract_anchors(event);
         let text_content = crate::event_writer::extract_text_content(event).unwrap_or_default();
-        let seq = event.seq() as i64;
+        let seq = 0_i64;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
