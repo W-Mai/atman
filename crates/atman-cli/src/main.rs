@@ -1689,7 +1689,7 @@ async fn cmd_repl_once(
                                 .enable_all()
                                 .build()
                                 .context("prebuild runtime init")?;
-                            rt.block_on(prebuild_session(Some(sid), intro, None))
+                            rt.block_on(prebuild_session(Some(sid), Some(intro), None))
                         });
                         *switch_target_for_ctrl.lock().unwrap() = Some(handle);
                         session_for_ctrl.cancel_flow();

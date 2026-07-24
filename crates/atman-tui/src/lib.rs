@@ -123,7 +123,7 @@ pub enum TuiControl {
     },
     SwitchSession {
         sid: String,
-        intro: Option<app::StartupIntro>,
+        intro: app::StartupIntro,
     },
     NewSession,
     MoveSession,
@@ -259,6 +259,11 @@ async fn run_frames(
     let ui_state = crate::states::PersistedUiState::load();
     ui_state.apply(&mut app);
     app.startup_intro = handle.startup_intro.take();
+    // Reset started_at so the 300ms fade begins now, not when the
+    // switch was requested (which may have been seconds ago).
+    if let Some(ref mut intro) = app.startup_intro {
+        intro.started_at = std::time::Instant::now();
+    }
     // Carry boot toasts into the live app so they persist seamlessly.
     if !handle.boot_toasts.is_empty() {
         for toast in std::mem::take(&mut handle.boot_toasts) {
@@ -2245,14 +2250,20 @@ fn request_session_switch(
     sid: String,
 ) {
     let intro = match app.items.first() {
-        Some(crate::app::OutputItem::StartupCard { version, recent }) => {
-            Some(crate::app::StartupIntro {
+        Some(crate::app::OutputItem::StartupCard { version, recent }) => crate::app::StartupIntro {
+            started_at: std::time::Instant::now(),
+            version: version.clone(),
+            recent: recent.clone(),
+        },
+        _ => {
+            // No StartupCard (e.g. mid-session switch): still play the
+            // fade transition so the user sees a smooth hand-off.
+            crate::app::StartupIntro {
                 started_at: std::time::Instant::now(),
-                version: version.clone(),
-                recent: recent.clone(),
-            })
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                recent: Vec::new(),
+            }
         }
-        _ => None,
     };
     if let Some(tx) = control_tx {
         let _ = tx.send(TuiControl::SwitchSession {
