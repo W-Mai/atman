@@ -4479,15 +4479,15 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
 
     // Inline notes — all 5 levels
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    send(NotifyLevel::Error, NotifyLocation::Inline, "✗ connection to provider lost — retrying in 3s…");
+    send(NotifyLevel::Error, NotifyLocation::Inline, "connection to provider lost — retrying in 3s…");
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    send(NotifyLevel::Warn, NotifyLocation::Inline, "! project index unavailable — history search disabled");
+    send(NotifyLevel::Warn, NotifyLocation::Inline, "project index unavailable — history search disabled");
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    send(NotifyLevel::Info, NotifyLocation::Inline, "· requested transcript compaction (847 → 142 messages)");
+    send(NotifyLevel::Info, NotifyLocation::Inline, "requested transcript compaction (847 → 142 messages)");
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    send(NotifyLevel::Success, NotifyLocation::Inline, "✓ copied 247 chars to clipboard");
+    send(NotifyLevel::Success, NotifyLocation::Inline, "copied 247 chars to clipboard");
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    send(NotifyLevel::Debug, NotifyLocation::Inline, "› auto_snapshot: agent @ 1.2.0 (id=a3f8b1c2)");
+    send(NotifyLevel::Debug, NotifyLocation::Inline, "auto_snapshot: agent @ 1.2.0 (id=a3f8b1c2)");
 
     // Toast notifications
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
