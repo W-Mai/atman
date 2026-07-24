@@ -2881,7 +2881,7 @@ fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppS
             let inner_w = max_w.saturating_sub(4);
             let rect = ratatui::layout::Rect {
                 x: base_x,
-                y: y_start + i as u16 * item_h - shift_up - fade_offsets[i],
+                y: (y_start + i as u16 * item_h).saturating_sub(shift_up).saturating_sub(fade_offsets[i]),
                 width: max_w,
                 height: item_h,
             };
