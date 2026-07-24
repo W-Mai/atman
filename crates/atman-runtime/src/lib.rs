@@ -7,6 +7,7 @@ pub mod env;
 pub mod error;
 pub mod eval;
 pub mod event;
+pub mod event_log;
 pub mod event_writer;
 pub mod exec;
 pub mod executor;
@@ -33,6 +34,7 @@ pub mod nodegraph;
 pub mod notify;
 pub mod oauth;
 pub mod oauth_server;
+pub mod projection;
 pub mod provider;
 pub mod providers;
 pub mod redact;
@@ -62,10 +64,11 @@ pub use executor::Executor;
 pub use hunk::{ApplyError, EditProposal, Hunk, HunkLine};
 pub use injection::{Injection, InjectionId, InjectionState};
 pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
+pub use projection::message_window::{TranscriptEntry, replay_transcript_from};
 pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
 pub use session::{
     CompactReviewDecision, CompactReviewMode, CompactReviewRegistry, ContextSnapshot,
-    PendingCompactReview, Session, SessionId, TranscriptEntry,
+    PendingCompactReview, Session, SessionId,
 };
 pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
 pub use tool_naming::ToolNaming;
