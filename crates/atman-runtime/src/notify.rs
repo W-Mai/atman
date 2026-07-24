@@ -168,6 +168,28 @@ pub fn global() -> Arc<dyn NotifySink> {
         .unwrap_or_else(|| Arc::new(NoopSink))
 }
 
+/// RAII guard: installs a sink and restores the previous one on drop.
+pub struct ScopedSink {
+    prev: Option<Arc<dyn NotifySink>>,
+}
+
+impl ScopedSink {
+    /// Install NoopSink for TUI mode — prevents stderr from leaking into raw terminal.
+    pub fn tui() -> Self {
+        let mut sink = GLOBAL_SINK.write().unwrap();
+        let prev = sink.take();
+        *sink = Some(Arc::new(NoopSink));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedSink {
+    fn drop(&mut self) {
+        let mut sink = GLOBAL_SINK.write().unwrap();
+        *sink = self.prev.take();
+    }
+}
+
 // ── Built-in sinks ─────────────────────────────────────────────────
 
 pub struct NoopSink;

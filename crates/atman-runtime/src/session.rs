@@ -41,7 +41,7 @@ type WatchKeepalive = (
 pub struct Session {
     id: SessionId,
     dir: PathBuf,
-    writer: Option<EventWriter>,
+    writer: std::sync::Mutex<Option<EventWriter>>,
     sink: EventSink,
     messages: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
     current_turn: Mutex<Option<TurnId>>,
@@ -1072,7 +1072,7 @@ impl Session {
         Ok(Self {
             id,
             dir,
-            writer: Some(writer),
+            writer: std::sync::Mutex::new(Some(writer)),
             sink,
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             current_turn: Mutex::new(None),
@@ -1163,7 +1163,7 @@ impl Session {
         Ok(Self {
             id,
             dir,
-            writer: Some(writer),
+            writer: std::sync::Mutex::new(Some(writer)),
             sink,
             messages: std::sync::Arc::new(std::sync::Mutex::new(messages)),
             current_turn: Mutex::new(None),
@@ -1205,7 +1205,7 @@ impl Session {
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
-            writer: None,
+            writer: std::sync::Mutex::new(None),
             sink: EventSink::new(),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             current_turn: Mutex::new(None),
@@ -1303,11 +1303,11 @@ impl Session {
         let Some(path) = self.events_path() else {
             return Vec::new();
         };
-        replay_transcript_from(path).unwrap_or_default()
+        replay_transcript_from(&path).unwrap_or_default()
     }
 
-    pub fn events_path(&self) -> Option<&Path> {
-        self.writer.as_ref().map(|w| w.events_path())
+    pub fn events_path(&self) -> Option<std::path::PathBuf> {
+        self.writer.lock().unwrap().as_ref().map(|w| w.events_path().to_path_buf())
     }
 
     pub async fn plan_system_prompt(&self) -> Option<String> {
@@ -1946,16 +1946,19 @@ impl Session {
         self.flow_cancel.lock().unwrap().clone()
     }
 
-    pub async fn shutdown(mut self) {
-        if let Some(writer) = self.writer.take() {
+    pub async fn shutdown(&self) {
+        let writer = self.writer.lock().unwrap().take();
+        if let Some(writer) = writer {
             writer.shutdown().await;
         }
     }
 
     // Rides FIFO queue ordering: once flush's own barrier is written,
     // every earlier sink.emit is on disk too.
+    #[allow(clippy::await_holding_lock)]
     pub async fn flush_writer(&self) {
-        let Some(writer) = self.writer.as_ref() else {
+        let guard = self.writer.lock().unwrap();
+        let Some(ref writer) = *guard else {
             return;
         };
         writer.flush().await;

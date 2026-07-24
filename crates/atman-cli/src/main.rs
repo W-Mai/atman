@@ -614,10 +614,7 @@ async fn cmd_run(
         )
         .await;
     session.end_turn();
-    match std::sync::Arc::try_unwrap(session) {
-        Ok(s) => s.shutdown().await,
-        Err(_) => atman_runtime::notify!(debug, "session still had refs at shutdown; skipping graceful close"),
-    }
+    session.shutdown().await;
 
     match outcome {
         Ok(v) => {
@@ -1468,6 +1465,12 @@ async fn cmd_repl(resume_sid: Option<String>) -> Result<()> {
         None
     };
     let (first, boot_terminal) = boot_first_session(resume_sid).await?;
+    // Suppress stderr while TUI is in raw mode — spans all session switches.
+    let _sink_guard: Option<atman_runtime::notify::ScopedSink> = if tui_mode_requested() {
+        Some(atman_runtime::notify::ScopedSink::tui())
+    } else {
+        None
+    };
     let mut current = first;
     let mut inherited_terminal = boot_terminal;
     loop {
@@ -1955,10 +1958,7 @@ async fn cmd_repl_once(
     };
     let session_id = session.id().to_string();
     let session_dir = session.dir().to_path_buf();
-    match std::sync::Arc::try_unwrap(session) {
-        Ok(s) => s.shutdown().await,
-        Err(_) => atman_runtime::notify!(debug, "session still had refs at shutdown; skipping graceful close"),
-    }
+    session.shutdown().await;
     if is_fresh_session
         && user_msg_count == 0
         && !session_dir.as_os_str().is_empty()
@@ -3077,7 +3077,7 @@ async fn handle_suggest(
     let events = session
         .events_path()
         .context("session has no events path (dry-run?)")?;
-    let transcript = suggest::read_recent_events(events, suggest::recent_turns_limit())?;
+    let transcript = suggest::read_recent_events(&events, suggest::recent_turns_limit())?;
     if transcript.trim().is_empty() {
         reporter.info("[atman] :suggest — no recent turns yet; talk a bit first.");
         return Ok(());
