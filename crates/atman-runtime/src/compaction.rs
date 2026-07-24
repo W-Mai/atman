@@ -64,7 +64,7 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
         return None;
     }
     let end = messages.len().saturating_sub(2);
-    if let Some(anchor) = messages.iter().position(is_compaction_summary) {
+    if let Some(anchor) = messages.iter().rposition(is_compaction_summary) {
         if anchor + 2 > end {
             return None;
         }
@@ -353,7 +353,7 @@ async fn maybe_auto_compact_locked(
         ));
         return;
     }
-    match session.compact_messages(final_summary) {
+    match session.compact_messages(final_summary, range, current) {
         Some(result) => {
             session.push_system_note(format!(
                 "auto-compacted {}..{} — {} → {} tokens",
@@ -563,8 +563,7 @@ pub fn replace_range_with_summary(
     summary: String,
     turn_id: crate::event::TurnId,
 ) -> Vec<Message> {
-    let mut out = Vec::with_capacity(messages.len() - (range.end - range.start) + 1);
-    out.extend_from_slice(&messages[..range.start]);
+    let mut out = Vec::with_capacity(1 + messages.len().saturating_sub(range.end));
     out.push(Message::system_compact_summary(
         turn_id,
         summary,
@@ -631,13 +630,11 @@ mod tests {
             "gist: talked about m1..m4".into(),
             TurnId::now(),
         );
-        assert_eq!(out.len(), 3, "1 head + 1 summary + 1 tail");
+        assert_eq!(out.len(), 2, "summary + tail");
         assert_eq!(out[0].role, MessageRole::System);
-        assert_eq!(out[0].text_concat(), "head");
-        assert_eq!(out[1].role, MessageRole::System);
-        assert!(out[1].text_concat().contains("gist: talked about"));
+        assert!(out[0].text_concat().contains("gist: talked about"));
         assert!(matches!(
-            out[1].parts.as_slice(),
+            out[0].parts.as_slice(),
             [MessagePart::CompactSummary {
                 seq_start: 1,
                 seq_end: 4,
@@ -645,8 +642,8 @@ mod tests {
                 ..
             }]
         ));
-        assert_eq!(out[2].role, MessageRole::User);
-        assert_eq!(out[2].text_concat(), "tail");
+        assert_eq!(out[1].role, MessageRole::User);
+        assert_eq!(out[1].text_concat(), "tail");
     }
 
     #[test]
@@ -805,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn find_compact_starts_from_earliest_summary() {
+    fn find_compact_starts_from_summary() {
         let msgs = vec![
             user("a"),
             assistant("b"),
@@ -835,8 +832,11 @@ mod tests {
             assistant("tail"),
         ];
         let range = find_compact_range(&msgs, 500).expect("expected range");
-        assert_eq!(range.start, 0, "should compact from the oldest summary");
-        assert!(range.end > 3, "should include later summaries and new work");
+        assert_eq!(range.start, 3, "should compact from the latest summary");
+        assert!(
+            range.end > 3,
+            "should include work after the latest summary"
+        );
     }
 
     #[test]

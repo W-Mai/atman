@@ -23,7 +23,7 @@ async fn compact_messages_replaces_middle_span() {
     build_long_history(&session, 20);
     let before_len = session.message_count();
     let result = session
-        .compact_messages("test summary".into())
+        .compact_messages_auto("test summary".into())
         .expect("expected compaction");
     assert!(result.after_tokens < result.before_tokens);
     assert!(session.message_count() < before_len);
@@ -42,7 +42,7 @@ async fn compact_messages_refreshes_window_from_compacted_history() {
     session.record_llm_call("llama-3b", 50_000, 0, 0, 0, None, None);
 
     let result = session
-        .compact_messages("test summary".into())
+        .compact_messages_auto("test summary".into())
         .expect("expected compaction");
 
     assert_eq!(session.last_input_tokens(), 0);
@@ -181,7 +181,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     session.end_turn();
 
     assert!(matches!(out, Value::Str(s) if s == "reply 1"));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
     assert_eq!(provider.normal_calls.load(Ordering::SeqCst), 2);
     assert!(provider.second_call_tokens.lock().unwrap().is_some());
 }
@@ -195,7 +195,7 @@ async fn compact_messages_returns_none_below_budget() {
         let msg = Message::user_text(TurnId::now(), format!("hi {i}"));
         session.append_message(msg, None);
     }
-    assert!(session.compact_messages("noop".into()).is_none());
+    assert!(session.compact_messages_auto("noop".into()).is_none());
 }
 
 #[tokio::test]
@@ -434,6 +434,6 @@ async fn cooldown_blocks_repeat_compaction_within_window() {
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
     build_long_history(&session, 20);
     assert!(session.approval_cooldown_ok_for_compact());
-    let _ = session.compact_messages("first".into()).unwrap();
+    let _ = session.compact_messages_auto("first".into()).unwrap();
     assert!(!session.approval_cooldown_ok_for_compact());
 }

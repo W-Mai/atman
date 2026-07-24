@@ -25,6 +25,7 @@ pub mod lifecycle;
 pub mod mcp;
 pub mod memory;
 pub mod message;
+pub mod message_stream;
 pub mod meta_commands;
 pub mod migration;
 pub mod model_registry;

@@ -43,6 +43,7 @@ pub struct Session {
     dir: PathBuf,
     writer: std::sync::Mutex<Option<EventWriter>>,
     sink: EventSink,
+    message_stream: crate::message_stream::MessageStream,
     messages: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
     current_turn: Mutex<Option<TurnId>>,
     injection_queue: Mutex<Vec<Injection>>,
@@ -1072,11 +1073,13 @@ impl Session {
         let (attach_watch, attach_rx) = watch::channel(0);
         let (todos_watch, todos_rx) = watch::channel(Vec::new());
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
+        let events_handle = sink.events_handle();
         Ok(Self {
             id,
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
             sink,
+            message_stream: crate::message_stream::MessageStream::new(events_handle),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
@@ -1166,11 +1169,17 @@ impl Session {
         let (attach_watch, attach_rx) = watch::channel(0);
         let (todos_watch, todos_rx) = watch::channel(Vec::new());
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
+        let events_handle = sink.events_handle();
+        let initial_msgs = messages.clone();
         Ok(Self {
             id,
             dir,
             writer: std::sync::Mutex::new(Some(writer)),
             sink,
+            message_stream: crate::message_stream::MessageStream::with_initial(
+                events_handle,
+                initial_msgs,
+            ),
             messages: std::sync::Arc::new(std::sync::Mutex::new(messages)),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
@@ -1208,11 +1217,14 @@ impl Session {
         let (attach_watch, attach_rx) = watch::channel(0);
         let (todos_watch, todos_rx) = watch::channel(Vec::new());
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
+        let sink = EventSink::new();
+        let events_handle = sink.events_handle();
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
             writer: std::sync::Mutex::new(None),
-            sink: EventSink::new(),
+            sink,
+            message_stream: crate::message_stream::MessageStream::new(events_handle),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             current_turn: Mutex::new(None),
             injection_queue: Mutex::new(Vec::new()),
@@ -1687,7 +1699,7 @@ impl Session {
     }
 
     pub fn messages(&self) -> Vec<Message> {
-        self.messages.lock().unwrap().clone()
+        self.message_stream.window()
     }
 
     pub fn messages_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<Message>>> {
@@ -1695,13 +1707,11 @@ impl Session {
     }
 
     pub fn message_count(&self) -> usize {
-        self.messages.lock().unwrap().len()
+        self.messages().len()
     }
 
     pub fn user_message_count(&self) -> usize {
-        self.messages
-            .lock()
-            .unwrap()
+        self.messages()
             .iter()
             .filter(|m| matches!(m.role, MessageRole::User))
             .count()
@@ -1738,31 +1748,40 @@ impl Session {
         self.push_system_note(format!("[warn] compaction skipped: {reason}"));
     }
 
-    pub fn compact_messages(&self, summary: String) -> Option<CompactResult> {
-        use crate::compaction::{
-            estimate_tokens_for_messages, find_compact_range, replace_range_with_summary,
-        };
-        let mut guard = self.messages.lock().unwrap();
-        let before = guard.clone();
+    /// Convenience wrapper that computes the compact range and token count
+    /// from the current message window. Used by tests and internal callers
+    /// that don't already have a pre-computed range.
+    pub fn compact_messages_auto(&self, summary: String) -> Option<CompactResult> {
+        let msgs = self.messages();
+        let tokens = crate::compaction::estimate_tokens_for_messages(&msgs);
         let info = crate::model_registry::model_info(&self.last_model());
         let threshold = info.compact_threshold_tokens();
-        let range = find_compact_range(&before, threshold)?;
-        let turn_id = before
+        let range = crate::compaction::find_compact_range(&msgs, threshold)?;
+        self.compact_messages(summary, range, tokens)
+    }
+
+    pub fn compact_messages(
+        &self,
+        summary: String,
+        range: crate::compaction::CompactRange,
+        before_tokens: u64,
+    ) -> Option<CompactResult> {
+        use crate::compaction::{estimate_tokens_for_messages, replace_range_with_summary};
+        let msgs = self.messages();
+        let turn_id = msgs
             .get(range.start)
             .map(|m| m.turn_id.clone())
             .unwrap_or_else(TurnId::now);
-        let before_tokens = estimate_tokens_for_messages(&before);
-        let after = replace_range_with_summary(&before, &range, summary.clone(), turn_id.clone());
+        let after = replace_range_with_summary(&msgs, &range, summary.clone(), turn_id.clone());
         let after_tokens = estimate_tokens_for_messages(&after);
         if after_tokens >= before_tokens {
-            drop(guard);
             self.push_system_note(format!(
                 "compaction skipped: summary would not shrink transcript ({} >= {} tokens)",
                 after_tokens, before_tokens
             ));
             return None;
         }
-        let replacement_msg = after.get(range.start).cloned().unwrap_or_else(|| {
+        let replacement_msg = after.first().cloned().unwrap_or_else(|| {
             Message::system_compact_summary(
                 turn_id.clone(),
                 summary.clone(),
@@ -1771,8 +1790,6 @@ impl Session {
                 range.end - range.start,
             )
         });
-        *guard = after;
-        drop(guard);
         self.sink.mark_compacted();
         let replacement_seq = self.sink.next_seq_peek();
         let ts = chrono::Utc::now();
@@ -1817,7 +1834,7 @@ impl Session {
             });
         self.clear_last_input_tokens();
         self.refresh_window_snapshot();
-        let checkpoint_messages = self.messages.lock().unwrap().clone();
+        let checkpoint_messages = self.messages();
         let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
         self.sink.emit(Event::Checkpoint {
             seq: 0,

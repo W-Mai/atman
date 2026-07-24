@@ -512,6 +512,10 @@ impl EventSink {
         self.events.lock().expect("event sink poisoned").push(event);
     }
 
+    pub fn events_handle(&self) -> Arc<Mutex<Vec<Event>>> {
+        self.events.clone()
+    }
+
     pub fn redactor(&self) -> Option<Arc<crate::redact::Redactor>> {
         self.redactor.clone()
     }
