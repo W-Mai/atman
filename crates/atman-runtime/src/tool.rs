@@ -81,6 +81,7 @@ pub struct ToolCtx {
     pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
     pub session_messages_handle:
         Option<std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>>,
+    pub session: Option<std::sync::Arc<crate::session::Session>>,
     pub compact_lock_handle: Option<std::sync::Arc<tokio::sync::Mutex<()>>>,
     pub current_node_id: Option<String>,
     pub stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
@@ -154,6 +155,11 @@ impl ToolCtx {
         handle: std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>,
     ) -> Self {
         self.session_messages_handle = Some(handle);
+        self
+    }
+
+    pub fn with_session(mut self, session: std::sync::Arc<crate::session::Session>) -> Self {
+        self.session = Some(session);
         self
     }
 

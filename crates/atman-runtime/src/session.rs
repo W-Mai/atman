@@ -1144,6 +1144,14 @@ impl Session {
         self.message_stream.window()
     }
 
+    pub fn full_messages(&self) -> Vec<Message> {
+        self.message_stream.full_messages()
+    }
+
+    pub fn window_messages(&self) -> Vec<Message> {
+        self.message_stream.window()
+    }
+
     pub fn messages_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<Message>>> {
         self.messages.clone()
     }

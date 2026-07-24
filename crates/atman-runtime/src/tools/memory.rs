@@ -131,9 +131,10 @@ impl Tool for MemoryRecentTurns {
             if n == 0 {
                 return Ok(Value::List(Vec::new()));
             }
-            let Some(msgs) = ctx.session_messages.as_ref() else {
+            let Some(session) = ctx.session.as_ref() else {
                 return Ok(Value::List(Vec::new()));
             };
+            let msgs = session.full_messages();
             let start = msgs.len().saturating_sub(n);
             let out: Vec<Value> = msgs
                 .iter()
@@ -758,11 +759,6 @@ impl Tool for MemoryHistorySearch {
                 Some(Value::Int(n)) if *n > 0 => (*n as usize).min(50),
                 _ => 10,
             };
-            let Some(idx) = ctx.project_index.as_ref() else {
-                return Err(RuntimeError::ToolFailed(
-                    "memory.history.search: no project index on context".into(),
-                ));
-            };
             let session_filter = match scope {
                 HistoryScope::Project => None,
                 HistoryScope::Session => ctx
@@ -771,9 +767,38 @@ impl Tool for MemoryHistorySearch {
                     .and_then(|d| d.file_name())
                     .map(|n| n.to_string_lossy().to_string()),
             };
-            let rows = idx
-                .fts_search_project_events(&query, session_filter.as_deref(), limit)
-                .map_err(|e| RuntimeError::ToolFailed(format!("memory.history.search: {e}")))?;
+            let rows = if let Some(idx) = ctx.project_index.as_ref() {
+                idx.fts_search_project_events(&query, session_filter.as_deref(), limit)
+                    .map_err(|e| RuntimeError::ToolFailed(format!("memory.history.search: {e}")))?
+            } else if let Some(session) = ctx.session.as_ref() {
+                // Fallback: grep current session's full messages
+                let msgs = session.full_messages();
+                let mut hits = Vec::new();
+                let query_lower = query.to_lowercase();
+                for (i, msg) in msgs.iter().enumerate() {
+                    let text = msg.text_concat();
+                    if text.to_lowercase().contains(&query_lower) {
+                        let snippet: String = text.chars().take(200).collect();
+                        hits.push(crate::index::ProjectEventRow {
+                            session_id: session.id().to_string(),
+                            seq: i as u64,
+                            ts: String::new(),
+                            kind: msg.role.as_str().to_string(),
+                            turn_id: None,
+                            flow_run_id: None,
+                            payload: snippet,
+                        });
+                        if hits.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+                hits
+            } else {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.history.search: no project index or session on context".into(),
+                ));
+            };
             let hits: Vec<Value> = rows
                 .into_iter()
                 .map(|row| {
@@ -868,7 +893,20 @@ impl Tool for MemoryHistoryRead {
                 ),
                 _ => None,
             };
-            let messages = load_session_messages(&dir, role_filter.as_deref())?;
+            let messages = match crate::projection::message_window::replay_messages_from(
+                &dir.join("events.jsonl"),
+            ) {
+                Ok(msgs) => {
+                    if let Some(filter) = role_filter.as_deref() {
+                        msgs.into_iter()
+                            .filter(|m| filter.iter().any(|r| r == m.role.as_str()))
+                            .collect()
+                    } else {
+                        msgs
+                    }
+                }
+                Err(_) => Vec::new(),
+            };
             let total = messages.len();
             let start = offset.saturating_sub(1);
             let end = (start + limit).min(total);
@@ -893,59 +931,6 @@ impl Tool for MemoryHistoryRead {
 enum HistoryScope {
     Session,
     Project,
-}
-
-fn load_session_messages(
-    session_dir: &std::path::Path,
-    role_filter: Option<&[String]>,
-) -> Result<Vec<crate::message::Message>, RuntimeError> {
-    let events_path = session_dir.join("events.jsonl");
-    let contents = match std::fs::read_to_string(&events_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(RuntimeError::ToolFailed(format!(
-                "memory.history.read: reading {} failed: {e}",
-                events_path.display()
-            )));
-        }
-    };
-    let mut out = Vec::new();
-    for line in contents.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let kind = value
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if !matches!(
-            kind,
-            "user_msg" | "assistant_msg" | "tool_result_msg" | "system_msg"
-        ) {
-            continue;
-        }
-        let message_json = match value.get("message") {
-            Some(m) => m,
-            None => continue,
-        };
-        let msg: crate::message::Message = match serde_json::from_value(message_json.clone()) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if let Some(filter) = role_filter {
-            let role = msg.role.as_str();
-            if !filter.iter().any(|f| f == role) {
-                continue;
-            }
-        }
-        out.push(msg);
-    }
-    Ok(out)
 }
 
 fn required_string(args: &ToolArgs, name: &str) -> Result<String, RuntimeError> {
