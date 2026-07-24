@@ -238,7 +238,13 @@ fn run_startup_config_migration() {
     };
     match atman_runtime::config_migration::migrate_legacy_config_if_needed(&cfg, &data) {
         Ok(Some(rep)) => {
-            atman_runtime::notify!(info, "moved {} config item(s) from {} to {}", rep.moved.len(), rep.from.display(), rep.to.display());
+            atman_runtime::notify!(
+                info,
+                "moved {} config item(s) from {} to {}",
+                rep.moved.len(),
+                rep.from.display(),
+                rep.to.display()
+            );
             for name in &rep.moved {
                 atman_runtime::notify!(info, "  moved: {name}");
             }
@@ -516,7 +522,7 @@ async fn cmd_daemon_rotate_token() -> Result<()> {
     let cfg = atman_daemon::config::DaemonConfig::rotate(&cfg_path)?;
     println!("{}", cfg.auth_token);
     atman_runtime::notify!(
-        info,
+        success,
         "new token written to {}. restart daemon with `atman daemon start`.",
         cfg_path.display()
     );
@@ -1081,7 +1087,12 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
     }
     match std::sync::Arc::try_unwrap(session) {
         Ok(s) => s.shutdown().await,
-        Err(_) => atman_runtime::notify!(warn, "sanitize: session still had refs at shutdown"),
+        Err(_) => atman_runtime::notify!(
+            warn,
+            location = Log,
+            stack = dedupe("sanitize.refs_at_shutdown", 60_000),
+            "sanitize: session still had refs at shutdown"
+        ),
     }
     println!("sanitize: wrote {} degrade event(s)", findings.len());
     Ok(())
@@ -1351,6 +1362,8 @@ struct PrebuiltSession {
     is_fresh: bool,
     root: PathBuf,
     intro: Option<atman_tui::app::StartupIntro>,
+    /// Notifications collected during boot, for seamless toast continuity.
+    boot_notifications: Vec<atman_runtime::notify::Notification>,
 }
 
 async fn prebuild_session(
@@ -1428,6 +1441,7 @@ async fn prebuild_session(
         is_fresh,
         root,
         intro,
+        boot_notifications: Vec::new(),
     })
 }
 
@@ -1441,6 +1455,13 @@ async fn boot_first_session(
     }
     let version = env!("CARGO_PKG_VERSION").to_string();
     let recent = build_startup_recent(&data_dir()?, "", 5);
+
+    // Replace CliSink with ToastCollector during boot so codex/other
+    // startup logs don't leak to the raw terminal.
+    let (toast_sink, toast_buf) = atman_runtime::notify::ToastCollector::new();
+    let _boot_sink =
+        atman_runtime::notify::ScopedSink::replace_with(std::sync::Arc::new(toast_sink));
+
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let prebuild = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1449,11 +1470,14 @@ async fn boot_first_session(
             .context("boot animation prebuild runtime init")?;
         rt.block_on(prebuild_session(resume_sid, None, Some(tx)))
     });
-    let animation = atman_tui::boot_animation::run_boot_animation(rx, version, recent);
+    let animation = atman_tui::boot_animation::run_boot_animation(rx, version, recent, toast_buf);
     let (anim_result, prebuild_result) = tokio::join!(animation, prebuild);
-    let terminal = anim_result?;
+    let (terminal, boot_notifications) = anim_result?;
     match prebuild_result {
-        Ok(Ok(session)) => Ok((session, Some(terminal))),
+        Ok(Ok(mut session)) => {
+            session.boot_notifications = boot_notifications;
+            Ok((session, Some(terminal)))
+        }
         Ok(Err(e)) => Err(e),
         Err(e) => Err(anyhow::anyhow!("prebuild join failed: {e}")),
     }
@@ -1516,6 +1540,7 @@ async fn cmd_repl_once(
         is_fresh: is_fresh_session,
         root,
         intro,
+        boot_notifications,
     } = prebuilt;
 
     let lifecycles = match config_dir() {
@@ -1622,7 +1647,10 @@ async fn cmd_repl_once(
                             {
                                 Ok(rt) => rt,
                                 Err(e) => {
-                                    atman_runtime::notify!(error, "compact runtime init failed: {e}");
+                                    atman_runtime::notify!(
+                                        error,
+                                        "compact runtime init failed: {e}"
+                                    );
                                     return;
                                 }
                             };
@@ -1725,16 +1753,21 @@ async fn cmd_repl_once(
                                 .await
                                 {
                                     Ok(p) => atman_runtime::notify!(
-                                        info,
+                                        success,
                                         "Codex logged in as \"{}\" ({})",
                                         p.name,
                                         p.account.as_deref().unwrap_or("unknown")
                                     ),
-                                    Err(e) => atman_runtime::notify!(error, "Codex login error: {e:#}"),
+                                    Err(e) => {
+                                        atman_runtime::notify!(error, "Codex login error: {e:#}")
+                                    }
                                 }
                             });
                         }
-                        _ => atman_runtime::notify!(warn, "Auth login for {kind:?} not yet implemented"),
+                        _ => atman_runtime::notify!(
+                            warn,
+                            "Auth login for {kind:?} not yet implemented"
+                        ),
                     },
                     atman_tui::TuiControl::AuthLogout { id } => {
                         if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
@@ -1772,6 +1805,31 @@ async fn cmd_repl_once(
             session: Some(std::sync::Arc::clone(&session)),
             startup_intro: intro.clone(),
             trust: atman_daemon::bootstrap::load_trust_config(config_dir().ok().as_deref()),
+            boot_toasts: boot_notifications
+                .into_iter()
+                .map(|n| {
+                    let level = match n.level {
+                        atman_runtime::notify::NotifyLevel::Error => {
+                            atman_tui::app::NoteLevel::Error
+                        }
+                        atman_runtime::notify::NotifyLevel::Warn => atman_tui::app::NoteLevel::Warn,
+                        atman_runtime::notify::NotifyLevel::Success => {
+                            atman_tui::app::NoteLevel::Success
+                        }
+                        _ => atman_tui::app::NoteLevel::Info,
+                    };
+                    atman_tui::app::ToastNote {
+                        id: format!("boot-{}", n.message.len()),
+                        level,
+                        message: n.message,
+                        ttl: std::time::Duration::from_secs(10),
+                        created: n.created_at,
+                        position: atman_tui::app::ToastPosition::TopRight,
+                        fading: false,
+                        fade_started: None,
+                    }
+                })
+                .collect(),
         };
         (
             Some(tokio::spawn(atman_tui::run_tui_ex(
@@ -3529,11 +3587,14 @@ fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_dsl::ast
     for flow in &parsed.flows {
         let name = &flow.name.name;
         match registry.snapshot(name, source, &meta, Some(source_path)) {
-            Ok(atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev)) => atman_runtime::notify!(
-                debug,
-                "auto_snapshot: {name} @ {} (id={})",
-                rev.version, rev.id
-            ),
+            Ok(atman_runtime::flow_registry::SnapshotOutcome::Inserted(rev)) => {
+                atman_runtime::notify!(
+                    debug,
+                    "auto_snapshot: {name} @ {} (id={})",
+                    rev.version,
+                    rev.id
+                )
+            }
             Ok(atman_runtime::flow_registry::SnapshotOutcome::UnchangedFromLatest(_)) => {}
             Err(e) => atman_runtime::notify!(error, "auto_snapshot: {name}: {e}"),
         }
@@ -4107,7 +4168,7 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                             .await
                             {
                                 Ok(p) => atman_runtime::notify!(
-                                    info,
+                                    success,
                                     "Codex logged in as \"{}\" ({})",
                                     p.name,
                                     p.account.as_deref().unwrap_or("unknown")
@@ -4262,7 +4323,10 @@ fn spawn_preview_scene(
             _ => false,
         };
         if !ok {
-            atman_runtime::notify!(warn, "unknown tui-preview scene: {scene}. try `atman tui-preview list`.");
+            atman_runtime::notify!(
+                warn,
+                "unknown tui-preview scene: {scene}. try `atman tui-preview list`."
+            );
         }
     }))
 }
@@ -4468,7 +4532,7 @@ async fn preview_scene_notes(session: std::sync::Arc<Session>) {
 }
 
 async fn preview_scene_notify(session: std::sync::Arc<Session>) {
-    use atman_runtime::notify::{NotifyLevel, NotifyLocation, NotifyLifecycle};
+    use atman_runtime::notify::{NotifyLevel, NotifyLifecycle, NotifyLocation};
     use atman_runtime::stream::{NotificationFrame, StreamFrame};
     let tx = session.stream_tx();
 
@@ -4484,15 +4548,35 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
 
     // Inline notes — all 5 levels
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    send(NotifyLevel::Error, NotifyLocation::Inline, "connection to provider lost — retrying in 3s…");
+    send(
+        NotifyLevel::Error,
+        NotifyLocation::Inline,
+        "connection to provider lost — retrying in 3s…",
+    );
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    send(NotifyLevel::Warn, NotifyLocation::Inline, "project index unavailable — history search disabled");
+    send(
+        NotifyLevel::Warn,
+        NotifyLocation::Inline,
+        "project index unavailable — history search disabled",
+    );
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    send(NotifyLevel::Info, NotifyLocation::Inline, "requested transcript compaction (847 → 142 messages)");
+    send(
+        NotifyLevel::Info,
+        NotifyLocation::Inline,
+        "requested transcript compaction (847 → 142 messages)",
+    );
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    send(NotifyLevel::Success, NotifyLocation::Inline, "copied 247 chars to clipboard");
+    send(
+        NotifyLevel::Success,
+        NotifyLocation::Inline,
+        "copied 247 chars to clipboard",
+    );
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    send(NotifyLevel::Debug, NotifyLocation::Inline, "auto_snapshot: agent @ 1.2.0 (id=a3f8b1c2)");
+    send(
+        NotifyLevel::Debug,
+        NotifyLocation::Inline,
+        "auto_snapshot: agent @ 1.2.0 (id=a3f8b1c2)",
+    );
 
     // Toast notifications
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -4529,7 +4613,9 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
         level: NotifyLevel::Info,
         location: NotifyLocation::Status,
         lifecycle: NotifyLifecycle::UntilReplaced,
-        stack: atman_runtime::notify::NotifyStack::Replace { key: "daemon".into() },
+        stack: atman_runtime::notify::NotifyStack::Replace {
+            key: "daemon".into(),
+        },
         message: "daemon connected".into(),
     }));
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -4537,7 +4623,9 @@ async fn preview_scene_notify(session: std::sync::Arc<Session>) {
         level: NotifyLevel::Warn,
         location: NotifyLocation::Status,
         lifecycle: NotifyLifecycle::UntilReplaced,
-        stack: atman_runtime::notify::NotifyStack::Replace { key: "compact".into() },
+        stack: atman_runtime::notify::NotifyStack::Replace {
+            key: "compact".into(),
+        },
         message: "compacting… 847 → 142 messages".into(),
     }));
 
@@ -5658,7 +5746,10 @@ async fn cmd_logs_stream(
     let cfg = atman_daemon::config::DaemonConfig::load_or_init(&cfg_path)?;
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
-    atman_runtime::notify!(info, "streaming events for session {sid} from {base}/events");
+    atman_runtime::notify!(
+        info,
+        "streaming events for session {sid} from {base}/events"
+    );
     stream_daemon_events(&client, &base, &cfg.auth_token, &sid, since_seq, false).await
 }
 

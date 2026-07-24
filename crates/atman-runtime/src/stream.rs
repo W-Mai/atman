@@ -1,5 +1,5 @@
+use crate::notify::{NotifyLevel, NotifyLifecycle, NotifyLocation, NotifyStack};
 use serde::{Deserialize, Serialize};
-use crate::notify::{NotifyLevel, NotifyLocation, NotifyLifecycle, NotifyStack};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationFrame {

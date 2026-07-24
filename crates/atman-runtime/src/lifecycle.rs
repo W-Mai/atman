@@ -73,10 +73,24 @@ impl LifecycleRunner {
             };
             match executor.run(&file, &flow_name, Vec::new()).await {
                 Ok(Value::Err(e)) => {
-                    crate::notify!(error, "on {} body error: {e}", lifecycle_event_slug(event));
+                    let key = format!("lifecycle.{}.returned_error", lifecycle_event_slug(event));
+                    crate::notify!(
+                        error,
+                        location = Inline,
+                        stack = dedupe(key, 60_000),
+                        "lifecycle on {} returned error: {e}",
+                        lifecycle_event_slug(event)
+                    );
                 }
                 Err(e) => {
-                    crate::notify!(error, "on {} body error: {e}", lifecycle_event_slug(event));
+                    let key = format!("lifecycle.{}.run_failed", lifecycle_event_slug(event));
+                    crate::notify!(
+                        error,
+                        location = Inline,
+                        stack = dedupe(key, 60_000),
+                        "lifecycle on {} failed to run: {e}",
+                        lifecycle_event_slug(event)
+                    );
                 }
                 Ok(_) => {}
             }

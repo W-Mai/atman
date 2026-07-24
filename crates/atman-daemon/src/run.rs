@@ -103,7 +103,7 @@ impl RunLauncher {
                     }
                 },
                 Err(e) => {
-                    atman_runtime::notify!(error, "resolve project scope failed: {e}");
+                    atman_runtime::notify!(warn, "resolve project scope failed: {e}");
                     None
                 }
             };
@@ -157,7 +157,12 @@ impl RunLauncher {
                     }
                     match std::sync::Arc::try_unwrap(session) {
                         Ok(s) => s.shutdown().await,
-                        Err(_) => atman_runtime::notify!(warn, "session still had refs at shutdown"),
+                        Err(_) => atman_runtime::notify!(
+                            warn,
+                            location = Log,
+                            stack = dedupe("session.refs_at_shutdown", 60_000),
+                            "session still had refs at shutdown"
+                        ),
                     }
                     state_for_task.deregister_live(&sid_for_task);
                 });

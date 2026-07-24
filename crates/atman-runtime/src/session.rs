@@ -1313,7 +1313,11 @@ impl Session {
     }
 
     pub fn events_path(&self) -> Option<std::path::PathBuf> {
-        self.writer.lock().unwrap().as_ref().map(|w| w.events_path().to_path_buf())
+        self.writer
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|w| w.events_path().to_path_buf())
     }
 
     pub async fn plan_system_prompt(&self) -> Option<String> {
@@ -1489,7 +1493,12 @@ impl Session {
                 let _ = self.plans_watch.send(list);
             }
             Err(e) => {
-                crate::notify!(warn, "refresh_plans_from_store_async: {e}");
+                crate::notify!(
+                    warn,
+                    location = Log,
+                    stack = dedupe("memory.refresh_plans_async", 60_000),
+                    "refresh_plans_from_store_async: {e}"
+                );
             }
         }
     }
@@ -1508,7 +1517,12 @@ impl Session {
                 let _ = self.todos_watch.send(list);
             }
             Some(Err(e)) => {
-                crate::notify!(warn, "refresh_todos_from_store: {e}");
+                crate::notify!(
+                    warn,
+                    location = Log,
+                    stack = dedupe("memory.refresh_todos", 60_000),
+                    "refresh_todos_from_store: {e}"
+                );
             }
             None => {}
         }
@@ -1524,7 +1538,12 @@ impl Session {
                 let _ = self.todos_watch.send(list);
             }
             Err(e) => {
-                crate::notify!(warn, "refresh_todos_from_store_async: {e}");
+                crate::notify!(
+                    warn,
+                    location = Log,
+                    stack = dedupe("memory.refresh_todos_async", 60_000),
+                    "refresh_todos_from_store_async: {e}"
+                );
             }
         }
     }

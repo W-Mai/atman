@@ -189,7 +189,9 @@ async fn write_event(
         && let Err(e) = insert_project_row(idx, sid, event, &line)
     {
         crate::notify!(
-            error,
+            warn,
+            location = Log,
+            stack = merge_count("project_index.insert_failed", 60_000),
             "project index insert failed (seq={}): {e}",
             event.seq()
         );

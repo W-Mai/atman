@@ -101,7 +101,13 @@ impl ConfessionStore {
         if let Some(idx) = &self.anchor_index
             && let Err(e) = insert_confession(idx, &confession)
         {
-            crate::notify!(error, "confession index insert failed (id={id}): {e}");
+            let key = format!("confession.index:{id}");
+            crate::notify!(
+                warn,
+                location = Inline,
+                stack = dedupe(key, 60_000),
+                "confession index insert failed (id={id}): {e}"
+            );
         }
         Ok(id)
     }

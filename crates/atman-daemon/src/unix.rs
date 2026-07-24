@@ -45,7 +45,7 @@ impl UnixServer {
                     let state = state.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_conn(stream, state).await {
-                            atman_runtime::notify!(error, "unix conn error: {e}");
+                            atman_runtime::notify!(warn, location = Log, stack = merge_count("daemon.unix_conn_error", 60_000), "unix conn error: {e}");
                         }
                     });
                 }

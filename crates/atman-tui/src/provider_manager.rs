@@ -360,9 +360,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
         ProviderFocus::ProviderList => {
             "Tab: models  |  a: add provider  |  e: toggle auth  |  Esc: close"
         }
-        ProviderFocus::ModelList => {
-            "Tab: providers  |  a: alias this model  |  Esc: back"
-        }
+        ProviderFocus::ModelList => "Tab: providers  |  a: alias this model  |  Esc: back",
     };
     let footer = Paragraph::new(Line::from(Span::styled(
         help,

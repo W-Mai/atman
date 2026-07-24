@@ -475,7 +475,12 @@ impl Provider for CodexProvider {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    crate::notify!(error, "fetch codex models failed: {e:#}");
+                    crate::notify!(
+                        warn,
+                        location = Inline,
+                        stack = dedupe("codex.models.fetch_failed", 60_000),
+                        "fetch codex models failed: {e:#}"
+                    );
                     return vec![];
                 }
             };

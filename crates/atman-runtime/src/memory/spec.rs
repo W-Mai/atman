@@ -114,8 +114,11 @@ impl SpecStore {
         if let Some(idx) = &self.anchor_index
             && let Err(e) = insert_entry(idx, &entry)
         {
+            let key = format!("spec.index.entry:{}", entry.id);
             crate::notify!(
-                error,
+                warn,
+                location = Inline,
+                stack = dedupe(key, 60_000),
                 "spec entry index insert failed (id={}): {e}",
                 entry.id
             );
@@ -148,8 +151,11 @@ impl SpecStore {
         if let Some(idx) = &self.anchor_index
             && let Err(e) = insert_deviation(idx, &dev)
         {
+            let key = format!("spec.index.deviation:{}", dev.id);
             crate::notify!(
-                error,
+                warn,
+                location = Inline,
+                stack = dedupe(key, 60_000),
                 "spec deviation index insert failed (id={}): {e}",
                 dev.id
             );
