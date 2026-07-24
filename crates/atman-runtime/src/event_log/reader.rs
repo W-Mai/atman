@@ -4,6 +4,50 @@ use crate::message::Message;
 use crate::session::{ContextSnapshot, SessionOpenError};
 use serde_json;
 
+/// Parsed representation of one JSONL event line.
+#[derive(Debug, Clone)]
+pub struct RawEventRow {
+    pub seq: u64,
+    pub kind: String,
+    pub value: serde_json::Value,
+}
+
+impl RawEventRow {
+    pub fn field<T: serde::de::DeserializeOwned>(&self, name: &str) -> Option<T> {
+        self.value
+            .get(name)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+}
+
+pub fn read_event_rows(path: &Path) -> Result<Vec<RawEventRow>, SessionOpenError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(SessionOpenError::Replay {
+                path: path.to_path_buf(),
+                source: e,
+            });
+        }
+    };
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(t) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let seq = value["seq"].as_u64().unwrap_or(0);
+        let kind = value["type"].as_str().unwrap_or("").to_string();
+        rows.push(RawEventRow { seq, kind, value });
+    }
+    Ok(rows)
+}
+
 pub fn parse_json_lines(text: &str) -> Vec<serde_json::Value> {
     text.lines()
         .filter_map(|line| {

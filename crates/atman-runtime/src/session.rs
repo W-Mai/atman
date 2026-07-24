@@ -1440,8 +1440,6 @@ pub enum EnqueueError {
     NoActiveTurn,
 }
 
-// ── Write commands ──
-
 pub struct AppendMessageCommand {
     pub msg: Message,
     pub flow_run_id: Option<FlowRunId>,
