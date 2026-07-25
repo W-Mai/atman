@@ -269,10 +269,7 @@ async fn run_flow_inner(
         .await;
 
     let turn_id = atman_runtime::event::TurnId::now();
-    let user_msg = atman_runtime::message::Message::user_text(
-        turn_id.clone(),
-        format!("daemon run {} flow={flow_name}", path.display()),
-    );
+    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), flow_name.clone());
     {
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);

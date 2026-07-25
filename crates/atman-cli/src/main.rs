@@ -605,10 +605,7 @@ async fn cmd_run(
     }
 
     let turn_id = atman_runtime::event::TurnId::now();
-    let user_msg = atman_runtime::message::Message::user_text(
-        turn_id.clone(),
-        format!("atman run {} flow={flow_name}", file.display()),
-    );
+    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), flow_name.clone());
     session
         .approval()
         .set_auto_ceiling(atman_runtime::tool::ApprovalLevel::Dangerous);
