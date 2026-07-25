@@ -48,15 +48,26 @@ fn init_is_idempotent_and_never_overwrites_user_edits() {
     run_init(&cfg);
     let hello = cfg.join("commands/hello.at");
     std::fs::write(&hello, "flow hello() -> string { return \"customised\" }\n").unwrap();
+    let agent = cfg.join("commands/agent.at");
+    std::fs::write(&agent, "flow agent() -> string { return \"broken\" }\n").unwrap();
 
-    let (out, err, code) = run_init(&cfg);
-    assert_eq!(code, 0, "stderr={err}");
+    let (out, _err, code) = run_init(&cfg);
+    assert_eq!(code, 0);
     assert!(
-        out.contains("already fully populated"),
-        "want idempotent hint: {out}"
+        out.contains("managed by atman"),
+        "want managed-agent-at warning: {out}"
     );
-    let body = std::fs::read_to_string(&hello).unwrap();
-    assert!(body.contains("customised"), "user edit lost: {body}");
+    // agent.at is overwritten even on second init → written > 0
+    let hello_body = std::fs::read_to_string(&hello).unwrap();
+    assert!(
+        hello_body.contains("customised"),
+        "user edit lost: {hello_body}"
+    );
+    let agent_body = std::fs::read_to_string(&agent).unwrap();
+    assert!(
+        agent_body.contains("flow agent(user_prompt: string) -> string"),
+        "managed agent.at must be restored: {agent_body}"
+    );
 }
 
 #[test]

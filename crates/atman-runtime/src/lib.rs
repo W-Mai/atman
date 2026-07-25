@@ -45,6 +45,7 @@ pub mod session;
 pub mod session_meta;
 pub mod storage;
 pub mod stream;
+pub mod templates;
 pub mod tool;
 pub mod tool_naming;
 pub mod tools;

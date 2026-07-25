@@ -16,6 +16,8 @@ So "just feed the model everything" is fine for short sessions, expensive over 2
 
 Atman ships **layer 1** by default and gives you the primitives for **layer 2**. Layer 3 is deferred until real signal shows up.
 
+Note: `commands/agent.at` is a managed atman template. `atman init`, CLI `/agent` startup, and daemon launches of that managed flow may overwrite it. Do not edit it directly; to customize the default agent, copy the template into your own `.at` file and change `routes.at`'s `default_route` to point at your flow.
+
 ### layer 1 — sliding window (default)
 
 Feed the last `n` messages. `commands/agent.at` uses
@@ -28,9 +30,7 @@ Feed the last `n` messages. `commands/agent.at` uses
 - Enough for the model to keep the immediate reference frame
 - Small enough to force the agent to *ask* when it needs older info
 
-Increase `n` when: the agent regularly loses thread across ~10 turns and users have to re-explain.
-
-Decrease `n` when: you have a chatty agent (many `tool_use` results) and messages fill up faster than 10 turns' worth of user prompts.
+If you want to tune this behavior, do not edit the managed `commands/agent.at` in place. Create your own `.at` file, adjust its context strategy there, and route to it from `routes.at`.
 
 ### layer 2 — anchor-based recall (opt-in, not yet shipped)
 

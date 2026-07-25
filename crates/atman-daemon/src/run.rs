@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -188,6 +188,11 @@ async fn run_flow_inner(
     home_dir: Option<PathBuf>,
     daemon_state: Option<Arc<crate::DaemonState>>,
 ) -> Result<()> {
+    if path_is_managed_agent_at(path, config_dir.as_deref()) {
+        if let Some(dir) = &config_dir {
+            atman_runtime::templates::ensure_managed_agent_at(dir)?;
+        }
+    }
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("reading flow {}", path.display()))?;
     let parsed = atman_dsl::parse::parse_file(&source)
@@ -296,4 +301,31 @@ async fn run_flow_inner(
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
         .await;
     Ok(())
+}
+
+fn path_is_managed_agent_at(path: &Path, config_dir: Option<&Path>) -> bool {
+    let Some(dir) = config_dir else {
+        return false;
+    };
+    let managed = dir.join("commands").join("agent.at");
+    if same_path(path, &managed) {
+        return true;
+    }
+    let Some(file_name) = path.file_name() else {
+        return false;
+    };
+    if file_name != "agent.at" {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    same_path(parent, &dir.join("commands"))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }

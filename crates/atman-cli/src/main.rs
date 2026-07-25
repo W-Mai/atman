@@ -1254,6 +1254,9 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     }
     let name = name_full.strip_prefix('/').unwrap_or(name_full);
     let cfg = config_dir()?;
+    if name == "agent" {
+        atman_runtime::templates::ensure_managed_agent_at(&cfg)?;
+    }
     let path = cfg.join("commands").join(format!("{name}.at"));
     if !path.exists() {
         bail!("no such command: {} (looked for {})", name, path.display());
@@ -4109,6 +4112,10 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
             );
         }
     }
+    println!(
+        "Note: commands/agent.at is managed by atman and will be overwritten on each agent start. Do not edit it."
+    );
+    println!("To customize behavior, create your own .at file and route to it from routes.at.");
     println!();
     println!("next steps:");
     let cfg_dir = config_dir().ok();

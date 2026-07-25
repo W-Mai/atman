@@ -1,11 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use atman_runtime::templates::AGENT_AT;
 
 pub struct InitReport {
     pub config_dir: PathBuf,
     pub written: Vec<PathBuf>,
     pub skipped: Vec<PathBuf>,
+    #[allow(dead_code)]
+    pub managed: Vec<PathBuf>,
 }
 
 #[cfg(test)]
@@ -32,20 +35,27 @@ pub fn init_config_dir_with_mode(
     };
 
     let config_path = config_dir.join("config.toml");
-    let templates: [(PathBuf, String); 5] = [
+    let managed_path = commands_dir.join("agent.at");
+    let optional_templates: [(PathBuf, String); 4] = [
         (config_path.clone(), config_toml_body),
         (config_dir.join("routes.at"), ROUTES_AT.into()),
         (
             config_dir.join("on_session_start.at"),
             ON_SESSION_START_AT.into(),
         ),
-        (commands_dir.join("agent.at"), AGENT_AT.into()),
         (commands_dir.join("hello.at"), HELLO_AT.into()),
     ];
 
     let mut written = Vec::new();
     let mut skipped = Vec::new();
-    for (path, body) in templates {
+    let mut managed = Vec::new();
+
+    std::fs::write(&managed_path, AGENT_AT)
+        .with_context(|| format!("write {}", managed_path.display()))?;
+    written.push(managed_path.clone());
+    managed.push(managed_path);
+
+    for (path, body) in optional_templates {
         if path.exists() {
             skipped.push(path);
             continue;
@@ -57,6 +67,7 @@ pub fn init_config_dir_with_mode(
         config_dir: config_dir.to_path_buf(),
         written,
         skipped,
+        managed,
     })
 }
 
@@ -132,55 +143,6 @@ pub const ON_SESSION_START_AT: &str = r#"flow on_session_start() -> string {
 }
 "#;
 
-pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
-    contract {
-        capabilities { shell: true }
-    }
-    _prompt_lands_via_begin_turn = user_prompt
-    return subflow(agent_loop, 0)
-}
-
-flow agent_loop(iteration: int) -> string {
-    when iteration >= 200 {
-        return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
-    }
-    reply = llm {
-        model: "smart"
-        context: session
-        system: "Planning tools: use plan.write/read/tick for the active high-level route through a multi-step task. A plan is a durable ordered checklist that atman injects back into every LLM call; create or revise one for work that spans several steps, files, tool calls, or turns, then call plan.tick when a plan step is truly complete. Use memory.todo.set/done/cancel/delete/list for concrete execution items inside the current plan step: small trackable units with where/why/how/expected_result, especially when you need a visible work queue or may pause and resume. Do not mirror the same item in both systems. If a plan step is enough, do not create a todo. If a todo becomes the whole strategy, replace it with a plan. Typical flow: set or read the plan, execute one plan step, create todos only for that step's sub-work, finish/cancel those todos, then tick the plan step."
-        cache: true
-        retry: 12
-        tools: [
-            fs.read, fs.write, fs.edit, fs.list, fs.grep,
-            bash.spawn, bash.status, bash.output, bash.kill, bash.list,
-            term.spawn, term.input, term.capture, term.resize, term.kill, term.list,
-            web.fetch, web.search,
-            hunk.review, hunk.apply, hunk.plan_edit,
-            git.diff, git.show, git.log, git.status, git.add, git.commit, git.branch, git.push, test.run,
-            memory.confess, memory.fetch_confessions,
-            memory.todo.set, memory.todo.done, memory.todo.cancel, memory.todo.delete, memory.todo.list,
-            memory.goal.get, memory.goal.set, memory.goal.clear,
-            memory.recent_turns, memory.history.search, memory.history.read,
-            memory.spec.status, memory.spec.update, memory.spec.deviate,
-            plan.write, plan.read, plan.tick,
-            agent.spawn,
-            form.ask,
-            preview.push,
-            session.push, sleep,
-            "mcp.*"
-        ]
-    }
-    tool_uses = extract_tool_uses(reply)
-    when is_empty(tool_uses) {
-        return text_concat(reply)
-    }
-    tool_results = dispatch_all(tool_uses)
-    session.push(tool_results)
-    j = iteration + 1
-    return subflow(agent_loop, j)
-}
-"#;
-
 pub const HELLO_AT: &str = r#"flow hello() -> string {
     return "hello from atman"
 }
@@ -197,6 +159,7 @@ mod tests {
         let rep = init_config_dir(&cfg).unwrap();
         assert!(rep.skipped.is_empty());
         assert_eq!(rep.written.len(), 5, "written: {:?}", rep.written);
+        assert_eq!(rep.managed.len(), 1);
         assert!(cfg.join("config.toml").exists());
         assert!(cfg.join("routes.at").exists());
         assert!(cfg.join("on_session_start.at").exists());
@@ -235,12 +198,20 @@ mod tests {
         init_config_dir(&cfg).unwrap();
         let touched = cfg.join("commands/hello.at");
         std::fs::write(&touched, "flow hello() { return \"CUSTOM\" }\n").unwrap();
+        let agent = cfg.join("commands/agent.at");
+        std::fs::write(&agent, "flow agent() { return \"BROKEN\" }\n").unwrap();
 
         let rep = init_config_dir(&cfg).unwrap();
-        assert!(rep.written.is_empty(), "second run must not overwrite");
-        assert_eq!(rep.skipped.len(), 5, "skipped: {:?}", rep.skipped);
-        let body = std::fs::read_to_string(&touched).unwrap();
-        assert!(body.contains("CUSTOM"), "user edit preserved: {body}");
+        assert!(rep.skipped.iter().any(|p| p.ends_with("hello.at")));
+        assert!(rep.managed.iter().any(|p| p.ends_with("agent.at")));
+        let hello_body = std::fs::read_to_string(&touched).unwrap();
+        assert!(
+            hello_body.contains("CUSTOM"),
+            "user edit preserved: {hello_body}"
+        );
+        let agent_body = std::fs::read_to_string(&agent).unwrap();
+        assert!(agent_body.contains("flow agent(user_prompt: string) -> string"));
+        assert!(!agent_body.contains("BROKEN"));
     }
 
     #[test]

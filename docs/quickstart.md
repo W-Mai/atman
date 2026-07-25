@@ -168,4 +168,4 @@ First run writes `hello.at.snap.json`. Subsequent runs compare the current outpu
 - **"no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml"** — REPL doesn't know what to do with your bare text. Either add a route or `atman init` again to write the `default_route { flow: agent }` fallback.
 - **`unreachable: connect: ...` on a provider row** — check the base URL and that you can `curl` it. Corporate proxies + custom CAs need `SSL_CERT_FILE`.
 - **REPL prints nothing after your input** — you're in the agent loop. Watch `atman logs tail --follow` or `atman monitor` to see what's happening.
-- **Agent forgets what you asked two turns ago** — set a `:goal`, or if that's not enough, edit `commands/agent.at` and raise the `memory.recent_turns(n: 10)` window. See `docs/context-strategy.md` for when to escalate to layer 2 (recall).
+- **Agent forgets what you asked two turns ago** — set a `:goal`. `commands/agent.at` is a managed atman template and is overwritten on agent start; to customize behavior, create your own `.at` file and point `routes.at`'s `default_route` at it. See `docs/context-strategy.md` for context-layer options.
