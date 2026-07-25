@@ -218,7 +218,7 @@ impl ProviderManager {
                 KeyAction::Char('e') => self.toggle_enabled(),
                 KeyAction::Char('d') => self.request_confirm(ConfirmKind::Delete),
                 KeyAction::Submit => self.request_confirm(ConfirmKind::Logout),
-                KeyAction::Char('r') => self.refresh_selected(),
+                KeyAction::Char('r') => self.refresh_selected(control_tx),
                 _ => {}
             },
             ProviderFocus::ModelList => {
@@ -310,9 +310,21 @@ impl ProviderManager {
         }
     }
 
-    fn refresh_selected(&mut self) {
-        // Reload auth.json and refresh the model groups.
-        self.refresh_list();
+    fn refresh_selected(
+        &mut self,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        if let Some(ProviderEntry {
+            source: ProviderSource::AuthStore { id },
+            ..
+        }) = self.providers.get(self.selected)
+        {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(crate::TuiControl::RefreshProviderModels {
+                    provider_id: id.clone(),
+                });
+            }
+        }
     }
 
     fn handle_add_key(

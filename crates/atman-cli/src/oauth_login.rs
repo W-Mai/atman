@@ -42,6 +42,15 @@ pub async fn oauth_login<P: OAuthProvider + Provider>(
                     let mut store = AuthStore::load().unwrap_or_default();
                     store.add(provider.clone());
                     let _ = store.save();
+
+                    // Discover models immediately after login.
+                    let discover_provider = P::from_stored(&provider);
+                    let models = discover_provider.discover_models().await;
+                    if !models.is_empty() {
+                        let _ = atman_runtime::auth_store::save_provider_model_cache(&id, &models);
+                        atman_runtime::model_registry::register_discovered(&id, &models);
+                    }
+
                     let _ = tx.send(Ok(provider));
                     Ok(())
                 }

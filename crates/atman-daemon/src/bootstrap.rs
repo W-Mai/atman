@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_runtime::event::EventSink;
-use atman_runtime::provider::Provider;
 use atman_runtime::providers::anthropic::AnthropicProvider;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::providers::openai::OpenAiProvider;
@@ -473,7 +472,7 @@ async fn register_providers_from_env(executor: &mut Executor) {
 
 async fn register_providers_from_auth_store(executor: &mut Executor) {
     use atman_runtime::auth_store::ProviderKind;
-    use atman_runtime::auth_store::{cached_to_discovered, save_provider_model_cache};
+    use atman_runtime::auth_store::cached_to_discovered;
     let Ok(store) = atman_runtime::auth_store::AuthStore::load() else {
         return;
     };
@@ -488,28 +487,14 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
                 atman_runtime::model_registry::register_discovered(&p.id, &cached);
             }
 
-            // Create provider without blocking on model discovery.
-            let provider_id = p.id.clone();
+            // Create provider (token refresh if needed) without model discovery.
             match atman_runtime::oauth::create_oauth_provider_no_discover::<
                 atman_runtime::providers::codex::CodexProvider,
             >(p)
             .await
             {
                 Ok(provider) => {
-                    executor.providers.register(provider.clone());
-
-                    // Background model discovery — never blocks boot.
-                    tokio::spawn(async move {
-                        let models: Vec<atman_runtime::provider::DiscoveredModel> =
-                            provider.discover_models().await;
-                        if !models.is_empty() {
-                            let _ = save_provider_model_cache(&provider_id, &models);
-                            atman_runtime::model_registry::register_discovered(
-                                &provider_id,
-                                &models,
-                            );
-                        }
-                    });
+                    executor.providers.register(provider);
                 }
                 Err(e) => {
                     atman_runtime::notify!(

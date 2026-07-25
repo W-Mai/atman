@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use atman_dsl::parse::parse_file;
+use atman_runtime::provider::Provider;
 use atman_runtime::{Executor, Session, Value};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -1591,6 +1592,7 @@ async fn cmd_repl_once(
         }
         let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<atman_tui::TuiControl>();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
+        let cmd_tx_for_models = cmd_tx.clone();
         let session_for_ctrl = std::sync::Arc::clone(&session);
         let switch_target_for_ctrl = switch_target.clone();
         let providers_for_ctrl = executor.providers.clone();
@@ -1777,6 +1779,34 @@ async fn cmd_repl_once(
                     }
                     atman_tui::TuiControl::OpenAliasManager { .. } => {
                         // handled internally in the TUI — no-op here
+                    }
+                    atman_tui::TuiControl::RefreshProviderModels { provider_id } => {
+                        let tx = cmd_tx_for_models.clone();
+                        let pid = provider_id.clone();
+                        tokio::spawn(async move {
+                            // Load the provider from auth store
+                            let Ok(store) = atman_runtime::auth_store::AuthStore::load() else {
+                                return;
+                            };
+                            let Some(p) = store.providers.iter().find(|x| x.id == pid) else {
+                                return;
+                            };
+                            // Create a temporary provider to discover models
+                            let provider = atman_runtime::providers::codex::CodexProvider::new(
+                                &p.name,
+                                &p.access_token,
+                                p.account.as_deref().unwrap_or(""),
+                            );
+                            let models: Vec<atman_runtime::provider::DiscoveredModel> =
+                                provider.discover_models().await;
+                            if !models.is_empty() {
+                                let _ = atman_runtime::auth_store::save_provider_model_cache(
+                                    &pid, &models,
+                                );
+                                atman_runtime::model_registry::register_discovered(&pid, &models);
+                            }
+                            let _ = tx.send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                        });
                     }
                 }
             }

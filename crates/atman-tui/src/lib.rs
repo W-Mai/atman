@@ -146,6 +146,9 @@ pub enum TuiControl {
     OpenAliasManager {
         model: Option<String>,
     },
+    RefreshProviderModels {
+        provider_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +166,7 @@ pub enum TuiCommand {
     OpenTrustModePicker,
     OpenThemePicker,
     CycleOutside,
+    ProviderModelsUpdated,
 }
 
 pub struct TuiHandle {
@@ -751,6 +755,9 @@ async fn run_frames(
                             } else {
                                 app.push_note("outside switch only available in eager mode", app::NoteLevel::Warn);
                             }
+                        }
+                        TuiCommand::ProviderModelsUpdated => {
+                            app.provider_manager.refresh_list();
                         }
                     }
                 }
