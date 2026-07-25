@@ -4086,12 +4086,19 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
         None => None,
     };
     let rep = init::init_config_dir_with_mode(&cfg, fs_access)?;
-    if rep.written.is_empty() {
+    let unmanaged_written: Vec<_> = rep
+        .written
+        .iter()
+        .filter(|p| !rep.managed.contains(p))
+        .collect();
+    if unmanaged_written.is_empty() && rep.skipped.len() == 4 {
         println!(
             "[atman] init: {} already fully populated ({} file(s) preserved)",
             rep.config_dir.display(),
             rep.skipped.len()
         );
+    } else if rep.written.len() == 1 && rep.managed.len() == 1 {
+        // only agent.at was refreshed
     } else {
         println!(
             "[atman] init: wrote {} template(s) under {}",
@@ -4100,7 +4107,12 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
         );
         for p in &rep.written {
             if let Ok(rel) = p.strip_prefix(&rep.config_dir) {
-                println!("  + {}", rel.display());
+                let tag = if rep.managed.contains(p) {
+                    "  *"
+                } else {
+                    "  +"
+                };
+                println!("{tag} {}", rel.display());
             } else {
                 println!("  + {}", p.display());
             }

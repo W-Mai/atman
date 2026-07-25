@@ -57,5 +57,6 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<PathBuf> {
         .with_context(|| format!("mkdir {}", commands_dir.display()))?;
     let path = commands_dir.join("agent.at");
     std::fs::write(&path, AGENT_AT).with_context(|| format!("write {}", path.display()))?;
+    crate::notify!(debug, "managed agent.at written at {}", path.display());
     Ok(path)
 }

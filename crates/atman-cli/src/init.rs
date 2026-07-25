@@ -7,7 +7,6 @@ pub struct InitReport {
     pub config_dir: PathBuf,
     pub written: Vec<PathBuf>,
     pub skipped: Vec<PathBuf>,
-    #[allow(dead_code)]
     pub managed: Vec<PathBuf>,
 }
 
