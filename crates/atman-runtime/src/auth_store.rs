@@ -23,14 +23,9 @@ pub struct ModelCache {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedModel {
     pub slug: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context_budget: Option<u64>,
-    #[serde(default)]
     pub thinking: bool,
-}
-
-fn default_enabled() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,16 +34,15 @@ pub struct StoredProvider {
     pub name: String,
     pub kind: ProviderKind,
     pub access_token: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     pub expires_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
-    #[serde(default = "default_enabled")]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_cache: Option<ModelCache>,
 }
 
@@ -256,27 +250,5 @@ mod tests {
         let json = r#"{"providers": []}"#;
         let store: AuthStore = serde_json::from_str(json).unwrap();
         assert!(store.providers.is_empty());
-    }
-
-    #[test]
-    fn old_auth_json_without_new_fields_loads_with_defaults() {
-        let json = r#"{
-            "providers": [
-                {
-                    "id": "abc",
-                    "name": "Test Codex",
-                    "kind": "codex",
-                    "access_token": "tok",
-                    "expires_at": 1761735358
-                }
-            ]
-        }"#;
-        let store: AuthStore = serde_json::from_str(json).unwrap();
-        assert_eq!(store.providers.len(), 1);
-        let p = &store.providers[0];
-        assert_eq!(p.id, "abc");
-        assert!(p.enabled, "missing enabled should default to true");
-        assert!(p.display_name.is_none());
-        assert!(p.model_cache.is_none());
     }
 }
