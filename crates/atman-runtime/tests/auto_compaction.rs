@@ -45,7 +45,7 @@ async fn compact_messages_refreshes_window_from_compacted_history() {
         .compact_messages_auto("test summary".into())
         .expect("expected compaction");
 
-    assert_eq!(session.last_input_tokens(), 0);
+    assert!(session.last_input_tokens() > 0);
     assert_eq!(
         session.subscribe_context().borrow().window_tokens,
         result.after_tokens

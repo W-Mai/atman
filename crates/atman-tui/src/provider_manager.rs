@@ -25,8 +25,18 @@ pub enum ProviderSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderStatus {
     Active,
+    Disabled,
     Inactive,
     EnvKey,
+    Cached,
+    Refreshing,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmKind {
+    Delete,
+    Logout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,6 +64,11 @@ pub struct ProviderManager {
     kind_selected: usize,
     name_editor: InputEditor,
     name_focused: bool,
+    /// Confirmation dialog state.
+    show_confirm: bool,
+    confirm_kind: Option<ConfirmKind>,
+    confirm_provider_id: Option<String>,
+    confirm_provider_name: String,
 }
 
 impl ProviderManager {
@@ -97,11 +112,19 @@ impl ProviderManager {
         }
         if let Ok(store) = atman_runtime::auth_store::AuthStore::load() {
             for p in &store.providers {
+                let has_cache = p.model_cache.is_some();
+                let status = if !p.enabled {
+                    ProviderStatus::Disabled
+                } else if has_cache {
+                    ProviderStatus::Cached
+                } else {
+                    ProviderStatus::Active
+                };
                 self.providers.push(ProviderEntry {
                     source: ProviderSource::AuthStore { id: p.id.clone() },
-                    name: p.name.clone(),
+                    name: p.display_name.as_deref().unwrap_or(&p.name).to_string(),
                     kind: format!("{:?}", p.kind).to_lowercase(),
-                    status: ProviderStatus::Active,
+                    status,
                     detail: p.account.clone().unwrap_or_default(),
                 });
             }
@@ -118,15 +141,6 @@ impl ProviderManager {
             }
         }
         self.groups = atman_runtime::model_registry::all_provider_groups();
-    }
-
-    fn selected_provider_auth_id(&self) -> Option<String> {
-        self.providers
-            .get(self.selected)
-            .and_then(|e| match &e.source {
-                ProviderSource::AuthStore { id } => Some(id.clone()),
-                _ => None,
-            })
     }
 
     fn open_add(&mut self) {
@@ -163,6 +177,19 @@ impl ProviderManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
+        // Confirmation dialog gets first priority.
+        if self.show_confirm {
+            match action {
+                KeyAction::Char('y') | KeyAction::Char('Y') | KeyAction::Submit => {
+                    self.execute_confirm(control_tx);
+                }
+                KeyAction::Escape | KeyAction::Char('n') | KeyAction::Char('N') => {
+                    self.show_confirm = false;
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.show_add {
             self.handle_add_key(action, control_tx);
             return;
@@ -188,14 +215,10 @@ impl ProviderManager {
                     }
                 }
                 KeyAction::Char('a') => self.open_add(),
-                KeyAction::Char('e') | KeyAction::Submit => {
-                    if let Some(id) = self.selected_provider_auth_id() {
-                        if let Some(tx) = control_tx {
-                            let _ = tx.send(crate::TuiControl::AuthLogout { id });
-                        }
-                        self.refresh_list();
-                    }
-                }
+                KeyAction::Char('e') => self.toggle_enabled(),
+                KeyAction::Char('d') => self.request_confirm(ConfirmKind::Delete),
+                KeyAction::Submit => self.request_confirm(ConfirmKind::Logout),
+                KeyAction::Char('r') => self.refresh_selected(),
                 _ => {}
             },
             ProviderFocus::ModelList => {
@@ -228,6 +251,68 @@ impl ProviderManager {
                 }
             }
         }
+    }
+
+    fn toggle_enabled(&mut self) {
+        if let Some(ProviderEntry {
+            source: ProviderSource::AuthStore { id },
+            status,
+            ..
+        }) = self.providers.get_mut(self.selected)
+        {
+            let new_enabled = !matches!(status, ProviderStatus::Active | ProviderStatus::Cached);
+            if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
+                if let Some(p) = store.providers.iter_mut().find(|p| p.id == *id) {
+                    p.enabled = new_enabled;
+                    let _ = store.save();
+                    self.refresh_list();
+                }
+            }
+        }
+    }
+
+    fn request_confirm(&mut self, kind: ConfirmKind) {
+        if let Some(ProviderEntry {
+            source: ProviderSource::AuthStore { id },
+            name,
+            ..
+        }) = self.providers.get(self.selected)
+        {
+            self.show_confirm = true;
+            self.confirm_kind = Some(kind);
+            self.confirm_provider_id = Some(id.clone());
+            self.confirm_provider_name = name.clone();
+        }
+    }
+
+    fn execute_confirm(
+        &mut self,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        let provider_id = self.confirm_provider_id.take();
+        let kind = self.confirm_kind.take();
+        self.show_confirm = false;
+
+        let Some(id) = provider_id else { return };
+
+        match kind {
+            Some(ConfirmKind::Delete) | Some(ConfirmKind::Logout) => {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(crate::TuiControl::AuthLogout { id: id.clone() });
+                }
+                if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
+                    store.remove(&id);
+                    let _ = store.save();
+                }
+                self.refresh_list();
+            }
+            None => {}
+        }
+    }
+
+    fn refresh_selected(&mut self) {
+        // Reload auth.json and refresh the model groups.
+        self.refresh_list();
     }
 
     fn handle_add_key(
@@ -335,6 +420,10 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
         return;
     }
 
+    if mgr.show_confirm {
+        render_confirm_dialog(f, inner, mgr, &theme);
+        return;
+    }
     if mgr.show_add {
         render_add_dialog(f, inner, mgr, &theme);
         return;
@@ -358,7 +447,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
     // Footer help
     let help = match mgr.focus {
         ProviderFocus::ProviderList => {
-            "Tab: models  |  a: add provider  |  e: toggle auth  |  Esc: close"
+            "e: enable/disable  |  d: delete  |  Enter: logout  |  r: refresh  |  a: add  |  Tab: models  |  Esc: close"
         }
         ProviderFocus::ModelList => "Tab: providers  |  a: alias this model  |  Esc: back",
     };
@@ -388,14 +477,23 @@ fn render_provider_list(
             } else {
                 Style::default()
             };
-            let status = match p.status {
-                ProviderStatus::Active => "●",
-                ProviderStatus::EnvKey => "○",
-                ProviderStatus::Inactive => "✗",
+            let (status_symbol, muted) = match p.status {
+                ProviderStatus::Active => ("●", false),
+                ProviderStatus::Cached => ("●", false),
+                ProviderStatus::Refreshing => ("◐", false),
+                ProviderStatus::Disabled => ("○", true),
+                ProviderStatus::EnvKey => ("○", false),
+                ProviderStatus::Inactive => ("✗", true),
+                ProviderStatus::Error => ("✗", false),
+            };
+            let s = if muted {
+                style.add_modifier(Modifier::DIM)
+            } else {
+                style
             };
             ListItem::new(Line::from(Span::styled(
-                format!(" {} {}", status, p.name),
-                style,
+                format!(" {} {}", status_symbol, p.name),
+                s,
             )))
         })
         .collect();
@@ -420,19 +518,18 @@ fn render_model_detail(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Find matching provider group
-    let provider_name = mgr.providers.get(mgr.selected).map(|p| p.name.as_str());
+    // Match model groups by provider ID for auth store entries.
+    let provider_id = mgr
+        .providers
+        .get(mgr.selected)
+        .and_then(|p| match &p.source {
+            ProviderSource::AuthStore { id } => Some(format!("codex:{}", id)),
+            _ => None,
+        });
     let mut lines = vec![];
-    if let Some(name) = provider_name {
+    if let Some(ref pid) = provider_id {
         for g in &mgr.groups {
-            if g.provider_name
-                .to_lowercase()
-                .contains(&name.to_lowercase())
-                || name
-                    .to_lowercase()
-                    .contains(&g.provider_name.to_lowercase())
-                || g.provider_name == "codex" && name.to_lowercase().contains("codex")
-            {
+            if g.provider_name == *pid {
                 lines.push(Line::from(Span::styled(
                     format!(" {} models:", g.models.len()),
                     Style::default().add_modifier(Modifier::BOLD),
@@ -515,4 +612,44 @@ fn render_add_dialog(
         lines.push(Line::from("Enter to select, Esc to cancel"));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_confirm_dialog(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    mgr: &ProviderManager,
+    theme: &crate::theme::Theme,
+) {
+    let (action, subtitle) = match mgr.confirm_kind {
+        Some(ConfirmKind::Delete) => ("Delete", "This removes credentials and cached models."),
+        Some(ConfirmKind::Logout) => (
+            "Log out of",
+            "This will remove the saved session from auth.json.",
+        ),
+        None => ("Remove", ""),
+    };
+    let title = format!("{action} provider \"{}\"?", mgr.confirm_provider_name);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.warn))
+        .title(format!(" {action}? "));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let lines = vec![
+        Line::from(Span::styled(
+            title.as_str(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(subtitle, Style::default().fg(theme.meta_fg))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  y / Enter: confirm    n / Esc: cancel",
+            Style::default().fg(theme.meta_fg),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+        inner,
+    );
 }

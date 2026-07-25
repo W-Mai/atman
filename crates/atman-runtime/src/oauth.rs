@@ -83,6 +83,22 @@ pub fn extract_account_from_id_token(id_token: &str) -> Option<String> {
 pub async fn create_oauth_provider<P: OAuthProvider>(
     stored: &StoredProvider,
 ) -> Result<(Arc<P>, Vec<DiscoveredModel>)> {
+    create_oauth_provider_impl(stored, true).await
+}
+
+/// Same as `create_oauth_provider` but skips `discover_models()`.
+/// Returns an empty model list. Use when discovery will happen in the background.
+pub async fn create_oauth_provider_no_discover<P: OAuthProvider>(
+    stored: &StoredProvider,
+) -> Result<Arc<P>> {
+    let (provider, _) = create_oauth_provider_impl(stored, false).await?;
+    Ok(provider)
+}
+
+async fn create_oauth_provider_impl<P: OAuthProvider>(
+    stored: &StoredProvider,
+    discover: bool,
+) -> Result<(Arc<P>, Vec<DiscoveredModel>)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock")?
@@ -106,7 +122,11 @@ pub async fn create_oauth_provider<P: OAuthProvider>(
     }
 
     let provider = P::from_stored(&updated);
-    let models = provider.discover_models().await;
+    let models = if discover {
+        provider.discover_models().await
+    } else {
+        vec![]
+    };
     Ok((Arc::new(provider), models))
 }
 

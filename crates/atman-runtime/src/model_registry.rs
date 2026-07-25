@@ -64,18 +64,15 @@ pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
 }
 
 /// Build ModelEntry values from discovered models and register them.
-pub fn register_discovered(prefix: &str, models: &[crate::provider::DiscoveredModel]) {
+pub fn register_discovered(provider_id: &str, models: &[crate::provider::DiscoveredModel]) {
     let entries: Vec<(String, ModelEntry)> = models
         .iter()
         .map(|m| {
-            let name = if m.slug.starts_with(&format!("{prefix}-")) {
-                m.slug.clone()
-            } else {
-                format!("{prefix}/{name}", name = m.slug)
-            };
+            let provider_name = format!("codex:{provider_id}");
+            let name = format!("{provider_name}/{}", m.slug);
             let entry = ModelEntry {
                 model: name.clone(),
-                provider: Some(prefix.to_string()),
+                provider: Some(provider_name.clone()),
                 context_budget: m.context_budget,
                 thinking: Some(m.thinking),
                 ..Default::default()
@@ -86,7 +83,7 @@ pub fn register_discovered(prefix: &str, models: &[crate::provider::DiscoveredMo
     let slugs: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
     register_model_entries(entries);
     set_discovered_models(slugs.clone());
-    crate::notify!(debug, target: "model_registry", "{} models: {}", prefix, slugs.join(", "));
+    crate::notify!(debug, target: "model_registry", "{} models: {}", provider_id, slugs.join(", "));
 }
 
 #[derive(Debug, Clone)]

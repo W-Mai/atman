@@ -15,6 +15,25 @@ pub enum ProviderKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCache {
+    pub fetched_at: i64,
+    pub models: Vec<CachedModel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedModel {
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<u64>,
+    #[serde(default)]
+    pub thinking: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredProvider {
     pub id: String,
     pub name: String,
@@ -25,6 +44,12 @@ pub struct StoredProvider {
     pub expires_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_cache: Option<ModelCache>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -80,6 +105,50 @@ impl AuthStore {
         self.providers.retain(|p| p.id != id);
         self.providers.len() < len_before
     }
+
+    /// Update the model cache for a provider by ID. Returns false if provider not found.
+    pub fn update_model_cache(&mut self, provider_id: &str, cache: ModelCache) -> bool {
+        if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+            p.model_cache = Some(cache);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Save discovered models as cache for a provider. Reads auth.json, updates, writes back.
+pub fn save_provider_model_cache(
+    provider_id: &str,
+    models: &[crate::provider::DiscoveredModel],
+) -> Result<()> {
+    let mut store = AuthStore::load().unwrap_or_default();
+    let cache = ModelCache {
+        fetched_at: chrono::Utc::now().timestamp(),
+        models: models
+            .iter()
+            .map(|m| CachedModel {
+                slug: m.slug.clone(),
+                context_budget: m.context_budget,
+                thinking: m.thinking,
+            })
+            .collect(),
+    };
+    store.update_model_cache(provider_id, cache);
+    store.save()
+}
+
+/// Convert cached models to discovered models for registry hydration.
+pub fn cached_to_discovered(cache: &ModelCache) -> Vec<crate::provider::DiscoveredModel> {
+    cache
+        .models
+        .iter()
+        .map(|m| crate::provider::DiscoveredModel {
+            slug: m.slug.clone(),
+            context_budget: m.context_budget,
+            thinking: m.thinking,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -111,6 +180,9 @@ mod tests {
             refresh_token: Some("rt1".into()),
             expires_at: 1761735358,
             account: Some("x@example.com".into()),
+            enabled: true,
+            display_name: None,
+            model_cache: None,
         });
         store.save_to(&path).unwrap();
 
@@ -131,6 +203,9 @@ mod tests {
             refresh_token: None,
             expires_at: 0,
             account: None,
+            enabled: true,
+            display_name: None,
+            model_cache: None,
         });
         store.add(StoredProvider {
             id: "del".into(),
@@ -140,6 +215,9 @@ mod tests {
             refresh_token: None,
             expires_at: 0,
             account: None,
+            enabled: true,
+            display_name: None,
+            model_cache: None,
         });
         assert!(store.remove("del"));
         assert_eq!(store.providers.len(), 1);
@@ -178,5 +256,27 @@ mod tests {
         let json = r#"{"providers": []}"#;
         let store: AuthStore = serde_json::from_str(json).unwrap();
         assert!(store.providers.is_empty());
+    }
+
+    #[test]
+    fn old_auth_json_without_new_fields_loads_with_defaults() {
+        let json = r#"{
+            "providers": [
+                {
+                    "id": "abc",
+                    "name": "Test Codex",
+                    "kind": "codex",
+                    "access_token": "tok",
+                    "expires_at": 1761735358
+                }
+            ]
+        }"#;
+        let store: AuthStore = serde_json::from_str(json).unwrap();
+        assert_eq!(store.providers.len(), 1);
+        let p = &store.providers[0];
+        assert_eq!(p.id, "abc");
+        assert!(p.enabled, "missing enabled should default to true");
+        assert!(p.display_name.is_none());
+        assert!(p.model_cache.is_none());
     }
 }

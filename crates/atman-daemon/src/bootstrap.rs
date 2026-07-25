@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atman_runtime::event::EventSink;
+use atman_runtime::provider::Provider;
 use atman_runtime::providers::anthropic::AnthropicProvider;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::providers::openai::OpenAiProvider;
@@ -471,20 +472,54 @@ async fn register_providers_from_env(executor: &mut Executor) {
 }
 
 async fn register_providers_from_auth_store(executor: &mut Executor) {
+    use atman_runtime::auth_store::ProviderKind;
+    use atman_runtime::auth_store::{cached_to_discovered, save_provider_model_cache};
     let Ok(store) = atman_runtime::auth_store::AuthStore::load() else {
         return;
     };
     for p in &store.providers {
-        if p.kind == atman_runtime::auth_store::ProviderKind::Codex {
-            let Ok((provider, models)) = atman_runtime::oauth::create_oauth_provider::<
+        if !p.enabled {
+            continue;
+        }
+        if p.kind == ProviderKind::Codex {
+            // Hydrate cached models immediately so the UI has them from frame 0.
+            if let Some(cache) = &p.model_cache {
+                let cached = cached_to_discovered(cache);
+                atman_runtime::model_registry::register_discovered(&p.id, &cached);
+            }
+
+            // Create provider without blocking on model discovery.
+            let provider_id = p.id.clone();
+            match atman_runtime::oauth::create_oauth_provider_no_discover::<
                 atman_runtime::providers::codex::CodexProvider,
             >(p)
             .await
-            else {
-                continue;
-            };
-            executor.providers.register(provider);
-            atman_runtime::model_registry::register_discovered("codex", &models);
+            {
+                Ok(provider) => {
+                    executor.providers.register(provider.clone());
+
+                    // Background model discovery — never blocks boot.
+                    tokio::spawn(async move {
+                        let models: Vec<atman_runtime::provider::DiscoveredModel> =
+                            provider.discover_models().await;
+                        if !models.is_empty() {
+                            let _ = save_provider_model_cache(&provider_id, &models);
+                            atman_runtime::model_registry::register_discovered(
+                                &provider_id,
+                                &models,
+                            );
+                        }
+                    });
+                }
+                Err(e) => {
+                    atman_runtime::notify!(
+                        warn,
+                        "codex provider {} ({}) failed to init: {e:#}",
+                        p.name,
+                        p.id
+                    );
+                }
+            }
         }
     }
 }

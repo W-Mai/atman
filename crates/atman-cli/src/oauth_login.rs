@@ -35,6 +35,9 @@ pub async fn oauth_login<P: OAuthProvider + Provider>(
                         refresh_token: tokens.refresh_token,
                         expires_at: tokens.expires_at,
                         account: tokens.account,
+                        enabled: true,
+                        display_name: None,
+                        model_cache: None,
                     };
                     let mut store = AuthStore::load().unwrap_or_default();
                     store.add(provider.clone());
