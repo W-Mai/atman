@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use atman_runtime::templates::AGENT_AT;
+use atman_runtime::templates::{AGENT_AT, SYSTEM_MD};
 
 pub struct InitReport {
     pub config_dir: PathBuf,
@@ -53,6 +53,15 @@ pub fn init_config_dir_with_mode(
         .with_context(|| format!("write {}", managed_path.display()))?;
     written.push(managed_path.clone());
     managed.push(managed_path);
+
+    let prompts_dir = config_dir.join("prompts");
+    std::fs::create_dir_all(&prompts_dir)
+        .with_context(|| format!("mkdir {}", prompts_dir.display()))?;
+    let system_md = prompts_dir.join("system.md");
+    std::fs::write(&system_md, SYSTEM_MD)
+        .with_context(|| format!("write {}", system_md.display()))?;
+    written.push(system_md.clone());
+    managed.push(system_md);
 
     for (path, body) in optional_templates {
         if path.exists() {
@@ -157,13 +166,14 @@ mod tests {
         let cfg = tmp.path().join("atman");
         let rep = init_config_dir(&cfg).unwrap();
         assert!(rep.skipped.is_empty());
-        assert_eq!(rep.written.len(), 5, "written: {:?}", rep.written);
-        assert_eq!(rep.managed.len(), 1);
+        assert_eq!(rep.written.len(), 6, "written: {:?}", rep.written);
+        assert_eq!(rep.managed.len(), 2);
         assert!(cfg.join("config.toml").exists());
         assert!(cfg.join("routes.at").exists());
         assert!(cfg.join("on_session_start.at").exists());
         assert!(cfg.join("commands/agent.at").exists());
         assert!(cfg.join("commands/hello.at").exists());
+        assert!(cfg.join("prompts/system.md").exists());
     }
 
     #[test]
@@ -221,7 +231,7 @@ mod tests {
         std::fs::write(cfg.join("some-other.toml"), "unrelated").unwrap();
         let rep = init_config_dir(&cfg).unwrap();
         assert!(cfg.join("commands").is_dir());
-        assert_eq!(rep.written.len(), 5);
+        assert_eq!(rep.written.len(), 6);
     }
 
     #[test]

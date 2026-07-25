@@ -24,7 +24,7 @@ fn init_writes_config_tree_and_prints_next_steps() {
     let cfg = tmp.path().join("atman");
     let (out, err, code) = run_init(&cfg);
     assert_eq!(code, 0, "stderr={err}");
-    assert!(out.contains("wrote 5 template"), "want write count: {out}");
+    assert!(out.contains("wrote 6 template"), "want write count: {out}");
     assert!(out.contains("next steps:"), "want next-steps block: {out}");
     for entry in [
         "config.toml",
@@ -32,6 +32,7 @@ fn init_writes_config_tree_and_prints_next_steps() {
         "on_session_start.at",
         "commands/agent.at",
         "commands/hello.at",
+        "prompts/system.md",
     ] {
         assert!(
             cfg.join(entry).exists(),

@@ -15,11 +15,7 @@ mod suggest;
 mod sync;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "atman",
-    version,
-    about = "atman — flow-driven code agent runtime"
-)]
+#[command(name = "atman", version, about = "atman witnesses; code exists")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -4114,8 +4110,7 @@ async fn cmd_init(sandbox: Option<String>) -> Result<()> {
             rep.config_dir.display(),
             rep.skipped.len()
         );
-    } else if rep.written.len() == 1 && rep.managed.len() == 1 {
-        // only agent.at was refreshed
+    } else if rep.written.len() == 2 && rep.managed.len() == 2 {
     } else {
         println!(
             "[atman] init: wrote {} template(s) under {}",
