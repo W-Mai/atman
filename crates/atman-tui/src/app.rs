@@ -548,6 +548,7 @@ impl AppState {
         let visible_above = self
             .last_document_visible_rows
             .saturating_sub(self.last_input_overlay_rows)
+            .saturating_sub(1)
             .max(1);
         self.last_total_rows.saturating_sub(visible_above)
     }
@@ -1523,18 +1524,19 @@ mod tests {
     #[test]
     fn resolve_scroll_follows_tail_by_default() {
         let mut app = AppState::new("s".into(), None);
+        // visible_above = 20 - 0 - 1 = 19, anchor = 100 - 19 = 81
         app.resolve_scroll(100, 20, 0, 5);
-        assert_eq!(app.scroll_offset, 80);
+        assert_eq!(app.scroll_offset, 81);
         assert!(app.follow_tail);
     }
 
     #[test]
     fn anchor_with_input_overlay() {
         let mut app = AppState::new("s".into(), None);
-        // transcript=30, input=5 → visible_above=25, anchor=75
+        // transcript=30, input=5 → visible_above=24, anchor=76
         app.resolve_scroll(100, 30, 5, 5);
-        assert_eq!(app.scroll_offset, 75);
-        assert_eq!(app.max_scroll_offset(), 75);
+        assert_eq!(app.scroll_offset, 76);
+        assert_eq!(app.max_scroll_offset(), 76);
         assert!(app.follow_tail);
     }
 
@@ -1543,7 +1545,7 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.resolve_scroll(100, 30, 5, 5);
         app.scroll_up(20);
-        assert_eq!(app.scroll_offset, 55);
+        assert_eq!(app.scroll_offset, 56);
         assert!(!app.follow_tail);
     }
 
@@ -1552,9 +1554,9 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.resolve_scroll(100, 30, 5, 5);
         app.scroll_up(30);
-        assert_eq!(app.scroll_offset, 45);
+        assert_eq!(app.scroll_offset, 46);
         app.scroll_down(30);
-        assert_eq!(app.scroll_offset, 75);
+        assert_eq!(app.scroll_offset, 76);
         assert!(app.follow_tail);
     }
 
@@ -1562,9 +1564,9 @@ mod tests {
     fn scroll_down_past_anchor_clamped_to_anchor() {
         let mut app = AppState::new("s".into(), None);
         app.resolve_scroll(100, 30, 5, 5);
-        // Already at anchor (75).  Scrolling down further is capped.
+        // Already at anchor (76).  Scrolling down further is capped.
         app.scroll_down(30);
-        assert_eq!(app.scroll_offset, 75);
+        assert_eq!(app.scroll_offset, 76);
         assert!(app.follow_tail);
     }
 
@@ -1573,9 +1575,9 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.resolve_scroll(200, 30, 5, 5);
         app.scroll_up(50);
-        assert_eq!(app.scroll_offset, 125);
+        assert_eq!(app.scroll_offset, 126);
         app.resolve_scroll(300, 30, 5, 5);
-        assert_eq!(app.scroll_offset, 125);
+        assert_eq!(app.scroll_offset, 126);
     }
 
     #[test]
@@ -1593,7 +1595,7 @@ mod tests {
     fn max_scroll_offset_zero_when_content_shorter_than_viewport() {
         let mut app = AppState::new("s".into(), None);
         app.resolve_scroll(10, 30, 5, 5);
-        // visible_above=25 > total=10 → anchor saturates to 0
+        // visible_above=24 > total=10 → anchor saturates to 0
         assert_eq!(app.max_scroll_offset(), 0);
     }
 
