@@ -531,7 +531,7 @@ fn render_model_detail(
     f.render_widget(block, area);
 
     // Match model groups by vendor name (e.g. "codex").
-    let provider_name = mgr.providers.get(mgr.selected).map(|p| p.kind.as_str());
+    let provider_name = mgr.providers.get(mgr.selected).map(|p| p.name.as_str());
     let mut lines = vec![];
     if let Some(name) = provider_name {
         for g in &mgr.groups {

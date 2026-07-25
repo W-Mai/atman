@@ -1803,7 +1803,9 @@ async fn cmd_repl_once(
                                 let _ = atman_runtime::auth_store::save_provider_model_cache(
                                     &pid, &models,
                                 );
-                                atman_runtime::model_registry::register_discovered(&pid, &models);
+                                atman_runtime::model_registry::register_discovered(
+                                    &pid, &p.name, &models,
+                                );
                             }
                             let _ = tx.send(atman_tui::TuiCommand::ProviderModelsUpdated);
                         });

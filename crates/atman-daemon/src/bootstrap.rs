@@ -484,7 +484,7 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
             // Hydrate cached models immediately so the UI has them from frame 0.
             if let Some(cache) = &p.model_cache {
                 let cached = cached_to_discovered(cache);
-                atman_runtime::model_registry::register_discovered(&p.id, &cached);
+                atman_runtime::model_registry::register_discovered(&p.id, &p.name, &cached);
             }
 
             // Create provider (token refresh if needed) without model discovery.

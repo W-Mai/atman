@@ -494,11 +494,6 @@ impl Provider for CodexProvider {
             list.iter()
                 .filter_map(|m| {
                     let slug = m["slug"].as_str()?.to_string();
-                    let slug = slug
-                        .strip_prefix("codex/")
-                        .or_else(|| slug.strip_prefix("codex:"))
-                        .unwrap_or(&slug)
-                        .to_string();
                     if slug.is_empty() {
                         return None;
                     }

@@ -64,16 +64,19 @@ pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
 }
 
 /// Build ModelEntry values from discovered models and register them.
-/// Models are keyed as `codex:<slug>` (vendor:model format).
-/// The `provider_id` identifies the auth-store account for cache management.
-pub fn register_discovered(provider_id: &str, models: &[crate::provider::DiscoveredModel]) {
+/// Models are keyed as `<provider_name>:<slug>` (e.g. `Codex:codex/gpt-5.5`).
+pub fn register_discovered(
+    provider_id: &str,
+    provider_name: &str,
+    models: &[crate::provider::DiscoveredModel],
+) {
     let entries: Vec<(String, ModelEntry)> = models
         .iter()
         .map(|m| {
-            let name = format!("codex:{}", m.slug);
+            let name = format!("{provider_name}:{}", m.slug);
             let entry = ModelEntry {
                 model: name.clone(),
-                provider: Some("codex".to_string()),
+                provider: Some(provider_name.to_string()),
                 context_budget: m.context_budget,
                 thinking: Some(m.thinking),
                 ..Default::default()
