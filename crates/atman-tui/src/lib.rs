@@ -758,6 +758,12 @@ async fn run_frames(
                         }
                         TuiCommand::ProviderModelsUpdated => {
                             app.provider_manager.refresh_list();
+                            app.push_toast(
+                                "models refreshed",
+                                app::NoteLevel::Success,
+                                std::time::Duration::from_secs(3),
+                                app::ToastPosition::TopRight,
+                            );
                         }
                     }
                 }
@@ -1885,6 +1891,15 @@ fn handle_key(
         app.provider_manager.handle_key(&action, control_tx);
         if let Some(model) = app.provider_manager.open_alias_model.take() {
             app.alias_manager.open_form_with_model(&model);
+        }
+        if app.provider_manager.refresh_just_triggered {
+            app.provider_manager.refresh_just_triggered = false;
+            app.push_toast(
+                "refreshing models…",
+                app::NoteLevel::Info,
+                std::time::Duration::from_secs(2),
+                app::ToastPosition::TopRight,
+            );
         }
         return;
     }

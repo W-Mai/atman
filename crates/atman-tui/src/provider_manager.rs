@@ -54,6 +54,8 @@ pub struct ProviderManager {
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
     model_selected: usize,
     pub open_alias_model: Option<String>,
+    /// Set to true when r was pressed; caller should push a toast and clear.
+    pub refresh_just_triggered: bool,
     show_add: bool,
     focus: ProviderFocus,
     kinds: Vec<(
@@ -218,7 +220,9 @@ impl ProviderManager {
                 KeyAction::Char('e') => self.toggle_enabled(),
                 KeyAction::Char('d') => self.request_confirm(ConfirmKind::Delete),
                 KeyAction::Submit => self.request_confirm(ConfirmKind::Logout),
-                KeyAction::Char('r') => self.refresh_selected(control_tx),
+                KeyAction::Char('r') => {
+                    self.refresh_selected(control_tx);
+                }
                 _ => {}
             },
             ProviderFocus::ModelList => {
@@ -323,6 +327,7 @@ impl ProviderManager {
                 let _ = tx.send(crate::TuiControl::RefreshProviderModels {
                     provider_id: id.clone(),
                 });
+                self.refresh_just_triggered = true;
             }
         }
     }

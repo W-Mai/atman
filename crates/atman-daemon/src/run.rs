@@ -50,6 +50,7 @@ fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::Model
                 compact_threshold_ratio: m.compact_threshold_ratio,
                 thinking: m.thinking,
                 max_tokens: m.max_tokens,
+                discovered: false,
             },
         );
     }

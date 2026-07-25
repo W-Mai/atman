@@ -3411,6 +3411,7 @@ pub fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::M
                 compact_threshold_ratio: m.compact_threshold_ratio,
                 thinking: m.thinking,
                 max_tokens: m.max_tokens,
+                discovered: false,
             },
         );
     }

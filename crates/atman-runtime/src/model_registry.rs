@@ -20,6 +20,10 @@ pub struct ModelEntry {
     pub compact_threshold_ratio: Option<f64>,
     pub thinking: Option<bool>,
     pub max_tokens: Option<u32>,
+    /// True for models registered via discover (OAuth providers),
+    /// false for config.toml-defined models.
+    #[allow(dead_code)]
+    pub discovered: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -47,10 +51,21 @@ pub fn discovered_models() -> Vec<String> {
 }
 
 /// Set the base model configuration (from config.toml).
-/// Replaces any previously loaded config.toml settings.
-/// Use `register_model_entries` to add discovered models on top.
-pub fn set_model_config(cfg: ModelConfig) {
-    *MODEL_CONFIG.write().unwrap() = Some(cfg);
+/// Preserves previously registered discovered models.
+pub fn set_model_config(mut cfg: ModelConfig) {
+    let mut guard = MODEL_CONFIG.write().unwrap();
+    if let Some(old) = guard.take() {
+        // Preserve discovered models from old config.
+        for (name, entry) in old.models {
+            if entry.discovered {
+                cfg.models.entry(name).or_insert(entry);
+            }
+        }
+        // Preserve aliases from old config that aren't in the new one.
+        // config.toml aliases are authoritative; only preserve
+        // non-config-sourced aliases (currently none exist).
+    }
+    *guard = Some(cfg);
 }
 
 /// Register additional model entries without clobbering existing ones.
@@ -66,7 +81,7 @@ pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
 /// Build ModelEntry values from discovered models and register them.
 /// Models are keyed as `<provider_name>:<slug>` (e.g. `Codex:codex/gpt-5.5`).
 pub fn register_discovered(
-    provider_id: &str,
+    _provider_id: &str,
     provider_name: &str,
     models: &[crate::provider::DiscoveredModel],
 ) {
@@ -79,6 +94,7 @@ pub fn register_discovered(
                 provider: Some(provider_name.to_string()),
                 context_budget: m.context_budget,
                 thinking: Some(m.thinking),
+                discovered: true,
                 ..Default::default()
             };
             (name, entry)
@@ -86,8 +102,7 @@ pub fn register_discovered(
         .collect();
     let slugs: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
     register_model_entries(entries);
-    set_discovered_models(slugs.clone());
-    crate::notify!(debug, target: "model_registry", "{} models: {}", provider_id, slugs.join(", "));
+    set_discovered_models(slugs);
 }
 
 #[derive(Debug, Clone)]
@@ -346,6 +361,7 @@ fn reload_from_text(text: &str) {
                     compact_threshold_ratio: None,
                     thinking,
                     max_tokens,
+                    discovered: false,
                 },
             );
         }
@@ -491,10 +507,7 @@ mod tests {
                 context_budget: Some(8192),
                 compact_threshold_ratio: Some(0.9),
                 thinking: None,
-                provider: None,
-                api_key: None,
-                base_url: None,
-                max_tokens: None,
+                ..Default::default()
             },
         );
         set_model_config(cfg);
@@ -514,10 +527,8 @@ mod tests {
                 context_budget: Some(1_000_000),
                 compact_threshold_ratio: Some(0.8),
                 thinking: None,
-                provider: None,
-                api_key: None,
-                base_url: None,
                 max_tokens: Some(400_000),
+                ..Default::default()
             },
         );
         set_model_config(cfg);
@@ -547,15 +558,73 @@ mod tests {
                 context_budget: Some(65_536),
                 compact_threshold_ratio: None,
                 thinking: None,
-                provider: None,
-                api_key: None,
-                base_url: None,
-                max_tokens: None,
+                ..Default::default()
             },
         );
         set_model_config(cfg);
         let info = model_info("default");
         assert_eq!(info.name, "my-model");
         assert_eq!(info.context_budget, 65_536);
+    }
+
+    #[test]
+    fn discovered_models_survive_set_model_config() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        // Register discovered models first.
+        register_discovered(
+            "pid-abc",
+            "Codex",
+            &[crate::provider::DiscoveredModel {
+                slug: "codex/gpt-5".to_string(),
+                context_budget: Some(128_000),
+                thinking: true,
+            }],
+        );
+        assert!(model_entry("Codex:codex/gpt-5").is_some());
+
+        // Simulate config reload from config.toml.
+        let mut cfg = ModelConfig::default();
+        cfg.aliases.insert(
+            "cheap".into(),
+            AliasEntry {
+                model: "claude-opus-4.7".into(),
+            },
+        );
+        set_model_config(cfg);
+
+        // Discovered models should still be there.
+        assert!(
+            model_entry("Codex:codex/gpt-5").is_some(),
+            "discovered models should survive set_model_config"
+        );
+        // Alias from config should work.
+        assert_eq!(resolve_alias("cheap"), "claude-opus-4.7");
+    }
+
+    #[test]
+    fn discovered_models_survive_reload_from_text_alias_crud() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        register_discovered(
+            "pid-abc",
+            "Codex",
+            &[crate::provider::DiscoveredModel {
+                slug: "codex/gpt-5".to_string(),
+                context_budget: Some(128_000),
+                thinking: true,
+            }],
+        );
+
+        // Simulate alias add → reload_from_text
+        let toml = r#"
+[alias]
+smart = { model = "Codex:codex/gpt-5" }
+"#;
+        reload_from_text(toml);
+
+        assert!(
+            model_entry("Codex:codex/gpt-5").is_some(),
+            "discovered models should survive alias CRUD"
+        );
+        assert_eq!(resolve_alias("smart"), "Codex:codex/gpt-5");
     }
 }
