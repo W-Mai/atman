@@ -66,6 +66,17 @@ use atman_runtime::event::FlowRunId as RuntimeRunId;
 
 use crate::state::{DaemonState, LiveSession};
 
+fn render_value(v: &atman_runtime::Value) -> String {
+    match v {
+        atman_runtime::Value::Str(s) => s.clone(),
+        atman_runtime::Value::Int(n) => n.to_string(),
+        atman_runtime::Value::Float(n) => n.to_string(),
+        atman_runtime::Value::Bool(b) => b.to_string(),
+        atman_runtime::Value::Unit => String::new(),
+        other => format!("{other:?}"),
+    }
+}
+
 pub struct RunLauncher {
     pub project_root: PathBuf,
     pub config_dir: Option<PathBuf>,
@@ -269,7 +280,15 @@ async fn run_flow_inner(
         .await;
 
     let turn_id = atman_runtime::event::TurnId::now();
-    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), flow_name.clone());
+    let user_text = if args.is_empty() {
+        flow_name.clone()
+    } else {
+        args.iter()
+            .map(|(k, v)| format!("{k}={}", render_value(v)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text);
     {
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);

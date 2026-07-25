@@ -605,7 +605,15 @@ async fn cmd_run(
     }
 
     let turn_id = atman_runtime::event::TurnId::now();
-    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), flow_name.clone());
+    let user_text = if args.is_empty() {
+        flow_name.clone()
+    } else {
+        args.iter()
+            .map(|(k, v)| format!("{k}={}", render_value(v)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text);
     session
         .approval()
         .set_auto_ceiling(atman_runtime::tool::ApprovalLevel::Dangerous);
