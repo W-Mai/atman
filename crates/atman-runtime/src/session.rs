@@ -11,7 +11,7 @@ use crate::event_writer::EventWriter;
 use crate::injection::{Injection, InjectionId, InjectionState};
 use crate::message::{Message, MessageRole};
 use crate::projection::message_window::{
-    TranscriptEntry, replay_messages_from, replay_transcript_from,
+    TranscriptEntry, replay_messages_from, replay_messages_with_seq, replay_transcript_from,
 };
 use crate::stream::StreamFrame;
 
@@ -680,6 +680,7 @@ impl Session {
         }
         let events_path = dir.join("events.jsonl");
         let messages = replay_messages_from(&events_path)?;
+        let initial_msgs = replay_messages_with_seq(&events_path)?;
         if let Some(last_seq) = find_last_seq(&events_path)? {
             sink.restore_seq(last_seq);
         }
@@ -696,7 +697,6 @@ impl Session {
         let (todos_watch, todos_rx) = watch::channel(Vec::new());
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
         let events_handle = sink.events_handle();
-        let initial_msgs = messages.clone();
         Ok(Self {
             id,
             dir,

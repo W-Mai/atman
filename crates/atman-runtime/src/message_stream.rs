@@ -42,7 +42,7 @@ struct Acc {
 
 pub struct MessageStream {
     events: Arc<Mutex<Vec<EventEnvelope>>>,
-    initial_messages: Vec<Message>,
+    initial_seeded: Vec<(u64, Message)>,
     acc: Mutex<Acc>,
 }
 
@@ -51,7 +51,7 @@ impl MessageStream {
         let empty = Arc::new(Vec::new());
         Self {
             events,
-            initial_messages: Vec::new(),
+            initial_seeded: Vec::new(),
             acc: Mutex::new(Acc {
                 messages: Vec::new(),
                 replayed: 0,
@@ -64,8 +64,12 @@ impl MessageStream {
         }
     }
 
-    pub fn with_initial(events: Arc<Mutex<Vec<EventEnvelope>>>, initial: Vec<Message>) -> Self {
-        let full = Arc::new(initial);
+    pub fn with_initial(
+        events: Arc<Mutex<Vec<EventEnvelope>>>,
+        initial: Vec<(u64, Message)>,
+    ) -> Self {
+        let full: Arc<Vec<Message>> =
+            Arc::new(initial.iter().map(|(_, msg)| msg.clone()).collect());
         let start = full.iter().rposition(is_compaction_summary).unwrap_or(0);
         let window = MessageWindow {
             messages: Arc::clone(&full),
@@ -73,7 +77,7 @@ impl MessageStream {
         };
         Self {
             events,
-            initial_messages: full.as_ref().clone(),
+            initial_seeded: initial,
             acc: Mutex::new(Acc {
                 messages: Vec::new(),
                 replayed: 0,
@@ -99,12 +103,7 @@ impl MessageStream {
 
     fn ensure_fresh_locked(&self, events: &[EventEnvelope], acc: &mut Acc) {
         if acc.messages.is_empty() {
-            acc.messages = self
-                .initial_messages
-                .iter()
-                .cloned()
-                .map(|m| (0, m))
-                .collect();
+            acc.messages = self.initial_seeded.clone();
         }
         if acc.replayed >= events.len() {
             return;
@@ -395,8 +394,8 @@ mod tests {
     #[test]
     fn reopened_session_keeps_initial_messages_after_new_events() {
         let initial = vec![
-            compact_summary("compaction summary"),
-            assistant("tail assistant"),
+            (1, compact_summary("compaction summary")),
+            (2, assistant("tail assistant")),
         ];
         let events = Arc::new(Mutex::new(Vec::new()));
         let ms = MessageStream::with_initial(events.clone(), initial);

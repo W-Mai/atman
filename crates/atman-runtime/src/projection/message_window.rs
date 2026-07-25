@@ -85,8 +85,15 @@ pub enum TranscriptEntry {
 }
 
 pub fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
+    Ok(replay_messages_with_seq(path)?
+        .into_iter()
+        .map(|(_, msg)| msg)
+        .collect())
+}
+
+pub fn replay_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, SessionOpenError> {
     let envelopes = read_event_envelopes(path)?;
-    Ok(envelopes.as_slice().to_messages())
+    Ok(envelopes.as_slice().to_messages_with_seq())
 }
 
 #[derive(Debug, Clone)]
@@ -377,15 +384,23 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
 
 pub trait MessageProjection {
     fn to_messages(&self) -> Vec<Message>;
+    fn to_messages_with_seq(&self) -> Vec<(u64, Message)>;
 }
 
 impl MessageProjection for [crate::event::EventEnvelope] {
     fn to_messages(&self) -> Vec<Message> {
+        self.to_messages_with_seq()
+            .into_iter()
+            .map(|(_, msg)| msg)
+            .collect()
+    }
+
+    fn to_messages_with_seq(&self) -> Vec<(u64, Message)> {
         let mut acc: Vec<(u64, Message)> = Vec::new();
         for env in self {
             apply_envelope_to_messages(env, &mut acc);
         }
-        acc.into_iter().map(|(_, msg)| msg).collect()
+        acc
     }
 }
 
@@ -417,10 +432,10 @@ pub(crate) fn apply_envelope_to_messages(
             let Some(rep_seq) = replacement_msg_seq else {
                 return;
             };
-            let Some(rep_idx) = acc.iter().position(|(s, _)| s == rep_seq) else {
+            let Some(rep_idx) = acc.iter().position(|(s, _)| *s == *rep_seq) else {
                 return;
             };
-            if after_tokens >= before_tokens {
+            if *after_tokens >= *before_tokens {
                 return;
             }
             let replacement = acc.remove(rep_idx);
