@@ -346,36 +346,42 @@ async fn call_streaming_sub_agent(
     tokio::pin!(output);
     let result = loop {
         tokio::select! {
-            biased;
-            ev = events.recv() => forward_stream_event(ev, ctx, &model_name),
+            ev = events.recv() => {
+                match ev {
+                    Ok(event) => forward_stream_event(event, ctx, &model_name),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Channel closed; drain remaining then break to output.
+                        break output.await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Skip lagged; continue polling.
+                    }
+                }
+            }
             result = &mut output => break result,
         }
     };
     while let Ok(ev) = events.try_recv() {
-        forward_stream_event(Ok(ev), ctx, &model_name);
+        forward_stream_event(ev, ctx, &model_name);
     }
     result
 }
 
-fn forward_stream_event(
-    ev: Result<NodeEvent, tokio::sync::broadcast::error::RecvError>,
-    ctx: &ToolCtx,
-    model: &str,
-) {
+fn forward_stream_event(ev: NodeEvent, ctx: &ToolCtx, model: &str) {
     let Some(tx) = &ctx.stream_tx else {
         return;
     };
     match ev {
-        Ok(NodeEvent::LlmChunk { text, .. }) => {
+        NodeEvent::LlmChunk { text, .. } => {
             let _ = tx.send(crate::stream::StreamFrame::LlmChunk {
                 text,
                 model: model.to_string(),
             });
         }
-        Ok(NodeEvent::ThinkingChunk { text }) => {
+        NodeEvent::ThinkingChunk { text } => {
             let _ = tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
         }
-        Ok(NodeEvent::LlmDone { total_tokens }) => {
+        NodeEvent::LlmDone { total_tokens } => {
             let _ = tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
         }
         _ => {}
