@@ -96,6 +96,20 @@ pub fn replay_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, Sess
     Ok(envelopes.as_slice().to_messages_with_seq())
 }
 
+pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, SessionOpenError> {
+    let envelopes = read_event_envelopes(path)?;
+    Ok(envelopes
+        .iter()
+        .filter_map(|env| match &env.event {
+            crate::event::Event::UserMsg { message, .. }
+            | crate::event::Event::AssistantMsg { message, .. }
+            | crate::event::Event::ToolResultMsg { message, .. }
+            | crate::event::Event::SystemMsg { message, .. } => Some((env.seq, message.clone())),
+            _ => None,
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone)]
 pub struct AttachmentPatch {
     part_index: usize,

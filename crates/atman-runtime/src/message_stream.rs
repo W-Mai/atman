@@ -34,7 +34,8 @@ impl Deref for MessageWindow {
 }
 
 struct Acc {
-    messages: Vec<(u64, Message)>,
+    compacted: Vec<(u64, Message)>,
+    full_raw: Vec<(u64, Message)>,
     replayed: usize,
     full_cache: Arc<Vec<Message>>,
     window_cache: MessageWindow,
@@ -42,7 +43,8 @@ struct Acc {
 
 pub struct MessageStream {
     events: Arc<Mutex<Vec<EventEnvelope>>>,
-    initial_seeded: Vec<(u64, Message)>,
+    initial_compacted: Vec<(u64, Message)>,
+    initial_raw: Vec<(u64, Message)>,
     acc: Mutex<Acc>,
 }
 
@@ -51,9 +53,11 @@ impl MessageStream {
         let empty = Arc::new(Vec::new());
         Self {
             events,
-            initial_seeded: Vec::new(),
+            initial_compacted: Vec::new(),
+            initial_raw: Vec::new(),
             acc: Mutex::new(Acc {
-                messages: Vec::new(),
+                compacted: Vec::new(),
+                full_raw: Vec::new(),
                 replayed: 0,
                 full_cache: Arc::clone(&empty),
                 window_cache: MessageWindow {
@@ -66,10 +70,10 @@ impl MessageStream {
 
     pub fn with_initial(
         events: Arc<Mutex<Vec<EventEnvelope>>>,
-        initial: Vec<(u64, Message)>,
+        compacted: Vec<(u64, Message)>,
+        raw: Vec<(u64, Message)>,
     ) -> Self {
-        let full: Arc<Vec<Message>> =
-            Arc::new(initial.iter().map(|(_, msg)| msg.clone()).collect());
+        let full: Arc<Vec<Message>> = Arc::new(raw.iter().map(|(_, msg)| msg.clone()).collect());
         let start = full.iter().rposition(is_compaction_summary).unwrap_or(0);
         let window = MessageWindow {
             messages: Arc::clone(&full),
@@ -77,9 +81,11 @@ impl MessageStream {
         };
         Self {
             events,
-            initial_seeded: initial,
+            initial_compacted: compacted,
+            initial_raw: raw,
             acc: Mutex::new(Acc {
-                messages: Vec::new(),
+                compacted: Vec::new(),
+                full_raw: Vec::new(),
                 replayed: 0,
                 full_cache: full,
                 window_cache: window,
@@ -102,25 +108,40 @@ impl MessageStream {
     }
 
     fn ensure_fresh_locked(&self, events: &[EventEnvelope], acc: &mut Acc) {
-        if acc.messages.is_empty() {
-            acc.messages = self.initial_seeded.clone();
+        if acc.compacted.is_empty() {
+            acc.compacted = self.initial_compacted.clone();
+            acc.full_raw = self.initial_raw.clone();
         }
         if acc.replayed >= events.len() {
             return;
         }
         for ev in &events[acc.replayed..] {
-            crate::projection::message_window::apply_envelope_to_messages(ev, &mut acc.messages);
+            crate::projection::message_window::apply_envelope_to_messages(ev, &mut acc.compacted);
+            match &ev.event {
+                crate::event::Event::UserMsg { message, .. }
+                | crate::event::Event::AssistantMsg { message, .. }
+                | crate::event::Event::ToolResultMsg { message, .. }
+                | crate::event::Event::SystemMsg { message, .. } => {
+                    acc.full_raw.push((ev.seq, message.clone()));
+                }
+                _ => {}
+            }
         }
         acc.replayed = events.len();
 
-        let full: Vec<Message> = acc.messages.iter().map(|(_, msg)| msg).cloned().collect();
-        let start = full.iter().rposition(is_compaction_summary).unwrap_or(0);
-        let arc = Arc::new(full);
+        let compacted: Vec<Message> = acc.compacted.iter().map(|(_, msg)| msg).cloned().collect();
+        let start = compacted
+            .iter()
+            .rposition(is_compaction_summary)
+            .unwrap_or(0);
+        let compacted_arc = Arc::new(compacted);
         acc.window_cache = MessageWindow {
-            messages: Arc::clone(&arc),
+            messages: Arc::clone(&compacted_arc),
             start,
         };
-        acc.full_cache = arc;
+
+        let raw: Vec<Message> = acc.full_raw.iter().map(|(_, msg)| msg).cloned().collect();
+        acc.full_cache = Arc::new(raw);
     }
 }
 
@@ -368,6 +389,28 @@ mod tests {
     }
 
     #[test]
+    fn full_messages_retains_compacted_history() {
+        let events = vec![
+            make_msg_event("user_msg", &user("old u1"), 1),
+            make_msg_event("assistant_msg", &assistant("old a1"), 2),
+            make_msg_event("user_msg", &user("old u2"), 3),
+            make_msg_event("system_msg", &compact_summary("summary"), 4),
+            make_context_compact(0, 2, 200, 100, "summary", 4),
+            make_msg_event("user_msg", &user("after compact"), 5),
+        ];
+        let ms = MessageStream::new(event_envelopes(events));
+        // Window: only compact summary + messages after it
+        let w = ms.window();
+        assert_eq!(w.len(), 2);
+        // Full: all messages including compacted ones
+        let f = ms.full_messages();
+        assert_eq!(f.len(), 5, "full must retain compacted messages");
+        assert_eq!(f[0].text_concat(), "old u1");
+        assert_eq!(f[1].text_concat(), "old a1");
+        assert_eq!(f[2].text_concat(), "old u2");
+    }
+
+    #[test]
     fn third_compaction_replaces_second_summary() {
         let events = vec![
             make_msg_event("user_msg", &user("a"), 1),
@@ -393,12 +436,16 @@ mod tests {
 
     #[test]
     fn reopened_session_keeps_initial_messages_after_new_events() {
-        let initial = vec![
+        let initial_compacted = vec![
+            (1, compact_summary("compaction summary")),
+            (2, assistant("tail assistant")),
+        ];
+        let initial_raw = vec![
             (1, compact_summary("compaction summary")),
             (2, assistant("tail assistant")),
         ];
         let events = Arc::new(Mutex::new(Vec::new()));
-        let ms = MessageStream::with_initial(events.clone(), initial);
+        let ms = MessageStream::with_initial(events.clone(), initial_compacted, initial_raw);
 
         events.lock().unwrap().push(EventEnvelope::new(
             1,
