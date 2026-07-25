@@ -493,7 +493,7 @@ impl Provider for CodexProvider {
             };
             list.iter()
                 .filter_map(|m| {
-                    let slug = m["slug"].as_str()?.to_string();
+                    let slug = format!("codex/{}", m["slug"].as_str()?);
                     if slug.is_empty() {
                         return None;
                     }
