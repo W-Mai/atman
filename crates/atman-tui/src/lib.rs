@@ -2529,6 +2529,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             let scroll_before = if app.follow_tail {
                 let visible_above = document_visible_rows
                     .saturating_sub(input_overlay_rows)
+                    .saturating_sub(1) // one-row gap above input
                     .max(1);
                 fresh_total.saturating_sub(visible_above)
             } else {

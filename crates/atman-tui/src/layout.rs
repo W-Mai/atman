@@ -144,17 +144,13 @@ fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect
     // so the panel never looks like a single squished line.
     let content_h = buf_lines.clamp(3, 12);
     let outer_h = content_h.saturating_add(2);
-    // One row of transcript peeks under the panel so users feel the
-    // messages continue behind the floating input.
-    let bottom_margin: u16 = 1;
-    let outer_h = outer_h.min(transcript.height.saturating_sub(bottom_margin).max(3));
+    let outer_h = outer_h.min(transcript.height.max(3));
     let x = transcript.x + (transcript.width.saturating_sub(outer_width)) / 2;
     let y = match anchor {
         InputYAnchor::Bottom => transcript
             .y
             .saturating_add(transcript.height)
-            .saturating_sub(outer_h)
-            .saturating_sub(bottom_margin),
+            .saturating_sub(outer_h),
         InputYAnchor::Center => transcript.y + (transcript.height.saturating_sub(outer_h)) / 2,
     };
     Rect {
@@ -301,7 +297,7 @@ mod tests {
         let rect = compute_input_rect(transcript, 1);
         assert_eq!(rect.width, 75);
         assert!(rect.height >= 3);
-        assert_eq!(rect.y + rect.height, transcript.y + transcript.height - 1);
+        assert_eq!(rect.y + rect.height, transcript.y + transcript.height);
         assert_eq!(rect.x, (100 - 75) / 2);
     }
 

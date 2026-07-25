@@ -588,6 +588,7 @@ impl AppState {
         let old_visible_above = self
             .last_document_visible_rows
             .saturating_sub(self.last_input_overlay_rows)
+            .saturating_sub(1)
             .max(1);
         let old_max = self.last_total_rows.saturating_sub(old_visible_above);
         let was_at_bottom = self.scroll_offset >= old_max || self.last_total_rows == 0;
@@ -595,10 +596,9 @@ impl AppState {
         self.last_document_visible_rows = document_visible_rows;
         self.last_input_overlay_rows = input_overlay_rows;
         self.last_items_len = items_len;
-        // Scroll range: content can scroll behind the floating input, but
-        // stops when the newest line reaches the input's upper boundary.
         let visible_above = document_visible_rows
             .saturating_sub(input_overlay_rows)
+            .saturating_sub(1)
             .max(1);
         let max = total_rows.saturating_sub(visible_above);
         if self.follow_tail && (new_items || was_at_bottom) {
