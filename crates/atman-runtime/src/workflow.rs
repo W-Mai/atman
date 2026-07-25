@@ -785,10 +785,6 @@ mod tests {
     use crate::event::{FlowRunId, FlowStatus};
     use crate::nodegraph::NodeKind;
 
-    fn now() -> DateTime<Utc> {
-        Utc::now()
-    }
-
     fn flow_start(run_id: FlowRunId, name: &str) -> Event {
         Event::FlowStart {
             run_id,

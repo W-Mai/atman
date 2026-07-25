@@ -18,7 +18,7 @@ pub struct EvalCtx<'a> {
     pub events: Option<&'a crate::event::EventSink>,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
-    pub session: Option<std::sync::Arc<crate::session::Session>>,
+    pub session_runtime: Option<std::sync::Arc<crate::session::Session>>,
     pub flow_cancel: tokio_util::sync::CancellationToken,
     pub safety: Option<&'a crate::safety::SafetyConfig>,
     pub current_node_id: Option<String>,
@@ -307,11 +307,11 @@ async fn dispatch_tool_call<'a>(
         c.sandbox = None;
         c
     };
-    let ctx_with_anchors = if let Some(session) = ctx.session.as_ref() {
+    let ctx_with_anchors = if let Some(session) = ctx.session_runtime.as_ref() {
         ctx_with_anchors
             .with_session_messages(std::sync::Arc::new(session.messages()))
             .with_session_messages_handle(session.messages_handle())
-            .with_session(session.clone())
+            .with_session_runtime(session.clone())
             .with_compact_lock_handle(session.compact_lock_handle())
     } else {
         ctx_with_anchors
@@ -325,14 +325,14 @@ async fn dispatch_tool_call<'a>(
         ctx_with_anchors
     };
     if let Some(tx) = ctx
-        .session
+        .session_runtime
         .as_ref()
         .map(|s| s.stream_tx())
         .or_else(|| ctx.tool_ctx.stream_tx.clone())
     {
         ctx_with_anchors = ctx_with_anchors.with_stream_tx(tx);
     }
-    let ctx_with_anchors = if let Some(session) = ctx.session.as_ref() {
+    let ctx_with_anchors = if let Some(session) = ctx.session_runtime.as_ref() {
         let mut c = ctx_with_anchors
             .with_read_files(session.read_files())
             .with_approval(session.approval())
@@ -353,7 +353,7 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
-    let stream_tx = ctx.session.as_ref().map(|s| s.stream_tx());
+    let stream_tx = ctx.session_runtime.as_ref().map(|s| s.stream_tx());
     let tool_call_id = uuid::Uuid::now_v7().to_string();
     let args_preview = preview_tool_args(&positional, &named);
     if let (Some(sink), Some(run_id), Some(parent_node)) =
@@ -413,12 +413,12 @@ async fn dispatch_tool_call<'a>(
             id: tool_call_id,
         });
     }
-    if let Some(session) = ctx.session.as_ref()
+    if let Some(session) = ctx.session_runtime.as_ref()
         && (name == "memory.todo.set" || name == "memory.todo.done")
     {
         session.refresh_todos_from_store_async().await;
     }
-    if let Some(session) = ctx.session.as_ref()
+    if let Some(session) = ctx.session_runtime.as_ref()
         && (name == "plan.write" || name == "plan.tick")
     {
         session.refresh_plans_from_store_async().await;
@@ -836,7 +836,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 label: format!("branch[{i}]"),
                                 parent_node_id: parent_id.clone(),
                             });
-                            if let Some(session) = ctx.session.as_ref() {
+                            if let Some(session) = ctx.session_runtime.as_ref() {
                                 let _ = session.stream_tx().send(
                                     crate::stream::StreamFrame::FlowNodeStart {
                                         run_id: run_id.0.to_string(),
@@ -871,7 +871,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             status: status.clone(),
                             output_preview: None,
                         });
-                        if let Some(session) = ctx.session.as_ref() {
+                        if let Some(session) = ctx.session_runtime.as_ref() {
                             let _ =
                                 session
                                     .stream_tx()
@@ -930,7 +930,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let has_messages_override = args.messages_override.is_some();
             if !matches!(context_mode, ContextMode::None)
                 && !has_messages_override
-                && let Some(session) = ctx.session.as_ref()
+                && let Some(session) = ctx.session_runtime.as_ref()
             {
                 crate::compaction::start_auto_compact(
                     session.clone(),
@@ -941,7 +941,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             }
             let mut compact_guard = if !matches!(context_mode, ContextMode::None)
                 && !has_messages_override
-                && let Some(session) = ctx.session.as_ref()
+                && let Some(session) = ctx.session_runtime.as_ref()
             {
                 Some(session.acquire_compact_lock().await)
             } else {
@@ -954,7 +954,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let llm_context = match llm_context::build_llm_context(
                 &args,
                 context_mode,
-                ctx.session.as_ref(),
+                ctx.session_runtime.as_ref(),
                 &turn_id,
                 ctx.events,
                 ctx.flow_run_id.as_ref(),
@@ -965,7 +965,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut final_messages = llm_context.messages;
             let prompt_for_budget = llm_context.budget_text;
             let session_messages_len = llm_context.session_messages_len;
-            if let Some(session) = ctx.session.as_ref()
+            if let Some(session) = ctx.session_runtime.as_ref()
                 && let Some(l3_or_l2) = session.peek_pending_l2_or_higher(&turn_id)
                 && matches!(l3_or_l2.level, crate::injection::InjectionLevel::L3Redirect)
                 && let Some(target) = &l3_or_l2.redirect_target
@@ -973,7 +973,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 session.mark_injection_consumed(&l3_or_l2.id);
                 return Value::Err(RuntimeError::Redirect(target.clone()));
             }
-            if let Some(session) = ctx.session.as_ref() {
+            if let Some(session) = ctx.session_runtime.as_ref() {
                 let injections = session.drain_injections(&turn_id);
                 let renderable: Vec<crate::injection::Injection> = injections
                     .into_iter()
@@ -995,7 +995,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             }
             let prompt = prompt_for_budget;
             let mut rewrite_used = false;
-            if let Some(session) = ctx.session.as_ref() {
+            if let Some(session) = ctx.session_runtime.as_ref() {
                 append_system_context(&mut system, session_system_context(session).await);
             }
             if let Some(safety) = ctx.safety
@@ -1042,7 +1042,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let retry_base_messages = final_messages.clone();
             let can_rebuild_from_session = !matches!(context_mode, ContextMode::None)
                 && !has_messages_override
-                && ctx.session.is_some();
+                && ctx.session_runtime.is_some();
             let mut compact_after_overflow_used = false;
             let mut saw_context_overflow = false;
             let mut last_err: Option<RuntimeError> = None;
@@ -1066,7 +1066,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     let outcome = call_and_maybe_stream(
                         provider.as_ref(),
                         req,
-                        ctx.session.as_deref(),
+                        ctx.session_runtime.as_deref(),
                         ctx.tool_ctx.stream_tx.clone(),
                     )
                     .await;
@@ -1116,7 +1116,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             node_id: ctx.current_node_id.clone(),
                         });
                     }
-                    if let Some(session) = ctx.session.as_ref() {
+                    if let Some(session) = ctx.session_runtime.as_ref() {
                         let input_with_cache = input_with_cache_for_window(&usage);
                         let _ =
                             session
@@ -1145,7 +1145,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     }
                     match outcome {
                         Ok(am) => {
-                            if let Some(session) = ctx.session.as_ref() {
+                            if let Some(session) = ctx.session_runtime.as_ref() {
                                 if !matches!(context_mode, ContextMode::None)
                                     && !has_messages_override
                                 {
@@ -1171,7 +1171,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 compact_after_overflow_used = true;
                                 saw_context_overflow = true;
                                 let session = ctx
-                                    .session
+                                    .session_runtime
                                     .as_ref()
                                     .expect("checked by can_rebuild_from_session");
                                 session.request_manual_compact();
@@ -1247,7 +1247,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                         | crate::error::ErrorKind::Transient
                                 ) {
                                     let delay_ms = 1000u64 << attempt;
-                                    if let Some(tx) = ctx.session.as_ref().map(|s| s.stream_tx()) {
+                                    if let Some(tx) =
+                                        ctx.session_runtime.as_ref().map(|s| s.stream_tx())
+                                    {
                                         let _ = tx.send(crate::stream::StreamFrame::Note(format!(
                                             "retrying in {}s…",
                                             delay_ms / 1000
@@ -1268,7 +1270,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             if let Some(fb) = args.fallback_expr.as_ref() {
                 return eval_expr(fb, env, ctx).await;
             }
-            if let Some(session) = ctx.session.as_ref()
+            if let Some(session) = ctx.session_runtime.as_ref()
                 && !saw_context_overflow
             {
                 crate::compaction::start_auto_compact(
@@ -1316,7 +1318,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     crate::form::FormAnswer::Confirmed { value: true }
                 ));
             }
-            let Some(session) = ctx.session.as_ref() else {
+            let Some(session) = ctx.session_runtime.as_ref() else {
                 return Value::Bool(true);
             };
             let forms = session.forms();
@@ -1385,7 +1387,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     parent_node_id: ctx.current_node_id.clone(),
                 });
             }
-            if let Some(session) = ctx.session.as_ref() {
+            if let Some(session) = ctx.session_runtime.as_ref() {
                 let _ = session
                     .stream_tx()
                     .send(crate::stream::StreamFrame::FlowStart {
@@ -1425,7 +1427,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     status,
                 });
             }
-            if let Some(session) = ctx.session.as_ref() {
+            if let Some(session) = ctx.session_runtime.as_ref() {
                 let _ = session
                     .stream_tx()
                     .send(crate::stream::StreamFrame::FlowDone {
@@ -2247,7 +2249,7 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
@@ -2343,7 +2345,7 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
@@ -2383,7 +2385,7 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
@@ -2424,7 +2426,7 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
@@ -2460,7 +2462,7 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
@@ -2501,7 +2503,7 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
@@ -2532,7 +2534,7 @@ mod tests {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
@@ -2645,7 +2647,7 @@ flow parent(x: Int) -> Int {
             events: None,
             turn_id: None,
             flow_run_id: None,
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
@@ -2680,7 +2682,7 @@ flow parent(x: Int) -> Int {
             events: Some(&events),
             turn_id: None,
             flow_run_id: Some(crate::event::FlowRunId::now()),
-            session: None,
+            session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: Some("stmt_1".into()),

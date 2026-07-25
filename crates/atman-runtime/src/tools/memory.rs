@@ -131,7 +131,7 @@ impl Tool for MemoryRecentTurns {
             if n == 0 {
                 return Ok(Value::List(Vec::new()));
             }
-            let Some(session) = ctx.session.as_ref() else {
+            let Some(session) = ctx.session_runtime.as_ref() else {
                 return Ok(Value::List(Vec::new()));
             };
             let msgs = session.messages_full();
@@ -770,7 +770,11 @@ impl Tool for MemoryHistorySearch {
             let rows = if let Some(idx) = ctx.project_index.as_ref() {
                 idx.fts_search_project_events(&query, session_filter.as_deref(), limit)
                     .map_err(|e| RuntimeError::ToolFailed(format!("memory.history.search: {e}")))?
-            } else if let Some(session) = ctx.session.as_ref() {
+            } else if matches!(scope, HistoryScope::Project) {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.history.search: project scope requires project index".into(),
+                ));
+            } else if let Some(session) = ctx.session_runtime.as_ref() {
                 // Fallback: grep current session's full messages
                 let msgs = session.messages_full();
                 let mut hits = Vec::new();
@@ -905,7 +909,11 @@ impl Tool for MemoryHistoryRead {
                         msgs
                     }
                 }
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    return Err(RuntimeError::ToolFailed(format!(
+                        "memory.history.read: {e}"
+                    )));
+                }
             };
             let total = messages.len();
             let start = offset.saturating_sub(1);

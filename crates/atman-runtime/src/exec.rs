@@ -85,7 +85,7 @@ pub fn exec_stmts_prefixed<'a>(
                 format!("{prefix}.{i}")
             };
             // Check for pending L4 stop / L3 redirect between statements.
-            if let Some(session) = ctx.session.as_ref()
+            if let Some(session) = ctx.session_runtime.as_ref()
                 && let Some(turn_id) = ctx.turn_id.as_ref()
             {
                 if let Some(inj) = session.peek_pending_l2_or_higher(turn_id) {
@@ -144,7 +144,7 @@ fn emit_flow_node_start(
     };
     let (kind, label) = stmt_to_node_kind_label(stmt);
     if let Some(sink) = ctx.events
-        && ctx.session.is_some()
+        && ctx.session_runtime.is_some()
     {
         sink.emit(crate::event::Event::FlowNodeStart {
             run_id: run_id.clone(),
@@ -154,7 +154,7 @@ fn emit_flow_node_start(
             parent_node_id: parent_node_id.map(String::from),
         });
     }
-    if let Some(session) = ctx.session.as_ref() {
+    if let Some(session) = ctx.session_runtime.as_ref() {
         let _ = session
             .stream_tx()
             .send(crate::stream::StreamFrame::FlowNodeStart {
@@ -228,7 +228,7 @@ fn emit_flow_node_end(
     };
     let preview_owned = output_preview.map(String::from);
     if let Some(sink) = ctx.events
-        && ctx.session.is_some()
+        && ctx.session_runtime.is_some()
     {
         sink.emit(crate::event::Event::FlowNodeEnd {
             run_id: run_id.clone(),
@@ -237,7 +237,7 @@ fn emit_flow_node_end(
             output_preview: preview_owned.clone(),
         });
     }
-    if let Some(session) = ctx.session.as_ref() {
+    if let Some(session) = ctx.session_runtime.as_ref() {
         let _ = session
             .stream_tx()
             .send(crate::stream::StreamFrame::FlowNodeEnd {
@@ -547,8 +547,11 @@ async fn run_streaming_once<'a>(
     rules: &WatchRules,
     ctx: &EvalCtx<'a>,
 ) -> StreamOutcome {
-    let mut inj_rx = ctx.session.as_ref().map(|s| s.subscribe_injections());
-    let stream_tx = ctx.session.as_ref().map(|s| s.stream_tx());
+    let mut inj_rx = ctx
+        .session_runtime
+        .as_ref()
+        .map(|s| s.subscribe_injections());
+    let stream_tx = ctx.session_runtime.as_ref().map(|s| s.stream_tx());
     let model_name = req.model.clone();
     let stall_secs = req.stall_timeout_secs;
     let obs = provider.call_streaming(req);
@@ -586,7 +589,7 @@ async fn run_streaming_once<'a>(
             }, if !events_closed => {
                 match ev {
                     Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
-                        if let Some(session) = ctx.session.as_ref() {
+                        if let Some(session) = ctx.session_runtime.as_ref() {
                             session.mark_streamed();
                         }
                         if let Some(tx) = &stream_tx {
@@ -668,7 +671,7 @@ async fn run_streaming_once<'a>(
                 text,
                 cumulative_tokens,
             } => {
-                if let Some(session) = ctx.session.as_ref() {
+                if let Some(session) = ctx.session_runtime.as_ref() {
                     session.mark_streamed();
                 }
                 if let Some(tx) = &stream_tx {
@@ -1046,7 +1049,7 @@ pub async fn exec_flow_with_siblings(
         events,
         turn_id,
         flow_run_id,
-        session,
+        session_runtime: session,
         flow_cancel,
         safety,
         current_node_id: None,

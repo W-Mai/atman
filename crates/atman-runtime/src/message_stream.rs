@@ -2,16 +2,27 @@
 //! layer. `window()` replays in-memory events, applies `ContextCompact`
 //! transformations, then returns from the last compaction summary (inclusive).
 //! With no summary the full message list is returned.
+//!
+//! The accumulator is incrementally maintained: new events are replayed only
+//! once, and the cache is reused across calls until invalidated.
 
 use std::sync::{Arc, Mutex};
 
 use crate::compaction::is_compaction_summary;
-use crate::event::{Event, EventEnvelope};
+use crate::event::EventEnvelope;
 use crate::message::Message;
+
+/// Cached accumulator.  `replayed` tracks how many events have already been
+/// applied so that subsequent `full_messages()` calls only replay new events.
+struct Acc {
+    messages: Vec<(u64, Message)>,
+    replayed: usize,
+}
 
 pub struct MessageStream {
     events: Arc<Mutex<Vec<EventEnvelope>>>,
     initial_messages: Vec<Message>,
+    acc: Mutex<Acc>,
 }
 
 impl MessageStream {
@@ -19,6 +30,10 @@ impl MessageStream {
         Self {
             events,
             initial_messages: Vec::new(),
+            acc: Mutex::new(Acc {
+                messages: Vec::new(),
+                replayed: 0,
+            }),
         }
     }
 
@@ -28,22 +43,39 @@ impl MessageStream {
         Self {
             events,
             initial_messages: initial,
+            acc: Mutex::new(Acc {
+                messages: Vec::new(),
+                replayed: 0,
+            }),
         }
     }
 
     pub fn full_messages(&self) -> Vec<Message> {
-        let guard = self.events.lock().expect("events poisoned");
-        if guard.is_empty() {
-            return self.initial_messages.clone();
+        let events = self.events.lock().expect("events poisoned");
+        let mut acc = self.acc.lock().expect("acc poisoned");
+
+        if acc.messages.is_empty() {
+            // First call: seed from initial messages.
+            acc.messages = self
+                .initial_messages
+                .iter()
+                .cloned()
+                .map(|m| (0, m))
+                .collect();
         }
-        let mut acc: Vec<(u64, Message)> = self
-            .initial_messages
-            .iter()
-            .cloned()
-            .map(|m| (0, m))
-            .collect();
-        replay_events_into(&mut acc, &guard);
-        acc.into_iter().map(|(_, msg)| msg).collect()
+
+        if acc.replayed < events.len() {
+            // Replay only new events since the last call.
+            for ev in &events[acc.replayed..] {
+                crate::projection::message_window::apply_envelope_to_messages(
+                    ev,
+                    &mut acc.messages,
+                );
+            }
+            acc.replayed = events.len();
+        }
+
+        acc.messages.iter().map(|(_, msg)| msg).cloned().collect()
     }
 
     pub fn window(&self) -> Vec<Message> {
@@ -55,17 +87,11 @@ impl MessageStream {
     }
 }
 
-fn replay_events_into(acc: &mut Vec<(u64, Message)>, events: &[EventEnvelope]) {
-    for ev in events {
-        crate::projection::message_window::replay_env_into(ev, acc);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::EventEnvelope;
     use crate::event::TurnId;
+    use crate::event::{Event, EventEnvelope};
     use crate::message::{MessagePart, MessageRole};
 
     fn user(text: &str) -> Message {

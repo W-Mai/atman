@@ -295,7 +295,7 @@ async fn run_frames(
     let mut editor = InputEditor::default();
     if let Some(sess) = handle.session.as_ref() {
         let past: Vec<String> = sess
-            .messages()
+            .messages_full()
             .iter()
             .filter(|m| matches!(m.role, atman_runtime::message::MessageRole::User))
             .map(|m| m.text_concat())

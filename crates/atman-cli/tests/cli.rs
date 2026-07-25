@@ -896,16 +896,16 @@ fn rebuild_index_walks_matching_project_sessions_and_reports_totals() {
     std::fs::write(
         dir_a.join("events.jsonl"),
         concat!(
-            r#"{"type":"flow_start","seq":1,"run_id":"run-a","ts":"2026-07-05T00:00:00Z"}"#,
+            r#"{"type":"flow_start","seq":1,"ts":"2026-07-05T00:00:00Z","run_id":"019f2900-0000-7000-8000-0000000000aa","flow_name":"test","parent_run_id":null,"parent_node_id":null}"#,
             "\n",
-            r#"{"type":"user_msg","seq":2,"turn_id":"turn-a","ts":"2026-07-05T00:00:01Z","message":{"role":"user","parts":[{"type":"text","text":"query token unique_xyzzy"}]}}"#,
+            r#"{"type":"user_msg","seq":2,"ts":"2026-07-05T00:00:01Z","turn_id":"019f2900-0000-7000-8000-0000000000ab","message":{"role":"user","parts":[{"type":"text","text":"query token unique_xyzzy"}],"turn_id":"019f2900-0000-7000-8000-0000000000ab"}}"#,
             "\n",
         ),
     )
     .unwrap();
     std::fs::write(
         dir_b.join("events.jsonl"),
-        r#"{"type":"flow_start","seq":1,"run_id":"run-b","ts":"2026-07-05T00:00:00Z"}"#.to_string()
+        r#"{"type":"flow_start","seq":1,"ts":"2026-07-05T00:00:00Z","run_id":"019f2900-0000-7000-8000-0000000000ba","flow_name":"test","parent_run_id":null,"parent_node_id":null}"#.to_string()
             + "\n",
     )
     .unwrap();

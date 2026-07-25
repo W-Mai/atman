@@ -68,7 +68,9 @@ impl serde::Serialize for EventEnvelope {
 impl<'de> serde::Deserialize<'de> for EventEnvelope {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
+        // seq: required for new events, default 0 for legacy backward compat
         let seq = value.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
+        // ts: parse when present; fall back to now for legacy events
         let ts = value
             .get("ts")
             .and_then(|v| v.as_str())

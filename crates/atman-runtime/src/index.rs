@@ -215,22 +215,21 @@ impl AnchorIndex {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
             let jsonl = dir.join("events.jsonl");
-            let rows = match crate::event_log::reader::read_event_rows(&jsonl) {
-                Ok(r) => r,
+            let envelopes = match crate::event_log::reader::read_event_envelopes(&jsonl) {
+                Ok(envelopes) => envelopes,
                 Err(_) => continue,
             };
-            for row in &rows {
-                let seq = row.seq as i64;
-                let ts = row.value.get("ts").and_then(|v| v.as_str()).unwrap_or("");
-                let kind = &row.kind;
-                let turn_id = row.value.get("turn_id").and_then(|v| v.as_str());
-                let flow_run_id = row
-                    .value
+            for envelope in &envelopes {
+                let value = serde_json::to_value(envelope)?;
+                let seq = envelope.seq as i64;
+                let ts = envelope.ts.to_rfc3339();
+                let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let turn_id = value.get("turn_id").and_then(|v| v.as_str());
+                let flow_run_id = value
                     .get("run_id")
-                    .or_else(|| row.value.get("flow_run_id"))
+                    .or_else(|| value.get("flow_run_id"))
                     .and_then(|v| v.as_str());
-                let text_content = row
-                    .value
+                let text_content = value
                     .get("message")
                     .and_then(|m| m.get("parts"))
                     .and_then(|p| p.as_array())
@@ -242,11 +241,11 @@ impl AnchorIndex {
                             .join("")
                     })
                     .unwrap_or_default();
-                let payload_json = serde_json::to_string(&row.value).unwrap_or_default();
+                let payload_json = serde_json::to_string(&value).unwrap_or_default();
                 self.insert_project_event_raw(ProjectEventInsert {
                     session_id: &sid,
                     seq,
-                    ts,
+                    ts: &ts,
                     kind,
                     turn_id,
                     flow_run_id,
