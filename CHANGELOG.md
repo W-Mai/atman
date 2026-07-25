@@ -4,6 +4,43 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [1.2.0] — 2026-07-26
+
+### Templates
+
+- **Managed system prompt** — system prompt externalized to `prompts/system.md`, referenced by agent.at via `@"../prompts/system.md"`. Automatically overwritten on `atman init` and every agent start; users can freely customize it.
+
+### Runtime
+
+- **FileRef relative path resolution** — `source_dir` wired through runtime/cli/daemon so `@` file references resolve relative to the directory containing the `.at` file.
+- **Sub-agent isolation** — sub-agent `ToolCtx` fully isolated from parent session, fixing streaming hangs and deadlocks from closed event channels.
+- **Message storage overhaul** — `MessageWindow` zero-copy sliding window, separate compacted and full message caches, unified `MessageStream` read/write API. Compaction now uses separate trigger and target thresholds to prevent boundary oscillation.
+- **Event model unification** — `EventEnvelope` replaces `RawEventRow`, seq/ts extracted from Event variants, `Deserialize` support added for typed event replay.
+- **LogSink** — per-session `notify.log` JSONL log, independent of the TUI lifecycle.
+
+### Provider
+
+- **Provider panel** — async Codex model discovery, enable/disable toggles, delete provider, logout confirmation. Model discovery now only runs on explicit add or manual refresh, no longer blocking startup.
+- **Model key format** — unified to `provider:full_api_slug` (e.g. `Codex:codex/gpt-5.5`). `reload_from_text` merges instead of replacing; `set_model_config` preserves previously discovered models.
+
+### TUI
+
+- **Input positioning fixes** — bottom-anchored layout, single-row gap between content and input, cursor animation fixes, `max_scroll_offset` off-by-one correction, stale cursor fallback restricted to empty-editor only.
+- **Session switch animation** — StartupIntro fade replays on every session switch.
+- **Static page cursor** — cursor now visible on the static startup page, not just during intro.
+- **Preview dedup** — removed duplicate glyphs from preview scene already handled by the renderer.
+
+### CLI
+
+- **Generic argument passing** — key=value args passed directly as user text, synthetic `atman run /path flow=name` messages removed.
+
+### Notify
+
+- **Toast continuity** — `ToastCollector` buffers toasts during startup and flushes them on TUI entry, preserving boot→main continuity with zero loss.
+- **Noise reduction** — internal error severity downgraded and deduplicated to cut down on meaningless popups.
+
+---
+
 ## [1.1.1] — 2026-07-22
 
 - **crates.io metadata** — keywords, categories, and richer descriptions for all six crates. Homepage and repository links added to every crate manifest.

@@ -137,7 +137,8 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<PathBuf> {
     std::fs::write(&path, AGENT_AT).with_context(|| format!("write {}", path.display()))?;
 
     let system_md = commands_dir.join("system.md");
-    std::fs::write(&system_md, SYSTEM_MD).with_context(|| format!("write {}", system_md.display()))?;
+    std::fs::write(&system_md, SYSTEM_MD)
+        .with_context(|| format!("write {}", system_md.display()))?;
 
     Ok(path)
 }
