@@ -600,21 +600,19 @@ mod tests {
         .save(&sess_theirs)
         .unwrap();
 
-        std::fs::write(
-            sess_ours.join("events.jsonl"),
-            concat!(
-                r#"{"type":"user_msg","seq":1,"turn_id":"t1","ts":"2026-07-05T00:00:00Z","message":{"role":"user","parts":[{"type":"text","text":"needle in ours"}]}}"#,
-                "\n",
-                r#"{"type":"flow_end","seq":2,"run_id":"r1","ts":"2026-07-05T00:00:01Z"}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            sess_theirs.join("events.jsonl"),
-            r#"{"type":"user_msg","seq":1,"turn_id":"t2","ts":"2026-07-05T00:00:00Z","message":{"role":"user","parts":[{"type":"text","text":"needle in theirs"}]}}"#,
-        )
-        .unwrap();
+        let tid1 = uuid::Uuid::now_v7();
+        let rid1 = uuid::Uuid::now_v7();
+        let events_ours = format!(
+            r#"{{"type":"user_msg","seq":1,"turn_id":"{tid1}","ts":"2026-07-05T00:00:00Z","message":{{"role":"user","parts":[{{"type":"text","text":"needle in ours"}}],"turn_id":"{tid1}"}}}}
+{{"type":"flow_end","seq":2,"run_id":"{rid1}","flow_name":"demo","status":{{"kind":"ok"}},"ts":"2026-07-05T00:00:01Z"}}"#
+        );
+        std::fs::write(sess_ours.join("events.jsonl"), events_ours).unwrap();
+
+        let tid2 = uuid::Uuid::now_v7();
+        let events_theirs = format!(
+            r#"{{"type":"user_msg","seq":1,"turn_id":"{tid2}","ts":"2026-07-05T00:00:00Z","message":{{"role":"user","parts":[{{"type":"text","text":"needle in theirs"}}],"turn_id":"{tid2}"}}}}"#
+        );
+        std::fs::write(sess_theirs.join("events.jsonl"), events_theirs).unwrap();
 
         let idx = AnchorIndex::open_project(index_dir.path()).unwrap();
         let stats = idx

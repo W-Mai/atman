@@ -1887,4 +1887,165 @@ mod tests {
             crate::message::MessagePart::Image { .. }
         ));
     }
+
+    #[test]
+    fn replay_messages_from_old_format_no_seq_no_ts() {
+        let dir = TempDir::new().unwrap();
+        // Old-style JSONL: no seq, no ts on events
+        let user_json = r#"{"type":"user_msg","turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"text","text":"hello"}],"turn_id":"019f0000-0000-7000-0000-000000000001"}}"#;
+        let asst_json = r#"{"type":"assistant_msg","turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"assistant","parts":[{"type":"text","text":"hi there"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"flow_run_id":null}"#;
+        write_events(dir.path(), &[user_json, asst_json]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert_eq!(msgs.len(), 2, "should load both messages from old format");
+        assert_eq!(msgs[0].text_concat(), "hello");
+        assert_eq!(msgs[1].text_concat(), "hi there");
+    }
+
+    #[test]
+    fn replay_messages_from_old_format_with_null_fields() {
+        let dir = TempDir::new().unwrap();
+        // Old JSON with null turn_id / flow_run_id (graceful parse)
+        let sys_json = r#"{"type":"system_msg","turn_id":"019f0000-0000-7000-0000-000000000003","message":{"role":"system","parts":[{"type":"text","text":"note"}],"turn_id":"019f0000-0000-7000-0000-000000000003"}}"#;
+        write_events(dir.path(), &[sys_json]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text_concat(), "note");
+    }
+
+    #[test]
+    fn replay_messages_from_applies_attachment_degrade() {
+        let dir = TempDir::new().unwrap();
+        let user_msg = r#"{"type":"user_msg","seq":5,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"image","source":{"media_type":"image/png","data":{"kind":"path","path":"/tmp/photo.png"}}},{"type":"text","text":"describe"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:00Z"}"#;
+        let degrade = r#"{"type":"attachment_degraded","seq":6,"turn_id":null,"flow_run_id":null,"message_seq":5,"part_index":0,"file_basename":"photo.png","reason":"image_too_large","ts":"2026-07-07T00:00:01Z"}"#;
+        write_events(dir.path(), &[user_msg, degrade]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert_eq!(msgs.len(), 1, "only the user message (patched)");
+        assert_eq!(msgs[0].parts.len(), 2);
+        match &msgs[0].parts[0] {
+            crate::message::MessagePart::Text { text } => {
+                assert!(text.contains("photo.png"), "expected basename: {text}");
+                assert!(text.contains("image_too_large"), "expected reason: {text}");
+                assert!(
+                    text.starts_with("[attachment unavailable"),
+                    "expected stub prefix: {text}"
+                );
+            }
+            other => panic!("expected Text stub, got {other:?}"),
+        }
+        assert!(
+            matches!(msgs[0].parts[1], crate::message::MessagePart::Text { .. }),
+            "second part should remain text"
+        );
+    }
+
+    #[test]
+    fn replay_messages_from_degrade_before_message_is_noop() {
+        let dir = TempDir::new().unwrap();
+        // Degrade event appears BEFORE the message it references (should not crash)
+        let degrade = r#"{"type":"attachment_degraded","seq":1,"turn_id":null,"flow_run_id":null,"message_seq":99,"part_index":0,"file_basename":"x.png","reason":"test","ts":"2026-07-07T00:00:00Z"}"#;
+        let user_msg = r#"{"type":"user_msg","seq":2,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"image","source":{"media_type":"image/png","data":{"kind":"path","path":"/tmp/x.png"}}}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:01Z"}"#;
+        write_events(dir.path(), &[degrade, user_msg]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert_eq!(msgs.len(), 1);
+        // Image part preserved — degrade referenced unknown message_seq
+        assert!(
+            matches!(msgs[0].parts[0], crate::message::MessagePart::Image { .. }),
+            "image should remain when degrade targets unknown seq"
+        );
+    }
+
+    #[test]
+    fn replay_messages_from_degrade_wrong_seq_leaves_image() {
+        let dir = TempDir::new().unwrap();
+        let user_msg = r#"{"type":"user_msg","seq":1,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"image","source":{"media_type":"image/png","data":{"kind":"path","path":"/tmp/x.png"}}}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:00Z"}"#;
+        // Degrade references wrong message_seq (2, but message has seq 1)
+        let degrade = r#"{"type":"attachment_degraded","seq":2,"turn_id":null,"flow_run_id":null,"message_seq":2,"part_index":0,"file_basename":"x.png","reason":"test","ts":"2026-07-07T00:00:01Z"}"#;
+        write_events(dir.path(), &[user_msg, degrade]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            matches!(msgs[0].parts[0], crate::message::MessagePart::Image { .. }),
+            "image should remain when degrade targets wrong seq"
+        );
+    }
+
+    #[test]
+    fn replay_messages_from_applies_context_compact() {
+        let dir = TempDir::new().unwrap();
+        let user1 = r#"{"type":"user_msg","seq":1,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"text","text":"old u1"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:00Z"}"#;
+        let asst1 = r#"{"type":"assistant_msg","seq":2,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"assistant","parts":[{"type":"text","text":"old a1"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"flow_run_id":null,"ts":"2026-07-07T00:00:01Z"}"#;
+        let user2 = r#"{"type":"user_msg","seq":3,"turn_id":"019f0000-0000-7000-0000-000000000002","message":{"role":"user","parts":[{"type":"text","text":"old u2"}],"turn_id":"019f0000-0000-7000-0000-000000000002"},"ts":"2026-07-07T00:00:02Z"}"#;
+        // replacement message (compact summary)
+        let summary = r#"{"type":"system_msg","seq":4,"turn_id":"019f0000-0000-7000-0000-000000000002","message":{"role":"system","parts":[{"type":"compact_summary","summary":"two messages compacted","seq_start":0,"seq_end":1,"count":2}],"turn_id":"019f0000-0000-7000-0000-000000000002"},"ts":"2026-07-07T00:00:03Z"}"#;
+        let compact = r#"{"type":"context_compact","seq":5,"session_id":"sess","before_tokens":200,"after_tokens":50,"compacted_range_start":0,"compacted_range_end":1,"summary_text":"two messages compacted","replacement_msg_seq":4,"ts":"2026-07-07T00:00:04Z"}"#;
+        let after = r#"{"type":"user_msg","seq":6,"turn_id":"019f0000-0000-7000-0000-000000000003","message":{"role":"user","parts":[{"type":"text","text":"after compact"}],"turn_id":"019f0000-0000-7000-0000-000000000003"},"ts":"2026-07-07T00:00:05Z"}"#;
+        write_events(dir.path(), &[user1, asst1, user2, summary, compact, after]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        // compact range 0-1 removes user1+asst1; user2 (outside range) + summary + after = 3
+        assert_eq!(msgs.len(), 3, "compact summary + user2 + after compact");
+        assert!(
+            matches!(
+                msgs[0].parts[0],
+                crate::message::MessagePart::CompactSummary { .. }
+            ),
+            "first should be compact summary"
+        );
+        if let crate::message::MessagePart::CompactSummary { summary, .. } = &msgs[0].parts[0] {
+            assert_eq!(summary, "two messages compacted");
+        }
+        assert_eq!(msgs[1].text_concat(), "old u2");
+        assert_eq!(msgs[2].text_concat(), "after compact");
+    }
+
+    #[test]
+    fn replay_messages_from_no_replacement_seq_ignores_compact() {
+        let dir = TempDir::new().unwrap();
+        let user1 = r#"{"type":"user_msg","seq":1,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"text","text":"hello"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:00Z"}"#;
+        // context_compact with no replacement_msg_seq → should be ignored
+        let compact = r#"{"type":"context_compact","seq":2,"session_id":"sess","before_tokens":200,"after_tokens":50,"compacted_range_start":0,"compacted_range_end":0,"summary_text":"ignored","replacement_msg_seq":null,"ts":"2026-07-07T00:00:01Z"}"#;
+        write_events(dir.path(), &[user1, compact]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert_eq!(msgs.len(), 1, "compact without replacement seq is ignored");
+        assert_eq!(msgs[0].text_concat(), "hello");
+    }
+
+    #[test]
+    fn replay_messages_from_compact_after_no_change_ignored() {
+        let dir = TempDir::new().unwrap();
+        let user1 = r#"{"type":"user_msg","seq":1,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"text","text":"hello"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:00Z"}"#;
+        let summary = r#"{"type":"system_msg","seq":2,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"system","parts":[{"type":"compact_summary","summary":"no change","seq_start":0,"seq_end":0,"count":1}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:01Z"}"#;
+        // after_tokens >= before_tokens → compaction is no-op
+        let compact = r#"{"type":"context_compact","seq":3,"session_id":"sess","before_tokens":50,"after_tokens":100,"compacted_range_start":0,"compacted_range_end":0,"summary_text":"no change","replacement_msg_seq":2,"ts":"2026-07-07T00:00:02Z"}"#;
+        write_events(dir.path(), &[user1, summary, compact]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert_eq!(msgs.len(), 2, "compact with after>=before is ignored");
+    }
+
+    #[test]
+    fn replay_messages_from_missing_file_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn replay_messages_from_empty_file_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        write_events(dir.path(), &[]);
+        let msgs = replay_messages_from(&dir.path().join("events.jsonl")).unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn replay_all_messages_with_seq_includes_compacted() {
+        let dir = TempDir::new().unwrap();
+        let user1 = r#"{"type":"user_msg","seq":1,"turn_id":"019f0000-0000-7000-0000-000000000001","message":{"role":"user","parts":[{"type":"text","text":"old"}],"turn_id":"019f0000-0000-7000-0000-000000000001"},"ts":"2026-07-07T00:00:00Z"}"#;
+        let summary = r#"{"type":"system_msg","seq":4,"turn_id":"019f0000-0000-7000-0000-000000000002","message":{"role":"system","parts":[{"type":"compact_summary","summary":"s","seq_start":0,"seq_end":0,"count":1}],"turn_id":"019f0000-0000-7000-0000-000000000002"},"ts":"2026-07-07T00:00:01Z"}"#;
+        let compact = r#"{"type":"context_compact","seq":5,"session_id":"sess","before_tokens":200,"after_tokens":50,"compacted_range_start":0,"compacted_range_end":0,"summary_text":"s","replacement_msg_seq":4,"ts":"2026-07-07T00:00:02Z"}"#;
+        write_events(dir.path(), &[user1, summary, compact]);
+        let all = replay_all_messages_with_seq(&dir.path().join("events.jsonl")).unwrap();
+        // all includes both user1 and summary — compaction NOT applied
+        assert_eq!(all.len(), 2, "all messages preserved (no compaction)");
+        assert_eq!(all[0].1.text_concat(), "old");
+    }
 }

@@ -119,7 +119,9 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
                     final_text = Some(am.text_concat());
                     break;
                 }
-                let tool_results = dispatch_child_tools(&uses, registry.as_ref(), ctx).await;
+                let mut child_ctx = sanitize_child_ctx(ctx);
+                child_ctx.session_messages = Some(std::sync::Arc::new(messages.clone()));
+                let tool_results = dispatch_child_tools(&uses, registry.as_ref(), &child_ctx).await;
                 let turn_for_results = am.message.turn_id.clone();
                 let combined = Message {
                     turn_id: turn_for_results,
@@ -198,18 +200,20 @@ async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResu
         .collect();
     let run_id = FlowRunId::now();
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
+    let mut child_ctx = sanitize_child_ctx(ctx);
+    child_ctx.session_messages = Some(std::sync::Arc::new(Vec::new()));
     let out = crate::exec::exec_flow_with_siblings(
         flow,
         args,
         registry.as_ref(),
-        ctx,
+        &child_ctx,
         providers.as_ref(),
         &flows,
-        ctx.events.as_ref(),
-        ctx.turn_id.clone(),
+        child_ctx.events.as_ref(),
+        child_ctx.turn_id.clone(),
         Some(run_id.clone()),
         None,
-        ctx.cancel.clone(),
+        child_ctx.cancel.clone(),
         None,
     )
     .await;
@@ -667,6 +671,16 @@ fn emit_tool_result_msg(ctx: &ToolCtx, run_id: &FlowRunId, message: &Message) {
             message: message.clone(),
         });
     }
+}
+
+fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
+    let mut c = parent.clone();
+    c.session_runtime = None;
+    c.session_messages_handle = None;
+    c.compact_lock_handle = None;
+    c.forms = None;
+    c.on_memory_recent = None;
+    c
 }
 
 fn truncate(s: &str, n: usize) -> String {

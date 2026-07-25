@@ -131,10 +131,13 @@ impl Tool for MemoryRecentTurns {
             if n == 0 {
                 return Ok(Value::List(Vec::new()));
             }
-            let Some(session) = ctx.session_runtime.as_ref() else {
+            let msgs = if let Some(session) = ctx.session_runtime.as_ref() {
+                session.messages_full()
+            } else if let Some(msgs) = ctx.session_messages.as_ref() {
+                std::sync::Arc::new((**msgs).clone())
+            } else {
                 return Ok(Value::List(Vec::new()));
             };
-            let msgs = session.messages_full();
             let start = msgs.len().saturating_sub(n);
             let out: Vec<Value> = msgs
                 .iter()
