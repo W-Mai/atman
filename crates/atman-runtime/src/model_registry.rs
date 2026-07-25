@@ -284,64 +284,74 @@ fn write_config_toml(text: &str) -> anyhow::Result<()> {
 }
 
 fn reload_from_text(text: &str) {
-    if let Ok(raw) = toml::from_str::<toml::Value>(text) {
-        let mut cfg = ModelConfig::default();
-        if let Some(aliases) = raw.get("alias").and_then(|a| a.as_table()) {
-            for (name, entry) in aliases {
-                if let Some(model) = entry.get("model").and_then(|m| m.as_str()) {
-                    cfg.aliases.insert(
-                        name.clone(),
-                        AliasEntry {
-                            model: model.to_string(),
-                        },
-                    );
-                }
-            }
-        }
-        if let Some(models) = raw.get("models").and_then(|m| m.as_table()) {
-            for (name, entry) in models {
-                let provider = entry
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let api_key = entry
-                    .get("api_key")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let base_url = entry
-                    .get("base_url")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let context_budget = entry
-                    .get("context_budget")
-                    .and_then(|v| v.as_integer())
-                    .map(|n| n as u64);
-                let thinking = entry.get("thinking").and_then(|v| v.as_bool());
-                let max_tokens = entry
-                    .get("max_tokens")
-                    .and_then(|v| v.as_integer())
-                    .map(|n| n as u32);
-                let model = entry
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                cfg.models.insert(
+    let Ok(raw) = toml::from_str::<toml::Value>(text) else {
+        return;
+    };
+    let mut guard = MODEL_CONFIG.write().unwrap();
+    let mut cfg = guard.take().unwrap_or_default();
+
+    // Update aliases from config.toml — preserve all other state
+    // (discovered models, config-defined models).
+    cfg.aliases.clear();
+    if let Some(aliases) = raw.get("alias").and_then(|a| a.as_table()) {
+        for (name, entry) in aliases {
+            if let Some(model) = entry.get("model").and_then(|m| m.as_str()) {
+                cfg.aliases.insert(
                     name.clone(),
-                    ModelEntry {
-                        model: model.unwrap_or_default(),
-                        provider,
-                        api_key,
-                        base_url,
-                        context_budget,
-                        compact_threshold_ratio: None,
-                        thinking,
-                        max_tokens,
+                    AliasEntry {
+                        model: model.to_string(),
                     },
                 );
             }
         }
-        set_model_config(cfg);
     }
+
+    // Update config-defined models — only update existing keys or add
+    // new ones; never remove entries that aren't in config.toml.
+    if let Some(models) = raw.get("models").and_then(|m| m.as_table()) {
+        for (name, entry) in models {
+            let provider = entry
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let api_key = entry
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let base_url = entry
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let context_budget = entry
+                .get("context_budget")
+                .and_then(|v| v.as_integer())
+                .map(|n| n as u64);
+            let thinking = entry.get("thinking").and_then(|v| v.as_bool());
+            let max_tokens = entry
+                .get("max_tokens")
+                .and_then(|v| v.as_integer())
+                .map(|n| n as u32);
+            let model = entry
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            cfg.models.insert(
+                name.clone(),
+                ModelEntry {
+                    model: model.unwrap_or_default(),
+                    provider,
+                    api_key,
+                    base_url,
+                    context_budget,
+                    compact_threshold_ratio: None,
+                    thinking,
+                    max_tokens,
+                },
+            );
+        }
+    }
+
+    *guard = Some(cfg);
 }
 
 pub fn add_alias_to_config(alias: &str, model: &str) -> anyhow::Result<()> {
