@@ -2710,15 +2710,19 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     );
     let raw_row = crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
     let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
-    let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
-    let inner_y = input_rect.y.saturating_add(1);
-    if raw_row as u32 >= scroll_row {
-        let cy = inner_y + (raw_row as u32 - scroll_row) as u16;
-        let cx = inner_x + raw_col;
-        if cy < input_rect.y + input_rect.height.saturating_sub(1)
-            && cx < input_rect.x + input_rect.width.saturating_sub(1)
-        {
-            f.set_cursor_position((cx, cy));
+    // Don't show the terminal cursor during the startup slide — the input
+    // rect moves every frame and the cursor would appear to fly across.
+    if !startup_active && !intro_active {
+        let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
+        let inner_y = input_rect.y.saturating_add(1);
+        if raw_row as u32 >= scroll_row {
+            let cy = inner_y + (raw_row as u32 - scroll_row) as u16;
+            let cx = inner_x + raw_col;
+            if cy < input_rect.y + input_rect.height.saturating_sub(1)
+                && cx < input_rect.x + input_rect.width.saturating_sub(1)
+            {
+                f.set_cursor_position((cx, cy));
+            }
         }
     }
     if app.popup.is_open() {
