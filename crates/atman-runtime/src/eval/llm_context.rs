@@ -24,7 +24,7 @@ pub fn build_llm_context(
         && let Some(session) = session
     {
         let mut history = match context_mode {
-            ContextMode::Session => session.messages(),
+            ContextMode::Session => session.messages().to_vec(),
             ContextMode::SessionRecent(n) => {
                 let all = session.messages();
                 let start = all.len().saturating_sub(n);

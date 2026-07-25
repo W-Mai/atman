@@ -83,7 +83,7 @@ fn rebuild_session_llm_messages(
     extra_messages: &[crate::message::Message],
 ) -> Vec<crate::message::Message> {
     let mut messages = match context_mode {
-        ContextMode::Session => session.messages(),
+        ContextMode::Session => session.messages().to_vec(),
         ContextMode::SessionRecent(n) => {
             let all = session.messages();
             let start = all.len().saturating_sub(n);
@@ -309,7 +309,7 @@ async fn dispatch_tool_call<'a>(
     };
     let ctx_with_anchors = if let Some(session) = ctx.session_runtime.as_ref() {
         ctx_with_anchors
-            .with_session_messages(std::sync::Arc::new(session.messages()))
+            .with_session_messages(session.messages_full())
             .with_session_messages_handle(session.messages_handle())
             .with_session_runtime(session.clone())
             .with_compact_lock_handle(session.compact_lock_handle())

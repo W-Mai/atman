@@ -1140,11 +1140,11 @@ impl Session {
         entry.images.len()
     }
 
-    pub fn messages(&self) -> Vec<Message> {
+    pub fn messages(&self) -> crate::message_stream::MessageWindow {
         self.message_stream.window()
     }
 
-    pub fn messages_full(&self) -> Vec<Message> {
+    pub fn messages_full(&self) -> std::sync::Arc<Vec<Message>> {
         self.message_stream.full_messages()
     }
 
@@ -1279,7 +1279,7 @@ impl Session {
         let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
-            messages: checkpoint_messages,
+            messages: checkpoint_messages.to_vec(),
             window_tokens,
         });
         Some(CompactResult {
