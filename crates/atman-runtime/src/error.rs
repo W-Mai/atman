@@ -35,6 +35,9 @@ pub enum RuntimeError {
 
     #[error("attachment error: {reason}")]
     AttachmentError { reason: String },
+
+    #[error("thinking signature missing")]
+    ThinkingSignatureMissing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -106,6 +109,7 @@ impl RuntimeError {
             RuntimeError::L2Restart { .. } => ErrorKind::UserError,
             RuntimeError::ToolFailed(msg) => classify_tool_failed(msg),
             RuntimeError::AttachmentError { .. } => ErrorKind::InvalidRequest,
+            RuntimeError::ThinkingSignatureMissing => ErrorKind::InvalidRequest,
         }
     }
 }

@@ -1047,6 +1047,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut saw_context_overflow = false;
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
+            let mut thinking_enabled =
+                crate::model_registry::model_info(&model).thinking_enabled();
+            let mut signature_retries: u32 = 0;
             'llm_attempts: loop {
                 for attempt in 0..=retry_count {
                     let sanitized_messages = sanitize_tool_pairs(final_messages.clone());
@@ -1058,8 +1061,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         schema: None,
                         cache_prompt,
                         tools: tool_specs.clone(),
-                        thinking_enabled: crate::model_registry::model_info(&model)
-                            .thinking_enabled(),
+                        thinking_enabled,
                         stall_timeout_secs,
                     };
                     let start = std::time::Instant::now();
@@ -1228,6 +1230,39 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 }
                                 last_err = Some(e);
                                 continue;
+                            }
+                            if matches!(e, RuntimeError::ThinkingSignatureMissing) {
+                                signature_retries += 1;
+                                if signature_retries < 3 {
+                                    crate::notify!(
+                                        info,
+                                        location = Inline,
+                                        "thinking signature missing — retry {signature_retries}/3"
+                                    );
+                                    last_err = Some(e);
+                                    continue 'llm_attempts;
+                                }
+                                // Exhausted — disable thinking
+                                thinking_enabled = false;
+                                crate::notify!(
+                                    warn,
+                                    location = Inline,
+                                    "thinking signature missing after 3 retries; disabling thinking…"
+                                );
+                                last_err = Some(e);
+                                continue 'llm_attempts;
+                            }
+                            if thinking_enabled
+                                && matches!(e.kind(), crate::error::ErrorKind::InvalidRequest)
+                            {
+                                thinking_enabled = false;
+                                crate::notify!(
+                                    warn,
+                                    location = Inline,
+                                    "thinking mode disabled due to API error; retrying…"
+                                );
+                                last_err = Some(e);
+                                continue 'llm_attempts;
                             }
                             if attempt < retry_count {
                                 let kind = e.kind();

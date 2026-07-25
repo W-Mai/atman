@@ -74,10 +74,13 @@ impl AnthropicProvider {
             thinking: if req.thinking_enabled {
                 Some(ThinkingConfig {
                     kind: "enabled",
-                    budget_tokens: self.max_tokens.saturating_sub(4096).max(1024),
+                    budget_tokens: Some(self.max_tokens.saturating_sub(4096).max(1024)),
                 })
             } else {
-                None
+                Some(ThinkingConfig {
+                    kind: "disabled",
+                    budget_tokens: None,
+                })
             },
             cache_control: if req.cache_prompt {
                 Some(CacheControl { kind: "ephemeral" })
@@ -167,10 +170,15 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
             MessagePart::Thinking {
                 thinking,
                 signature,
-            } => ContentPart::Thinking {
-                thinking: thinking.clone(),
-                signature: signature.clone(),
-            },
+            } => {
+                if signature.is_none() {
+                    continue;
+                }
+                ContentPart::Thinking {
+                    thinking: thinking.clone(),
+                    signature: signature.clone(),
+                }
+            }
             MessagePart::ToolResult {
                 tool_use_id,
                 content,
@@ -415,6 +423,9 @@ impl Provider for AnthropicProvider {
 
                 let mut parts: Vec<MessagePart> = Vec::new();
                 if !acc_thinking.is_empty() {
+                    if req.thinking_enabled && acc_signature.is_none() {
+                        return Err(RuntimeError::ThinkingSignatureMissing);
+                    }
                     parts.push(MessagePart::Thinking {
                         thinking: acc_thinking,
                         signature: acc_signature,
@@ -561,7 +572,8 @@ struct MessagesRequest {
 struct ThinkingConfig {
     #[serde(rename = "type")]
     kind: &'static str,
-    budget_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_tokens: Option<u32>,
 }
 
 #[derive(Serialize, Clone)]
