@@ -2725,9 +2725,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             }
         }
         if !placed {
-            // Fall back to the ❯ prompt so the cursor never lingers at a
-            // stale position (e.g. after editor.clear() during streaming).
-            f.set_cursor_position((input_rect.x + layout::INPUT_LEFT, input_rect.y + 1));
+            // Fall back to the ❯ prompt only when the editor is empty
+            // (e.g. just after submit).  When the user is typing the
+            // primary cursor-position logic works and must win.
+            if editor.buf().is_empty() {
+                f.set_cursor_position((input_rect.x + layout::INPUT_LEFT, input_rect.y + 1));
+            }
         }
     }
     if app.popup.is_open() {
