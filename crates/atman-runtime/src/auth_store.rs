@@ -41,8 +41,6 @@ pub struct StoredProvider {
     pub account: Option<String>,
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_cache: Option<ModelCache>,
 }
 
@@ -175,7 +173,6 @@ mod tests {
             expires_at: 1761735358,
             account: Some("x@example.com".into()),
             enabled: true,
-            display_name: None,
             model_cache: None,
         });
         store.save_to(&path).unwrap();
@@ -198,7 +195,6 @@ mod tests {
             expires_at: 0,
             account: None,
             enabled: true,
-            display_name: None,
             model_cache: None,
         });
         store.add(StoredProvider {
@@ -210,7 +206,6 @@ mod tests {
             expires_at: 0,
             account: None,
             enabled: true,
-            display_name: None,
             model_cache: None,
         });
         assert!(store.remove("del"));

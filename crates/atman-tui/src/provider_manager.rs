@@ -122,7 +122,7 @@ impl ProviderManager {
                 };
                 self.providers.push(ProviderEntry {
                     source: ProviderSource::AuthStore { id: p.id.clone() },
-                    name: p.display_name.as_deref().unwrap_or(&p.name).to_string(),
+                    name: p.name.clone(),
                     kind: format!("{:?}", p.kind).to_lowercase(),
                     status,
                     detail: p.account.clone().unwrap_or_default(),
