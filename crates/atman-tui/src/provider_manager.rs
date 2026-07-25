@@ -530,18 +530,12 @@ fn render_model_detail(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Match model groups by provider ID for auth store entries.
-    let provider_id = mgr
-        .providers
-        .get(mgr.selected)
-        .and_then(|p| match &p.source {
-            ProviderSource::AuthStore { id } => Some(format!("codex:{}", id)),
-            _ => None,
-        });
+    // Match model groups by vendor name (e.g. "codex").
+    let provider_name = mgr.providers.get(mgr.selected).map(|p| p.kind.as_str());
     let mut lines = vec![];
-    if let Some(ref pid) = provider_id {
+    if let Some(name) = provider_name {
         for g in &mgr.groups {
-            if g.provider_name == *pid {
+            if g.provider_name == name {
                 lines.push(Line::from(Span::styled(
                     format!(" {} models:", g.models.len()),
                     Style::default().add_modifier(Modifier::BOLD),

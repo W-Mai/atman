@@ -41,6 +41,7 @@ impl CodexProvider {
             .model
             .split_once('/')
             .map(|(_, slug)| slug)
+            .or_else(|| req.model.split_once(':').map(|(_, slug)| slug))
             .unwrap_or(&req.model)
             .to_string();
 

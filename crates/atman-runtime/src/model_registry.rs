@@ -64,15 +64,16 @@ pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
 }
 
 /// Build ModelEntry values from discovered models and register them.
+/// Models are keyed as `codex:<slug>` (vendor:model format).
+/// The `provider_id` identifies the auth-store account for cache management.
 pub fn register_discovered(provider_id: &str, models: &[crate::provider::DiscoveredModel]) {
     let entries: Vec<(String, ModelEntry)> = models
         .iter()
         .map(|m| {
-            let provider_name = format!("codex:{provider_id}");
-            let name = format!("{provider_name}/{}", m.slug);
+            let name = format!("codex:{}", m.slug);
             let entry = ModelEntry {
                 model: name.clone(),
-                provider: Some(provider_name.clone()),
+                provider: Some("codex".to_string()),
                 context_budget: m.context_budget,
                 thinking: Some(m.thinking),
                 ..Default::default()
@@ -195,7 +196,7 @@ pub fn model_info(name: &str) -> ModelInfo {
 fn builtin_budget(name: &str) -> (u64, f64) {
     let bare = match name.split_once('/') {
         Some((_, rest)) => rest,
-        None => name,
+        None => name.split_once(':').map(|(_, r)| r).unwrap_or(name),
     };
     match bare {
         n if n.starts_with("codex-") => (272_000, 0.8),
