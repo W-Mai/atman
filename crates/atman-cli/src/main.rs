@@ -576,6 +576,7 @@ async fn cmd_run(
     let atman_daemon::bootstrap::BootstrapOutcome { mut executor } =
         atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
             .await?;
+    executor.source_dir = file.parent().map(|p| p.to_path_buf());
     atman_daemon::bootstrap::spawn_mcp_boot(
         executor.clone(),
         session.clone(),
@@ -1222,6 +1223,8 @@ async fn run_boot_flow(executor: &Executor, reporter: &Reporter) -> Result<()> {
         return Ok(());
     }
     let flow_name = parsed.flows[0].name.name.clone();
+    let mut executor = executor.clone();
+    executor.source_dir = path.parent().map(|p| p.to_path_buf());
     let value = executor.run(&parsed, &flow_name, vec![]).await?;
     let rendered = render_value(&value);
     if !rendered.is_empty() {
@@ -1239,14 +1242,21 @@ async fn run_slash_command_in_turn(
     session: std::sync::Arc<Session>,
     turn_id: atman_runtime::event::TurnId,
 ) -> Result<Value> {
-    let (parsed, flow_name, kv) = resolve_slash_command(line)?;
+    let (parsed, flow_name, kv, source_dir) = resolve_slash_command(line)?;
+    let mut executor = executor.clone();
+    executor.source_dir = source_dir;
     executor
         .run_in_turn(&parsed, &flow_name, kv, Some(turn_id), Some(session))
         .await
         .map_err(Into::into)
 }
 
-type SlashCommandParsed = (atman_dsl::ast::File, String, Vec<(String, Value)>);
+type SlashCommandParsed = (
+    atman_dsl::ast::File,
+    String,
+    Vec<(String, Value)>,
+    Option<PathBuf>,
+);
 
 fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
     let trimmed_line = line.trim();
@@ -1305,7 +1315,8 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
             .any(|t| t.contains('=') && !t.starts_with('='));
     if single_string_param {
         kv.push((params[0].clone(), Value::Str(rest_raw.to_string())));
-        return Ok((parsed, flow_name, kv));
+        let source_dir = path.parent().map(|p| p.to_path_buf());
+        return Ok((parsed, flow_name, kv, source_dir));
     }
 
     let mut positional_index = 0usize;
@@ -1323,7 +1334,8 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
             positional_index += 1;
         }
     }
-    Ok((parsed, flow_name, kv))
+    let source_dir = path.parent().map(|p| p.to_path_buf());
+    Ok((parsed, flow_name, kv, source_dir))
 }
 
 fn split_quoted_args(input: &str) -> Vec<String> {

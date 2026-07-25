@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use atman_dsl::ast::{CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 
@@ -1002,6 +1002,7 @@ pub async fn exec_flow(
     tools: &ToolRegistry,
     tool_ctx: &ToolCtx,
     providers: &crate::provider::ProviderRegistry,
+    source_dir: Option<PathBuf>,
 ) -> Result<Value, RuntimeError> {
     let flows = std::collections::HashMap::new();
     exec_flow_with_siblings(
@@ -1017,6 +1018,7 @@ pub async fn exec_flow(
         None,
         tokio_util::sync::CancellationToken::new(),
         None,
+        source_dir,
     )
     .await
 }
@@ -1035,6 +1037,7 @@ pub async fn exec_flow_with_siblings(
     session: Option<std::sync::Arc<crate::session::Session>>,
     flow_cancel: tokio_util::sync::CancellationToken,
     safety: Option<&crate::safety::SafetyConfig>,
+    source_dir: Option<PathBuf>,
 ) -> Result<Value, RuntimeError> {
     let mut env = Env::new();
     for (name, value) in args {
@@ -1053,6 +1056,7 @@ pub async fn exec_flow_with_siblings(
         flow_cancel,
         safety,
         current_node_id: None,
+        source_dir,
     };
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),
@@ -1071,7 +1075,7 @@ mod tests {
         let tools = ToolRegistry::new();
         let tool_ctx = ToolCtx::new();
         let providers = crate::provider::ProviderRegistry::new();
-        exec_flow(&file.flows[0], args, &tools, &tool_ctx, &providers).await
+        exec_flow(&file.flows[0], args, &tools, &tool_ctx, &providers, None).await
     }
 
     #[tokio::test]

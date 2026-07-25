@@ -17,6 +17,8 @@ pub struct Executor {
     pub events: EventSink,
     pub tool_ctx: ToolCtx,
     pub safety: Option<crate::safety::SafetyConfig>,
+    /// When set, relative `@` paths are resolved against this directory.
+    pub source_dir: Option<std::path::PathBuf>,
 }
 
 impl Executor {
@@ -27,6 +29,7 @@ impl Executor {
             events: EventSink::new(),
             tool_ctx: ToolCtx::new(),
             safety: None,
+            source_dir: None,
         }
     }
 
@@ -37,6 +40,7 @@ impl Executor {
             events,
             tool_ctx: ToolCtx::new(),
             safety: None,
+            source_dir: None,
         }
     }
 
@@ -167,6 +171,7 @@ impl Executor {
             session.clone(),
             flow_cancel.clone(),
             self.safety.as_ref(),
+            self.source_dir.clone(),
         );
         let result = tokio::select! {
             biased;

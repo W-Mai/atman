@@ -230,6 +230,7 @@ async fn run_flow_inner(
     })
     .await?;
     let mut executor = outcome.executor;
+    executor.source_dir = path.parent().map(|p| p.to_path_buf());
 
     let lifecycles = match &config_dir {
         Some(c) => atman_runtime::lifecycle::LifecycleRunner::from_dir(c),

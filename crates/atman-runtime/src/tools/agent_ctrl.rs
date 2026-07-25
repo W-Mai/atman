@@ -215,6 +215,7 @@ async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResu
         None,
         child_ctx.cancel.clone(),
         None,
+        path.parent().map(|p| p.to_path_buf()),
     )
     .await;
     let status = match &out {

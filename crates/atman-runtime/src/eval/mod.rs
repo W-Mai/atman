@@ -22,6 +22,9 @@ pub struct EvalCtx<'a> {
     pub flow_cancel: tokio_util::sync::CancellationToken,
     pub safety: Option<&'a crate::safety::SafetyConfig>,
     pub current_node_id: Option<String>,
+    /// Directory of the .at source file. When set, relative `@` paths
+    /// are resolved against this directory instead of the process CWD.
+    pub source_dir: Option<std::path::PathBuf>,
 }
 
 impl<'a> EvalCtx<'a> {
@@ -147,10 +150,24 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
             Some(v) => v.clone(),
             None => Value::Err(RuntimeError::UndefinedVar(id.name.clone())),
         },
-        Expr::FileRef(f) => match tokio::fs::read_to_string(&f.path).await {
-            Ok(s) => Value::Str(s),
-            Err(e) => Value::Err(RuntimeError::ToolFailed(format!("@\"{}\": {e}", f.path))),
-        },
+        Expr::FileRef(f) => {
+            let path = if std::path::Path::new(&f.path).is_relative() {
+                if let Some(dir) = &ctx.source_dir {
+                    dir.join(&f.path)
+                } else {
+                    std::path::PathBuf::from(&f.path)
+                }
+            } else {
+                std::path::PathBuf::from(&f.path)
+            };
+            match tokio::fs::read_to_string(&path).await {
+                Ok(s) => Value::Str(s),
+                Err(e) => Value::Err(RuntimeError::ToolFailed(format!(
+                    "@\"{}\": {e}",
+                    path.display()
+                ))),
+            }
+        }
         Expr::Member { base, field } => {
             let base_v = eval_expr(base, env, ctx).await;
             if base_v.is_err() {
@@ -2287,6 +2304,7 @@ mod tests {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
+            source_dir: None,
         };
         let stmt = &file.flows[0].body[0];
         if let atman_dsl::ast::Stmt::Return { value } = stmt {
@@ -2383,6 +2401,7 @@ mod tests {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
+            source_dir: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -2423,6 +2442,7 @@ mod tests {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
+            source_dir: None,
         };
 
         let mut env = Env::new();
@@ -2464,6 +2484,7 @@ mod tests {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
+            source_dir: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -2500,6 +2521,7 @@ mod tests {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
+            source_dir: None,
         };
 
         let src = r#"flow t() {
@@ -2541,6 +2563,7 @@ mod tests {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
+            source_dir: None,
         };
         let src = r#"flow t() { return llm { prompt: "hi" } }"#;
         let file = parse_file(src).unwrap();
@@ -2572,6 +2595,7 @@ mod tests {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
+            source_dir: None,
         };
         let src = r#"flow t() { return user_confirm("proceed?") }"#;
         let file = parse_file(src).unwrap();
@@ -2617,6 +2641,7 @@ flow parent(x: Int) -> Int {
             None,
             tokio_util::sync::CancellationToken::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2650,6 +2675,7 @@ flow parent(x: Int) -> Int {
             None,
             None,
             tokio_util::sync::CancellationToken::new(),
+            None,
             None,
         )
         .await
@@ -2685,6 +2711,7 @@ flow parent(x: Int) -> Int {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: None,
+            source_dir: None,
         };
 
         let mut env = Env::new();
@@ -2720,6 +2747,7 @@ flow parent(x: Int) -> Int {
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
             current_node_id: Some("stmt_1".into()),
+            source_dir: None,
         };
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let _ = eval_expr(value, &Env::new(), &ctx).await;
