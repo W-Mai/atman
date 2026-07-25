@@ -1047,8 +1047,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut saw_context_overflow = false;
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
-            let mut thinking_enabled =
-                crate::model_registry::model_info(&model).thinking_enabled();
+            let mut thinking_enabled = crate::model_registry::model_info(&model).thinking_enabled();
             let mut signature_retries: u32 = 0;
             'llm_attempts: loop {
                 for attempt in 0..=retry_count {

@@ -952,12 +952,6 @@ impl Session {
         self.compaction.lock.clone()
     }
 
-    fn clear_last_input_tokens(&self) {
-        self.compaction
-            .last_input_tokens
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
     pub fn refresh_window_snapshot(&self) {
         let provider_tokens = self.last_input_tokens();
         let estimated = crate::compaction::estimate_tokens_for_messages(&self.messages());
@@ -1276,10 +1270,12 @@ impl Session {
                 after_tokens,
                 compacted_count: range.end - range.start,
             });
-        self.clear_last_input_tokens();
-        self.refresh_window_snapshot();
         let checkpoint_messages = self.messages();
         let window_tokens = estimate_tokens_for_messages(&checkpoint_messages);
+        self.compaction
+            .last_input_tokens
+            .store(window_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.refresh_window_snapshot();
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),
             messages: checkpoint_messages.to_vec(),
