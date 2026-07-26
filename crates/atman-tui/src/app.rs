@@ -867,7 +867,6 @@ impl AppState {
                     StreamFrame::FlowNodeStart {
                         run_id,
                         node_id,
-                        kind,
                         label,
                         ..
                     } => {

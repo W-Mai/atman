@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
@@ -167,7 +165,7 @@ impl FloatingPanels {
 
 pub fn render(
     f: &mut Frame,
-    canvas: Rect,
+    _canvas: Rect,
     panels: &FloatingPanels,
     snapshots: &[TaskSnapshot],
 ) {

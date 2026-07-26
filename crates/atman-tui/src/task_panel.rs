@@ -6,8 +6,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use atman_runtime::nodegraph::NodeKind;
-
 #[derive(Debug, Clone)]
 pub struct ActivityNode {
     pub run_id: String,
