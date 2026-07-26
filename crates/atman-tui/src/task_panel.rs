@@ -1,10 +1,10 @@
 use std::time::Instant;
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 #[derive(Debug, Clone)]
 pub struct ActivityNode {
@@ -34,14 +34,11 @@ pub struct TaskPanelHitMap {
     pub kill_rects: Vec<(TaskId, Rect)>,
     pub group_header_rects: Vec<(TaskKind, Rect)>,
     pub task_rects: Vec<(String, Rect)>,
+    pub activity_rects: Vec<(String, String, Rect)>,
     pub history_btn_rect: Option<Rect>,
 }
 
-pub fn compute_task_panel_rect(
-    area: Rect,
-    show: bool,
-    collapsed: bool,
-) -> Option<Rect> {
+pub fn compute_task_panel_rect(area: Rect, show: bool, collapsed: bool) -> Option<Rect> {
     if !show {
         return None;
     }
@@ -121,7 +118,7 @@ fn fmt_elapsed(ms: u64) -> String {
     if s < 60 {
         format!("{s}s")
     } else {
-        format!("{}:{}", s / 60, format!("{:02}", s % 60))
+        format!("{}:{:02}", s / 60, s % 60)
     }
 }
 
@@ -195,11 +192,24 @@ pub fn render(
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
             lines.push(Line::from(vec![
                 Span::styled(" ", Style::default().fg(color)),
-                Span::styled(format!("{icon} "), Style::default().fg(activity_status_color(node.status))),
+                Span::styled(
+                    format!("{icon} "),
+                    Style::default().fg(activity_status_color(node.status)),
+                ),
                 Span::styled(label, Style::default().fg(color)),
                 Span::raw(" "),
                 Span::styled(elapsed, Style::default().fg(Color::DarkGray)),
             ]));
+            hitmap.activity_rects.push((
+                node.run_id.clone(),
+                node.node_id.clone(),
+                Rect {
+                    x: inner.x,
+                    y: row,
+                    width: inner.width,
+                    height: 1,
+                },
+            ));
             row += 1;
         }
     }
@@ -305,6 +315,30 @@ pub fn render(
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
+
+    let btn_y = inner.y + inner.height.saturating_sub(1);
+    if btn_y >= inner.y {
+        let btn_rect = Rect {
+            x: inner.x,
+            y: btn_y,
+            width: inner.width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    "⊞ History",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            btn_rect,
+        );
+        hitmap.history_btn_rect = Some(btn_rect);
+    }
+
     hitmap
 }
 
@@ -345,20 +379,6 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
-
-    fn snap(kind: TaskKind, label: &str, status: TaskStatus) -> TaskSnapshot {
-        TaskSnapshot {
-            id: atman_runtime::TaskId::now(),
-            kind,
-            label: label.into(),
-            status,
-            started_at: Instant::now(),
-            ended_at: None,
-            source_handle: "h".into(),
-            session_id: "s".into(),
-        }
-    }
 
     #[test]
     fn truncate_short() {

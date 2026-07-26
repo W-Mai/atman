@@ -249,10 +249,7 @@ impl TermRegistry {
         Self::default()
     }
 
-    pub fn with_task_registry(
-        mut self,
-        tr: crate::task_registry::TaskRegistry,
-    ) -> Self {
+    pub fn with_task_registry(mut self, tr: crate::task_registry::TaskRegistry) -> Self {
         self.task_registry = Some(tr);
         self
     }
@@ -320,6 +317,7 @@ fn now_ms() -> u64 {
 const READ_BUF_SIZE: usize = 4096;
 
 impl TermRegistry {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_entry(
         self: &Arc<Self>,
         rows: u16,
@@ -407,6 +405,7 @@ impl TermRegistry {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_reader_loop(
     mut reader: Box<dyn std::io::Read + Send>,
     parser: Arc<Mutex<vt100::Parser>>,

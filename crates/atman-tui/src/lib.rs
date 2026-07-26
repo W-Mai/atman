@@ -24,6 +24,7 @@ pub mod highlight;
 pub mod history;
 pub mod history_search_modal;
 
+pub mod floating_panels;
 pub mod input;
 pub mod keys;
 pub mod layout;
@@ -36,7 +37,6 @@ pub mod session_switcher;
 pub mod sidebar;
 pub mod states;
 pub mod status;
-pub mod floating_panels;
 pub mod task_panel;
 pub mod terminal_guard;
 pub mod terminal_viewer_modal;
@@ -576,6 +576,36 @@ async fn run_frames(
                                             app.task_panel_collapsed_groups.remove(kind);
                                         } else {
                                             app.task_panel_collapsed_groups.insert(*kind);
+                                        }
+                                    } else if let Some(hr) = &hm.history_btn_rect
+                                        && rect_contains(*hr, me.column, me.row)
+                                    {
+                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        app.floating_panels.open(
+                                            "__history__",
+                                            crate::floating_panels::PanelKind::History,
+                                            "History",
+                                            canvas,
+                                        );
+                                    } else if let Some((run_id, node_id, _)) = hm
+                                        .activity_rects
+                                        .iter()
+                                        .find(|(_, _, ar)| rect_contains(*ar, me.column, me.row))
+                                        .map(|(r, n, a)| (r, n, a))
+                                    {
+                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        let panel_id = format!("{run_id}:{node_id}");
+                                        let node = app
+                                            .activity_nodes
+                                            .iter()
+                                            .find(|n| n.run_id == *run_id && n.node_id == *node_id);
+                                        if let Some(node) = node {
+                                            app.floating_panels.open(
+                                                &panel_id,
+                                                crate::floating_panels::PanelKind::Activity,
+                                                &node.label,
+                                                canvas,
+                                            );
                                         }
                                     } else {
                                         if let Some((handle, _)) = hm
@@ -2753,9 +2783,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_collapse_btn_rect = sr.collapse_btn_rect;
         app.last_expand_btn_rect = sr.expand_btn_rect;
     }
-    if let Some(tp_area) =
-        crate::task_panel::compute_task_panel_rect(l.transcript, !intro_active, app.task_panel_collapsed)
-    {
+    if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(
+        l.transcript,
+        !intro_active,
+        app.task_panel_collapsed,
+    ) {
         let hitmap = crate::task_panel::render(
             f,
             tp_area,
@@ -2776,6 +2808,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             l.transcript,
             &app.floating_panels,
             &app.task_snapshots,
+            &app.items,
+            &app.activity_nodes,
         );
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {

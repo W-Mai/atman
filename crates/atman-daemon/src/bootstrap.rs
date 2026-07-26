@@ -246,14 +246,10 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
     tools::register_git_ops(&mut executor.tools);
     let task_registry = atman_runtime::TaskRegistry::new();
-    let bg_registry = tools::register_bash_bg_with_task_registry(
-        &mut executor.tools,
-        task_registry.clone(),
-    );
-    let term_registry = tools::register_terminal_with_task_registry(
-        &mut executor.tools,
-        task_registry.clone(),
-    );
+    let bg_registry =
+        tools::register_bash_bg_with_task_registry(&mut executor.tools, task_registry.clone());
+    let term_registry =
+        tools::register_terminal_with_task_registry(&mut executor.tools, task_registry.clone());
     let trust_config = load_trust_config(opts.config_dir.as_deref());
     let sandbox_enabled = trust_config.mode.sandbox_enabled();
     let sandbox_trust = trust_config.clone();

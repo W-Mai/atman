@@ -337,9 +337,27 @@ mod tests {
     #[test]
     fn list_filters_by_kind_and_status() {
         let reg = TaskRegistry::new();
-        let b1 = reg.register(TaskKind::Bash, "a".into(), "bg_1".into(), "s".into(), cancel());
-        let _t1 = reg.register(TaskKind::Terminal, "vim".into(), "term_1".into(), "s".into(), cancel());
-        let _b2 = reg.register(TaskKind::Bash, "ls".into(), "bg_2".into(), "s".into(), cancel());
+        let b1 = reg.register(
+            TaskKind::Bash,
+            "a".into(),
+            "bg_1".into(),
+            "s".into(),
+            cancel(),
+        );
+        let _t1 = reg.register(
+            TaskKind::Terminal,
+            "vim".into(),
+            "term_1".into(),
+            "s".into(),
+            cancel(),
+        );
+        let _b2 = reg.register(
+            TaskKind::Bash,
+            "ls".into(),
+            "bg_2".into(),
+            "s".into(),
+            cancel(),
+        );
 
         let bash_only = reg.list(&TaskFilter {
             kind: Some(TaskKind::Bash),
@@ -356,7 +374,13 @@ mod tests {
     fn kill_cancels_token() {
         let reg = TaskRegistry::new();
         let tok = cancel();
-        let id = reg.register(TaskKind::Bash, "x".into(), "bg".into(), "s".into(), tok.clone());
+        let id = reg.register(
+            TaskKind::Bash,
+            "x".into(),
+            "bg".into(),
+            "s".into(),
+            tok.clone(),
+        );
         assert!(reg.kill(&id));
         assert!(tok.is_cancelled());
     }
@@ -364,7 +388,13 @@ mod tests {
     #[test]
     fn kill_returns_false_for_terminal() {
         let reg = TaskRegistry::new();
-        let id = reg.register(TaskKind::Bash, "x".into(), "bg".into(), "s".into(), cancel());
+        let id = reg.register(
+            TaskKind::Bash,
+            "x".into(),
+            "bg".into(),
+            "s".into(),
+            cancel(),
+        );
         reg.finish(&id, TaskStatus::Ok);
         assert!(!reg.kill(&id));
     }
@@ -372,7 +402,13 @@ mod tests {
     #[test]
     fn finish_is_idempotent() {
         let reg = TaskRegistry::new();
-        let id = reg.register(TaskKind::Bash, "x".into(), "bg".into(), "s".into(), cancel());
+        let id = reg.register(
+            TaskKind::Bash,
+            "x".into(),
+            "bg".into(),
+            "s".into(),
+            cancel(),
+        );
         reg.finish(&id, TaskStatus::Ok);
         reg.finish(&id, TaskStatus::Err);
         let snap = reg.lookup(&id).unwrap();
@@ -382,7 +418,13 @@ mod tests {
     #[test]
     fn reap_removes_terminal_only() {
         let reg = TaskRegistry::new();
-        let id = reg.register(TaskKind::Bash, "x".into(), "bg".into(), "s".into(), cancel());
+        let id = reg.register(
+            TaskKind::Bash,
+            "x".into(),
+            "bg".into(),
+            "s".into(),
+            cancel(),
+        );
         reg.reap(&id);
         assert!(reg.lookup(&id).is_some());
         reg.finish(&id, TaskStatus::Ok);
@@ -394,7 +436,13 @@ mod tests {
     fn subscribe_receives_registered_event() {
         let reg = TaskRegistry::new();
         let mut rx = reg.subscribe();
-        let _id = reg.register(TaskKind::Bash, "x".into(), "bg".into(), "s".into(), cancel());
+        let _id = reg.register(
+            TaskKind::Bash,
+            "x".into(),
+            "bg".into(),
+            "s".into(),
+            cancel(),
+        );
         let ev = rx.try_recv().expect("got event");
         match ev {
             TaskEvent::Registered(s) => assert_eq!(s.kind, TaskKind::Bash),
@@ -406,7 +454,13 @@ mod tests {
     fn subscribe_receives_status_changed() {
         let reg = TaskRegistry::new();
         let mut rx = reg.subscribe();
-        let id = reg.register(TaskKind::Bash, "x".into(), "bg".into(), "s".into(), cancel());
+        let id = reg.register(
+            TaskKind::Bash,
+            "x".into(),
+            "bg".into(),
+            "s".into(),
+            cancel(),
+        );
         let _ = rx.try_recv();
         reg.finish(&id, TaskStatus::Ok);
         let ev = rx.try_recv().expect("got status event");
