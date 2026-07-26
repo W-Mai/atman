@@ -2652,8 +2652,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_collapse_btn_rect = sr.collapse_btn_rect;
         app.last_expand_btn_rect = sr.expand_btn_rect;
     }
-    if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(l.transcript, !intro_active) {
-        crate::task_panel::render(f, tp_area, &app.task_snapshots);
+    if let Some(tp_area) =
+        crate::task_panel::compute_task_panel_rect(l.transcript, !intro_active, app.task_panel_collapsed)
+    {
+        crate::task_panel::render(f, tp_area, &app.task_snapshots, app.task_panel_collapsed);
         app.last_task_panel_rect = Some(tp_area);
     } else {
         app.last_task_panel_rect = None;

@@ -1,18 +1,28 @@
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use atman_runtime::{TaskKind, TaskSnapshot, TaskStatus};
 
 pub const TASK_PANEL_WIDTH: u16 = 32;
+pub const TASK_PANEL_STRIP_WIDTH: u16 = 5;
 
-pub fn compute_task_panel_rect(area: Rect, show: bool) -> Option<Rect> {
+pub fn compute_task_panel_rect(
+    area: Rect,
+    show: bool,
+    collapsed: bool,
+) -> Option<Rect> {
     if !show {
         return None;
     }
-    if area.width < TASK_PANEL_WIDTH + 40 {
+    let width = if collapsed {
+        TASK_PANEL_STRIP_WIDTH
+    } else {
+        TASK_PANEL_WIDTH
+    };
+    if !collapsed && area.width < TASK_PANEL_WIDTH + 40 {
         return None;
     }
     let height = area.height.saturating_sub(4);
@@ -22,7 +32,7 @@ pub fn compute_task_panel_rect(area: Rect, show: bool) -> Option<Rect> {
     Some(Rect {
         x: area.x + 1,
         y: area.y + 2,
-        width: TASK_PANEL_WIDTH,
+        width,
         height,
     })
 }
@@ -63,20 +73,32 @@ fn fmt_elapsed(ms: u64) -> String {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
+pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: bool) {
+    if collapsed {
+        render_strip(f, area, snapshots);
+        return;
+    }
+
+    let t = crate::theme::theme();
+    crate::sanitize_widget_edges(f, area);
+    f.render_widget(Clear, area);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.subtle_fg))
+        .title(" ≡ ")
         .title(
             Line::from(vec![
-                Span::styled(" Tasks ", Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::styled("Tasks", Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::styled(
                     format!("({})", snapshots.iter().filter(|s| s.is_running()).count()),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.subtle_fg),
                 ),
             ])
-            .alignment(Alignment::Left),
+            .alignment(Alignment::Right),
         );
     f.render_widget(block, area);
 
@@ -181,6 +203,31 @@ fn truncate_label(s: &str, max: usize) -> String {
         let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{truncated}…")
     }
+}
+
+fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
+    let t = crate::theme::theme();
+    crate::sanitize_widget_edges(f, area);
+    f.render_widget(Clear, area);
+
+    let running = snapshots.iter().filter(|s| s.is_running()).count();
+    let dot = if running > 0 {
+        Span::styled("●", Style::default().fg(t.success))
+    } else {
+        Span::styled("○", Style::default().fg(t.subtle_fg))
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(t.subtle_fg))
+        .title(" ≡ ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(Line::from(dot)).alignment(Alignment::Center),
+        inner,
+    );
 }
 
 #[cfg(test)]
