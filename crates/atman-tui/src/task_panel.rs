@@ -13,6 +13,8 @@ pub const TASK_PANEL_STRIP_WIDTH: u16 = 5;
 pub struct TaskPanelHitMap {
     pub kill_rects: Vec<(TaskId, Rect)>,
     pub group_header_rects: Vec<(TaskKind, Rect)>,
+    pub task_rects: Vec<(String, Rect)>,
+    pub history_btn_rect: Option<Rect>,
 }
 
 pub fn compute_task_panel_rect(
@@ -240,6 +242,15 @@ pub fn render(
                     },
                 ));
             }
+            hitmap.task_rects.push((
+                snap.source_handle.clone(),
+                Rect {
+                    x: inner.x,
+                    y: row,
+                    width: inner.width.saturating_sub(3),
+                    height: 1,
+                },
+            ));
             row += 1;
         }
     }

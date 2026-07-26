@@ -36,6 +36,7 @@ pub mod session_switcher;
 pub mod sidebar;
 pub mod states;
 pub mod status;
+pub mod floating_panels;
 pub mod task_panel;
 pub mod terminal_guard;
 pub mod terminal_viewer_modal;
@@ -547,7 +548,52 @@ async fn run_frames(
                                         } else {
                                             app.task_panel_collapsed_groups.insert(*kind);
                                         }
+                                    } else {
+                                        if let Some((handle, _)) = hm
+                                            .task_rects
+                                            .iter()
+                                            .find(|(_, tr)| rect_contains(*tr, me.column, me.row))
+                                        {
+                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            let snap = app
+                                                .task_snapshots
+                                                .iter()
+                                                .find(|s| s.source_handle == *handle);
+                                            if let Some(snap) = snap {
+                                                app.floating_panels.open(
+                                                    &snap.source_handle,
+                                                    crate::floating_panels::PanelKind::Task(
+                                                        snap.kind,
+                                                    ),
+                                                    &snap.label,
+                                                    canvas,
+                                                );
+                                            }
+                                        }
                                     }
+                                } else if let Some(close_id) =
+                                    app.floating_panels.hit_test_close(me.column, me.row)
+                                {
+                                    app.floating_panels.close(&close_id);
+                                } else if let Some(max_id) =
+                                    app.floating_panels.hit_test_maximize(me.column, me.row)
+                                {
+                                    let canvas = app.last_transcript_rect.unwrap_or_default();
+                                    app.floating_panels.toggle_maximize(&max_id, canvas);
+                                } else if let Some(fp) = app
+                                    .floating_panels
+                                    .hit_test_titlebar(me.column, me.row)
+                                {
+                                    let id = fp.id.clone();
+                                    app.floating_panels.focus(&id);
+                                    app.drag_target = Some(id);
+                                    app.drag_offset = (me.column, me.row);
+                                } else if let Some(fp_id) = app
+                                    .floating_panels
+                                    .hit_test_panel(me.column, me.row)
+                                    .map(|fp| fp.id.clone())
+                                {
+                                    app.floating_panels.focus(&fp_id);
                                 } else if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
@@ -599,6 +645,26 @@ async fn run_frames(
                                 {
                                     app.toggle_compaction_summary_expand(idx);
                                 }
+                            } else if let MouseEventKind::Drag(MouseButton::Left) = me.kind {
+                                if let Some(id) = &app.drag_target {
+                                    let (ox, oy) = app.drag_offset;
+                                    let dx = me.column as i32 - ox as i32;
+                                    let dy = me.row as i32 - oy as i32;
+                                    if let Some(p) = app
+                                        .floating_panels
+                                        .panels
+                                        .iter()
+                                        .find(|p| &p.id == id)
+                                    {
+                                        let nx = (p.rect.x as i32 + dx).max(0) as u16;
+                                        let ny = (p.rect.y as i32 + dy).max(0) as u16;
+                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        app.floating_panels.move_panel(id, nx, ny, canvas);
+                                        app.drag_offset = (me.column, me.row);
+                                    }
+                                }
+                            } else if let MouseEventKind::Up(MouseButton::Left) = me.kind {
+                                app.drag_target = None;
                             } else if let MouseEventKind::Moved = me.kind {
                                 if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::Thinking { .. }) =
@@ -2696,6 +2762,14 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     } else {
         app.last_task_panel_rect = None;
         app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
+    }
+    if !app.floating_panels.panels.is_empty() {
+        crate::floating_panels::render(
+            f,
+            l.transcript,
+            &app.floating_panels,
+            &app.task_snapshots,
+        );
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
