@@ -125,6 +125,22 @@ impl Executor {
         run_id: Option<FlowRunId>,
     ) -> Result<Value, RuntimeError> {
         let run_id = run_id.unwrap_or_else(FlowRunId::now);
+        let flow_cancel = session
+            .as_ref()
+            .map(|s| s.flow_cancel_token())
+            .unwrap_or_default();
+        let task_id = self.tool_ctx.task_registry.as_ref().map(|tr| {
+            tr.register(
+                crate::task_registry::TaskKind::Flow,
+                flow.name.name.clone(),
+                run_id.0.to_string(),
+                self.tool_ctx
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| "anon".into()),
+                flow_cancel.clone(),
+            )
+        });
         self.events.emit(Event::FlowStart {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
@@ -154,10 +170,6 @@ impl Executor {
                     graph,
                 });
         }
-        let flow_cancel = session
-            .as_ref()
-            .map(|s| s.flow_cancel_token())
-            .unwrap_or_default();
         let exec_fut = exec_flow_with_siblings(
             flow,
             args,
@@ -199,6 +211,14 @@ impl Executor {
             }
         };
         let cancelled = matches!(status, FlowStatus::Cancelled);
+        if let (Some(tr), Some(tid)) = (self.tool_ctx.task_registry.as_ref(), &task_id) {
+            let ts = match &status {
+                FlowStatus::Ok => crate::task_registry::TaskStatus::Ok,
+                FlowStatus::Cancelled => crate::task_registry::TaskStatus::Killed,
+                FlowStatus::Errored { .. } => crate::task_registry::TaskStatus::Err,
+            };
+            tr.finish(tid, ts);
+        }
         self.events.emit(Event::FlowEnd {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),

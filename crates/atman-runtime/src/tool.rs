@@ -98,6 +98,7 @@ pub struct ToolCtx {
         Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
     pub term_registry: Option<std::sync::Arc<crate::tools::term::TermRegistry>>,
+    pub task_registry: Option<crate::task_registry::TaskRegistry>,
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,
     pub current_model: Option<String>,
@@ -259,6 +260,11 @@ impl ToolCtx {
         registry: std::sync::Arc<crate::tools::term::TermRegistry>,
     ) -> Self {
         self.term_registry = Some(registry);
+        self
+    }
+
+    pub fn with_task_registry(mut self, registry: crate::task_registry::TaskRegistry) -> Self {
+        self.task_registry = Some(registry);
         self
     }
 

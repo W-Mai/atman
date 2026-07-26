@@ -86,6 +86,19 @@ pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {
     registry
 }
 
+pub fn register_bash_bg_with_task_registry(
+    reg: &mut ToolRegistry,
+    task_registry: crate::task_registry::TaskRegistry,
+) -> Arc<bash_bg::BgRegistry> {
+    let registry = Arc::new(bash_bg::BgRegistry::new().with_task_registry(task_registry));
+    reg.register(Arc::new(bash_bg::BashSpawn));
+    reg.register(Arc::new(bash_bg::BashStatus));
+    reg.register(Arc::new(bash_bg::BashOutput));
+    reg.register(Arc::new(bash_bg::BashKill));
+    reg.register(Arc::new(bash_bg::BashList));
+    registry
+}
+
 pub fn register_web(reg: &mut ToolRegistry, config: web::WebConfig) {
     reg.register(Arc::new(web::WebFetch::new(config)));
 }
@@ -98,6 +111,20 @@ pub fn register_web_search(reg: &mut ToolRegistry, config: &web::SearchConfig) {
 
 pub fn register_terminal(reg: &mut ToolRegistry) -> Arc<term::TermRegistry> {
     let registry = Arc::new(term::TermRegistry::new());
+    reg.register(Arc::new(term::TermSpawn));
+    reg.register(Arc::new(term::TermInput));
+    reg.register(Arc::new(term::TermCapture));
+    reg.register(Arc::new(term::TermResize));
+    reg.register(Arc::new(term::TermKill));
+    reg.register(Arc::new(term::TermList));
+    registry
+}
+
+pub fn register_terminal_with_task_registry(
+    reg: &mut ToolRegistry,
+    task_registry: crate::task_registry::TaskRegistry,
+) -> Arc<term::TermRegistry> {
+    let registry = Arc::new(term::TermRegistry::new().with_task_registry(task_registry));
     reg.register(Arc::new(term::TermSpawn));
     reg.register(Arc::new(term::TermInput));
     reg.register(Arc::new(term::TermCapture));

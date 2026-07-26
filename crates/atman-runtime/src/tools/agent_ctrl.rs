@@ -84,6 +84,17 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     };
     let tool_specs = build_tool_specs(registry.as_ref(), tool_filter.as_deref());
     let child_run_id = FlowRunId::now();
+    let task_id = ctx.task_registry.as_ref().map(|tr| {
+        tr.register(
+            crate::task_registry::TaskKind::Agent,
+            goal.clone(),
+            child_run_id.0.to_string(),
+            ctx.session_id
+                .clone()
+                .unwrap_or_else(|| "anon".into()),
+            ctx.cancel.clone(),
+        )
+    });
     emit_child_flow_start(ctx, &child_run_id, &goal);
     let turn = ctx
         .turn_id
@@ -147,6 +158,14 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         }
     };
     emit_child_flow_end(ctx, &child_run_id, &status);
+    if let (Some(tr), Some(tid)) = (ctx.task_registry.as_ref(), &task_id) {
+        let ts = match &status {
+            FlowStatus::Ok => crate::task_registry::TaskStatus::Ok,
+            FlowStatus::Cancelled => crate::task_registry::TaskStatus::Killed,
+            FlowStatus::Errored { .. } => crate::task_registry::TaskStatus::Err,
+        };
+        tr.finish(tid, ts);
+    }
     if let Some(text) = final_text {
         Ok(Value::Str(text))
     } else {
@@ -199,6 +218,17 @@ async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResu
         .map(|flow| (flow.name.name.clone(), flow.clone()))
         .collect();
     let run_id = FlowRunId::now();
+    let task_id = ctx.task_registry.as_ref().map(|tr| {
+        tr.register(
+            crate::task_registry::TaskKind::Agent,
+            flow.name.name.clone(),
+            run_id.0.to_string(),
+            ctx.session_id
+                .clone()
+                .unwrap_or_else(|| "anon".into()),
+            ctx.cancel.clone(),
+        )
+    });
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
     child_ctx.session_messages = Some(std::sync::Arc::new(Vec::new()));
@@ -225,6 +255,14 @@ async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResu
         },
     };
     emit_child_flow_end(ctx, &run_id, &status);
+    if let (Some(tr), Some(tid)) = (ctx.task_registry.as_ref(), &task_id) {
+        let ts = match &status {
+            FlowStatus::Ok => crate::task_registry::TaskStatus::Ok,
+            FlowStatus::Cancelled => crate::task_registry::TaskStatus::Killed,
+            FlowStatus::Errored { .. } => crate::task_registry::TaskStatus::Err,
+        };
+        tr.finish(tid, ts);
+    }
     out
 }
 
