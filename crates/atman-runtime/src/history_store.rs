@@ -128,12 +128,16 @@ fn role_to_kind(role: &str) -> Option<&'static str> {
     }
 }
 
-fn roles_to_kinds(roles: Option<&[&str]>) -> Option<Vec<&'static str>> {
-    roles.map(|rs| {
-        rs.iter()
+const MESSAGE_KINDS: &[&str] = &["user_msg", "assistant_msg", "tool_result_msg", "system_msg"];
+
+fn roles_to_kinds(roles: Option<&[&str]>) -> Vec<&'static str> {
+    match roles {
+        Some(rs) if !rs.is_empty() => rs
+            .iter()
             .filter_map(|r| role_to_kind(r))
-            .collect::<Vec<_>>()
-    })
+            .collect::<Vec<_>>(),
+        _ => MESSAGE_KINDS.to_vec(),
+    }
 }
 
 fn filter_messages_by_role(msgs: Vec<Message>, roles: Option<&[&str]>) -> Vec<Message> {
@@ -171,7 +175,7 @@ impl HistoryStore for HistoryStoreImpl {
             && self.sqlite_available()
         {
             return idx
-                .count_events(session_id, kinds.as_deref())
+                .count_events(session_id, Some(&kinds))
                 .map_err(|e| RuntimeError::ToolFailed(format!("history.count: {e}")));
         }
 
@@ -204,10 +208,10 @@ impl HistoryStore for HistoryStoreImpl {
             && self.sqlite_available()
         {
             let total = idx
-                .count_events(&session_id, kinds.as_deref())
+                .count_events(&session_id, Some(&kinds))
                 .map_err(|e| RuntimeError::ToolFailed(format!("history.read count: {e}")))?;
             let rows = idx
-                .read_events_paginated(&session_id, offset0, limit, kinds.as_deref())
+                .read_events_paginated(&session_id, offset0, limit, Some(&kinds))
                 .map_err(|e| RuntimeError::ToolFailed(format!("history.read: {e}")))?;
             let items = rows_to_messages(rows);
             return Ok(HistoryPage {
