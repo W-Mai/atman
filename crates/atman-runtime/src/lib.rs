@@ -45,6 +45,7 @@ pub mod session;
 pub mod session_meta;
 pub mod storage;
 pub mod stream;
+pub mod task_registry;
 pub mod templates;
 pub mod tool;
 pub mod tool_naming;
@@ -70,6 +71,9 @@ pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
 pub use session::{
     CompactReviewDecision, CompactReviewMode, CompactReviewRegistry, ContextSnapshot,
     PendingCompactReview, Session, SessionId,
+};
+pub use task_registry::{
+    TaskEvent, TaskFilter, TaskId, TaskKind, TaskRegistry, TaskSnapshot, TaskStatus,
 };
 pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
 pub use tool_naming::ToolNaming;
