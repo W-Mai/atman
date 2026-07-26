@@ -867,6 +867,7 @@ impl AppState {
                     StreamFrame::FlowNodeStart {
                         run_id,
                         node_id,
+                        kind,
                         label,
                         ..
                     } => {
@@ -874,6 +875,7 @@ impl AppState {
                             run_id: run_id.clone(),
                             node_id: node_id.clone(),
                             label: label.clone(),
+                            kind: kind.clone(),
                             status: crate::task_panel::ActivityStatus::Running,
                             started_at: std::time::Instant::now(),
                             ended_at: None,
@@ -917,13 +919,28 @@ impl AppState {
                 };
                 self.ensure_workflow_panel_and_apply(&frame);
                 if is_done {
+                    if let Some(rid) = done_run_id {
+                        let st = if cancelled {
+                            crate::task_panel::ActivityStatus::Cancelled
+                        } else {
+                            crate::task_panel::ActivityStatus::Ok
+                        };
+                        let now = std::time::Instant::now();
+                        for n in self.activity_nodes.iter_mut() {
+                            if n.run_id == rid
+                                && n.status == crate::task_panel::ActivityStatus::Running
+                            {
+                                n.status = st;
+                                n.ended_at = Some(now);
+                            }
+                        }
+                    }
                     // Only close the panel for top-level flows — subflow
                     // FlowDone must not close the parent panel.
                     if done_run_id.is_some_and(|rid| self.top_level_run_ids.contains(rid)) {
                         let panel_idx = done_run_id
                             .and_then(|rid| self.workflow_run_to_panel.get(rid).copied());
                         self.close_current_workflow_panel(cancelled, panel_idx);
-                        // Clean up the top-level run id.
                         if let Some(rid) = done_run_id {
                             self.top_level_run_ids.remove(rid);
                         }

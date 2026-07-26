@@ -926,10 +926,12 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
     let futs = batch.iter().map(|a| a.tool.call(a.call_args.clone(), ctx));
     let results = futures::future::join_all(futs).await;
     for (a, r) in batch.into_iter().zip(results) {
+        emit_dispatch_node_start(ctx, &a.id, &a.name);
         let (content, is_error) = match &r {
             Ok(v) => (render_tool_result_text(v), false),
             Err(e) => (format!("{e}"), true),
         };
+        emit_dispatch_node_end(ctx, &a.id, &a.name, is_error);
         if let Ok(v) = &r {
             emit_diff_preview_if_relevant(ctx, &a.name, v);
         }
@@ -952,11 +954,13 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
 
 async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
     for a in batch {
+        emit_dispatch_node_start(ctx, &a.id, &a.name);
         let r = a.tool.call(a.call_args, ctx).await;
         let (content, is_error) = match &r {
             Ok(v) => (render_tool_result_text(v), false),
             Err(e) => (format!("{e}"), true),
         };
+        emit_dispatch_node_end(ctx, &a.id, &a.name, is_error);
         if let Ok(v) = &r {
             emit_diff_preview_if_relevant(ctx, &a.name, v);
         }
@@ -974,6 +978,68 @@ async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option
         };
         emit_tool_result(ctx, &msg);
         out_slots[a.index] = Some(Value::Message(msg));
+    }
+}
+
+fn emit_dispatch_node_start(ctx: &ToolCtx, id: &str, name: &str) {
+    use crate::nodegraph::NodeKind;
+    let kind = NodeKind::ToolCall {
+        path: name.to_string(),
+    };
+    let label = format!("⟶ {name}");
+    let node_id = format!("dispatch:{id}");
+    if let Some(sink) = ctx.events.as_ref()
+        && let Some(run_id) = ctx.flow_run_id.as_ref()
+    {
+        sink.emit(crate::event::Event::FlowNodeStart {
+            run_id: run_id.clone(),
+            node_id: node_id.clone(),
+            kind: kind.clone(),
+            label: label.clone(),
+            parent_node_id: ctx.current_node_id.clone(),
+        });
+    }
+    if let Some(tx) = &ctx.stream_tx
+        && let Some(run_id) = ctx.flow_run_id.as_ref()
+    {
+        let _ = tx.send(crate::stream::StreamFrame::FlowNodeStart {
+            run_id: run_id.0.to_string(),
+            node_id,
+            kind,
+            label,
+            parent_node_id: ctx.current_node_id.clone(),
+        });
+    }
+}
+
+fn emit_dispatch_node_end(ctx: &ToolCtx, id: &str, name: &str, is_error: bool) {
+    let node_id = format!("dispatch:{id}");
+    let status = if is_error {
+        crate::event::FlowNodeStatus::Err
+    } else {
+        crate::event::FlowNodeStatus::Ok
+    };
+    let preview = name.to_string();
+    if let Some(sink) = ctx.events.as_ref()
+        && let Some(run_id) = ctx.flow_run_id.as_ref()
+    {
+        sink.emit(crate::event::Event::FlowNodeEnd {
+            run_id: run_id.clone(),
+            node_id: node_id.clone(),
+            status: status.clone(),
+            output_preview: Some(preview.clone()),
+        });
+    }
+    if let Some(tx) = &ctx.stream_tx
+        && let Some(run_id) = ctx.flow_run_id.as_ref()
+    {
+        let _ = tx.send(crate::stream::StreamFrame::FlowNodeEnd {
+            run_id: run_id.0.to_string(),
+            node_id,
+            status,
+            output_preview: Some(preview),
+            parent_node_id: ctx.current_node_id.clone(),
+        });
     }
 }
 

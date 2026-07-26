@@ -468,6 +468,7 @@ fn render_terminal_content(
 }
 
 fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
+    let (kind_icon, kind_color) = crate::task_panel::node_kind_glyph(&node.kind);
     let icon = match node.status {
         ActivityStatus::Running => "◐",
         ActivityStatus::Ok => "✓",
@@ -488,8 +489,10 @@ fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(format!(" {icon} "), Style::default().fg(color)),
+        Span::styled(format!(" {kind_icon} "), Style::default().fg(kind_color)),
         Span::styled(&node.label, Style::default().fg(Color::White)),
+        Span::raw(" "),
+        Span::styled(icon.to_string(), Style::default().fg(color)),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![

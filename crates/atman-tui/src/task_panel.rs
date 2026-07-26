@@ -11,6 +11,7 @@ pub struct ActivityNode {
     pub run_id: String,
     pub node_id: String,
     pub label: String,
+    pub kind: atman_runtime::nodegraph::NodeKind,
     pub status: ActivityStatus,
     pub started_at: Instant,
     pub ended_at: Option<Instant>,
@@ -71,24 +72,6 @@ fn status_icon(status: TaskStatus) -> &'static str {
     }
 }
 
-fn activity_status_icon(status: ActivityStatus) -> &'static str {
-    match status {
-        ActivityStatus::Running => "◐",
-        ActivityStatus::Ok => "✓",
-        ActivityStatus::Err => "✗",
-        ActivityStatus::Cancelled => "⊘",
-    }
-}
-
-fn activity_status_color(status: ActivityStatus) -> Color {
-    match status {
-        ActivityStatus::Running => Color::LightBlue,
-        ActivityStatus::Ok => Color::Green,
-        ActivityStatus::Err => Color::Red,
-        ActivityStatus::Cancelled => Color::DarkGray,
-    }
-}
-
 fn fmt_activity_elapsed(started: std::time::Instant, ended: Option<std::time::Instant>) -> String {
     let end = ended.unwrap_or_else(std::time::Instant::now);
     let ms = end.duration_since(started).as_millis() as u64;
@@ -104,13 +87,19 @@ fn status_color(status: TaskStatus) -> Color {
     }
 }
 
-fn saturation_color(index: usize, total: usize) -> Color {
-    if total <= 1 {
-        return Color::White;
+pub fn node_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, Color) {
+    use atman_runtime::nodegraph::NodeKind;
+    match kind {
+        NodeKind::Llm { .. } => ("✦", Color::Magenta),
+        NodeKind::ToolCall { .. } => ("🔧", Color::Blue),
+        NodeKind::Fanout { .. } => ("⇉", Color::Magenta),
+        NodeKind::UserConfirm => ("?", Color::LightCyan),
+        NodeKind::Subflow { .. } => ("↳", Color::Cyan),
+        NodeKind::Message { .. } => ("✉", Color::White),
+        NodeKind::FixUntilTest => ("↻", Color::LightMagenta),
+        NodeKind::When { .. } => ("⋯", Color::DarkGray),
+        NodeKind::Return => ("←", Color::Green),
     }
-    let ratio = index as f32 / (total - 1) as f32;
-    let gray = 80 + (175.0 * ratio) as u8;
-    Color::Rgb(gray, gray, gray)
 }
 
 fn fmt_elapsed(ms: u64) -> String {
@@ -172,7 +161,7 @@ pub fn render(
     let mut lines: Vec<Line> = Vec::new();
     let mut row = inner.y;
 
-    // --- Upper: Activity (running only, old→new, saturation gradient) ---
+    // --- Upper: Activity (running only, old→new, gradient bg) ---
     let running: Vec<&ActivityNode> = activity_nodes
         .iter()
         .filter(|n| n.status == ActivityStatus::Running)
@@ -181,24 +170,33 @@ pub fn render(
     if running_count == 0 {
         lines.push(Line::from(vec![Span::styled(
             "  no active tasks",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.subtle_fg.into()),
         )]));
         row += 1;
     } else {
+        let w = inner.width as usize;
         for (i, node) in running.iter().enumerate() {
-            let color = saturation_color(i, running_count);
-            let icon = activity_status_icon(node.status);
-            let label = truncate_label(&node.label, inner.width as usize - 12);
+            let ratio = if running_count <= 1 {
+                0.5
+            } else {
+                i as f64 / (running_count - 1) as f64
+            };
+            let bg = t.panel_bg.lerp(t.highlight_bg, ratio);
+            let (kind_icon, kind_color) = node_kind_glyph(&node.kind);
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
+            let elapsed_w = elapsed.chars().count() + 1;
+            let icon_w = 2;
+            let content_w = w.saturating_sub(icon_w + elapsed_w + 1);
+            let label = truncate_label(&node.label, content_w);
+            let pad = w.saturating_sub(icon_w + label.chars().count() + elapsed_w);
             lines.push(Line::from(vec![
-                Span::styled(" ", Style::default().fg(color)),
                 Span::styled(
-                    format!("{icon} "),
-                    Style::default().fg(activity_status_color(node.status)),
+                    format!(" {kind_icon} "),
+                    Style::default().fg(kind_color).bg(bg),
                 ),
-                Span::styled(label, Style::default().fg(color)),
-                Span::raw(" "),
-                Span::styled(elapsed, Style::default().fg(Color::DarkGray)),
+                Span::styled(label, Style::default().fg(t.tinted_fg.into()).bg(bg)),
+                Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+                Span::styled(elapsed, Style::default().fg(t.meta_fg.into()).bg(bg)),
             ]));
             hitmap.activity_rects.push((
                 node.run_id.clone(),
@@ -217,7 +215,7 @@ pub fn render(
     // separator
     lines.push(Line::from(vec![Span::styled(
         "─".repeat(inner.width as usize),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.subtle_fg.into()),
     )]));
     row += 1;
 
@@ -391,9 +389,18 @@ mod tests {
     }
 
     #[test]
-    fn saturation_gradient_boundaries() {
-        assert_eq!(saturation_color(0, 1), Color::White);
-        assert_eq!(saturation_color(0, 2), Color::Rgb(80, 80, 80));
-        assert_eq!(saturation_color(1, 2), Color::Rgb(255, 255, 255));
+    fn node_kind_glyph_returns_tool_for_toolcall() {
+        use atman_runtime::nodegraph::NodeKind;
+        let (icon, _) = node_kind_glyph(&NodeKind::ToolCall {
+            path: "fs.read".into(),
+        });
+        assert_eq!(icon, "🔧");
+    }
+
+    #[test]
+    fn node_kind_glyph_returns_llm_for_llm() {
+        use atman_runtime::nodegraph::NodeKind;
+        let (icon, _) = node_kind_glyph(&NodeKind::Llm { model: None });
+        assert_eq!(icon, "✦");
     }
 }
