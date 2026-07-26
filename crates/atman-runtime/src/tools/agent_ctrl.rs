@@ -89,9 +89,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             crate::task_registry::TaskKind::Agent,
             goal.clone(),
             child_run_id.0.to_string(),
-            ctx.session_id
-                .clone()
-                .unwrap_or_else(|| "anon".into()),
+            ctx.session_id.clone().unwrap_or_else(|| "anon".into()),
             ctx.cancel.clone(),
         )
     });
@@ -223,9 +221,7 @@ async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResu
             crate::task_registry::TaskKind::Agent,
             flow.name.name.clone(),
             run_id.0.to_string(),
-            ctx.session_id
-                .clone()
-                .unwrap_or_else(|| "anon".into()),
+            ctx.session_id.clone().unwrap_or_else(|| "anon".into()),
             ctx.cancel.clone(),
         )
     });
