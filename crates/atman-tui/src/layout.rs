@@ -5,6 +5,9 @@ use ratatui::layout::{Constraint, Direction, Layout as RatatuiLayout, Rect};
 pub const SIDEBAR_WIDTH: u16 = 40;
 pub const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 120 + SIDEBAR_WIDTH / 3 * 2;
 
+pub const INPUT_BOTTOM_MARGIN: u16 = 2;
+pub const INPUT_TOP_GAP: u16 = 2;
+
 // AppLayout only reserves status + transcript. Input, approvals, and the
 // sidebar all draw as floating overlays on top of the transcript so
 // message content still visually flows underneath them.
@@ -140,17 +143,16 @@ fn input_rect_at(transcript: Rect, buf_lines: u16, anchor: InputYAnchor) -> Rect
     let outer_width = (transcript.width * 3 / 4)
         .clamp(50, 96)
         .min(transcript.width);
-    // Default height fits three content rows even when the buffer is empty,
-    // so the panel never looks like a single squished line.
     let content_h = buf_lines.clamp(3, 12);
     let outer_h = content_h.saturating_add(2);
-    let outer_h = outer_h.min(transcript.height.max(3));
+    let outer_h = outer_h.min(transcript.height.saturating_sub(INPUT_BOTTOM_MARGIN).max(3));
     let x = transcript.x + (transcript.width.saturating_sub(outer_width)) / 2;
     let y = match anchor {
         InputYAnchor::Bottom => transcript
             .y
             .saturating_add(transcript.height)
-            .saturating_sub(outer_h),
+            .saturating_sub(outer_h)
+            .saturating_sub(INPUT_BOTTOM_MARGIN),
         InputYAnchor::Center => transcript.y + (transcript.height.saturating_sub(outer_h)) / 2,
     };
     Rect {
@@ -297,7 +299,7 @@ mod tests {
         let rect = compute_input_rect(transcript, 1);
         assert_eq!(rect.width, 75);
         assert!(rect.height >= 3);
-        assert_eq!(rect.y + rect.height, transcript.y + transcript.height);
+        assert_eq!(rect.y + rect.height, transcript.y + transcript.height - 2);
         assert_eq!(rect.x, (100 - 75) / 2);
     }
 
