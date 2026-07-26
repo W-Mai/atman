@@ -692,6 +692,8 @@ fn emit_assistant_msg(ctx: &ToolCtx, run_id: &FlowRunId, message: &Message) {
 }
 
 fn emit_tool_result_msg(ctx: &ToolCtx, run_id: &FlowRunId, message: &Message) {
+    let message =
+        crate::tools::tool_output::maybe_truncate_tool_message(message, ctx.session_dir.as_deref());
     let turn_id = message.turn_id.clone();
     if let Some(sink) = &ctx.events {
         sink.emit(Event::ToolResultMsg {

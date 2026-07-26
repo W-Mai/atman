@@ -467,4 +467,92 @@ mod tests {
         assert_eq!(w[1].text_concat(), "tail assistant");
         assert_eq!(w[2].text_concat(), "latest user");
     }
+
+    /// Regression: after a runtime ContextCompact, full_messages() must still
+    /// contain the pre-compact messages.
+    #[test]
+    fn full_messages_retains_pre_compact_history_after_runtime_compact() {
+        let initial_compacted = vec![
+            (1, compact_summary("prior summary")),
+            (2, user("old user")),
+            (3, assistant("old assistant")),
+        ];
+        let initial_raw = vec![
+            (1, compact_summary("prior summary")),
+            (2, user("old user")),
+            (3, assistant("old assistant")),
+        ];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let ms = MessageStream::with_initial(events.clone(), initial_compacted, initial_raw);
+
+        events.lock().unwrap().push(EventEnvelope::new(
+            10,
+            Event::UserMsg {
+                turn_id: TurnId::now(),
+                message: user("new user before compact"),
+            },
+        ));
+        events.lock().unwrap().push(EventEnvelope::new(
+            11,
+            Event::AssistantMsg {
+                turn_id: TurnId::now(),
+                flow_run_id: None,
+                message: assistant("new assistant before compact"),
+            },
+        ));
+
+        let before = ms.full_messages();
+        assert_eq!(before.len(), 5, "pre-compact full should have all 5 msgs");
+
+        events.lock().unwrap().push(EventEnvelope::new(
+            12,
+            Event::SystemMsg {
+                turn_id: TurnId::now(),
+                message: compact_summary("runtime summary"),
+            },
+        ));
+        events.lock().unwrap().push(EventEnvelope::new(
+            13,
+            Event::ContextCompact {
+                session_id: "test".into(),
+                before_tokens: 1000,
+                after_tokens: 100,
+                compacted_range_start: 1,
+                compacted_range_end: 2,
+                summary_text: Some("runtime summary".into()),
+                replacement_msg_seq: Some(12),
+            },
+        ));
+
+        events.lock().unwrap().push(EventEnvelope::new(
+            14,
+            Event::UserMsg {
+                turn_id: TurnId::now(),
+                message: user("after compact user"),
+            },
+        ));
+
+        let w = ms.window();
+        assert_eq!(w.len(), 4, "window after compact");
+        assert!(matches!(w[0].parts[0], MessagePart::CompactSummary { .. }));
+
+        let full = ms.full_messages();
+        assert!(
+            full.len() >= 6,
+            "full must retain pre-compact history, got {} msgs: {:?}",
+            full.len(),
+            full.iter().map(|m| m.text_concat()).collect::<Vec<_>>()
+        );
+        let texts: Vec<String> = full.iter().map(|m| m.text_concat()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("old user")),
+            "full must contain pre-compact 'old user', got: {:?}",
+            texts
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("old assistant")),
+            "full must contain pre-compact 'old assistant', got: {:?}",
+            texts
+        );
+    }
 }

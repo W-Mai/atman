@@ -77,6 +77,10 @@ impl Tool for SessionPush {
                 None => None,
             };
             for msg in msgs {
+                let msg = crate::tools::tool_output::maybe_truncate_tool_message(
+                    &msg,
+                    ctx.session_dir.as_deref(),
+                );
                 emit_message_event(ctx, &msg);
                 if let Some(tx) = &ctx.stream_tx {
                     let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
@@ -96,6 +100,8 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
     let Some(sink) = &ctx.events else {
         return;
     };
+    let msg =
+        crate::tools::tool_output::maybe_truncate_tool_message(msg, ctx.session_dir.as_deref());
     let turn_id = ctx.turn_id.clone().unwrap_or_else(TurnId::now);
     let event = match msg.role {
         MessageRole::User => Event::UserMsg {

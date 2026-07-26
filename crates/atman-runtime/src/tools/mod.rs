@@ -18,6 +18,7 @@ pub mod sleep;
 pub mod stdlib;
 pub mod term;
 pub mod test;
+pub mod tool_output;
 pub mod web;
 
 pub fn register_tier_zero(reg: &mut ToolRegistry) {

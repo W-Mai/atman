@@ -1106,6 +1106,8 @@ fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) {
     let Some(sink) = &ctx.events else {
         return;
     };
+    let msg =
+        crate::tools::tool_output::maybe_truncate_tool_message(msg, ctx.session_dir.as_deref());
     sink.emit(crate::event::Event::ToolResultMsg {
         turn_id: msg.turn_id.clone(),
         flow_run_id: ctx.flow_run_id.clone(),

@@ -61,6 +61,60 @@ async fn resume_shows_the_compacted_view_not_the_raw_history() {
     );
 }
 
+/// Regression: after MULTIPLE runtime auto-compactions, `messages_full()`
+/// must still contain pre-compact messages.
+#[tokio::test]
+async fn messages_full_retains_history_after_multiple_runtime_compacts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = Session::open(tmp.path()).unwrap();
+
+    let mut total_appended = 0usize;
+    let mut first_msgs: Vec<String> = Vec::new();
+    for phase in 0..3 {
+        let base = "x".repeat(4000);
+        for i in 0..40 {
+            let turn = TurnId::now();
+            let text = format!("{base} phase{phase} msg{i}");
+            let msg = if i % 2 == 0 {
+                Message::user_text(turn, text.clone())
+            } else {
+                Message::assistant_text(turn, text.clone())
+            };
+            if first_msgs.len() < 5 {
+                first_msgs.push(format!("phase{phase} msg{i}"));
+            }
+            session.append_message(msg, None);
+            total_appended += 1;
+        }
+        let summary = format!("Compacted summary for phase {phase}.");
+        let result = session.compact_messages_auto(summary);
+        assert!(
+            result.is_some(),
+            "phase {phase}: compaction must succeed, before={}",
+            session.message_count()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let full = session.messages_full();
+    let texts: Vec<String> = full.iter().map(|m| m.text_concat()).collect();
+
+    assert!(
+        full.len() >= total_appended,
+        "full must retain all {} pre-compact messages across 3 compactions, got {}. first 10 texts: {:?}",
+        total_appended,
+        full.len(),
+        texts.iter().take(10).collect::<Vec<_>>()
+    );
+
+    assert!(
+        texts.iter().any(|t| t.contains(&first_msgs[0])),
+        "full must retain the first message '{}', got first 5: {:?}",
+        first_msgs[0],
+        texts.iter().take(5).collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn legacy_compact_event_without_summary_field_replays_original_history() {
     let tmp = tempfile::tempdir().unwrap();
