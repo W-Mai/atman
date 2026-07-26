@@ -519,6 +519,10 @@ async fn run_frames(
                                 {
                                     app.sidebar_collapsed = false;
                                     app.save_ui_state();
+                                } else if let Some(r) = app.last_task_panel_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.task_panel_collapsed = !app.task_panel_collapsed;
                                 } else if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
