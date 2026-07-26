@@ -56,6 +56,10 @@ pub fn replay_context_snapshot_from(path: &Path) -> ContextSnapshot {
         if value["type"].as_str() != Some("llm_call") {
             continue;
         }
+        // Only count main-agent LLM calls — subagent calls have run_id: null.
+        if value["run_id"].is_null() {
+            continue;
+        }
         if let Some(model) = value["model"].as_str() {
             snap.model = model.to_string();
         }

@@ -1764,15 +1764,29 @@ mod tests {
     fn replay_context_snapshot_accumulates_llm_call_usage() {
         let dir = TempDir::new().unwrap();
         let events = [
-            r#"{"type":"llm_call","seq":1,"model":"anthropic/claude-4","provider":"anthropic","usage":{"input":100,"cached_input":10,"output":50,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"ts":"2026-07-08T00:00:00Z"}"#,
+            r#"{"type":"llm_call","seq":1,"model":"anthropic/claude-4","provider":"anthropic","usage":{"input":100,"cached_input":10,"output":50,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"run_id":"019f0000-0000-7000-0000-000000000099","ts":"2026-07-08T00:00:00Z"}"#,
             r#"{"type":"user_msg","seq":2,"turn_id":"019f0000-0000-7000-0000-000000000002","message":{"role":"user","parts":[{"type":"text","text":"hi"}],"turn_id":"019f0000-0000-7000-0000-000000000002"},"ts":"2026-07-08T00:00:00Z"}"#,
-            r#"{"type":"llm_call","seq":3,"model":"anthropic/claude-4","provider":"anthropic","usage":{"input":200,"cached_input":0,"output":80,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"ts":"2026-07-08T00:00:01Z"}"#,
+            r#"{"type":"llm_call","seq":3,"model":"anthropic/claude-4","provider":"anthropic","usage":{"input":200,"cached_input":0,"output":80,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"run_id":"019f0000-0000-7000-0000-000000000099","ts":"2026-07-08T00:00:01Z"}"#,
         ];
         write_events(dir.path(), &events);
         let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
         assert_eq!(snap.model, "anthropic/claude-4");
         assert_eq!(snap.tokens_in, 310);
         assert_eq!(snap.tokens_out, 130);
+    }
+
+    #[test]
+    fn replay_context_snapshot_skips_subagent_llm_calls() {
+        let dir = TempDir::new().unwrap();
+        let events = [
+            r#"{"type":"llm_call","seq":1,"model":"zhipuai/glm-5.2","provider":"zhipu","usage":{"input":100,"cached_input":0,"output":50,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"run_id":"019f0000-0000-7000-0000-000000000099","ts":"2026-07-08T00:00:00Z"}"#,
+            r#"{"type":"llm_call","seq":2,"model":"gpt-4o-mini","provider":"openai","usage":{"input":200,"cached_input":0,"output":80,"cache_write":0},"wallclock_ms":1000,"status":{"kind":"ok"},"run_id":null,"ts":"2026-07-08T00:00:01Z"}"#,
+        ];
+        write_events(dir.path(), &events);
+        let snap = replay_context_snapshot_from(&dir.path().join("events.jsonl"));
+        assert_eq!(snap.model, "zhipuai/glm-5.2");
+        assert_eq!(snap.tokens_in, 100);
+        assert_eq!(snap.tokens_out, 50);
     }
 
     #[test]
