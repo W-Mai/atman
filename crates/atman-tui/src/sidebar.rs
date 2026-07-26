@@ -494,7 +494,7 @@ fn context_section<'a>(
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let plain = Style::default();
     let model = if ctx.model.is_empty() {
-        "(none)".to_string()
+        "—".to_string()
     } else {
         ctx.model.clone()
     };

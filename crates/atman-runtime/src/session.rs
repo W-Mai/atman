@@ -558,28 +558,20 @@ struct PersistedContextState {
 }
 
 impl PersistedContextState {
-    fn path() -> Option<PathBuf> {
-        crate::storage::config_dir()
-            .ok()
-            .map(|d| d.join("context_state.json"))
+    fn path(dir: &Path) -> PathBuf {
+        dir.join("context_state.json")
     }
 
-    fn load() -> Self {
-        let Some(path) = Self::path() else {
-            return Self::default();
-        };
-        match std::fs::read_to_string(&path) {
+    fn load(dir: &Path) -> Self {
+        match std::fs::read_to_string(Self::path(dir)) {
             Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
             Err(_) => Self::default(),
         }
     }
 
-    fn save(&self) {
-        let Some(path) = Self::path() else {
-            return;
-        };
+    fn save(&self, dir: &Path) {
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, &json);
+            let _ = std::fs::write(Self::path(dir), &json);
         }
     }
 }
@@ -724,7 +716,7 @@ impl Session {
             sink.restore_seq(last_seq);
         }
         let mut initial_context = replay_context_snapshot_from(&events_path);
-        let persisted = PersistedContextState::load();
+        let persisted = PersistedContextState::load(&dir);
         if !persisted.model.is_empty() {
             initial_context.model = persisted.model;
         }
@@ -1014,7 +1006,7 @@ impl Session {
             window_tokens: snap.window_tokens,
             window_budget: snap.window_budget,
         }
-        .save();
+        .save(&self.dir);
     }
 
     pub fn cumulative_input_tokens(&self) -> u64 {
