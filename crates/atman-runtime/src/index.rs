@@ -148,6 +148,124 @@ impl AnchorIndex {
         collect(rows)
     }
 
+    pub fn count_events(&self, session_id: &str, kinds: Option<&[&str]>) -> Result<u64> {
+        let conn = self.conn();
+        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match kinds {
+            Some(ks) if !ks.is_empty() => {
+                let placeholders = ks.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!(
+                    "SELECT COUNT(*) FROM events WHERE session_id = ? AND kind IN ({placeholders})"
+                );
+                let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                    vec![Box::new(session_id.to_string())];
+                for k in ks {
+                    params.push(Box::new(k.to_string()));
+                }
+                (sql, params)
+            }
+            _ => (
+                "SELECT COUNT(*) FROM events WHERE session_id = ?".into(),
+                vec![Box::new(session_id.to_string())],
+            ),
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    pub fn read_events_paginated(
+        &self,
+        session_id: &str,
+        offset: usize,
+        limit: usize,
+        kinds: Option<&[&str]>,
+    ) -> Result<Vec<ProjectEventRow>> {
+        let conn = self.conn();
+        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match kinds {
+            Some(ks) if !ks.is_empty() => {
+                let placeholders = ks.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!(
+                    "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload \
+                     FROM events WHERE session_id = ? AND kind IN ({placeholders}) \
+                     ORDER BY seq LIMIT ? OFFSET ?"
+                );
+                let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                    vec![Box::new(session_id.to_string())];
+                for k in ks {
+                    params.push(Box::new(k.to_string()));
+                }
+                params.push(Box::new(limit as i64));
+                params.push(Box::new(offset as i64));
+                (sql, params)
+            }
+            _ => (
+                "SELECT session_id, seq, ts, kind, turn_id, flow_run_id, payload \
+                 FROM events WHERE session_id = ? ORDER BY seq LIMIT ? OFFSET ?"
+                    .into(),
+                vec![
+                    Box::new(session_id.to_string()),
+                    Box::new(limit as i64),
+                    Box::new(offset as i64),
+                ],
+            ),
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), project_event_row_from)?;
+        collect(rows)
+    }
+
+    pub fn count_search_hits(&self, query: &str, session_filter: Option<&str>) -> Result<u64> {
+        let conn = self.conn();
+        if query.chars().any(is_cjk_char) {
+            return self.count_search_hits_like(query, session_filter, &conn);
+        }
+        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match session_filter {
+            Some(sid) => (
+                "SELECT COUNT(*) FROM events e JOIN events_fts f ON f.rowid = e.id \
+                 WHERE f.events_fts MATCH ?1 AND e.session_id = ?2"
+                    .into(),
+                vec![Box::new(query.to_string()), Box::new(sid.to_string())],
+            ),
+            None => (
+                "SELECT COUNT(*) FROM events e JOIN events_fts f ON f.rowid = e.id \
+                 WHERE f.events_fts MATCH ?1"
+                    .into(),
+                vec![Box::new(query.to_string())],
+            ),
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    fn count_search_hits_like(
+        &self,
+        query: &str,
+        session_filter: Option<&str>,
+        conn: &std::sync::MutexGuard<'_, rusqlite::Connection>,
+    ) -> Result<u64> {
+        let pattern = format!("%{query}%");
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match session_filter {
+            Some(sid) => (
+                "SELECT COUNT(*) FROM events e JOIN events_fts f ON f.rowid = e.id \
+                 WHERE f.text_content LIKE ?1 AND e.session_id = ?2",
+                vec![Box::new(pattern), Box::new(sid.to_string())],
+            ),
+            None => (
+                "SELECT COUNT(*) FROM events e JOIN events_fts f ON f.rowid = e.id \
+                 WHERE f.text_content LIKE ?1",
+                vec![Box::new(pattern)],
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let count: i64 = stmt.query_row(param_refs.as_slice(), |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
     pub fn delete_events_for_session(&self, session_id: &str) -> rusqlite::Result<usize> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -751,5 +869,116 @@ mod tests {
             .query_row("PRAGMA journal_mode", params![], |row| row.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn count_events_returns_zero_for_empty_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        assert_eq!(idx.count_events("no-such-session", None).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_events_counts_all_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "s1", 1, "user_msg", None, None, "hello");
+        seed_project_event(&idx, "s1", 2, "assistant_msg", None, None, "hi");
+        seed_project_event(&idx, "s1", 3, "tool_result_msg", None, None, "ok");
+        seed_project_event(&idx, "s2", 1, "user_msg", None, None, "other");
+        assert_eq!(idx.count_events("s1", None).unwrap(), 3);
+        assert_eq!(idx.count_events("s2", None).unwrap(), 1);
+    }
+
+    #[test]
+    fn count_events_filters_by_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "s1", 1, "user_msg", None, None, "a");
+        seed_project_event(&idx, "s1", 2, "assistant_msg", None, None, "b");
+        seed_project_event(&idx, "s1", 3, "tool_result_msg", None, None, "c");
+        seed_project_event(&idx, "s1", 4, "user_msg", None, None, "d");
+        assert_eq!(idx.count_events("s1", Some(&["user_msg"])).unwrap(), 2);
+        assert_eq!(
+            idx.count_events("s1", Some(&["user_msg", "assistant_msg"]))
+                .unwrap(),
+            3
+        );
+        assert_eq!(idx.count_events("s1", Some(&["system_msg"])).unwrap(), 0);
+    }
+
+    #[test]
+    fn read_events_paginated_returns_ordered_by_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "s1", 3, "user_msg", None, None, "third");
+        seed_project_event(&idx, "s1", 1, "user_msg", None, None, "first");
+        seed_project_event(&idx, "s1", 2, "user_msg", None, None, "second");
+        let rows = idx.read_events_paginated("s1", 0, 10, None).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].seq, 1);
+        assert_eq!(rows[1].seq, 2);
+        assert_eq!(rows[2].seq, 3);
+    }
+
+    #[test]
+    fn read_events_paginated_respects_offset_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        for i in 1..=5 {
+            seed_project_event(&idx, "s1", i, "user_msg", None, None, &format!("msg {i}"));
+        }
+        let rows = idx.read_events_paginated("s1", 1, 2, None).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].seq, 2);
+        assert_eq!(rows[1].seq, 3);
+    }
+
+    #[test]
+    fn read_events_paginated_filters_by_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "s1", 1, "user_msg", None, None, "u1");
+        seed_project_event(&idx, "s1", 2, "assistant_msg", None, None, "a1");
+        seed_project_event(&idx, "s1", 3, "user_msg", None, None, "u2");
+        let rows = idx
+            .read_events_paginated("s1", 0, 10, Some(&["user_msg"]))
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].seq, 1);
+        assert_eq!(rows[1].seq, 3);
+    }
+
+    #[test]
+    fn read_events_paginated_empty_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        let rows = idx.read_events_paginated("no-such", 0, 10, None).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn count_search_hits_fts() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "s1", 1, "user_msg", None, None, "hello world");
+        seed_project_event(&idx, "s1", 2, "user_msg", None, None, "hello again");
+        seed_project_event(&idx, "s1", 3, "user_msg", None, None, "goodbye");
+        seed_project_event(&idx, "s2", 1, "user_msg", None, None, "hello other");
+        assert_eq!(idx.count_search_hits("hello", None).unwrap(), 3);
+        assert_eq!(idx.count_search_hits("hello", Some("s1")).unwrap(), 2);
+        assert_eq!(idx.count_search_hits("goodbye", None).unwrap(), 1);
+        assert_eq!(idx.count_search_hits("nomatch", None).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_search_hits_cjk() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(&idx, "s1", 1, "user_msg", None, None, "浮动面板设计");
+        seed_project_event(&idx, "s1", 2, "user_msg", None, None, "另一个消息");
+        assert_eq!(idx.count_search_hits("浮动", None).unwrap(), 1);
+        assert_eq!(idx.count_search_hits("浮动", Some("s1")).unwrap(), 1);
+        assert_eq!(idx.count_search_hits("不存在", None).unwrap(), 0);
     }
 }

@@ -366,6 +366,21 @@ async fn dispatch_tool_call<'a>(
                 s.set_memory_recent_count(count);
             }));
         }
+        {
+            let store = std::sync::Arc::new(crate::history_store::HistoryStoreImpl::new(
+                session.project_index(),
+                Some(session.clone()),
+                Some(session.id().to_string()),
+                Some(
+                    session
+                        .dir()
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_default(),
+                ),
+            ));
+            c = c.with_history_store(store);
+        }
         c
     } else {
         ctx_with_anchors

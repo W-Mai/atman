@@ -129,26 +129,42 @@ impl Tool for MemoryRecentTurns {
                 None => 10,
             };
             if n == 0 {
-                return Ok(Value::List(Vec::new()));
+                if let Some(cb) = &ctx.on_memory_recent {
+                    cb(0);
+                }
+                return Ok(Value::Struct(vec![
+                    ("total_message_count".into(), Value::Int(0)),
+                    ("items".into(), Value::List(Vec::new())),
+                ]));
             }
-            let msgs = if let Some(session) = ctx.session_runtime.as_ref() {
-                session.messages_full()
-            } else if let Some(msgs) = ctx.session_messages.as_ref() {
-                std::sync::Arc::new((**msgs).clone())
-            } else {
-                return Ok(Value::List(Vec::new()));
+            // Sub-agent path: session_messages has the child's local message list.
+            if let Some(msgs) = ctx.session_messages.as_ref() {
+                let total = msgs.len() as u64;
+                let start = msgs.len().saturating_sub(n);
+                let out: Vec<Value> = msgs[start..].iter().cloned().map(Value::Message).collect();
+                if let Some(cb) = &ctx.on_memory_recent {
+                    cb(out.len() as u16);
+                }
+                return Ok(Value::Struct(vec![
+                    ("total_message_count".into(), Value::Int(total as i64)),
+                    ("items".into(), Value::List(out)),
+                ]));
+            }
+            // Main-agent path: delegate to HistoryStore.
+            let Some(store) = ctx.history_store.as_ref() else {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.recent_turns: no history store on context".into(),
+                ));
             };
-            let start = msgs.len().saturating_sub(n);
-            let out: Vec<Value> = msgs
-                .iter()
-                .skip(start)
-                .cloned()
-                .map(Value::Message)
-                .collect();
+            let (total, msgs) = store.recent(n)?;
             if let Some(cb) = &ctx.on_memory_recent {
-                cb(out.len() as u16);
+                cb(msgs.len() as u16);
             }
-            Ok(Value::List(out))
+            let items: Vec<Value> = msgs.into_iter().map(Value::Message).collect();
+            Ok(Value::Struct(vec![
+                ("total_message_count".into(), Value::Int(total as i64)),
+                ("items".into(), Value::List(items)),
+            ]))
         })
     }
 }
@@ -749,11 +765,6 @@ impl Tool for MemoryHistorySearch {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let query = required_string(&args, "query")?;
-            if query.trim().is_empty() {
-                return Err(RuntimeError::ToolFailed(
-                    "memory.history.search: empty query".into(),
-                ));
-            }
             let scope = match args.named("scope") {
                 Some(Value::Str(s)) if s == "project" => HistoryScope::Project,
                 _ => HistoryScope::Session,
@@ -762,69 +773,33 @@ impl Tool for MemoryHistorySearch {
                 Some(Value::Int(n)) if *n > 0 => (*n as usize).min(50),
                 _ => 10,
             };
-            let session_filter = match scope {
-                HistoryScope::Project => None,
-                HistoryScope::Session => ctx
-                    .session_dir
-                    .as_ref()
-                    .and_then(|d| d.file_name())
-                    .map(|n| n.to_string_lossy().to_string()),
-            };
-            let rows = if let Some(idx) = ctx.project_index.as_ref() {
-                idx.fts_search_project_events(&query, session_filter.as_deref(), limit)
-                    .map_err(|e| RuntimeError::ToolFailed(format!("memory.history.search: {e}")))?
-            } else if matches!(scope, HistoryScope::Project) {
+            let Some(store) = ctx.history_store.as_ref() else {
                 return Err(RuntimeError::ToolFailed(
-                    "memory.history.search: project scope requires project index".into(),
-                ));
-            } else if let Some(session) = ctx.session_runtime.as_ref() {
-                // Fallback: grep current session's full messages
-                let msgs = session.messages_full();
-                let mut hits = Vec::new();
-                let query_lower = query.to_lowercase();
-                for (i, msg) in msgs.iter().enumerate() {
-                    let text = msg.text_concat();
-                    if text.to_lowercase().contains(&query_lower) {
-                        let snippet: String = text.chars().take(200).collect();
-                        hits.push(crate::index::ProjectEventRow {
-                            session_id: session.id().to_string(),
-                            seq: i as u64,
-                            ts: String::new(),
-                            kind: msg.role.as_str().to_string(),
-                            turn_id: None,
-                            flow_run_id: None,
-                            payload: snippet,
-                        });
-                        if hits.len() >= limit {
-                            break;
-                        }
-                    }
-                }
-                hits
-            } else {
-                return Err(RuntimeError::ToolFailed(
-                    "memory.history.search: no project index or session on context".into(),
+                    "memory.history.search: no history store on context".into(),
                 ));
             };
-            let hits: Vec<Value> = rows
+            let search_scope = match scope {
+                HistoryScope::Project => crate::history_store::SearchScope::Project,
+                HistoryScope::Session => crate::history_store::SearchScope::Session,
+            };
+            let result = store.search(&query, search_scope, limit)?;
+            let hits: Vec<Value> = result
+                .hits
                 .into_iter()
-                .map(|row| {
-                    let snippet: String = row
-                        .payload
-                        .chars()
-                        .take(200)
-                        .collect::<String>()
-                        .replace('\n', " ");
+                .map(|hit| {
                     Value::Struct(vec![
-                        ("session_id".into(), Value::Str(row.session_id)),
-                        ("seq".into(), Value::Int(row.seq as i64)),
-                        ("ts".into(), Value::Str(row.ts)),
-                        ("kind".into(), Value::Str(row.kind)),
-                        ("snippet".into(), Value::Str(snippet)),
+                        ("session_id".into(), Value::Str(hit.session_id)),
+                        ("seq".into(), Value::Int(hit.seq as i64)),
+                        ("ts".into(), Value::Str(hit.ts)),
+                        ("kind".into(), Value::Str(hit.kind)),
+                        ("snippet".into(), Value::Str(hit.snippet)),
                     ])
                 })
                 .collect();
-            Ok(Value::List(hits))
+            Ok(Value::Struct(vec![
+                ("total".into(), Value::Int(result.total as i64)),
+                ("hits".into(), Value::List(hits)),
+            ]))
         })
     }
 }
@@ -846,7 +821,7 @@ impl Tool for MemoryHistoryRead {
              memory.history.search first to find a hit, then call this for surrounding context. \
              Params: session_id (string, default current session's directory name), offset \
              (1-based turn index, default 1), limit (int, default 20, max 100), role_filter \
-             (comma-separated: user,assistant,tool; default all).",
+             (comma-separated: user,assistant,tool,system; default all).",
         )
     }
 
@@ -869,19 +844,12 @@ impl Tool for MemoryHistoryRead {
                     "memory.history.read: no session dir on context".into(),
                 ));
             };
-            let dir = match args.named("session_id") {
-                Some(Value::Str(sid)) if !sid.is_empty() => {
-                    let sessions_parent = current_dir.parent().unwrap_or(current_dir);
-                    let candidate = sessions_parent.join(sid);
-                    if !candidate.is_dir() {
-                        return Err(RuntimeError::ToolFailed(format!(
-                            "memory.history.read: session `{sid}` not found at {}",
-                            candidate.display()
-                        )));
-                    }
-                    candidate
-                }
-                _ => current_dir.clone(),
+            let session_id = match args.named("session_id") {
+                Some(Value::Str(sid)) if !sid.is_empty() => sid.clone(),
+                _ => current_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
             };
             let offset = match args.named("offset") {
                 Some(Value::Int(n)) if *n >= 1 => *n as usize,
@@ -900,43 +868,101 @@ impl Tool for MemoryHistoryRead {
                 ),
                 _ => None,
             };
-            let messages = match crate::projection::message_window::replay_all_messages_with_seq(
-                &dir.join("events.jsonl"),
-            ) {
-                Ok(msgs) => {
-                    let filtered: Vec<_> = if let Some(filter) = role_filter.as_deref() {
-                        msgs.into_iter()
-                            .map(|(_, m)| m)
-                            .filter(|m| filter.iter().any(|r| r == m.role.as_str()))
-                            .collect()
-                    } else {
-                        msgs.into_iter().map(|(_, m)| m).collect()
-                    };
-                    filtered
-                }
-                Err(e) => {
-                    return Err(RuntimeError::ToolFailed(format!(
-                        "memory.history.read: {e}"
-                    )));
-                }
+            let Some(store) = ctx.history_store.as_ref() else {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.history.read: no history store on context".into(),
+                ));
             };
-            let total = messages.len();
-            let start = offset.saturating_sub(1);
-            let end = (start + limit).min(total);
-            let slice: Vec<Value> = if start >= total {
-                Vec::new()
+            let query = crate::history_store::HistoryQuery {
+                session_id,
+                offset,
+                limit,
+                role_filter,
+            };
+            let page = store.read(query)?;
+            let item_count = page.items.len();
+            let items: Vec<Value> = page.items.into_iter().map(Value::Message).collect();
+            let start = offset;
+            let end = if item_count == 0 {
+                start
             } else {
-                messages[start..end]
-                    .iter()
-                    .cloned()
-                    .map(Value::Message)
-                    .collect()
+                start + item_count - 1
             };
-            let header = format!("[history: turns {start}-{end} of {total}]");
+            let header = format!("[history: turns {start}-{end} of {}]", page.total);
             Ok(Value::Struct(vec![
+                ("total".into(), Value::Int(page.total as i64)),
+                ("offset".into(), Value::Int(page.offset as i64)),
+                ("limit".into(), Value::Int(page.limit as i64)),
                 ("header".into(), Value::Str(header)),
-                ("turns".into(), Value::List(slice)),
+                ("items".into(), Value::List(items)),
             ]))
+        })
+    }
+}
+
+pub struct MemoryHistoryCount;
+
+impl Tool for MemoryHistoryCount {
+    fn name(&self) -> &str {
+        "memory.history.count"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Return the total message count for a session. Lightweight — use this to check \
+             how many messages exist before paginating with memory.history.read. \
+             Params: session_id (string, default current session), role_filter \
+             (comma-separated: user,assistant,tool,system; default all).",
+        )
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "role_filter": {"type": "string"}
+            }
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let Some(current_dir) = ctx.session_dir.as_ref() else {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.history.count: no session dir on context".into(),
+                ));
+            };
+            let session_id = match args.named("session_id") {
+                Some(Value::Str(sid)) if !sid.is_empty() => sid.clone(),
+                _ => current_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            };
+            let role_filter: Option<Vec<String>> = match args.named("role_filter") {
+                Some(Value::Str(s)) if !s.is_empty() => Some(
+                    s.split(',')
+                        .map(|t| t.trim().to_lowercase())
+                        .filter(|t| !t.is_empty())
+                        .collect(),
+                ),
+                _ => None,
+            };
+            let Some(store) = ctx.history_store.as_ref() else {
+                return Err(RuntimeError::ToolFailed(
+                    "memory.history.count: no history store on context".into(),
+                ));
+            };
+            let role_strs: Option<Vec<&str>> = role_filter
+                .as_ref()
+                .map(|rs| rs.iter().map(|s| s.as_str()).collect());
+            let total = store.count(&session_id, role_strs.as_deref())?;
+            Ok(Value::Int(total as i64))
         })
     }
 }

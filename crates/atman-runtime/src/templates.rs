@@ -36,6 +36,7 @@ When the user corrects you: fix it, update your approach, move on. Don't over-ap
 
 ## Recall
 memory.recent_turns — this session's last N messages, fast and cheap.
+memory.history.count — lightweight total message count (no content).
 memory.history.search — full-text across sessions.
 memory.history.read — paginate by turn.
 

@@ -175,6 +175,7 @@ pub fn register_memory(
     reg.register(Arc::new(memory::MemoryRecentTurns));
     reg.register(Arc::new(memory::MemoryHistorySearch));
     reg.register(Arc::new(memory::MemoryHistoryRead));
+    reg.register(Arc::new(memory::MemoryHistoryCount));
     reg.register(Arc::new(plan::PlanWrite {
         store: plan_store.clone(),
     }));

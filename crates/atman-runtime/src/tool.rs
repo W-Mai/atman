@@ -104,6 +104,7 @@ pub struct ToolCtx {
     pub current_model: Option<String>,
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
     pub on_memory_recent: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
+    pub history_store: Option<std::sync::Arc<dyn crate::history_store::HistoryStore>>,
 }
 
 impl ToolCtx {
@@ -285,6 +286,14 @@ impl ToolCtx {
 
     pub fn with_project_index(mut self, idx: std::sync::Arc<crate::index::AnchorIndex>) -> Self {
         self.project_index = Some(idx);
+        self
+    }
+
+    pub fn with_history_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::history_store::HistoryStore>,
+    ) -> Self {
+        self.history_store = Some(store);
         self
     }
 

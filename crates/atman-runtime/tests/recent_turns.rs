@@ -18,8 +18,8 @@ async fn recent_turns_returns_empty_before_any_message() {
     atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
-    xs = memory.recent_turns(n: 5)
-    return len(xs)
+    result = memory.recent_turns(n: 5)
+    return len(result.items)
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -56,8 +56,8 @@ async fn recent_turns_picks_up_appended_messages() {
     atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
-    xs = memory.recent_turns(n: 5)
-    return len(xs)
+    result = memory.recent_turns(n: 5)
+    return len(result.items)
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -101,8 +101,8 @@ async fn recent_turns_caps_output_at_n() {
     atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
-    xs = memory.recent_turns(n: 3)
-    return len(xs)
+    result = memory.recent_turns(n: 3)
+    return len(result.items)
 }
 "#;
     let file = parse_file(src).unwrap();
