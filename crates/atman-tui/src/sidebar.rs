@@ -500,7 +500,9 @@ fn context_section<'a>(
     };
     let stream_style = if streaming { bold } else { plain };
     use atman_runtime::humanize::format_count;
-    let window = if ctx.window_budget == 0 {
+    let window = if ctx.window_budget == 0 && ctx.window_tokens == 0 {
+        "—".to_string()
+    } else if ctx.window_budget == 0 {
         format_count(ctx.window_tokens)
     } else {
         format!(
