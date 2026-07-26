@@ -139,7 +139,7 @@ impl FloatingPanels {
     pub fn hit_test_close(&self, col: u16, row: u16) -> Option<String> {
         self.panels.iter()
             .find(|p| {
-                row == p.rect.y && col >= p.rect.x + 1 && col <= p.rect.x + 2
+                col == p.rect.x && row == p.rect.y + 1
             })
             .map(|p| p.id.clone())
     }
@@ -147,7 +147,7 @@ impl FloatingPanels {
     pub fn hit_test_maximize(&self, col: u16, row: u16) -> Option<String> {
         self.panels.iter()
             .find(|p| {
-                row == p.rect.y + 1 && col >= p.rect.x + 1 && col <= p.rect.x + 2
+                col == p.rect.x && row == p.rect.y + 2
             })
             .map(|p| p.id.clone())
     }
@@ -208,10 +208,10 @@ pub fn render(
         let inner = block.inner(panel.rect);
         f.render_widget(block, panel.rect);
 
-        // Vertical button bar on left border: × (close) at row 0, ▢ (maximize) at row 1
-        if panel.rect.height >= 3 {
-            let bx = panel.rect.x + 1;
-            let by = panel.rect.y;
+        // Vertical button bar on left border: × (close) at row 1, ▢ (maximize) at row 2
+        // Left border is at x=panel.rect.x, y starts below the top-left corner.
+        if panel.rect.height >= 4 {
+            let bx = panel.rect.x;
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
                     "×",
@@ -219,8 +219,8 @@ pub fn render(
                 )])),
                 Rect {
                     x: bx,
-                    y: by,
-                    width: 2,
+                    y: panel.rect.y + 1,
+                    width: 1,
                     height: 1,
                 },
             );
@@ -231,8 +231,8 @@ pub fn render(
                 )])),
                 Rect {
                     x: bx,
-                    y: by + 1,
-                    width: 2,
+                    y: panel.rect.y + 2,
+                    width: 1,
                     height: 1,
                 },
             );
