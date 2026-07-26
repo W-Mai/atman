@@ -108,7 +108,7 @@ pub fn render(
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(t.subtle_fg))
+        .border_style(Style::default().fg(t.subtle_fg.into()))
         .title(" ≡ ")
         .padding(ratatui::widgets::Padding {
             left: 2,
@@ -274,7 +274,7 @@ pub fn render(
     {
         let mp = Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(t.subtle_fg));
+            .border_style(Style::default().fg(t.subtle_fg.into()));
         let inner = mp.inner(bottom_area);
         f.render_widget(mp, bottom_area);
 
@@ -349,7 +349,9 @@ fn render_scrollable_section(
     let t = crate::theme::theme();
     let header_line = Line::from(Span::styled(
         header.to_string(),
-        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(t.accent.into())
+            .add_modifier(Modifier::BOLD),
     ));
     let body_count = body.len() as u16;
     let visible_body = area.height.saturating_sub(1);
@@ -371,7 +373,7 @@ fn goal_body(goal: Option<&str>) -> Vec<Line<'_>> {
         if i == GOAL_MAX_LINES {
             lines.push(Line::from(Span::styled(
                 "  …",
-                Style::default().fg(crate::theme::theme().subtle_fg),
+                Style::default().fg(crate::theme::theme().subtle_fg.into()),
             )));
             break;
         }
@@ -399,14 +401,14 @@ fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
         None => {
             lines.push(Line::from(Span::styled(
                 "  (no active plan)",
-                Style::default().fg(t.subtle_fg),
+                Style::default().fg(t.subtle_fg.into()),
             )));
         }
         Some(p) => {
             lines.push(Line::from(Span::styled(
                 truncate_line(&p.title, 30),
                 Style::default()
-                    .fg(t.tinted_fg)
+                    .fg(t.tinted_fg.into())
                     .add_modifier(Modifier::BOLD),
             )));
             let total = p.steps.len();
@@ -415,21 +417,24 @@ fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
                 let (glyph, glyph_style, text_style) = if step.done {
                     (
                         "✓",
-                        Style::default().fg(t.success),
-                        Style::default().fg(t.meta_fg),
+                        Style::default().fg(t.success.into()),
+                        Style::default().fg(t.meta_fg.into()),
                     )
                 } else {
                     (
                         "○",
-                        Style::default().fg(t.subtle_fg),
-                        Style::default().fg(t.tinted_fg),
+                        Style::default().fg(t.subtle_fg.into()),
+                        Style::default().fg(t.tinted_fg.into()),
                     )
                 };
                 let indent = if total <= 1 { "  " } else { " │" };
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" {indent} "), Style::default().fg(t.subtle_fg)),
+                    Span::styled(
+                        format!(" {indent} "),
+                        Style::default().fg(t.subtle_fg.into()),
+                    ),
                     Span::styled(format!("{glyph} "), glyph_style),
-                    Span::styled(format!("{num:>2}. "), Style::default().fg(t.meta_fg)),
+                    Span::styled(format!("{num:>2}. "), Style::default().fg(t.meta_fg.into())),
                     Span::styled(truncate_line(&step.text, 22), text_style),
                 ]));
             }
@@ -454,16 +459,18 @@ fn todos_body<'a>(todos: &'a [atman_runtime::memory::todo::Todo]) -> Vec<Line<'a
     let mut lines: Vec<Line<'_>> = Vec::new();
     for todo in todos {
         let (glyph, glyph_style) = match todo.status {
-            TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg)),
+            TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg.into())),
             TodoStatus::InProgress => (
                 "⚡",
-                Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(t.warn.into())
+                    .add_modifier(Modifier::BOLD),
             ),
-            TodoStatus::Done => ("✓", Style::default().fg(t.success)),
+            TodoStatus::Done => ("✓", Style::default().fg(t.success.into())),
             TodoStatus::Cancelled => (
                 "✗",
                 Style::default()
-                    .fg(t.subtle_fg)
+                    .fg(t.subtle_fg.into())
                     .add_modifier(Modifier::CROSSED_OUT),
             ),
         };
@@ -471,7 +478,7 @@ fn todos_body<'a>(todos: &'a [atman_runtime::memory::todo::Todo]) -> Vec<Line<'a
             Span::styled(format!("  {glyph} "), glyph_style),
             Span::styled(
                 truncate_line(&todo.why, 32),
-                Style::default().fg(t.tinted_fg),
+                Style::default().fg(t.tinted_fg.into()),
             ),
         ]));
         lines.push(Line::from(Span::styled(
@@ -480,7 +487,7 @@ fn todos_body<'a>(todos: &'a [atman_runtime::memory::todo::Todo]) -> Vec<Line<'a
                 truncate_line(&todo.where_, 20),
                 truncate_line(&todo.how, 8)
             ),
-            Style::default().fg(t.meta_fg),
+            Style::default().fg(t.meta_fg.into()),
         )));
     }
     lines
@@ -621,13 +628,16 @@ fn mcp_server_status_line<'a>(s: &atman_runtime::mcp::McpServerStatus) -> Line<'
         }
     };
     Line::from(vec![
-        Span::styled(format!("  {glyph} "), Style::default().fg(color)),
-        Span::styled(format!("{:<14}", s.name), Style::default().fg(t.meta_fg)),
+        Span::styled(format!("  {glyph} "), Style::default().fg(color.into())),
+        Span::styled(
+            format!("{:<14}", s.name),
+            Style::default().fg(t.meta_fg.into()),
+        ),
         Span::styled(
             format!("{:<6}", transport),
-            Style::default().fg(t.subtle_fg),
+            Style::default().fg(t.subtle_fg.into()),
         ),
-        Span::styled(detail, Style::default().fg(t.subtle_fg)),
+        Span::styled(detail, Style::default().fg(t.subtle_fg.into())),
     ])
 }
 
@@ -647,13 +657,16 @@ fn project_dir_line<'a>(dir: &str) -> Line<'a> {
         let parent = short[..=slash].to_string();
         let name = short[slash + 1..].to_string();
         Line::from(vec![
-            Span::styled(format!("  {parent}"), Style::default().fg(t.subtle_fg)),
-            Span::styled(name, Style::default().fg(t.accent)),
+            Span::styled(
+                format!("  {parent}"),
+                Style::default().fg(t.subtle_fg.into()),
+            ),
+            Span::styled(name, Style::default().fg(t.accent.into())),
         ])
     } else {
         Line::from(Span::styled(
             format!("  {short}"),
-            Style::default().fg(t.accent),
+            Style::default().fg(t.accent.into()),
         ))
     }
 }
@@ -670,12 +683,18 @@ fn version_line<'a>(version: &str, latest: Option<&'a str>) -> Line<'a> {
         }
         None => t.subtle_fg, // check failed / loading — gray
     };
-    let dots = Span::styled(" ∴ ", Style::default().fg(dot_color));
-    let brand = Span::styled("atman", Style::default().fg(t.accent));
-    let ver = Span::styled(format!(" v{version}"), Style::default().fg(t.tinted_fg));
+    let dots = Span::styled(" ∴ ", Style::default().fg(dot_color.into()));
+    let brand = Span::styled("atman", Style::default().fg(t.accent.into()));
+    let ver = Span::styled(
+        format!(" v{version}"),
+        Style::default().fg(t.tinted_fg.into()),
+    );
     match latest {
         Some(latest_ver) if version_is_newer(latest_ver, version) => {
-            let latest = Span::styled(format!("→ v{latest_ver}"), Style::default().fg(t.success));
+            let latest = Span::styled(
+                format!("→ v{latest_ver}"),
+                Style::default().fg(t.success.into()),
+            );
             Line::from(vec![dots, brand, ver, Span::raw("  "), latest])
         }
         _ => Line::from(vec![dots, brand, ver]),
@@ -705,7 +724,7 @@ fn section_title(text: &str) -> Span<'_> {
     Span::styled(
         text,
         Style::default()
-            .fg(crate::theme::theme().accent)
+            .fg(crate::theme::theme().accent.into())
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -719,7 +738,7 @@ fn kv_line<'a>(key: &'a str, value: String, value_style: Style) -> Line<'a> {
     Line::from(vec![
         Span::styled(
             format!("  {key:<7}"),
-            Style::default().fg(crate::theme::theme().subtle_fg),
+            Style::default().fg(crate::theme::theme().subtle_fg.into()),
         ),
         Span::styled(value, value_style),
     ])
@@ -786,7 +805,7 @@ fn render_strip(
         let outer = Block::default()
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(t.subtle_fg))
+            .border_style(Style::default().fg(t.subtle_fg.into()))
             .title(" ≡ ");
         let inner = outer.inner(mini);
         f.render_widget(ratatui::widgets::Clear, mini);
@@ -794,13 +813,13 @@ fn render_strip(
         let ctx_dot = if inputs.context.window_budget > 0
             && inputs.context.window_tokens > inputs.context.window_budget
         {
-            Span::styled("●", Style::default().fg(t.error))
+            Span::styled("●", Style::default().fg(t.error.into()))
         } else if inputs.context.window_budget > 0
             && inputs.context.window_tokens as f64 > inputs.context.window_budget as f64 * 0.8
         {
-            Span::styled("●", Style::default().fg(t.warn))
+            Span::styled("●", Style::default().fg(t.warn.into()))
         } else {
-            Span::styled("○", Style::default().fg(t.success))
+            Span::styled("○", Style::default().fg(t.success.into()))
         };
         f.render_widget(
             Paragraph::new(Line::from(ctx_dot)).alignment(Alignment::Center),
@@ -822,7 +841,7 @@ fn render_strip(
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(t.subtle_fg))
+        .border_style(Style::default().fg(t.subtle_fg.into()))
         .title(" ≡ ");
     let inner = outer.inner(capped);
     f.render_widget(ratatui::widgets::Clear, capped);
@@ -851,17 +870,17 @@ fn render_strip(
 
     let mut si = 0usize;
 
-    let accent = Style::default().fg(t.accent);
-    let tinted = Style::default().fg(t.tinted_fg);
-    let success = Style::default().fg(t.success);
+    let accent = Style::default().fg(t.accent.into());
+    let tinted = Style::default().fg(t.tinted_fg.into());
+    let success = Style::default().fg(t.success.into());
 
     let ctx = &inputs.context;
     let ctx_dot_span = if ctx.window_budget > 0 && ctx.window_tokens > ctx.window_budget {
-        Span::styled("●", Style::default().fg(t.error))
+        Span::styled("●", Style::default().fg(t.error.into()))
     } else if ctx.window_budget > 0 && ctx.window_tokens as f64 > ctx.window_budget as f64 * 0.8 {
-        Span::styled("●", Style::default().fg(t.warn))
+        Span::styled("●", Style::default().fg(t.warn.into()))
     } else {
-        Span::styled("○", Style::default().fg(t.success))
+        Span::styled("○", Style::default().fg(t.success.into()))
     };
     f.render_widget(
         Paragraph::new(Line::from(ctx_dot_span)).alignment(Alignment::Center),
@@ -928,7 +947,7 @@ fn render_strip(
             let (sym, style) = match todo.status {
                 atman_runtime::memory::todo::TodoStatus::Done => ("✓", success),
                 atman_runtime::memory::todo::TodoStatus::Cancelled => {
-                    ("✕", Style::default().fg(t.subtle_fg))
+                    ("✕", Style::default().fg(t.subtle_fg.into()))
                 }
                 _ => ("○", tinted),
             };

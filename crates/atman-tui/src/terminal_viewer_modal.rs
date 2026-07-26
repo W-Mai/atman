@@ -108,7 +108,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut AppState) {
     f.render_widget(block, modal_area);
     app.terminal_viewer.last_inner_rect = Some(inner);
 
-    let pad_style = Style::default().bg(bg);
+    let pad_style = Style::default().bg(bg.into());
     for _ in 0..PAD.min(inner.height) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -167,7 +167,7 @@ fn render_capture_full(
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg = t.code_bg;
-    let pad_style = Style::default().bg(bg);
+    let pad_style = Style::default().bg(bg.into());
     let cols = screen.cols as usize;
     let target = width as usize;
     let mut lines = Vec::with_capacity(screen.rows as usize);
@@ -180,7 +180,7 @@ fn render_capture_full(
                 break;
             }
             let cell = &screen.cells[idx];
-            let cell_style = crate::output::cell_style_for_viewer(cell, bg);
+            let cell_style = crate::output::cell_style_for_viewer(cell, bg.into());
             let chars = if cell.chars.is_empty() {
                 " "
             } else {
@@ -204,7 +204,7 @@ fn render_capture_full(
 
 fn render_stream_full(accumulated_bytes: &[u8], width: u16) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
-    let body_style = Style::default().fg(t.subtle_fg).bg(t.code_bg);
+    let body_style = Style::default().fg(t.subtle_fg.into()).bg(t.code_bg.into());
     let text = String::from_utf8_lossy(accumulated_bytes).into_owned();
     let target = width.max(20) as usize;
     let mut lines = Vec::new();

@@ -80,7 +80,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
     f.render_widget(Clear, rect);
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().warn))
+        .border_style(Style::default().fg(crate::theme::theme().warn.into()))
         .title(Span::styled(
             format!(
                 " Review Compaction — slice {}..{} ({} msgs, ~{} tokens) ",
@@ -90,7 +90,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
                 modal.pending.tokens_before,
             ),
             Style::default()
-                .fg(crate::theme::theme().warn)
+                .fg(crate::theme::theme().warn.into())
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
@@ -124,7 +124,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
 fn render_slice_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().subtle_fg))
+        .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into()))
         .title(" Being replaced ");
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -142,7 +142,7 @@ fn render_summary_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReview
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colour))
+        .border_style(Style::default().fg(colour.into()))
         .title(title);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
@@ -166,27 +166,27 @@ fn render_footer(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal)
             Span::styled(
                 "Enter",
                 Style::default()
-                    .fg(crate::theme::theme().success)
+                    .fg(crate::theme::theme().success.into())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" accept  "),
             Span::styled(
                 "e",
                 Style::default()
-                    .fg(crate::theme::theme().accent)
+                    .fg(crate::theme::theme().accent.into())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" edit  "),
             Span::styled(
                 "r/Esc",
                 Style::default()
-                    .fg(crate::theme::theme().error)
+                    .fg(crate::theme::theme().error.into())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" reject  "),
             Span::styled(
                 "PgUp/PgDn",
-                Style::default().fg(crate::theme::theme().subtle_fg),
+                Style::default().fg(crate::theme::theme().subtle_fg.into()),
             ),
             Span::raw(" scroll slice"),
         ]),
@@ -194,11 +194,14 @@ fn render_footer(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal)
             Span::styled(
                 "Ctrl+Enter",
                 Style::default()
-                    .fg(crate::theme::theme().success)
+                    .fg(crate::theme::theme().success.into())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" commit edit  "),
-            Span::styled("Esc", Style::default().fg(crate::theme::theme().warn)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(crate::theme::theme().warn.into()),
+            ),
             Span::raw(" back to viewing (edits kept)"),
         ]),
     };

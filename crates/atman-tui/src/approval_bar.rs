@@ -11,17 +11,17 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, pending: &[PendingApproval]) {
     let title = format!(" approvals · {} pending ", pending.len());
     let hint = Line::from(Span::styled(
         " 1..9 accept · a all · d deny · Esc deny all ",
-        Style::default().fg(crate::theme::theme().subtle_fg),
+        Style::default().fg(crate::theme::theme().subtle_fg.into()),
     ))
     .right_aligned();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(crate::theme::theme().warn))
+        .border_style(Style::default().fg(crate::theme::theme().warn.into()))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(crate::theme::theme().warn)
+                .fg(crate::theme::theme().warn.into())
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(hint)
@@ -36,23 +36,23 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, pending: &[PendingApproval]) {
             Span::styled(
                 key,
                 Style::default()
-                    .fg(crate::theme::theme().success)
+                    .fg(crate::theme::theme().success.into())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 p.tool_name.clone(),
-                Style::default().fg(crate::theme::theme().accent),
+                Style::default().fg(crate::theme::theme().accent.into()),
             ),
             Span::styled(
                 format!("  {args}"),
-                Style::default().fg(crate::theme::theme().tinted_fg),
+                Style::default().fg(crate::theme::theme().tinted_fg.into()),
             ),
         ]));
     }
     if pending.len() > 9 {
         lines.push(Line::from(Span::styled(
             format!("(+{} more, only 1..9 have hotkeys)", pending.len() - 9),
-            Style::default().fg(crate::theme::theme().subtle_fg),
+            Style::default().fg(crate::theme::theme().subtle_fg.into()),
         )));
     }
     f.render_widget(Paragraph::new(lines).block(block), area);

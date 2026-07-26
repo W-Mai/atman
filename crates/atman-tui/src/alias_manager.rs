@@ -262,11 +262,11 @@ fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     let theme = crate::theme::theme();
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent))
+        .border_style(Style::default().fg(theme.accent.into()))
         .title(Span::styled(
             " Aliases ",
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.accent.into())
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
@@ -279,7 +279,7 @@ fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
         .map(|(i, (a, m))| {
             let style = if i == mgr.selected {
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.accent.into())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -314,11 +314,11 @@ fn render_alias_form(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     };
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent))
+        .border_style(Style::default().fg(theme.accent.into()))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.accent.into())
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
@@ -349,7 +349,7 @@ fn render_alias_form(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     };
     let footer = Paragraph::new(Line::from(Span::styled(
         help,
-        Style::default().fg(theme.meta_fg),
+        Style::default().fg(theme.meta_fg.into()),
     )))
     .alignment(ratatui::layout::Alignment::Right);
     f.render_widget(footer, footer_area);
@@ -365,10 +365,10 @@ fn render_tree_panel(
 
     let name_style = if mgr.focus == Focus::NameInput {
         Style::default()
-            .fg(theme.accent)
+            .fg(theme.accent.into())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.tinted_fg)
+        Style::default().fg(theme.tinted_fg.into())
     };
     let cursor = if mgr.focus == Focus::NameInput {
         "█"
@@ -385,10 +385,10 @@ fn render_tree_panel(
         let is_active = mgr.focus == Focus::Tree && mgr.provider_idx == pi;
         let hdr_style = if is_active {
             Style::default()
-                .fg(theme.heading)
+                .fg(theme.heading.into())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.heading)
+            Style::default().fg(theme.heading.into())
         };
         lines.push(Line::from(Span::styled(
             format!("▸ {}", grp.provider_name),
@@ -399,10 +399,10 @@ fn render_tree_panel(
             let is_sel = is_active && mgr.model_idx[pi] == mi;
             let style = if is_sel {
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.accent.into())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.tinted_fg)
+                Style::default().fg(theme.tinted_fg.into())
             };
             let prefix = if is_sel { " ▶" } else { "  " };
             lines.push(Line::from(Span::styled(
@@ -423,7 +423,7 @@ fn render_preview_panel(
 ) {
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(theme.border.into()))
         .title(" Preview ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -436,12 +436,12 @@ fn render_preview_panel(
         if let Some((_, target)) = mgr.aliases.iter().find(|(a, _)| a == alias_name) {
             lines.push(Line::from(Span::styled(
                 format!("→ {}", target),
-                Style::default().fg(theme.meta_fg),
+                Style::default().fg(theme.meta_fg.into()),
             )));
         } else {
             lines.push(Line::from(Span::styled(
                 "New alias",
-                Style::default().fg(theme.meta_fg),
+                Style::default().fg(theme.meta_fg.into()),
             )));
         }
     }
@@ -456,7 +456,7 @@ fn render_preview_panel(
                 "Context: {}",
                 atman_runtime::humanize::format_count(m.context_budget)
             ),
-            Style::default().fg(theme.tinted_fg),
+            Style::default().fg(theme.tinted_fg.into()),
         )));
         let max_out = m
             .max_output_tokens
@@ -464,11 +464,11 @@ fn render_preview_panel(
             .unwrap_or_else(|| "—".to_string());
         lines.push(Line::from(Span::styled(
             format!("Output:  {}", max_out),
-            Style::default().fg(theme.tinted_fg),
+            Style::default().fg(theme.tinted_fg.into()),
         )));
         lines.push(Line::from(Span::styled(
             format!("Thinking: {}", if m.thinking { "✓" } else { "—" }),
-            Style::default().fg(theme.tinted_fg),
+            Style::default().fg(theme.tinted_fg.into()),
         )));
     }
 

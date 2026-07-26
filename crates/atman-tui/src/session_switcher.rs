@@ -298,11 +298,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     };
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
+        .border_style(Style::default().fg(border_color.into()))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(border_color)
+                .fg(border_color.into())
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
@@ -323,7 +323,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         };
         let footer = Line::from(Span::styled(
             " s:sort  f:filter  r:rename  Enter:open  d:delete  Tab:scope  Esc:close ",
-            Style::default().fg(crate::theme::theme().subtle_fg),
+            Style::default().fg(crate::theme::theme().subtle_fg.into()),
         ));
         f.render_widget(Paragraph::new(footer), footer_rect);
     }
@@ -349,7 +349,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         f.render_widget(
             ratatui::widgets::Paragraph::new(Line::from(Span::styled(
                 hint,
-                Style::default().fg(crate::theme::theme().subtle_fg),
+                Style::default().fg(crate::theme::theme().subtle_fg.into()),
             ))),
             inner,
         );
@@ -373,24 +373,24 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
                 Span::styled(
                     format!("{sid_short:<10}"),
                     Style::default()
-                        .fg(crate::theme::theme().warn)
+                        .fg(crate::theme::theme().warn.into())
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("{:>5} msgs  ", row.message_count),
-                    Style::default().fg(crate::theme::theme().subtle_fg),
+                    Style::default().fg(crate::theme::theme().subtle_fg.into()),
                 ),
                 Span::styled(
                     format!("{updated:<19}  "),
-                    Style::default().fg(crate::theme::theme().accent),
+                    Style::default().fg(crate::theme::theme().accent.into()),
                 ),
                 Span::styled(
                     project_label,
-                    Style::default().fg(crate::theme::theme().success),
+                    Style::default().fg(crate::theme::theme().success.into()),
                 ),
                 Span::styled(
                     format!("  {goal_snippet}"),
-                    Style::default().fg(crate::theme::theme().tinted_fg),
+                    Style::default().fg(crate::theme::theme().tinted_fg.into()),
                 ),
             ]);
             ListItem::new(line)
@@ -399,7 +399,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(crate::theme::theme().subtle_fg)
+                .bg(crate::theme::theme().subtle_fg.into())
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");

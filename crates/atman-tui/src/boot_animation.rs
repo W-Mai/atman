@@ -242,7 +242,7 @@ fn render(
         crate::input::input_paragraph(
             "",
             0,
-            crate::theme::theme().subtle_fg,
+            crate::theme::theme().subtle_fg.into(),
             0,
             0,
             &atman_runtime::trust::TrustConfig::default(),

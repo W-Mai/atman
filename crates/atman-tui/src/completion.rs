@@ -209,12 +209,12 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
             let line = Line::from(vec![
                 Span::styled(
                     item.insert.trim_end().to_string(),
-                    Style::default().fg(crate::theme::theme().accent),
+                    Style::default().fg(crate::theme::theme().accent.into()),
                 ),
                 Span::raw("  "),
                 Span::styled(
                     item.hint.clone(),
-                    Style::default().fg(crate::theme::theme().subtle_fg),
+                    Style::default().fg(crate::theme::theme().subtle_fg.into()),
                 ),
             ]);
             ListItem::new(line)
@@ -224,11 +224,11 @@ pub fn render_popup(f: &mut ratatui::Frame, input_rect: Rect, state: &PopupState
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(crate::theme::theme().subtle_fg)),
+                .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into())),
         )
         .highlight_style(
             Style::default()
-                .bg(crate::theme::theme().subtle_fg)
+                .bg(crate::theme::theme().subtle_fg.into())
                 .add_modifier(Modifier::BOLD),
         );
     let mut list_state = ListState::default();
@@ -247,7 +247,7 @@ pub fn render_hint_strip(
         let text = " [YANK MODE] j/k select · Enter copy · Esc cancel";
         let p = Paragraph::new(Line::from(Span::styled(
             text,
-            Style::default().fg(crate::theme::theme().accent),
+            Style::default().fg(crate::theme::theme().accent.into()),
         )));
         f.render_widget(p, rect);
         return;
@@ -256,7 +256,7 @@ pub fn render_hint_strip(
         let text = " [SELECT MODE] drag to copy · F3 resume interaction";
         let p = Paragraph::new(Line::from(Span::styled(
             text,
-            Style::default().fg(crate::theme::theme().warn),
+            Style::default().fg(crate::theme::theme().warn.into()),
         )));
         f.render_widget(p, rect);
         return;
@@ -268,7 +268,7 @@ pub fn render_hint_strip(
     };
     let p = Paragraph::new(Line::from(Span::styled(
         text,
-        Style::default().fg(crate::theme::theme().subtle_fg),
+        Style::default().fg(crate::theme::theme().subtle_fg.into()),
     )));
     f.render_widget(p, rect);
 }
@@ -288,7 +288,7 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().accent))
+        .border_style(Style::default().fg(crate::theme::theme().accent.into()))
         .title(" atman keybindings — Esc / F1 to close ");
     let mut body = vec![
         Line::from(section("Editing")),
@@ -348,7 +348,7 @@ fn section(text: &str) -> Span<'_> {
     Span::styled(
         text,
         Style::default()
-            .fg(crate::theme::theme().accent)
+            .fg(crate::theme::theme().accent.into())
             .add_modifier(Modifier::BOLD),
     )
 }
@@ -357,7 +357,7 @@ fn kv<'a>(key: &'a str, value: &'a str) -> Line<'a> {
     Line::from(vec![
         Span::styled(
             format!(" {key:<28}"),
-            Style::default().fg(crate::theme::theme().warn),
+            Style::default().fg(crate::theme::theme().warn.into()),
         ),
         Span::raw(value),
     ])

@@ -2841,7 +2841,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             let block = ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
                 .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(ratatui::style::Style::default().fg(crate::theme::theme().warn));
+                .border_style(
+                    ratatui::style::Style::default().fg(crate::theme::theme().warn.into()),
+                );
             let para = ratatui::widgets::Paragraph::new(lines).block(block);
             f.render_widget(para, area);
         }
@@ -2861,7 +2863,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     sanitize_widget_edges(f, clear_target);
     f.render_widget(ratatui::widgets::Clear, clear_target);
     let target_border = if app.streaming {
-        crate::theme::theme().subtle_fg
+        crate::theme::theme().subtle_fg.into()
     } else {
         app.trust.display().color.ratatui()
     };
@@ -2874,7 +2876,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         let prev = if app.streaming {
             app.trust.display().color.ratatui()
         } else {
-            crate::theme::theme().subtle_fg
+            crate::theme::theme().subtle_fg.into()
         };
         if elapsed >= 0.35 {
             app.border_fade_at = None;
@@ -3197,7 +3199,7 @@ pub(crate) fn render_toast_notes(
                     label,
                     border_style.add_modifier(Modifier::BOLD),
                 ))
-                .style(style.bg(bg));
+                .style(style.bg(bg.into()));
             let inner = block.inner(rect);
             f.render_widget(block, rect);
 
@@ -3267,7 +3269,7 @@ fn render_notify_modal(f: &mut ratatui::Frame, area: ratatui::layout::Rect, mess
                 .fg(ratatui::style::Color::Red)
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(theme.note_error_bg));
+        .style(Style::default().bg(theme.note_error_bg.into()));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
 
@@ -3287,7 +3289,7 @@ fn render_notify_modal(f: &mut ratatui::Frame, area: ratatui::layout::Rect, mess
 
     let hint = Paragraph::new(Line::from(Span::styled(
         "Press Esc to dismiss",
-        Style::default().fg(theme.subtle_fg),
+        Style::default().fg(theme.subtle_fg.into()),
     )))
     .alignment(Alignment::Center);
     let hint_rect = ratatui::layout::Rect {
@@ -3414,10 +3416,10 @@ fn render_pulse_bar(
         return;
     }
     let t = crate::theme::theme();
-    let peak = if to_rgb(t.accent) == to_rgb(border_color) {
+    let peak = if to_rgb(t.accent.into()) == to_rgb(border_color) {
         Color::Rgb(100, 210, 255)
     } else {
-        t.accent
+        t.accent.into()
     };
     let bar_y = input_rect.y + input_rect.height.saturating_sub(1);
     let bar_x = input_rect.x + 1;

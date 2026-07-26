@@ -142,7 +142,7 @@ pub fn render(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(t.subtle_fg))
+        .border_style(Style::default().fg(t.subtle_fg.into()))
         .title(" ≡ ")
         .title(
             Line::from(vec![
@@ -151,7 +151,7 @@ pub fn render(
                 Span::raw(" "),
                 Span::styled(
                     format!("({})", snapshots.iter().filter(|s| s.is_running()).count()),
-                    Style::default().fg(t.subtle_fg),
+                    Style::default().fg(t.subtle_fg.into()),
                 ),
             ])
             .alignment(Alignment::Right),
@@ -358,15 +358,15 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
 
     let running = snapshots.iter().filter(|s| s.is_running()).count();
     let dot = if running > 0 {
-        Span::styled("●", Style::default().fg(t.success))
+        Span::styled("●", Style::default().fg(t.success.into()))
     } else {
-        Span::styled("○", Style::default().fg(t.subtle_fg))
+        Span::styled("○", Style::default().fg(t.subtle_fg.into()))
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(t.subtle_fg))
+        .border_style(Style::default().fg(t.subtle_fg.into()))
         .title(" ≡ ");
     let inner = block.inner(area);
     f.render_widget(block, area);

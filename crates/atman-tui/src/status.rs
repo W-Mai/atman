@@ -29,18 +29,21 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
             " atman ",
             Style::default()
                 .fg(Color::Black)
-                .bg(t.accent)
+                .bg(t.accent.into())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
             &inputs.session_id[..inputs.session_id.len().min(8)],
-            Style::default().fg(t.subtle_fg),
+            Style::default().fg(t.subtle_fg.into()),
         ),
     ];
     if let Some(g) = inputs.goal {
         spans.push(Span::raw("  · goal "));
-        spans.push(Span::styled(truncate(g, 60), Style::default().fg(t.warn)));
+        spans.push(Span::styled(
+            truncate(g, 60),
+            Style::default().fg(t.warn.into()),
+        ));
     }
     if inputs.streaming {
         let label = if inputs.waiting_for_llm {
@@ -51,7 +54,9 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             label,
-            Style::default().fg(t.success).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(t.success.into())
+                .add_modifier(Modifier::BOLD),
         ));
     }
     // Status notes from notify system
@@ -59,7 +64,7 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         spans.push(Span::raw("  · "));
         spans.push(Span::styled(
             truncate(text, 60),
-            Style::default().fg(t.tinted_fg),
+            Style::default().fg(t.tinted_fg.into()),
         ));
     }
     Line::from(spans)

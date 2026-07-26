@@ -423,11 +423,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
     let theme = crate::theme::theme();
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent))
+        .border_style(Style::default().fg(theme.accent.into()))
         .title(Span::styled(
             " Provider Manager ",
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.accent.into())
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = outer.inner(rect);
@@ -470,7 +470,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
     };
     let footer = Paragraph::new(Line::from(Span::styled(
         help,
-        Style::default().fg(theme.meta_fg),
+        Style::default().fg(theme.meta_fg.into()),
     )))
     .alignment(ratatui::layout::Alignment::Right);
     f.render_widget(footer, footer_area);
@@ -489,7 +489,7 @@ fn render_provider_list(
         .map(|(i, p)| {
             let style = if i == mgr.selected {
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.accent.into())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -518,7 +518,7 @@ fn render_provider_list(
     let mut state = ListState::default().with_selected(Some(mgr.selected));
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(theme.border.into()))
         .title(" Providers ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -554,10 +554,10 @@ fn render_model_detail(
                     let is_sel = mgr.focus == ProviderFocus::ModelList && mgr.model_selected == mi;
                     let style = if is_sel {
                         Style::default()
-                            .fg(theme.accent)
+                            .fg(theme.accent.into())
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(theme.tinted_fg)
+                        Style::default().fg(theme.tinted_fg.into())
                     };
                     let prefix = if is_sel { "▶" } else { " " };
                     lines.push(Line::from(Span::styled(
@@ -579,7 +579,7 @@ fn render_model_detail(
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             " Select a provider to view models",
-            Style::default().fg(theme.meta_fg),
+            Style::default().fg(theme.meta_fg.into()),
         )));
     }
 
@@ -603,14 +603,14 @@ fn render_add_dialog(
         lines.push(Line::from("Name:"));
         lines.push(Line::from(Span::styled(
             format!("  {}", mgr.name_editor.buf()),
-            Style::default().fg(theme.accent),
+            Style::default().fg(theme.accent.into()),
         )));
         lines.push(Line::from("Enter to confirm, Esc to cancel"));
     } else {
         for (i, (label, desc, _)) in mgr.kinds.iter().enumerate() {
             let style = if i == mgr.kind_selected {
                 Style::default()
-                    .fg(theme.accent)
+                    .fg(theme.accent.into())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -642,7 +642,7 @@ fn render_confirm_dialog(
     let title = format!("{action} provider \"{}\"?", mgr.confirm_provider_name);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.warn))
+        .border_style(Style::default().fg(theme.warn.into()))
         .title(format!(" {action}? "));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -652,11 +652,14 @@ fn render_confirm_dialog(
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled(subtitle, Style::default().fg(theme.meta_fg))),
+        Line::from(Span::styled(
+            subtitle,
+            Style::default().fg(theme.meta_fg.into()),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "  y / Enter: confirm    n / Esc: cancel",
-            Style::default().fg(theme.meta_fg),
+            Style::default().fg(theme.meta_fg.into()),
         )),
     ];
     f.render_widget(

@@ -368,12 +368,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
-        .style(Style::default().bg(t.modal_bg))
+        .style(Style::default().bg(t.modal_bg.into()))
         .title(Line::from(title_spans))
         .title_bottom(
             Line::from(Span::styled(
                 hint_for(&form.kind),
-                Style::default().fg(t.subtle_fg),
+                Style::default().fg(t.subtle_fg.into()),
             ))
             .right_aligned(),
         );
@@ -382,10 +382,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
 
     let inner_w = inner.width as usize;
     let prompt_style = Style::default()
-        .fg(t.tinted_fg)
+        .fg(t.tinted_fg.into())
         .add_modifier(Modifier::BOLD);
-    let dim_style = Style::default().fg(t.subtle_fg);
-    let idle_row_style = Style::default().fg(t.tinted_fg).bg(t.panel_bg);
+    let dim_style = Style::default().fg(t.subtle_fg.into());
+    let idle_row_style = Style::default()
+        .fg(t.tinted_fg.into())
+        .bg(t.panel_bg.into());
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         form.kind.prompt().to_string(),
@@ -403,7 +405,9 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                     .bg(Color::Green)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(t.tinted_fg).bg(t.panel_bg)
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .bg(t.panel_bg.into())
             };
             let no_style = if no_focused {
                 Style::default()
@@ -411,7 +415,9 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                     .bg(Color::Red)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(t.tinted_fg).bg(t.panel_bg)
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .bg(t.panel_bg.into())
             };
             let label = "  Yes  ";
             let label_w = unicode_width::UnicodeWidthStr::width(label);
@@ -424,13 +430,13 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
             if left_pad > 0 {
                 spans.push(Span::styled(
                     " ".repeat(left_pad),
-                    Style::default().bg(t.modal_bg),
+                    Style::default().bg(t.modal_bg.into()),
                 ));
             }
             spans.push(Span::styled(label.to_string(), yes_style));
             spans.push(Span::styled(
                 " ".repeat(gap),
-                Style::default().bg(t.modal_bg),
+                Style::default().bg(t.modal_bg.into()),
             ));
             spans.push(Span::styled(no_label.to_string(), no_style));
             lines.push(Line::from(spans));
@@ -448,7 +454,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                 };
                 let prefix = if is_cursor { "▶ " } else { "  " };
                 let text = format!(" {prefix}{label} ");
-                lines.push(render_full_row(inner_w, &text, row_style, t.modal_bg));
+                lines.push(render_full_row(
+                    inner_w,
+                    &text,
+                    row_style,
+                    t.modal_bg.into(),
+                ));
                 if i + 1 < options.len() {
                     lines.push(Line::from(""));
                 }
@@ -481,7 +492,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                 };
                 let prefix = if is_cursor { "▶ " } else { "  " };
                 let text = format!(" {prefix}[{check_glyph}] {label} ");
-                lines.push(render_full_row(inner_w, &text, row_style, t.modal_bg));
+                lines.push(render_full_row(
+                    inner_w,
+                    &text,
+                    row_style,
+                    t.modal_bg.into(),
+                ));
                 if i + 1 < options.len() {
                     lines.push(Line::from(""));
                 }
@@ -516,11 +532,16 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                 prompt_style
             };
             let row_style = Style::default()
-                .fg(text_style.fg.unwrap_or(t.tinted_fg))
-                .bg(t.panel_bg);
+                .fg(text_style.fg.unwrap_or(t.tinted_fg.into()))
+                .bg(t.panel_bg.into());
             for row in display.split('\n') {
                 let text = format!("  {row}");
-                lines.push(render_full_row(inner_w, &text, row_style, t.modal_bg));
+                lines.push(render_full_row(
+                    inner_w,
+                    &text,
+                    row_style,
+                    t.modal_bg.into(),
+                ));
             }
             if buf.is_empty() {
                 lines.push(Line::from(Span::styled(

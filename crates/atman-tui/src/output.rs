@@ -808,7 +808,7 @@ impl std::fmt::Debug for LayoutCache {
 // Subtle stripe behind user messages so they visually separate from
 // assistant markdown without a heavy border or gutter glyph.
 fn user_message_bg() -> Color {
-    crate::theme::theme().user_msg_bg
+    crate::theme::theme().user_msg_bg.into()
 }
 
 const RIGHT_PAD: usize = 2;
@@ -1289,15 +1289,15 @@ fn render_thinking(
             crate::theme::ThemeMode::Light => Color::Rgb(232, 232, 236),
         }
     } else {
-        t.code_bg
+        t.code_bg.into()
     };
     let header_style = Style::default()
-        .fg(t.subtle_fg)
+        .fg(t.subtle_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
-    let body_style = Style::default().fg(t.subtle_fg).bg(bg);
+    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
     let hint_style = Style::default()
-        .fg(t.meta_fg)
+        .fg(t.meta_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
     let glyph = if done {
@@ -1391,8 +1391,11 @@ fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Lin
         .strip_prefix("[atman] ")
         .or_else(|| text.strip_prefix("[atman]"))
         .unwrap_or(text);
-    let body_style = Style::default().fg(t.tinted_fg).bg(bg);
-    let glyph_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(t.tinted_fg.into()).bg(bg.into());
+    let glyph_style = Style::default()
+        .fg(fg)
+        .bg(bg.into())
+        .add_modifier(Modifier::BOLD);
     let target = panel_width.max(20) as usize;
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1560,7 +1563,7 @@ fn render_diff_preview(
 ) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
-    let bg = t.code_bg;
+    let bg: Color = t.code_bg.into();
     let target = panel_width.max(20) as usize;
     let base_style = Style::default().bg(bg);
     let header_style = Style::default()
@@ -1568,7 +1571,7 @@ fn render_diff_preview(
         .bg(bg)
         .add_modifier(Modifier::BOLD);
     let hint_style = Style::default()
-        .fg(t.meta_fg)
+        .fg(t.meta_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
     let blank = Line::from(Span::styled(" ".repeat(target), base_style));
@@ -3551,14 +3554,14 @@ fn render_bash(
 ) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
-    let bg = t.code_bg;
+    let bg: Color = t.code_bg.into();
     let header_style = Style::default()
-        .fg(t.subtle_fg)
+        .fg(t.subtle_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
-    let body_style = Style::default().fg(t.subtle_fg).bg(bg);
+    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
     let hint_style = Style::default()
-        .fg(t.meta_fg)
+        .fg(t.meta_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
 
@@ -3641,14 +3644,14 @@ fn render_terminal(
 ) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
-    let bg = t.code_bg;
+    let bg: Color = t.code_bg.into();
     let header_style = Style::default()
-        .fg(t.subtle_fg)
+        .fg(t.subtle_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
-    let body_style = Style::default().fg(t.subtle_fg).bg(bg);
+    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
     let hint_style = Style::default()
-        .fg(t.meta_fg)
+        .fg(t.meta_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
 
@@ -3824,7 +3827,7 @@ pub fn cell_style_for_viewer(
 fn cell_fg(cell: &atman_runtime::tools::term::TerminalCell) -> Color {
     use atman_runtime::tools::term::TerminalColor;
     match cell.fg {
-        TerminalColor::Default => crate::theme::theme().subtle_fg,
+        TerminalColor::Default => crate::theme::theme().subtle_fg.into(),
         TerminalColor::Idx(i) => Color::Indexed(i),
         TerminalColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
@@ -4568,14 +4571,14 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
     } = render;
     use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
-    let bg = t.code_bg;
+    let bg: Color = t.code_bg.into();
     let header_style = Style::default()
         .fg(Color::Yellow)
         .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let body_style = Style::default().fg(t.subtle_fg).bg(bg);
+    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
     let hint_style = Style::default()
-        .fg(t.meta_fg)
+        .fg(t.meta_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
 
@@ -4698,19 +4701,25 @@ pub fn render_injection_queue(
     let title = format!(" ⚡ interjections · {} pending ", pending.len());
     lines.push(Line::from(Span::styled(
         title,
-        Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(t.warn.into())
+            .add_modifier(Modifier::BOLD),
     )));
 
     for inj in pending {
         let level_style = match inj.level {
-            InjectionLevel::L1Nudge => Style::default().fg(t.success).add_modifier(Modifier::BOLD),
-            InjectionLevel::L2CourseCorrect => {
-                Style::default().fg(t.warn).add_modifier(Modifier::BOLD)
-            }
-            InjectionLevel::L3Redirect => {
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
-            }
-            InjectionLevel::L4HardStop => Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+            InjectionLevel::L1Nudge => Style::default()
+                .fg(t.success.into())
+                .add_modifier(Modifier::BOLD),
+            InjectionLevel::L2CourseCorrect => Style::default()
+                .fg(t.warn.into())
+                .add_modifier(Modifier::BOLD),
+            InjectionLevel::L3Redirect => Style::default()
+                .fg(t.accent.into())
+                .add_modifier(Modifier::BOLD),
+            InjectionLevel::L4HardStop => Style::default()
+                .fg(t.error.into())
+                .add_modifier(Modifier::BOLD),
         };
         let level_label = match inj.level {
             InjectionLevel::L1Nudge => "L1",
@@ -4722,7 +4731,7 @@ pub fn render_injection_queue(
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(format!("[{level_label}]"), level_style),
-            Span::styled(format!(" {text}"), Style::default().fg(t.tinted_fg)),
+            Span::styled(format!(" {text}"), Style::default().fg(t.tinted_fg.into())),
         ]));
     }
     lines
