@@ -520,7 +520,9 @@ async fn run_frames(
                                     app.sidebar_collapsed = false;
                                     app.save_ui_state();
                                 } else if let Some(r) = app.last_task_panel_rect
-                                    && rect_contains(r, me.column, me.row)
+                                    && me.column >= r.x
+                                    && me.column < r.x + 3
+                                    && me.row == r.y
                                 {
                                     app.task_panel_collapsed = !app.task_panel_collapsed;
                                 } else if let Some((panel_idx, node_id)) =
