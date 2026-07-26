@@ -82,6 +82,10 @@ impl AnchorIndex {
         limit: usize,
     ) -> Result<Vec<ProjectEventRow>> {
         let conn = self.conn();
+        // CJK text doesn't tokenize well under unicode61 — use LIKE for CJK queries.
+        if query.chars().any(is_cjk_char) {
+            return self.search_events_like(query, session_filter, limit, &conn);
+        }
         let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match session_filter {
             Some(sid) => (
                 "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
@@ -105,6 +109,40 @@ impl AnchorIndex {
             ),
         };
         let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), project_event_row_from)?;
+        collect(rows)
+    }
+
+    fn search_events_like(
+        &self,
+        query: &str,
+        session_filter: Option<&str>,
+        limit: usize,
+        conn: &std::sync::MutexGuard<'_, rusqlite::Connection>,
+    ) -> Result<Vec<ProjectEventRow>> {
+        let pattern = format!("%{query}%");
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match session_filter {
+            Some(sid) => (
+                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
+                 FROM events e JOIN events_fts f ON f.rowid = e.id \
+                 WHERE f.text_content LIKE ?1 AND e.session_id = ?2 \
+                 ORDER BY e.id DESC LIMIT ?3",
+                vec![
+                    Box::new(pattern),
+                    Box::new(sid.to_string()),
+                    Box::new(limit as i64),
+                ],
+            ),
+            None => (
+                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
+                 FROM events e JOIN events_fts f ON f.rowid = e.id \
+                 WHERE f.text_content LIKE ?1 \
+                 ORDER BY e.id DESC LIMIT ?2",
+                vec![Box::new(pattern), Box::new(limit as i64)],
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         let rows = stmt.query_map(param_refs.as_slice(), project_event_row_from)?;
         collect(rows)
@@ -346,6 +384,17 @@ fn collect<T>(
     Ok(out)
 }
 
+fn is_cjk_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x4E00..=0x9FFF   |  // CJK Unified Ideographs
+        0x3400..=0x4DBF   |  // CJK Extension A
+        0x20000..=0x2A6DF |  // CJK Extension B
+        0x3040..=0x309F   |  // Hiragana
+        0x30A0..=0x30FF   |  // Katakana
+        0xAC00..=0xD7AF      // Hangul Syllables
+    )
+}
+
 const PROJECT_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -435,6 +484,31 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect()
+    }
+
+    #[test]
+    fn fts_search_finds_cjk_substring() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = AnchorIndex::open_project(dir.path()).unwrap();
+        seed_project_event(
+            &idx,
+            "sess-a",
+            1,
+            "user_msg",
+            None,
+            None,
+            "这是一个浮动面板的设计方案",
+        );
+        // 2-char CJK substring — would fail with FTS5 unicode61
+        let hits = idx
+            .fts_search_project_events("浮动", Some("sess-a"), 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "2-char CJK substring should match");
+        // 4-char CJK phrase
+        let hits = idx
+            .fts_search_project_events("浮动面板", Some("sess-a"), 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "4-char CJK phrase should match");
     }
 
     #[test]
