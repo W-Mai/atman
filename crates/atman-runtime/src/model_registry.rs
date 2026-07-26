@@ -191,58 +191,21 @@ pub fn model_info(name: &str) -> ModelInfo {
     let resolved = resolve_alias(name);
     if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
         if let Some(entry) = cfg.models.get(&resolved) {
-            let (budget, ratio) = builtin_budget(&resolved);
             return ModelInfo {
                 name: resolved.clone(),
-                context_budget: entry.context_budget.unwrap_or(budget),
-                compact_threshold_ratio: entry.compact_threshold_ratio.unwrap_or(ratio),
+                context_budget: entry.context_budget.unwrap_or(0),
+                compact_threshold_ratio: entry.compact_threshold_ratio.unwrap_or(0.8),
                 thinking_enabled: entry.thinking.unwrap_or(false),
                 max_output_tokens: entry.max_tokens,
             };
         }
     }
-    let (budget, ratio) = builtin_budget(&resolved);
     ModelInfo {
         name: resolved,
-        context_budget: budget,
-        compact_threshold_ratio: ratio,
+        context_budget: 0,
+        compact_threshold_ratio: 0.8,
         thinking_enabled: false,
         max_output_tokens: None,
-    }
-}
-
-fn builtin_budget(name: &str) -> (u64, f64) {
-    let bare = match name.split_once('/') {
-        Some((_, rest)) => rest,
-        None => name.split_once(':').map(|(_, r)| r).unwrap_or(name),
-    };
-    match bare {
-        n if n.starts_with("codex-") => (272_000, 0.8),
-        n if n.starts_with("claude-opus") => (200_000, 0.8),
-        n if n.starts_with("claude-sonnet") => (200_000, 0.8),
-        n if n.starts_with("claude-haiku") => (200_000, 0.8),
-        n if n.starts_with("claude-") => (200_000, 0.8),
-        n if n.starts_with("gpt-5") => (128_000, 0.8),
-        n if n.starts_with("gpt-4o-mini") => (128_000, 0.8),
-        n if n.starts_with("gpt-4o") => (128_000, 0.8),
-        n if n.starts_with("gpt-4-turbo") => (128_000, 0.8),
-        n if n.starts_with("gpt-4") => (32_000, 0.8),
-        n if n.starts_with("gpt-3.5") => (16_000, 0.8),
-        n if n.starts_with("o1") => (128_000, 0.8),
-        n if n.starts_with("o3") => (128_000, 0.8),
-        n if n.starts_with("glm-5") => (128_000, 0.8),
-        n if n.starts_with("glm-4.5") => (128_000, 0.8),
-        n if n.starts_with("glm-4") => (128_000, 0.8),
-        n if n.starts_with("glm-") => (128_000, 0.8),
-        n if n.starts_with("deepseek-v4") => (1_000_000, 0.8),
-        n if n.starts_with("deepseek-v3") => (128_000, 0.8),
-        n if n.starts_with("deepseek-r1") => (128_000, 0.8),
-        n if n.starts_with("deepseek") => (64_000, 0.8),
-        n if n.starts_with("qwen3") => (128_000, 0.8),
-        n if n.starts_with("qwen-max") => (128_000, 0.8),
-        n if n.starts_with("qwen") => (32_000, 0.8),
-        n if n.starts_with("llama") => (8_000, 0.8),
-        _ => (32_000, 0.8),
     }
 }
 
@@ -437,30 +400,47 @@ mod tests {
     static TEST_CFG_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
-    fn claude_opus_returns_200k() {
-        assert_eq!(model_info("claude-opus-4.7").context_budget, 200_000);
-    }
-
-    #[test]
-    fn gpt_4o_returns_128k() {
-        assert_eq!(model_info("gpt-4o-mini").context_budget, 128_000);
-        assert_eq!(model_info("gpt-4o-2024-08-06").context_budget, 128_000);
-    }
-
-    #[test]
-    fn unknown_model_falls_back_to_32k() {
-        assert_eq!(model_info("mystery-model").context_budget, 32_000);
-        assert_eq!(model_info("").context_budget, 32_000);
+    fn unregistered_model_returns_zero_budget() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        *MODEL_CONFIG.write().unwrap() = None;
+        assert_eq!(model_info("mystery-model").context_budget, 0);
+        assert_eq!(model_info("").context_budget, 0);
     }
 
     #[test]
     fn threshold_is_eighty_percent() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let mut cfg = ModelConfig::default();
+        cfg.models.insert(
+            "claude-opus-4.7".into(),
+            ModelEntry {
+                model: "claude-opus-4.7".into(),
+                context_budget: Some(200_000),
+                compact_threshold_ratio: Some(0.8),
+                thinking: None,
+                ..Default::default()
+            },
+        );
+        set_model_config(cfg);
         let info = model_info("claude-opus-4.7");
         assert_eq!(info.compact_threshold_tokens(), 160_000);
     }
 
     #[test]
     fn compaction_trigger_is_near_budget_top() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let mut cfg = ModelConfig::default();
+        cfg.models.insert(
+            "claude-opus-4.7".into(),
+            ModelEntry {
+                model: "claude-opus-4.7".into(),
+                context_budget: Some(200_000),
+                compact_threshold_ratio: Some(0.8),
+                thinking: None,
+                ..Default::default()
+            },
+        );
+        set_model_config(cfg);
         let info = model_info("claude-opus-4.7");
         let trigger = info.compaction_trigger_threshold();
         assert!(
@@ -471,6 +451,19 @@ mod tests {
 
     #[test]
     fn compaction_target_is_lower_than_trigger() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let mut cfg = ModelConfig::default();
+        cfg.models.insert(
+            "claude-opus-4.7".into(),
+            ModelEntry {
+                model: "claude-opus-4.7".into(),
+                context_budget: Some(200_000),
+                compact_threshold_ratio: Some(0.8),
+                thinking: None,
+                ..Default::default()
+            },
+        );
+        set_model_config(cfg);
         let info = model_info("claude-opus-4.7");
         let trigger = info.compaction_trigger_threshold();
         let target = info.compaction_target_after();
@@ -484,6 +477,14 @@ mod tests {
     fn alias_resolves_to_real_model() {
         let _lock = TEST_CFG_LOCK.lock().unwrap();
         let mut cfg = ModelConfig::default();
+        cfg.models.insert(
+            "claude-opus-4.7".into(),
+            ModelEntry {
+                model: "claude-opus-4.7".into(),
+                context_budget: Some(200_000),
+                ..Default::default()
+            },
+        );
         cfg.aliases.insert(
             "smart".into(),
             AliasEntry {

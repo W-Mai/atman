@@ -1402,6 +1402,7 @@ async fn prebuild_session(
     };
 
     emit(BootStepId::OpenSession, true, false);
+    load_model_config_from_disk();
     let root = data_dir()?;
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
     let is_fresh = resume_sid.is_none();

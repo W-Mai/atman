@@ -1064,7 +1064,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             let mut saw_context_overflow = false;
             let mut last_err: Option<RuntimeError> = None;
             let retry_kinds_ref = retry_kinds.as_ref();
-            let mut thinking_enabled = crate::model_registry::model_info(&model).thinking_enabled();
+            let model_info = crate::model_registry::model_info(&model);
+            if model_info.context_budget == 0 {
+                return Value::Err(RuntimeError::ToolFailed(format!(
+                    "model `{model}` is not registered in config.toml — add a [models.{model}] section with context_budget before using it"
+                )));
+            }
+            let mut thinking_enabled = model_info.thinking_enabled();
             let mut signature_retries: u32 = 0;
             'llm_attempts: loop {
                 for attempt in 0..=retry_count {

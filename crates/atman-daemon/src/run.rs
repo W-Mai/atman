@@ -100,6 +100,14 @@ impl RunLauncher {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
 
+        if let Some(dir) = &self.config_dir {
+            if let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) {
+                if let Some(mc) = parse_model_config(&text) {
+                    atman_runtime::model_registry::set_model_config(mc);
+                }
+            }
+        }
+
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
         let project_index =
             match atman_runtime::storage::resolve_project_scope_for(&self.project_root) {
@@ -212,14 +220,6 @@ async fn run_flow_inner(
         anyhow::bail!("{} contains no flows", path.display());
     }
     let flow_name = parsed.flows[0].name.name.clone();
-
-    if let Some(dir) = &config_dir {
-        if let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) {
-            if let Some(mc) = parse_model_config(&text) {
-                atman_runtime::model_registry::set_model_config(mc);
-            }
-        }
-    }
 
     let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
         events: session.sink().clone(),

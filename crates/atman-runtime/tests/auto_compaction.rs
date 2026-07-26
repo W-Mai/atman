@@ -2,6 +2,8 @@ use atman_runtime::Session;
 use atman_runtime::event::TurnId;
 use atman_runtime::message::Message;
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn build_long_history(session: &Session, msg_count: usize) {
     let base = "x".repeat(4000);
     for i in 0..msg_count {
@@ -157,6 +159,25 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
         normal_calls: AtomicUsize::new(0),
         second_call_tokens: std::sync::Mutex::new(None),
     });
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    {
+        use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+        let cfg = ModelConfig {
+            models: [(
+                "llama-workflow-compact".into(),
+                ModelEntry {
+                    model: "llama-workflow-compact".into(),
+                    context_budget: Some(200_000),
+                    compact_threshold_ratio: Some(0.8),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            aliases: std::collections::HashMap::new(),
+        };
+        atman_runtime::model_registry::set_model_config(cfg);
+    }
     let session = std::sync::Arc::new(Session::open_ephemeral());
     build_long_history(&session, 20);
 
@@ -188,6 +209,23 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
 
 #[tokio::test]
 async fn compact_messages_returns_none_below_budget() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+    let _lock = TEST_CFG_LOCK.lock().await;
+    let cfg = ModelConfig {
+        models: [(
+            "claude-opus-4.7".into(),
+            ModelEntry {
+                model: "claude-opus-4.7".into(),
+                context_budget: Some(200_000),
+                compact_threshold_ratio: Some(0.8),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        aliases: std::collections::HashMap::new(),
+    };
+    atman_runtime::model_registry::set_model_config(cfg);
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("claude-opus-4.7", 0, 0, 0, 0, None, None);
@@ -195,7 +233,11 @@ async fn compact_messages_returns_none_below_budget() {
         let msg = Message::user_text(TurnId::now(), format!("hi {i}"));
         session.append_message(msg, None);
     }
-    assert!(session.compact_messages_auto("noop".into()).is_none());
+    assert!(
+        session
+            .compact_messages_auto("claude-opus-4.7".into())
+            .is_none()
+    );
 }
 
 #[tokio::test]

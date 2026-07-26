@@ -547,6 +547,43 @@ fn load_goal(dir: &Path) -> Option<String> {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PersistedContextState {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    window_tokens: u64,
+    #[serde(default)]
+    window_budget: u64,
+}
+
+impl PersistedContextState {
+    fn path() -> Option<PathBuf> {
+        crate::storage::config_dir()
+            .ok()
+            .map(|d| d.join("context_state.json"))
+    }
+
+    fn load() -> Self {
+        let Some(path) = Self::path() else {
+            return Self::default();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    fn save(&self) {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(&path, &json);
+        }
+    }
+}
+
 fn default_project_index(root: &Path) -> Option<std::sync::Arc<crate::index::AnchorIndex>> {
     match crate::index::AnchorIndex::open_project(root) {
         Ok(idx) => Some(std::sync::Arc::new(idx)),
@@ -687,9 +724,12 @@ impl Session {
             sink.restore_seq(last_seq);
         }
         let mut initial_context = replay_context_snapshot_from(&events_path);
-        initial_context.window_tokens = crate::compaction::estimate_tokens_for_messages(&messages);
-        initial_context.window_budget =
-            crate::model_registry::model_info(&initial_context.model).context_budget;
+        let persisted = PersistedContextState::load();
+        if !persisted.model.is_empty() {
+            initial_context.model = persisted.model;
+        }
+        initial_context.window_tokens = persisted.window_tokens;
+        initial_context.window_budget = persisted.window_budget;
         let initial_goal = load_goal(&dir);
         let (injection_tx, _) = broadcast::channel(32);
         let (stream_tx, _) = broadcast::channel(1024);
@@ -960,11 +1000,21 @@ impl Session {
         } else {
             estimated
         };
-        let budget = crate::model_registry::model_info(&self.last_model()).context_budget;
+        let model = self.last_model();
+        let budget = crate::model_registry::model_info(&model).context_budget;
         self.watch.context.send_modify(|snap| {
             snap.window_tokens = window;
-            snap.window_budget = budget;
+            if budget > 0 {
+                snap.window_budget = budget;
+            }
         });
+        let snap = self.watch.context.borrow();
+        PersistedContextState {
+            model,
+            window_tokens: snap.window_tokens,
+            window_budget: snap.window_budget,
+        }
+        .save();
     }
 
     pub fn cumulative_input_tokens(&self) -> u64 {

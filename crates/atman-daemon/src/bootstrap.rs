@@ -283,6 +283,20 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         executor.providers.register(Arc::new(
             MockProvider::new("mock").with_fallback(Value::Str("[mock response]".into())),
         ));
+        use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "mock".into(),
+            ModelEntry {
+                model: "mock".into(),
+                context_budget: Some(200_000),
+                ..Default::default()
+            },
+        );
+        atman_runtime::model_registry::set_model_config(ModelConfig {
+            models,
+            aliases: std::collections::HashMap::new(),
+        });
     }
     Ok(BootstrapOutcome { executor })
 }
