@@ -227,6 +227,7 @@ pub struct AppState {
     pub sidebar_collapse_locked: bool,
     pub task_registry: Option<atman_runtime::TaskRegistry>,
     pub task_snapshots: Vec<atman_runtime::TaskSnapshot>,
+    pub last_task_panel_rect: Option<ratatui::layout::Rect>,
     pub tick: u64,
     pub last_goal_rect: Option<ratatui::layout::Rect>,
     pub last_plan_rect: Option<ratatui::layout::Rect>,

@@ -36,6 +36,7 @@ pub mod session_switcher;
 pub mod sidebar;
 pub mod states;
 pub mod status;
+pub mod task_panel;
 pub mod terminal_guard;
 pub mod terminal_viewer_modal;
 pub mod theme;
@@ -2650,6 +2651,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_mcp_hdr_rect = sr.mcp_hdr_rect;
         app.last_collapse_btn_rect = sr.collapse_btn_rect;
         app.last_expand_btn_rect = sr.expand_btn_rect;
+    }
+    if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(l.transcript, !intro_active) {
+        crate::task_panel::render(f, tp_area, &app.task_snapshots);
+        app.last_task_panel_rect = Some(tp_area);
+    } else {
+        app.last_task_panel_rect = None;
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
