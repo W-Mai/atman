@@ -227,6 +227,7 @@ pub struct AppState {
     pub sidebar_collapse_locked: bool,
     pub task_registry: Option<atman_runtime::TaskRegistry>,
     pub task_snapshots: Vec<atman_runtime::TaskSnapshot>,
+    pub activity_nodes: Vec<crate::task_panel::ActivityNode>,
     pub task_panel_collapsed: bool,
     pub task_panel_collapsed_groups: std::collections::HashSet<atman_runtime::TaskKind>,
     pub floating_panels: crate::floating_panels::FloatingPanels,
@@ -862,6 +863,53 @@ impl AppState {
             | StreamFrame::ToolPendingApproval { .. }
             | StreamFrame::ToolApproved { .. }
             | StreamFrame::ToolDenied { .. }) => {
+                match &frame {
+                    StreamFrame::FlowNodeStart {
+                        run_id,
+                        node_id,
+                        kind,
+                        label,
+                        ..
+                    } => {
+                        self.activity_nodes.push(crate::task_panel::ActivityNode {
+                            run_id: run_id.clone(),
+                            node_id: node_id.clone(),
+                            label: label.clone(),
+                            status: crate::task_panel::ActivityStatus::Running,
+                            started_at: std::time::Instant::now(),
+                            ended_at: None,
+                        });
+                        if self.activity_nodes.len() > 128 {
+                            self.activity_nodes.remove(0);
+                        }
+                    }
+                    StreamFrame::FlowNodeEnd {
+                        run_id,
+                        node_id,
+                        status,
+                        ..
+                    } => {
+                        let st = match status {
+                            atman_runtime::event::FlowNodeStatus::Ok => {
+                                crate::task_panel::ActivityStatus::Ok
+                            }
+                            atman_runtime::event::FlowNodeStatus::Err => {
+                                crate::task_panel::ActivityStatus::Err
+                            }
+                            atman_runtime::event::FlowNodeStatus::Cancelled => {
+                                crate::task_panel::ActivityStatus::Cancelled
+                            }
+                        };
+                        for n in self.activity_nodes.iter_mut().rev() {
+                            if n.run_id == *run_id && n.node_id == *node_id {
+                                n.status = st;
+                                n.ended_at = Some(std::time::Instant::now());
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 let (is_done, cancelled, done_run_id) = match &frame {
                     StreamFrame::FlowDone {
                         cancelled, run_id, ..

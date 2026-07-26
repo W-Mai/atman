@@ -1,8 +1,30 @@
+use std::time::Instant;
+
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
+
+use atman_runtime::nodegraph::NodeKind;
+
+#[derive(Debug, Clone)]
+pub struct ActivityNode {
+    pub run_id: String,
+    pub node_id: String,
+    pub label: String,
+    pub status: ActivityStatus,
+    pub started_at: Instant,
+    pub ended_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityStatus {
+    Running,
+    Ok,
+    Err,
+    Cancelled,
+}
 
 use atman_runtime::{TaskId, TaskKind, TaskSnapshot, TaskStatus};
 
@@ -54,6 +76,30 @@ fn status_icon(status: TaskStatus) -> &'static str {
     }
 }
 
+fn activity_status_icon(status: ActivityStatus) -> &'static str {
+    match status {
+        ActivityStatus::Running => "◐",
+        ActivityStatus::Ok => "✓",
+        ActivityStatus::Err => "✗",
+        ActivityStatus::Cancelled => "⊘",
+    }
+}
+
+fn activity_status_color(status: ActivityStatus) -> Color {
+    match status {
+        ActivityStatus::Running => Color::LightBlue,
+        ActivityStatus::Ok => Color::Green,
+        ActivityStatus::Err => Color::Red,
+        ActivityStatus::Cancelled => Color::DarkGray,
+    }
+}
+
+fn fmt_activity_elapsed(started: std::time::Instant, ended: Option<std::time::Instant>) -> String {
+    let end = ended.unwrap_or_else(std::time::Instant::now);
+    let ms = end.duration_since(started).as_millis() as u64;
+    fmt_elapsed(ms)
+}
+
 fn status_color(status: TaskStatus) -> Color {
     match status {
         TaskStatus::Running => Color::LightBlue,
@@ -85,6 +131,7 @@ pub fn render(
     f: &mut Frame,
     area: Rect,
     snapshots: &[TaskSnapshot],
+    activity_nodes: &[ActivityNode],
     collapsed: bool,
     collapsed_groups: &std::collections::HashSet<TaskKind>,
 ) -> TaskPanelHitMap {
@@ -131,7 +178,10 @@ pub fn render(
     let mut row = inner.y;
 
     // --- Upper: Activity (running only, old→new, saturation gradient) ---
-    let running: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| s.is_running()).collect();
+    let running: Vec<&ActivityNode> = activity_nodes
+        .iter()
+        .filter(|n| n.status == ActivityStatus::Running)
+        .collect();
     let running_count = running.len();
     if running_count == 0 {
         lines.push(Line::from(vec![Span::styled(
@@ -140,14 +190,14 @@ pub fn render(
         )]));
         row += 1;
     } else {
-        for (i, snap) in running.iter().enumerate() {
+        for (i, node) in running.iter().enumerate() {
             let color = saturation_color(i, running_count);
-            let icon = status_icon(snap.status);
-            let label = truncate_label(&snap.label, inner.width as usize - 12);
-            let elapsed = fmt_elapsed(snap.elapsed_ms());
+            let icon = activity_status_icon(node.status);
+            let label = truncate_label(&node.label, inner.width as usize - 12);
+            let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
             lines.push(Line::from(vec![
                 Span::styled(" ", Style::default().fg(color)),
-                Span::styled(format!("{icon} "), Style::default().fg(status_color(snap.status))),
+                Span::styled(format!("{icon} "), Style::default().fg(activity_status_color(node.status))),
                 Span::styled(label, Style::default().fg(color)),
                 Span::raw(" "),
                 Span::styled(elapsed, Style::default().fg(Color::DarkGray)),

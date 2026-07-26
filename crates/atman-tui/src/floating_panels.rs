@@ -139,8 +139,7 @@ impl FloatingPanels {
     pub fn hit_test_close(&self, col: u16, row: u16) -> Option<String> {
         self.panels.iter()
             .find(|p| {
-                let close_x = p.rect.x + p.rect.width.saturating_sub(2);
-                row == p.rect.y && col == close_x
+                row == p.rect.y && col >= p.rect.x + 1 && col <= p.rect.x + 2
             })
             .map(|p| p.id.clone())
     }
@@ -148,8 +147,7 @@ impl FloatingPanels {
     pub fn hit_test_maximize(&self, col: u16, row: u16) -> Option<String> {
         self.panels.iter()
             .find(|p| {
-                let max_x = p.rect.x + p.rect.width.saturating_sub(4);
-                row == p.rect.y && col == max_x
+                row == p.rect.y + 1 && col >= p.rect.x + 1 && col <= p.rect.x + 2
             })
             .map(|p| p.id.clone())
     }
@@ -192,16 +190,13 @@ pub fn render(
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(
-                truncate(&panel.title, panel.rect.width as usize - 8),
+                truncate(&panel.title, panel.rect.width as usize - 6),
                 Style::default().fg(if is_focused {
                     Color::White
                 } else {
                     Color::Gray
                 }),
             ),
-            Span::raw(" "),
-            Span::styled("▢", Style::default().fg(Color::DarkGray)),
-            Span::styled("×", Style::default().fg(Color::DarkGray)),
         ]);
 
         let block = Block::default()
@@ -212,6 +207,36 @@ pub fn render(
 
         let inner = block.inner(panel.rect);
         f.render_widget(block, panel.rect);
+
+        // Vertical button bar on left border: × (close) at row 0, ▢ (maximize) at row 1
+        if panel.rect.height >= 3 {
+            let bx = panel.rect.x + 1;
+            let by = panel.rect.y;
+            f.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(
+                    "×",
+                    Style::default().fg(Color::Red),
+                )])),
+                Rect {
+                    x: bx,
+                    y: by,
+                    width: 2,
+                    height: 1,
+                },
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(
+                    "▢",
+                    Style::default().fg(Color::DarkGray),
+                )])),
+                Rect {
+                    x: bx,
+                    y: by + 1,
+                    width: 2,
+                    height: 1,
+                },
+            );
+        }
 
         render_panel_content(f, inner, panel, snapshots);
     }

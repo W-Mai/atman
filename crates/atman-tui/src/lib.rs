@@ -478,8 +478,37 @@ async fn run_frames(
                                 );
                                 editor.set_cursor(pos);
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
-                                // Toggle sidebar section headers on click.
-                                if let Some(r) = app.last_goal_hdr_rect
+                                // Floating panels take priority — they float on top.
+                                if let Some(close_id) =
+                                    app.floating_panels.hit_test_close(me.column, me.row)
+                                {
+                                    app.floating_panels.close(&close_id);
+                                } else if let Some(max_id) =
+                                    app.floating_panels.hit_test_maximize(me.column, me.row)
+                                {
+                                    let canvas = app.last_transcript_rect.unwrap_or_default();
+                                    app.floating_panels.toggle_maximize(&max_id, canvas);
+                                } else if let Some(fp) = app
+                                    .floating_panels
+                                    .hit_test_titlebar(me.column, me.row)
+                                {
+                                    let id = fp.id.clone();
+                                    app.floating_panels.focus(&id);
+                                    app.drag_target = Some(id);
+                                    app.drag_offset = (me.column, me.row);
+                                } else if app
+                                    .floating_panels
+                                    .hit_test_panel(me.column, me.row)
+                                    .is_some()
+                                {
+                                    let fp_id = app
+                                        .floating_panels
+                                        .hit_test_panel(me.column, me.row)
+                                        .unwrap()
+                                        .id
+                                        .clone();
+                                    app.floating_panels.focus(&fp_id);
+                                } else if let Some(r) = app.last_goal_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.goal_collapsed = !app.goal_collapsed;
@@ -571,29 +600,6 @@ async fn run_frames(
                                             }
                                         }
                                     }
-                                } else if let Some(close_id) =
-                                    app.floating_panels.hit_test_close(me.column, me.row)
-                                {
-                                    app.floating_panels.close(&close_id);
-                                } else if let Some(max_id) =
-                                    app.floating_panels.hit_test_maximize(me.column, me.row)
-                                {
-                                    let canvas = app.last_transcript_rect.unwrap_or_default();
-                                    app.floating_panels.toggle_maximize(&max_id, canvas);
-                                } else if let Some(fp) = app
-                                    .floating_panels
-                                    .hit_test_titlebar(me.column, me.row)
-                                {
-                                    let id = fp.id.clone();
-                                    app.floating_panels.focus(&id);
-                                    app.drag_target = Some(id);
-                                    app.drag_offset = (me.column, me.row);
-                                } else if let Some(fp_id) = app
-                                    .floating_panels
-                                    .hit_test_panel(me.column, me.row)
-                                    .map(|fp| fp.id.clone())
-                                {
-                                    app.floating_panels.focus(&fp_id);
                                 } else if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
@@ -2754,6 +2760,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             f,
             tp_area,
             &app.task_snapshots,
+            &app.activity_nodes,
             app.task_panel_collapsed,
             &app.task_panel_collapsed_groups,
         );
