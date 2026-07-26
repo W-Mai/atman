@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
+use crate::task_registry::{TaskKind, TaskRegistry, TaskStatus};
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -179,17 +180,24 @@ pub struct BgEntry {
     pub status: Arc<Mutex<BgStatus>>,
     pub output: Arc<Mutex<BgOutput>>,
     pub log_path: std::path::PathBuf,
+    pub task_id: Option<crate::task_registry::TaskId>,
 }
 
 #[derive(Default)]
 pub struct BgRegistry {
     next_id: AtomicU64,
     entries: Mutex<HashMap<String, Arc<BgEntry>>>,
+    task_registry: Option<TaskRegistry>,
 }
 
 impl BgRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_task_registry(mut self, tr: TaskRegistry) -> Self {
+        self.task_registry = Some(tr);
+        self
     }
 
     pub fn spawn(
@@ -229,12 +237,23 @@ impl BgRegistry {
         let output = Arc::new(Mutex::new(BgOutput::default()));
         let cancel = ctx.cancel.clone();
 
+        let task_id = self.task_registry.as_ref().map(|tr| {
+            tr.register(
+                TaskKind::Bash,
+                cmd.clone(),
+                handle_str.clone(),
+                session_id.clone(),
+                cancel.clone(),
+            )
+        });
+
         let entry = Arc::new(BgEntry {
             session_id: session_id.clone(),
             control_tx,
             status: status.clone(),
             output: output.clone(),
             log_path: log_path.clone(),
+            task_id: task_id.clone(),
         });
         {
             let mut entries = self.entries.lock().unwrap();
@@ -247,6 +266,8 @@ impl BgRegistry {
         let log_path_for_return = log_path.clone();
         let stream_tx = ctx.stream_tx.clone();
         let handle_for_task = handle_str.clone();
+        let task_registry = self.task_registry.clone();
+        let task_id_for_spawn = task_id.clone();
         tokio::spawn(async move {
             run_bg_process(
                 handle_str_for_task,
@@ -261,6 +282,8 @@ impl BgRegistry {
                 registry,
                 stream_tx,
                 handle_for_task,
+                task_registry,
+                task_id_for_spawn,
             )
             .await;
         });
@@ -499,6 +522,8 @@ async fn run_bg_process(
     registry: Arc<BgRegistry>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     handle_for_stream: String,
+    task_registry: Option<TaskRegistry>,
+    task_id: Option<crate::task_registry::TaskId>,
 ) {
     let started_at = now_ms();
     let mut command = tokio::process::Command::new("sh");
@@ -639,13 +664,22 @@ async fn run_bg_process(
         BgStatus::Exited { exit_code, .. } => Some(*exit_code),
         _ => None,
     };
-    *status.lock().unwrap() = final_status;
+    *status.lock().unwrap() = final_status.clone();
 
     if let Some(tx) = &stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::BashExited {
             handle: handle_for_stream,
             exit_code,
         });
+    }
+
+    if let (Some(tr), Some(tid)) = (task_registry, task_id) {
+        let ts = match &final_status {
+            BgStatus::Exited { exit_code, .. } if *exit_code == 0 => TaskStatus::Ok,
+            BgStatus::Killed { .. } | BgStatus::TimedOut { .. } => TaskStatus::Killed,
+            _ => TaskStatus::Err,
+        };
+        tr.finish(&tid, ts);
     }
 }
 

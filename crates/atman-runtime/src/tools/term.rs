@@ -204,6 +204,7 @@ pub struct TermEntry {
     pub child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
     pub master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
     pub started_at: Instant,
+    pub task_id: Option<crate::task_registry::TaskId>,
 }
 
 impl TermEntry {
@@ -240,11 +241,20 @@ impl TermEntry {
 pub struct TermRegistry {
     next_id: AtomicU64,
     entries: Mutex<HashMap<String, Arc<TermEntry>>>,
+    task_registry: Option<crate::task_registry::TaskRegistry>,
 }
 
 impl TermRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_task_registry(
+        mut self,
+        tr: crate::task_registry::TaskRegistry,
+    ) -> Self {
+        self.task_registry = Some(tr);
+        self
     }
 
     pub fn next_handle(&self, session_id: &str) -> TermHandle {
@@ -318,6 +328,8 @@ impl TermRegistry {
         session_dir: PathBuf,
         pty_result: crate::sandbox::PtySpawnResult,
         tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+        label: String,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<(TermHandle, Arc<TermEntry>), RuntimeError> {
         let handle = self.next_handle(&session_id);
         let handle_str = handle.to_string();
@@ -341,6 +353,16 @@ impl TermRegistry {
             .open(&log_path)
             .map_err(|e| RuntimeError::ToolFailed(format!("term.spawn: open log: {e}")))?;
 
+        let task_id = self.task_registry.as_ref().map(|tr| {
+            tr.register(
+                crate::task_registry::TaskKind::Terminal,
+                label,
+                handle_str.clone(),
+                session_id.clone(),
+                cancel,
+            )
+        });
+
         let entry = Arc::new(TermEntry {
             handle: handle.clone(),
             session_id: session_id.clone(),
@@ -359,10 +381,12 @@ impl TermRegistry {
             child: Mutex::new(Some(pty_result.child)),
             master: Mutex::new(Some(pty_result.master)),
             started_at: Instant::now(),
+            task_id: task_id.clone(),
         });
 
         let reader = pty_result.reader;
         let handle_for_loop = handle_str.clone();
+        let task_registry = self.task_registry.clone();
         let join = tokio::task::spawn_blocking(move || {
             run_reader_loop(
                 reader,
@@ -372,6 +396,8 @@ impl TermRegistry {
                 log_file,
                 tui_stream_tx,
                 handle_for_loop,
+                task_registry,
+                task_id,
             );
         });
         *entry.reader_task.lock().expect("reader_task poisoned") = Some(join);
@@ -389,6 +415,8 @@ fn run_reader_loop(
     mut log_file: std::fs::File,
     tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     handle: String,
+    task_registry: Option<crate::task_registry::TaskRegistry>,
+    task_id: Option<crate::task_registry::TaskId>,
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
     let mut last_screen: Option<TerminalScreen> = None;
@@ -441,6 +469,10 @@ fn run_reader_loop(
     let _ = stream_tx.send(TermStreamEvent::Exited { exit_code });
     if let Some(tx) = &tui_stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::TerminalExited { handle, exit_code });
+    }
+
+    if let (Some(tr), Some(tid)) = (task_registry, task_id) {
+        tr.finish(&tid, crate::task_registry::TaskStatus::Ok);
     }
 }
 
@@ -627,6 +659,8 @@ async fn spawn_impl(
         session_dir,
         pty_result,
         ctx.stream_tx.clone(),
+        cmd_str.unwrap_or_else(|| "terminal".into()),
+        ctx.cancel.clone(),
     )?;
 
     let state = entry.current_state();
@@ -1140,6 +1174,7 @@ mod tests {
             child: Mutex::new(None),
             master: Mutex::new(None),
             started_at: Instant::now(),
+            task_id: None,
         });
         registry.insert(entry);
         assert!(registry.lookup(&h.to_string(), "session_a").is_ok());
