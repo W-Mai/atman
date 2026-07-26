@@ -214,7 +214,7 @@ pub fn render(
             let bx = panel.rect.x;
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
-                    "×",
+                    "✕",
                     Style::default().fg(Color::Red),
                 )])),
                 Rect {
