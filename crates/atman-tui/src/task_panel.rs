@@ -4,10 +4,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use atman_runtime::{TaskKind, TaskSnapshot, TaskStatus};
+use atman_runtime::{TaskId, TaskKind, TaskSnapshot, TaskStatus};
 
 pub const TASK_PANEL_WIDTH: u16 = 32;
 pub const TASK_PANEL_STRIP_WIDTH: u16 = 5;
+
+#[derive(Debug, Default)]
+pub struct TaskPanelHitMap {
+    pub kill_rects: Vec<(TaskId, Rect)>,
+    pub group_header_rects: Vec<(TaskKind, Rect)>,
+}
 
 pub fn compute_task_panel_rect(
     area: Rect,
@@ -73,10 +79,16 @@ fn fmt_elapsed(ms: u64) -> String {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: bool) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    snapshots: &[TaskSnapshot],
+    collapsed: bool,
+    collapsed_groups: &std::collections::HashSet<TaskKind>,
+) -> TaskPanelHitMap {
     if collapsed {
         render_strip(f, area, snapshots);
-        return;
+        return TaskPanelHitMap::default();
     }
 
     let t = crate::theme::theme();
@@ -108,11 +120,13 @@ pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: 
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
+    let mut hitmap = TaskPanelHitMap::default();
     if inner.height == 0 || inner.width < 3 {
-        return;
+        return hitmap;
     }
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut row = inner.y;
 
     // --- Upper: Activity (running only, old→new, saturation gradient) ---
     let running: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| s.is_running()).collect();
@@ -122,6 +136,7 @@ pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: 
             "  no active tasks",
             Style::default().fg(Color::DarkGray),
         )]));
+        row += 1;
     } else {
         for (i, snap) in running.iter().enumerate() {
             let color = saturation_color(i, running_count);
@@ -135,6 +150,7 @@ pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: 
                 Span::raw(" "),
                 Span::styled(elapsed, Style::default().fg(Color::DarkGray)),
             ]));
+            row += 1;
         }
     }
 
@@ -143,6 +159,7 @@ pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: 
         "─".repeat(inner.width as usize),
         Style::default().fg(Color::DarkGray),
     )]));
+    row += 1;
 
     // --- Lower: Background tasks grouped by TaskKind ---
     let kinds = [
@@ -159,9 +176,11 @@ pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: 
         if tasks.is_empty() {
             continue;
         }
+        let is_collapsed = collapsed_groups.contains(&kind);
+        let glyph = if is_collapsed { "▸" } else { "▾" };
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" {} ", kind.label()),
+                format!(" {glyph} {} ", kind.label()),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -171,13 +190,32 @@ pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: 
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
+        hitmap.group_header_rects.push((
+            kind,
+            Rect {
+                x: inner.x,
+                y: row,
+                width: inner.width,
+                height: 1,
+            },
+        ));
+        row += 1;
+
+        if is_collapsed {
+            continue;
+        }
         for snap in &tasks {
             let icon = status_icon(snap.status);
-            let label = truncate_label(&snap.label, inner.width as usize - 14);
+            let label = truncate_label(&snap.label, inner.width as usize - 16);
             let meta = if snap.is_running() {
                 fmt_elapsed(snap.elapsed_ms())
             } else {
                 "done".to_string()
+            };
+            let kill_span = if snap.is_running() {
+                Span::styled(" ✕", Style::default().fg(Color::Red))
+            } else {
+                Span::raw("  ")
             };
             lines.push(Line::from(vec![
                 Span::raw("  "),
@@ -188,12 +226,27 @@ pub fn render(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot], collapsed: 
                 Span::styled(label, Style::default().fg(Color::White)),
                 Span::raw(" "),
                 Span::styled(meta, Style::default().fg(Color::DarkGray)),
+                kill_span,
             ]));
+            if snap.is_running() {
+                let kill_x = inner.x + inner.width.saturating_sub(2);
+                hitmap.kill_rects.push((
+                    snap.id.clone(),
+                    Rect {
+                        x: kill_x,
+                        y: row,
+                        width: 2,
+                        height: 1,
+                    },
+                ));
+            }
+            row += 1;
         }
     }
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
+    hitmap
 }
 
 fn truncate_label(s: &str, max: usize) -> String {

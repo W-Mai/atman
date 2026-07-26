@@ -525,6 +525,29 @@ async fn run_frames(
                                     && me.row == r.y
                                 {
                                     app.task_panel_collapsed = !app.task_panel_collapsed;
+                                } else if let Some(r) = app.last_task_panel_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    let hm = &app.last_task_panel_hitmap;
+                                    if let Some((tid, _)) = hm
+                                        .kill_rects
+                                        .iter()
+                                        .find(|(_, kr)| rect_contains(*kr, me.column, me.row))
+                                    {
+                                        if let Some(tr) = &app.task_registry {
+                                            tr.kill(tid);
+                                        }
+                                    } else if let Some((kind, _)) = hm
+                                        .group_header_rects
+                                        .iter()
+                                        .find(|(_, hr)| rect_contains(*hr, me.column, me.row))
+                                    {
+                                        if app.task_panel_collapsed_groups.contains(kind) {
+                                            app.task_panel_collapsed_groups.remove(kind);
+                                        } else {
+                                            app.task_panel_collapsed_groups.insert(*kind);
+                                        }
+                                    }
                                 } else if let Some((panel_idx, node_id)) =
                                     app.hit_test_node(me.column, me.row)
                                 {
@@ -2661,10 +2684,18 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if let Some(tp_area) =
         crate::task_panel::compute_task_panel_rect(l.transcript, !intro_active, app.task_panel_collapsed)
     {
-        crate::task_panel::render(f, tp_area, &app.task_snapshots, app.task_panel_collapsed);
+        let hitmap = crate::task_panel::render(
+            f,
+            tp_area,
+            &app.task_snapshots,
+            app.task_panel_collapsed,
+            &app.task_panel_collapsed_groups,
+        );
         app.last_task_panel_rect = Some(tp_area);
+        app.last_task_panel_hitmap = hitmap;
     } else {
         app.last_task_panel_rect = None;
+        app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
