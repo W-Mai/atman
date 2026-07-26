@@ -174,6 +174,7 @@ pub struct TuiHandle {
     pub session_dir: String,
     pub goal: Option<String>,
     pub stream_rx: broadcast::Receiver<StreamFrame>,
+    pub task_event_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::TaskEvent>>,
     pub submit_tx: Option<mpsc::UnboundedSender<String>>,
     pub note_rx: Option<mpsc::UnboundedReceiver<TuiNote>>,
     pub shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -195,6 +196,7 @@ pub struct TuiHandle {
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub startup_intro: Option<app::StartupIntro>,
     pub trust: atman_runtime::trust::TrustConfig,
+    pub task_registry: Option<atman_runtime::TaskRegistry>,
     /// Toasts collected during boot, to be pushed to app on start.
     pub boot_toasts: Vec<app::ToastNote>,
 }
@@ -206,6 +208,7 @@ impl TuiHandle {
             session_dir: session.dir().to_string_lossy().to_string(),
             goal: session.goal(),
             stream_rx: session.stream_subscribe(),
+            task_event_rx: None,
             submit_tx: None,
             note_rx: None,
             shutdown_rx: None,
@@ -225,6 +228,7 @@ impl TuiHandle {
             session: Some(session),
             startup_intro: None,
             trust: atman_runtime::trust::TrustConfig::default(),
+            task_registry: None,
             boot_toasts: Vec::new(),
         }
     }
@@ -260,6 +264,9 @@ async fn run_frames(
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
+    if let Some(tr) = handle.task_registry.take() {
+        app = app.with_task_registry(tr);
+    }
     let ui_state = crate::states::PersistedUiState::load();
     ui_state.apply(&mut app);
     app.startup_intro = handle.startup_intro.take();
@@ -603,6 +610,11 @@ async fn run_frames(
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+            ev = recv_task_event(handle.task_event_rx.as_mut()) => {
+                if let Some(ev) = ev {
+                    app.apply_task_event(ev);
+                }
+            }
             note = recv_note(handle.note_rx.as_mut()) => {
                 if let Some(n) = note {
                     let (text, level) = n.into_parts();
@@ -899,6 +911,15 @@ async fn recv_note(rx: Option<&mut mpsc::UnboundedReceiver<TuiNote>>) -> Option<
 async fn recv_injection(
     rx: Option<&mut tokio::sync::broadcast::Receiver<atman_runtime::injection::Injection>>,
 ) -> Option<atman_runtime::injection::Injection> {
+    match rx {
+        Some(r) => r.recv().await.ok(),
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_task_event(
+    rx: Option<&mut tokio::sync::broadcast::Receiver<atman_runtime::TaskEvent>>,
+) -> Option<atman_runtime::TaskEvent> {
     match rx {
         Some(r) => r.recv().await.ok(),
         None => std::future::pending().await,

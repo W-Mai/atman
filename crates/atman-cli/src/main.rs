@@ -1834,6 +1834,11 @@ async fn cmd_repl_once(
             session_dir: session.dir().to_string_lossy().to_string(),
             goal: session.goal(),
             stream_rx: session.stream_subscribe(),
+            task_event_rx: executor
+                .tool_ctx
+                .task_registry
+                .as_ref()
+                .map(|tr| tr.subscribe()),
             submit_tx: Some(input_tx),
             note_rx: Some(note_rx),
             shutdown_rx: Some(sh_rx),
@@ -1853,6 +1858,7 @@ async fn cmd_repl_once(
             session: Some(std::sync::Arc::clone(&session)),
             startup_intro: intro.clone(),
             trust: atman_daemon::bootstrap::load_trust_config(config_dir().ok().as_deref()),
+            task_registry: executor.tool_ctx.task_registry.clone(),
             boot_toasts: boot_notifications
                 .into_iter()
                 .map(|n| {

@@ -225,6 +225,8 @@ pub struct AppState {
     pub mcp_collapsed: bool,
     pub sidebar_collapsed: bool,
     pub sidebar_collapse_locked: bool,
+    pub task_registry: Option<atman_runtime::TaskRegistry>,
+    pub task_snapshots: Vec<atman_runtime::TaskSnapshot>,
     pub tick: u64,
     pub last_goal_rect: Option<ratatui::layout::Rect>,
     pub last_plan_rect: Option<ratatui::layout::Rect>,
@@ -290,6 +292,11 @@ impl AppState {
 
     pub fn with_trust(mut self, trust: atman_runtime::trust::TrustConfig) -> Self {
         self.trust = trust;
+        self
+    }
+
+    pub fn with_task_registry(mut self, tr: atman_runtime::TaskRegistry) -> Self {
+        self.task_registry = Some(tr);
         self
     }
 
@@ -705,6 +712,26 @@ impl AppState {
             let fade_start = t.fade_started.unwrap_or(now);
             now.duration_since(fade_start) < fade_duration
         });
+    }
+
+    pub fn apply_task_event(&mut self, event: atman_runtime::TaskEvent) {
+        match event {
+            atman_runtime::TaskEvent::Registered(snap) => {
+                self.task_snapshots.push(snap);
+                self.items_version = self.items_version.wrapping_add(1);
+            }
+            atman_runtime::TaskEvent::StatusChanged { id, new, .. } => {
+                if let Some(s) = self.task_snapshots.iter_mut().find(|s| s.id == id) {
+                    s.status = new;
+                    s.ended_at = Some(std::time::Instant::now());
+                    self.items_version = self.items_version.wrapping_add(1);
+                }
+            }
+            atman_runtime::TaskEvent::Reaped { id } => {
+                self.task_snapshots.retain(|s| s.id != id);
+                self.items_version = self.items_version.wrapping_add(1);
+            }
+        }
     }
 
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
