@@ -900,17 +900,19 @@ impl Tool for MemoryHistoryRead {
                 ),
                 _ => None,
             };
-            let messages = match crate::projection::message_window::replay_messages_from(
+            let messages = match crate::projection::message_window::replay_all_messages_with_seq(
                 &dir.join("events.jsonl"),
             ) {
                 Ok(msgs) => {
-                    if let Some(filter) = role_filter.as_deref() {
+                    let filtered: Vec<_> = if let Some(filter) = role_filter.as_deref() {
                         msgs.into_iter()
+                            .map(|(_, m)| m)
                             .filter(|m| filter.iter().any(|r| r == m.role.as_str()))
                             .collect()
                     } else {
-                        msgs
-                    }
+                        msgs.into_iter().map(|(_, m)| m).collect()
+                    };
+                    filtered
                 }
                 Err(e) => {
                     return Err(RuntimeError::ToolFailed(format!(
