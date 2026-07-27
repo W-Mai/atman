@@ -582,7 +582,7 @@ async fn run_frames(
                                     app.save_ui_state();
                                 } else if let Some(r) = app.last_task_panel_rect
                                     && me.column >= r.x
-                                    && me.column < r.x + 3
+                                    && me.column < r.x + 10
                                     && me.row == r.y
                                 {
                                     app.task_panel_collapsed = !app.task_panel_collapsed;

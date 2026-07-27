@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 #[derive(Debug, Clone)]
 pub struct ActivityNode {
@@ -136,30 +136,44 @@ pub fn render(
     f.render_widget(Clear, area);
 
     let panel_bg: Color = t.modal_bg.into();
+    let title_line = Line::from(vec![
+        Span::styled(
+            "  ≡",
+            Style::default()
+                .fg(t.heading.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "Tasks",
+            Style::default()
+                .fg(t.heading.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("({})", snapshots.iter().filter(|s| s.is_running()).count()),
+            Style::default().fg(t.subtle_fg.into()),
+        ),
+    ]);
     f.render_widget(
         Block::default()
             .style(Style::default().bg(panel_bg))
-            .title(" ≡ ")
-            .title(
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled("Tasks", Style::default().fg(t.heading.into())),
-                Span::raw(" "),
-                Span::styled(
-                    format!("({})", snapshots.iter().filter(|s| s.is_running()).count()),
-                    Style::default().fg(t.subtle_fg.into()),
-                ),
-            ])
-            .alignment(Alignment::Right),
-        ),
+            .title(title_line)
+            .padding(ratatui::widgets::Padding {
+                left: 0,
+                right: 0,
+                top: 1,
+                bottom: 0,
+            }),
         area,
     );
 
     let inner = Rect {
         x: area.x + 2,
-        y: area.y + 1,
+        y: area.y + 2,
         width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
+        height: area.height.saturating_sub(3),
     };
     let mut hitmap = TaskPanelHitMap::default();
     if inner.height == 0 || inner.width < 3 {
@@ -227,6 +241,10 @@ pub fn render(
                 },
             ));
             row += 1;
+            if i + 1 < running_count {
+                lines.push(Line::from(""));
+                row += 1;
+            }
         }
     }
 
@@ -247,6 +265,7 @@ pub fn render(
         TaskKind::Dispatch,
     ];
 
+    let mut first_group = true;
     for kind in kinds {
         let running_tasks: Vec<&TaskSnapshot> = snapshots
             .iter()
@@ -255,18 +274,27 @@ pub fn render(
         if running_tasks.is_empty() {
             continue;
         }
+        if !first_group {
+            lines.push(Line::from(""));
+            row += 1;
+        }
+        first_group = false;
         let is_collapsed = collapsed_groups.contains(&kind);
-        let glyph = if is_collapsed { "▸" } else { "▾" };
+        let glyph = if is_collapsed { "›" } else { "⌄" };
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" {glyph} {} ", kind.label()),
+                format!(" {glyph} "),
+                Style::default().fg(t.subtle_fg.into()),
+            ),
+            Span::styled(
+                kind.label(),
                 Style::default()
                     .fg(t.heading.into())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("({})", running_tasks.len()),
-                Style::default().fg(t.meta_fg.into()),
+                format!(" {}", running_tasks.len()),
+                Style::default().fg(t.subtle_fg.into()),
             ),
         ]));
         hitmap.group_header_rects.push((
@@ -284,7 +312,7 @@ pub fn render(
             continue;
         }
         let w = inner.width as usize;
-        for snap in &running_tasks {
+        for (task_idx, snap) in running_tasks.iter().enumerate() {
             let is_task_hovered = hover.hovered_task_id == Some(snap.id.clone());
             let is_kill_hovered = hover.hovered_kill_id == Some(snap.id.clone());
             let is_kill_armed =
@@ -483,6 +511,10 @@ pub fn render(
                 ));
                 row += 1;
             }
+            if task_idx + 1 < running_tasks.len() {
+                lines.push(Line::from(""));
+                row += 1;
+            }
         }
     }
 
@@ -536,13 +568,24 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
         Span::styled("○", Style::default().fg(t.subtle_fg.into()))
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(t.subtle_fg.into()))
-        .title(" ≡ ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let panel_bg: Color = t.modal_bg.into();
+    f.render_widget(
+        Block::default()
+            .style(Style::default().bg(panel_bg))
+            .title(Line::from(vec![Span::styled(
+                "≡",
+                Style::default()
+                    .fg(t.heading.into())
+                    .add_modifier(Modifier::BOLD),
+            )])),
+        area,
+    );
+    let inner = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
     f.render_widget(
         Paragraph::new(Line::from(dot)).alignment(Alignment::Center),
         inner,
