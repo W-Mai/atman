@@ -1281,6 +1281,19 @@ impl AppState {
         }
     }
 
+    pub fn cancel_running_activities(&mut self) {
+        let now = std::time::Instant::now();
+        for n in self.activity_nodes.iter_mut() {
+            if n.status == crate::task_panel::ActivityStatus::Running {
+                n.status = crate::task_panel::ActivityStatus::Cancelled;
+                n.ended_at = Some(now);
+            }
+        }
+        self.streaming = false;
+        self.waiting_for_llm = false;
+        self.reset_lag_state();
+    }
+
     pub fn record_lag(&mut self, dropped: u64, now: Instant) {
         let within_cooldown = self
             .last_lag_at

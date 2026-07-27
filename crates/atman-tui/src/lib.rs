@@ -735,6 +735,16 @@ async fn run_frames(
                 match frame {
                     Ok(frame) => {
                         app.apply_stream_frame(frame);
+                        let mut drained = 0u32;
+                        while drained < 256 {
+                            match handle.stream_rx.try_recv() {
+                                Ok(extra) => {
+                                    app.apply_stream_frame(extra);
+                                    drained += 1;
+                                }
+                                Err(_) => break,
+                            }
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         app.record_lag(n, std::time::Instant::now());
@@ -1996,6 +2006,7 @@ fn handle_approval_key(
                 app::NoteLevel::Warn,
             );
             app.deny_arm = None;
+            app.cancel_running_activities();
             true
         }
         _ => false,
@@ -2315,6 +2326,7 @@ fn handle_key(
             if let Some(tx) = control_tx {
                 let _ = tx.send(TuiControl::HardStop);
             }
+            app.cancel_running_activities();
             *interrupt_prompt = None;
         }
         KeyAction::ScrollUp | KeyAction::PageUp => {
@@ -2347,6 +2359,7 @@ fn handle_key(
                     let _ = tx.send(TuiControl::CancelFlow);
                 }
                 app.push_note("cancel requested", app::NoteLevel::Warn);
+                app.cancel_running_activities();
             }
             *interrupt_prompt = None;
         }
@@ -2391,6 +2404,7 @@ fn handle_key(
                     let _ = tx.send(TuiControl::HardStop);
                 }
                 app.push_note("flow stopped (Ctrl+C)", app::NoteLevel::Warn);
+                app.cancel_running_activities();
                 *interrupt_prompt = None;
             } else {
                 let within_window = interrupt_prompt

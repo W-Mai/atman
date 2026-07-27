@@ -602,6 +602,7 @@ async fn call_and_maybe_stream_inner(
     let stall_secs = req.stall_timeout_secs;
     let request_start = std::time::Instant::now();
     let mut first_token_at: Option<std::time::Instant> = None;
+    let flow_cancel = session.map(|s| s.flow_cancel_token()).unwrap_or_default();
     let obs = provider.call_streaming(req);
     let mut events = obs.events;
     let output = obs.output;
@@ -619,6 +620,9 @@ async fn call_and_maybe_stream_inner(
     loop {
         tokio::select! {
             biased;
+            _ = flow_cancel.cancelled() => {
+                return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
+            }
             ev = events.recv() => {
                 match ev {
                     Ok(crate::event::NodeEvent::LlmChunk { text, .. }) => {
