@@ -462,9 +462,8 @@ pub fn render(
             row += 1;
             for (i, content_trunc) in content_rows.iter().enumerate() {
                 let content_y = header_row + 1 + i as u16;
-                let content_pad = w.saturating_sub(1 + 1 + content_trunc.chars().count() + 2);
+                let content_pad = w.saturating_sub(1 + content_trunc.chars().count() + 2);
                 lines.push(Line::from(vec![
-                    Span::styled(bar, Style::default().fg(bar_color).bg(c_bg)),
                     Span::styled(
                         format!(" {content_trunc}"),
                         Style::default().fg(t.meta_fg.into()).bg(c_bg),
