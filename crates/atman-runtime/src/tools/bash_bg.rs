@@ -251,7 +251,7 @@ impl BgRegistry {
                 cmd.clone(),
                 handle_str.clone(),
                 session_id.clone(),
-                task_cancel,
+                task_cancel.clone(),
             )
         });
 
@@ -286,7 +286,7 @@ impl BgRegistry {
                 status_for_task,
                 output,
                 control_rx,
-                cancel,
+                task_cancel,
                 registry,
                 stream_tx,
                 handle_for_task,

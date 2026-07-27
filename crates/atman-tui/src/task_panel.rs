@@ -439,7 +439,7 @@ pub fn render(
                 };
                 let label_trunc = truncate_label(&collapsed_label_text, collapsed_max);
                 let remaining = collapsed_max.saturating_sub(label_trunc.chars().count() + 1);
-                let summary_trunc = if collapsed_summary_text.is_empty() {
+                let summary_trunc = if collapsed_summary_text.is_empty() || remaining < 2 {
                     String::new()
                 } else {
                     truncate_label(&collapsed_summary_text, remaining)
@@ -450,7 +450,9 @@ pub fn render(
                     } else {
                         1 + summary_trunc.chars().count()
                     };
-                let c_pad = w.saturating_sub(left_w + collapsed_label_w + right_w);
+                let c_pad = w
+                    .saturating_sub(left_w + collapsed_label_w + right_w)
+                    .max(0);
 
                 // top padding (with bar)
                 let top_y = row;
