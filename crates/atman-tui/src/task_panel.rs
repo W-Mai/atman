@@ -177,11 +177,11 @@ pub fn render(
         let w = inner.width as usize;
         for (i, node) in running.iter().enumerate() {
             let ratio = if running_count <= 1 {
-                0.5
+                0.0
             } else {
-                i as f64 / (running_count - 1) as f64
+                1.0 - (i as f64 / (running_count - 1) as f64)
             };
-            let bg = t.panel_bg.lerp(t.highlight_bg, ratio);
+            let bg = t.user_msg_bg.lerp(t.panel_bg, ratio);
             let (kind_icon, kind_color) = node_kind_glyph(&node.kind);
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
             let elapsed_w = elapsed.chars().count() + 1;
