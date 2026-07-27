@@ -284,10 +284,26 @@ fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
             .map(|h| h.snippet.clone())
             .unwrap_or_default()
     } else {
-        modal.preview_lines.join("\n")
+        modal.preview_lines.join("\n\n")
     };
-    let para = Paragraph::new(text).wrap(Wrap { trim: false });
-    f.render_widget(para, inner);
+    if text.trim().is_empty() {
+        return;
+    }
+    let lines = crate::markdown::render_markdown_with_width(&text, inner.width);
+    for (i, line) in lines.into_iter().enumerate() {
+        if i as u16 >= inner.height {
+            break;
+        }
+        f.render_widget(
+            line,
+            Rect {
+                x: inner.x,
+                y: inner.y + i as u16,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
 }
 
 #[cfg(test)]
