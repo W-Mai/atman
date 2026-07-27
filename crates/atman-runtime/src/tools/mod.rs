@@ -16,6 +16,7 @@ pub mod preview;
 pub mod session;
 pub mod sleep;
 pub mod stdlib;
+pub mod task_ops;
 pub mod term;
 pub mod test;
 pub mod tool_output;

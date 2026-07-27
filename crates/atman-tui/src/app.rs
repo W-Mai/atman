@@ -197,6 +197,13 @@ pub struct AppState {
     pub last_sidebar_rect: Option<ratatui::layout::Rect>,
     pub input_rect: Option<ratatui::layout::Rect>,
     pub hovered_thinking_idx: Option<usize>,
+    pub hovered_task_id: Option<atman_runtime::TaskId>,
+    pub hovered_kill_id: Option<atman_runtime::TaskId>,
+    pub hovered_insert_handle: Option<String>,
+    pub hovered_activity: Option<(String, String)>,
+    pub hovered_history_btn: bool,
+    pub kill_armed_id: Option<atman_runtime::TaskId>,
+    pub kill_armed_at: Option<Instant>,
     pub startup_intro: Option<StartupIntro>,
     pub form_modal: crate::form_modal::FormModal,
     pub animation_frame: u32,
@@ -385,6 +392,62 @@ impl AppState {
         if self.hovered_thinking_idx != idx {
             self.hovered_thinking_idx = idx;
             self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn set_hovered_task(&mut self, id: Option<atman_runtime::TaskId>) {
+        if self.hovered_task_id != id {
+            self.hovered_task_id = id;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn set_hovered_kill(&mut self, id: Option<atman_runtime::TaskId>) {
+        if self.hovered_kill_id != id {
+            self.hovered_kill_id = id;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn set_hovered_insert(&mut self, handle: Option<String>) {
+        if self.hovered_insert_handle != handle {
+            self.hovered_insert_handle = handle;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn set_hovered_activity(&mut self, key: Option<(String, String)>) {
+        if self.hovered_activity != key {
+            self.hovered_activity = key;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn set_hovered_history_btn(&mut self, hovered: bool) {
+        if self.hovered_history_btn != hovered {
+            self.hovered_history_btn = hovered;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn arm_kill(&mut self, id: atman_runtime::TaskId) {
+        self.kill_armed_id = Some(id);
+        self.kill_armed_at = Some(Instant::now());
+        self.items_version = self.items_version.wrapping_add(1);
+    }
+
+    pub fn clear_kill_arm(&mut self) {
+        if self.kill_armed_id.is_some() {
+            self.kill_armed_id = None;
+            self.kill_armed_at = None;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn kill_arm_expired(&self) -> bool {
+        match self.kill_armed_at {
+            Some(t) => t.elapsed() > std::time::Duration::from_secs(2),
+            None => true,
         }
     }
 

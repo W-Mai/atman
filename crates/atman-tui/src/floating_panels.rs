@@ -311,31 +311,32 @@ fn render_panel_content(
 }
 
 fn render_history_content(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
+    let t = crate::theme::theme();
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![Span::styled(
         " Tool execution history",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.subtle_fg.into()),
     )]));
     lines.push(Line::from(""));
-    for snap in snapshots.iter() {
+    let done: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| !s.is_running()).collect();
+    for snap in &done {
         let icon = status_icon(snap.status);
-        let elapsed = if snap.is_running() {
-            format_elapsed(snap.elapsed_ms())
-        } else {
-            "done".into()
-        };
+        let elapsed = format_elapsed(snap.elapsed_ms());
         lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {icon} "),
-                Style::default().fg(status_color(snap.status)),
-            ),
+            Span::styled(format!(" {icon} "), Style::default().fg(t.subtle_fg.into())),
             Span::styled(
                 truncate(&snap.label, area.width as usize - 12),
-                Style::default().fg(Color::White),
+                Style::default().fg(t.subtle_fg.into()),
             ),
             Span::raw(" "),
-            Span::styled(elapsed, Style::default().fg(Color::DarkGray)),
+            Span::styled(elapsed, Style::default().fg(t.subtle_fg.into())),
         ]));
+    }
+    if done.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            " (no completed tasks)",
+            Style::default().fg(t.subtle_fg.into()),
+        )]));
     }
     f.render_widget(Paragraph::new(lines), area);
 }

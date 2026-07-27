@@ -37,6 +37,18 @@ pub struct TaskPanelHitMap {
     pub task_rects: Vec<(String, Rect)>,
     pub activity_rects: Vec<(String, String, Rect)>,
     pub history_btn_rect: Option<Rect>,
+    pub insert_rects: Vec<(String, Rect)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TaskPanelHover {
+    pub hovered_task_id: Option<TaskId>,
+    pub hovered_kill_id: Option<TaskId>,
+    pub hovered_insert_handle: Option<String>,
+    pub hovered_activity: Option<(String, String)>,
+    pub hovered_history_btn: bool,
+    pub kill_armed_id: Option<TaskId>,
+    pub kill_armed_expired: bool,
 }
 
 pub fn compute_task_panel_rect(area: Rect, show: bool, collapsed: bool) -> Option<Rect> {
@@ -79,26 +91,28 @@ fn fmt_activity_elapsed(started: std::time::Instant, ended: Option<std::time::In
 }
 
 fn status_color(status: TaskStatus) -> Color {
+    let t = crate::theme::theme();
     match status {
-        TaskStatus::Running => Color::LightBlue,
-        TaskStatus::Ok => Color::Green,
-        TaskStatus::Err => Color::Red,
-        TaskStatus::Killed => Color::DarkGray,
+        TaskStatus::Running => t.accent.into(),
+        TaskStatus::Ok => t.success.into(),
+        TaskStatus::Err => t.error.into(),
+        TaskStatus::Killed => t.subtle_fg.into(),
     }
 }
 
 pub fn node_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, Color) {
+    let t = crate::theme::theme();
     use atman_runtime::nodegraph::NodeKind;
     match kind {
-        NodeKind::Llm { .. } => ("✦", Color::Magenta),
-        NodeKind::ToolCall { .. } => ("🔧", Color::Blue),
-        NodeKind::Fanout { .. } => ("⇉", Color::Magenta),
-        NodeKind::UserConfirm => ("?", Color::LightCyan),
-        NodeKind::Subflow { .. } => ("↳", Color::Cyan),
-        NodeKind::Message { .. } => ("✉", Color::White),
-        NodeKind::FixUntilTest => ("↻", Color::LightMagenta),
-        NodeKind::When { .. } => ("⋯", Color::DarkGray),
-        NodeKind::Return => ("←", Color::Green),
+        NodeKind::Llm { .. } => ("✦", t.accent.into()),
+        NodeKind::ToolCall { .. } => ("🔧", t.heading.into()),
+        NodeKind::Fanout { .. } => ("⇉", t.accent.into()),
+        NodeKind::UserConfirm => ("?", t.warn.into()),
+        NodeKind::Subflow { .. } => ("↳", t.accent.into()),
+        NodeKind::Message { .. } => ("✉", t.tinted_fg.into()),
+        NodeKind::FixUntilTest => ("↻", t.warn.into()),
+        NodeKind::When { .. } => ("⋯", t.subtle_fg.into()),
+        NodeKind::Return => ("←", t.success.into()),
     }
 }
 
@@ -111,13 +125,16 @@ fn fmt_elapsed(ms: u64) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     area: Rect,
     snapshots: &[TaskSnapshot],
     activity_nodes: &[ActivityNode],
+    items: &[crate::app::OutputItem],
     collapsed: bool,
     collapsed_groups: &std::collections::HashSet<TaskKind>,
+    hover: &TaskPanelHover,
 ) -> TaskPanelHitMap {
     if collapsed {
         render_strip(f, area, snapshots);
@@ -136,7 +153,7 @@ pub fn render(
         .title(
             Line::from(vec![
                 Span::raw(" "),
-                Span::styled("Tasks", Style::default().fg(Color::Yellow)),
+                Span::styled("Tasks", Style::default().fg(t.heading.into())),
                 Span::raw(" "),
                 Span::styled(
                     format!("({})", snapshots.iter().filter(|s| s.is_running()).count()),
@@ -181,7 +198,16 @@ pub fn render(
             } else {
                 1.0 - (i as f64 / (running_count - 1) as f64)
             };
-            let bg = t.user_msg_bg.lerp(t.panel_bg, ratio);
+            let base_bg = t.user_msg_bg.lerp(t.panel_bg, ratio);
+            let is_hovered = hover
+                .hovered_activity
+                .as_ref()
+                .is_some_and(|(r, n)| *r == node.run_id && *n == node.node_id);
+            let bg: Color = if is_hovered {
+                t.user_msg_bg.lerp(t.highlight_bg, 0.3)
+            } else {
+                base_bg
+            };
             let (kind_icon, kind_color) = node_kind_glyph(&node.kind);
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
             let elapsed_w = elapsed.chars().count() + 1;
@@ -230,8 +256,11 @@ pub fn render(
     ];
 
     for kind in kinds {
-        let tasks: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| s.kind == kind).collect();
-        if tasks.is_empty() {
+        let running_tasks: Vec<&TaskSnapshot> = snapshots
+            .iter()
+            .filter(|s| s.kind == kind && s.is_running())
+            .collect();
+        if running_tasks.is_empty() {
             continue;
         }
         let is_collapsed = collapsed_groups.contains(&kind);
@@ -240,12 +269,12 @@ pub fn render(
             Span::styled(
                 format!(" {glyph} {} ", kind.label()),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(t.heading.into())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("({})", tasks.len()),
-                Style::default().fg(Color::DarkGray),
+                format!("({})", running_tasks.len()),
+                Style::default().fg(t.meta_fg.into()),
             ),
         ]));
         hitmap.group_header_rects.push((
@@ -262,52 +291,199 @@ pub fn render(
         if is_collapsed {
             continue;
         }
-        for snap in &tasks {
+        let w = inner.width as usize;
+        for snap in &running_tasks {
+            let is_task_hovered = hover.hovered_task_id == Some(snap.id.clone());
+            let is_kill_hovered = hover.hovered_kill_id == Some(snap.id.clone());
+            let is_kill_armed =
+                hover.kill_armed_id == Some(snap.id.clone()) && !hover.kill_armed_expired;
+            let base_bg: Color = t.user_msg_bg.into();
+            let bg: Color = if is_task_hovered {
+                t.user_msg_bg.lerp(t.highlight_bg, 0.3)
+            } else {
+                base_bg
+            };
+            let bar_color: Color = status_color(snap.status);
+            let bar = if is_task_hovered { "▌" } else { "▎" };
+
             let icon = status_icon(snap.status);
-            let label = truncate_label(&snap.label, inner.width as usize - 16);
-            let meta = if snap.is_running() {
-                fmt_elapsed(snap.elapsed_ms())
+            let elapsed = fmt_elapsed(snap.elapsed_ms());
+            let elapsed_w = elapsed.chars().count();
+            // layout: bar(1) sp(1) icon(1) sp(1) label(...) pad sp(1) elapsed sp(1) insert(1) sp(1) kill(1) sp(1)
+            let right_w = 1 + elapsed_w + 1 + 1 + 1 + 1 + 1; // sp + elapsed + sp + ↵ + sp + ✕ + sp
+            let left_w = 1 + 1 + 1 + 1; // bar + sp + icon + sp
+            let label_max = w.saturating_sub(left_w + right_w);
+            let label = truncate_label(&snap.label, label_max);
+            let label_w = label.chars().count();
+            let pad = w.saturating_sub(left_w + label_w + right_w);
+
+            let insert_color: Color = if is_kill_hovered || is_kill_armed {
+                t.meta_fg.into()
+            } else if hover.hovered_insert_handle.as_deref() == Some(&snap.source_handle) {
+                t.tinted_fg.into()
             } else {
-                "done".to_string()
+                t.meta_fg.into()
             };
-            let kill_span = if snap.is_running() {
-                Span::styled(" ✕", Style::default().fg(Color::Red))
+            let insert_mod = if hover.hovered_insert_handle.as_deref() == Some(&snap.source_handle)
+            {
+                Modifier::BOLD
             } else {
-                Span::raw("  ")
+                Modifier::empty()
             };
+
+            let (kill_glyph, kill_color, kill_mod) = if is_kill_armed {
+                ("⚠", t.warn.into(), Modifier::BOLD)
+            } else if is_kill_hovered {
+                ("✕", t.error.into(), Modifier::BOLD)
+            } else {
+                ("✕", t.error.into(), Modifier::empty())
+            };
+
             lines.push(Line::from(vec![
-                Span::raw("  "),
+                Span::styled(bar, Style::default().fg(bar_color).bg(bg)),
+                Span::styled(format!(" {icon} "), Style::default().fg(bar_color).bg(bg)),
+                Span::styled(label, Style::default().fg(t.tinted_fg.into()).bg(bg)),
+                Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(elapsed, Style::default().fg(t.meta_fg.into()).bg(bg)),
+                Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    format!("{icon} "),
-                    Style::default().fg(status_color(snap.status)),
+                    "↵",
+                    Style::default()
+                        .fg(insert_color)
+                        .bg(bg)
+                        .add_modifier(insert_mod),
                 ),
-                Span::styled(label, Style::default().fg(Color::White)),
-                Span::raw(" "),
-                Span::styled(meta, Style::default().fg(Color::DarkGray)),
-                kill_span,
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(
+                    kill_glyph,
+                    Style::default()
+                        .fg(kill_color)
+                        .bg(bg)
+                        .add_modifier(kill_mod),
+                ),
+                Span::styled(" ", Style::default().bg(bg)),
             ]));
-            if snap.is_running() {
-                let kill_x = inner.x + inner.width.saturating_sub(2);
-                hitmap.kill_rects.push((
-                    snap.id.clone(),
-                    Rect {
-                        x: kill_x,
-                        y: row,
-                        width: 2,
-                        height: 1,
-                    },
-                ));
-            }
+
+            // kill is at width-2 (with trailing space), insert is 2 chars before
+            let kill_x = inner.x + inner.width.saturating_sub(2);
+            let insert_x = kill_x.saturating_sub(2);
+            let header_row = row;
+            hitmap.kill_rects.push((
+                snap.id.clone(),
+                Rect {
+                    x: kill_x,
+                    y: row,
+                    width: 1,
+                    height: 1,
+                },
+            ));
+            hitmap.insert_rects.push((
+                snap.source_handle.clone(),
+                Rect {
+                    x: insert_x,
+                    y: row,
+                    width: 1,
+                    height: 1,
+                },
+            ));
+
+            // content line: sub-node for flow/agent, output tail for bash/terminal
+            let content_lines: Vec<String> = match snap.kind {
+                TaskKind::Flow | TaskKind::Subflow | TaskKind::Agent | TaskKind::Dispatch => {
+                    let sub = activity_nodes.iter().rev().find(|n| {
+                        n.run_id == snap.source_handle && n.status == ActivityStatus::Running
+                    });
+                    sub.map(|n| vec![n.label.clone()]).unwrap_or_default()
+                }
+                TaskKind::Bash => {
+                    let label = snap.label.trim();
+                    let exe = label.split_whitespace().next().unwrap_or("");
+                    let rest = label.strip_prefix(exe).unwrap_or(label).trim_start();
+                    if rest.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![rest.to_string()]
+                    }
+                }
+                TaskKind::Terminal => {
+                    let item = items.iter().rev().find(|it| match it {
+                        crate::app::OutputItem::Terminal { handle, .. } => {
+                            *handle == snap.source_handle
+                        }
+                        _ => false,
+                    });
+                    let mut found: Vec<String> = Vec::new();
+                    if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
+                        let cols = screen.cols as usize;
+                        let rows = screen.rows as usize;
+                        if cols > 0 && rows > 0 {
+                            for r in (0..rows).rev() {
+                                let start = r * cols;
+                                let end = start + cols;
+                                let line: String = screen
+                                    .cells
+                                    .get(start..end)
+                                    .map(|cells| {
+                                        cells.iter().map(|c| c.chars.as_str()).collect::<String>()
+                                    })
+                                    .unwrap_or_default();
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    found.push(trimmed.to_string());
+                                    if found.len() >= 3 {
+                                        break;
+                                    }
+                                }
+                            }
+                            found.reverse();
+                        }
+                    }
+                    found
+                }
+            };
+            let content_rows: Vec<String> = if content_lines.is_empty() {
+                vec![String::new()]
+            } else {
+                content_lines
+                    .iter()
+                    .map(|c| truncate_label(c, w.saturating_sub(3)))
+                    .collect()
+            };
             hitmap.task_rects.push((
                 snap.source_handle.clone(),
                 Rect {
                     x: inner.x,
-                    y: row,
-                    width: inner.width.saturating_sub(3),
+                    y: header_row,
+                    width: inner.width.saturating_sub(4),
                     height: 1,
                 },
             ));
             row += 1;
+            for (i, content_trunc) in content_rows.iter().enumerate() {
+                let content_y = header_row + 1 + i as u16;
+                lines.push(Line::from(vec![
+                    Span::styled(bar, Style::default().fg(bar_color).bg(bg)),
+                    Span::styled(
+                        format!(" {} ", content_trunc),
+                        Style::default().fg(t.meta_fg.into()).bg(bg),
+                    ),
+                    Span::styled(
+                        " ".repeat(w.saturating_sub(1 + content_trunc.chars().count() + 1)),
+                        Style::default().bg(bg),
+                    ),
+                ]));
+                hitmap.task_rects.push((
+                    snap.source_handle.clone(),
+                    Rect {
+                        x: inner.x,
+                        y: content_y,
+                        width: inner.width.saturating_sub(4),
+                        height: 1,
+                    },
+                ));
+                row += 1;
+            }
         }
     }
 
@@ -322,15 +498,15 @@ pub fn render(
             width: inner.width,
             height: 1,
         };
+        let history_color: Color = if hover.hovered_history_btn {
+            t.tinted_fg.into()
+        } else {
+            t.subtle_fg.into()
+        };
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled(
-                    "⊞ History",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("⊞ History", Style::default().fg(history_color)),
             ])),
             btn_rect,
         );
@@ -402,5 +578,96 @@ mod tests {
         use atman_runtime::nodegraph::NodeKind;
         let (icon, _) = node_kind_glyph(&NodeKind::Llm { model: None });
         assert_eq!(icon, "✦");
+    }
+
+    #[test]
+    fn hitmap_group_header_not_overlapped_by_task_content() {
+        use atman_runtime::task_registry::{TaskKind, TaskStatus};
+        use ratatui::backend::TestBackend;
+        use std::time::Instant;
+
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 20,
+        };
+        let snapshots = vec![
+            TaskSnapshot {
+                id: TaskId::default(),
+                kind: TaskKind::Terminal,
+                label: "vim".into(),
+                status: TaskStatus::Running,
+                started_at: Instant::now(),
+                ended_at: None,
+                source_handle: "term_0".into(),
+                session_id: "s".into(),
+            },
+            TaskSnapshot {
+                id: TaskId::default(),
+                kind: TaskKind::Flow,
+                label: "agent".into(),
+                status: TaskStatus::Running,
+                started_at: Instant::now(),
+                ended_at: None,
+                source_handle: "flow_0".into(),
+                session_id: "s".into(),
+            },
+        ];
+        let items = vec![crate::app::OutputItem::Terminal {
+            handle: "term_0".into(),
+            screen: atman_runtime::tools::term::TerminalScreen {
+                rows: 3,
+                cols: 10,
+                cells: vec![
+                    atman_runtime::tools::term::TerminalCell {
+                        chars: "line1".into(),
+                        ..Default::default()
+                    };
+                    10
+                ],
+                cursor: None,
+                alt_screen: false,
+            },
+            accumulated_bytes: vec![],
+            mode: crate::app::TerminalViewMode::Capture,
+            done: false,
+            expanded: false,
+            scroll_offset: None,
+        }];
+        let hover = TaskPanelHover::default();
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut hm = TaskPanelHitMap::default();
+        terminal
+            .draw(|f| {
+                hm = render(
+                    f,
+                    area,
+                    &snapshots,
+                    &[],
+                    &items,
+                    false,
+                    &std::collections::HashSet::new(),
+                    &hover,
+                );
+            })
+            .unwrap();
+
+        let flow_header = hm
+            .group_header_rects
+            .iter()
+            .find(|(k, _)| *k == TaskKind::Flow)
+            .expect("Flow group header");
+
+        for (_, tr) in &hm.task_rects {
+            assert!(
+                !(flow_header.1.y >= tr.y && flow_header.1.y < tr.y + tr.height),
+                "Flow group header y={} is inside task_rect y={} height={}",
+                flow_header.1.y,
+                tr.y,
+                tr.height
+            );
+        }
     }
 }

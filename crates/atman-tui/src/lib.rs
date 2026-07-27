@@ -559,14 +559,40 @@ async fn run_frames(
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     let hm = &app.last_task_panel_hitmap;
-                                    if let Some((tid, _)) = hm
+                                    let hit_kill = hm
                                         .kill_rects
                                         .iter()
                                         .find(|(_, kr)| rect_contains(*kr, me.column, me.row))
-                                    {
-                                        if let Some(tr) = &app.task_registry {
-                                            tr.kill(tid);
+                                        .map(|(t, _)| t.clone());
+                                    if let Some(tid) = hit_kill {
+                                        if app.kill_armed_id == Some(tid.clone())
+                                            && !app.kill_arm_expired()
+                                        {
+                                            if let Some(tr) = &app.task_registry {
+                                                tr.kill(&tid);
+                                            }
+                                            app.clear_kill_arm();
+                                        } else {
+                                            let label = app
+                                                .task_snapshots
+                                                .iter()
+                                                .find(|s| s.id == tid)
+                                                .map(|s| s.label.clone())
+                                                .unwrap_or_default();
+                                            app.arm_kill(tid.clone());
+                                            app.push_note(
+                                                format!("press ✕ again to kill {label}"),
+                                                app::NoteLevel::Warn,
+                                            );
                                         }
+                                    } else if let Some((handle, _)) = hm
+                                        .insert_rects
+                                        .iter()
+                                        .find(|(_, ir)| rect_contains(*ir, me.column, me.row))
+                                    {
+                                        editor.prefill(&format!("{handle} "));
+                                        app.refresh_popup(editor.buf());
+                                        app.clear_kill_arm();
                                     } else if let Some((kind, _)) = hm
                                         .group_header_rects
                                         .iter()
@@ -608,16 +634,18 @@ async fn run_frames(
                                             );
                                         }
                                     } else {
-                                        if let Some((handle, _)) = hm
+                                        let hit_task = hm
                                             .task_rects
                                             .iter()
                                             .find(|(_, tr)| rect_contains(*tr, me.column, me.row))
-                                        {
+                                            .map(|(h, _)| h.clone());
+                                        if let Some(handle) = hit_task {
+                                            app.clear_kill_arm();
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
                                             let snap = app
                                                 .task_snapshots
                                                 .iter()
-                                                .find(|s| s.source_handle == *handle);
+                                                .find(|s| s.source_handle == handle);
                                             if let Some(snap) = snap {
                                                 app.floating_panels.open(
                                                     &snap.source_handle,
@@ -709,6 +737,66 @@ async fn run_frames(
                                     app.set_hovered_thinking(Some(idx));
                                 } else {
                                     app.set_hovered_thinking(None);
+                                }
+                                let hm = &app.last_task_panel_hitmap;
+                                if let Some(kr) = hm
+                                    .kill_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
+                                {
+                                    app.set_hovered_kill(Some(kr.0.clone()));
+                                    app.set_hovered_task(None);
+                                    app.set_hovered_insert(None);
+                                    app.set_hovered_activity(None);
+                                    app.set_hovered_history_btn(false);
+                                } else if let Some(ir) = hm
+                                    .insert_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
+                                {
+                                    app.set_hovered_insert(Some(ir.0.clone()));
+                                    app.set_hovered_kill(None);
+                                    app.set_hovered_task(None);
+                                    app.set_hovered_activity(None);
+                                    app.set_hovered_history_btn(false);
+                                } else if let Some(tr) = hm
+                                    .task_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
+                                {
+                                    let snap = app
+                                        .task_snapshots
+                                        .iter()
+                                        .find(|s| s.source_handle == tr.0);
+                                    app.set_hovered_task(snap.map(|s| s.id.clone()));
+                                    app.set_hovered_kill(None);
+                                    app.set_hovered_insert(None);
+                                    app.set_hovered_activity(None);
+                                    app.set_hovered_history_btn(false);
+                                } else if let Some(ar) = hm
+                                    .activity_rects
+                                    .iter()
+                                    .find(|(_, _, r)| rect_contains(*r, me.column, me.row))
+                                {
+                                    app.set_hovered_activity(Some((ar.0.clone(), ar.1.clone())));
+                                    app.set_hovered_kill(None);
+                                    app.set_hovered_task(None);
+                                    app.set_hovered_insert(None);
+                                    app.set_hovered_history_btn(false);
+                                } else if let Some(hr) = &hm.history_btn_rect
+                                    && rect_contains(*hr, me.column, me.row)
+                                {
+                                    app.set_hovered_history_btn(true);
+                                    app.set_hovered_kill(None);
+                                    app.set_hovered_task(None);
+                                    app.set_hovered_insert(None);
+                                    app.set_hovered_activity(None);
+                                } else {
+                                    app.set_hovered_kill(None);
+                                    app.set_hovered_task(None);
+                                    app.set_hovered_insert(None);
+                                    app.set_hovered_activity(None);
+                                    app.set_hovered_history_btn(false);
                                 }
                             }
                             interrupt_prompt = None;
@@ -2802,13 +2890,24 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         !intro_active,
         app.task_panel_collapsed,
     ) {
+        let hover = crate::task_panel::TaskPanelHover {
+            hovered_task_id: app.hovered_task_id.clone(),
+            hovered_kill_id: app.hovered_kill_id.clone(),
+            hovered_insert_handle: app.hovered_insert_handle.clone(),
+            hovered_activity: app.hovered_activity.clone(),
+            hovered_history_btn: app.hovered_history_btn,
+            kill_armed_id: app.kill_armed_id.clone(),
+            kill_armed_expired: app.kill_arm_expired(),
+        };
         let hitmap = crate::task_panel::render(
             f,
             tp_area,
             &app.task_snapshots,
             &app.activity_nodes,
+            &app.items,
             app.task_panel_collapsed,
             &app.task_panel_collapsed_groups,
+            &hover,
         );
         app.last_task_panel_rect = Some(tp_area);
         app.last_task_panel_hitmap = hitmap;

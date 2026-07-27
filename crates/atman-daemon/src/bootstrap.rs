@@ -250,6 +250,12 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         tools::register_bash_bg_with_task_registry(&mut executor.tools, task_registry.clone());
     let term_registry =
         tools::register_terminal_with_task_registry(&mut executor.tools, task_registry.clone());
+    executor.tools.register(std::sync::Arc::new(
+        atman_runtime::tools::task_ops::TaskList,
+    ));
+    executor.tools.register(std::sync::Arc::new(
+        atman_runtime::tools::task_ops::TaskKill,
+    ));
     let trust_config = load_trust_config(opts.config_dir.as_deref());
     let sandbox_enabled = trust_config.mode.sandbox_enabled();
     let sandbox_trust = trust_config.clone();
