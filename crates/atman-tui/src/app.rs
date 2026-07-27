@@ -1018,7 +1018,9 @@ impl AppState {
                 state: _,
             } => {
                 self.waiting_for_llm = false;
-                self.follow_tail = true;
+                if self.scroll_offset >= self.max_scroll_offset() {
+                    self.follow_tail = true;
+                }
                 let existing = self
                     .find_item_by_handle(&handle)
                     .and_then(|idx| match &self.items[idx] {
@@ -1070,7 +1072,9 @@ impl AppState {
             }
             StreamFrame::BashChunk { handle, kind, line } => {
                 self.waiting_for_llm = false;
-                self.follow_tail = true;
+                if self.scroll_offset >= self.max_scroll_offset() {
+                    self.follow_tail = true;
+                }
                 let existing = self
                     .find_item_by_handle(&handle)
                     .and_then(|idx| match &self.items[idx] {
