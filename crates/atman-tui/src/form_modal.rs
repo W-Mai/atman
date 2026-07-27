@@ -297,15 +297,17 @@ impl FormModal {
         if !self.open {
             return SubmitOutcome::None;
         }
-        if self.pending.is_none() {
-            return SubmitOutcome::None;
-        }
+        let pending = match self.pending.as_ref() {
+            Some(p) => p.clone(),
+            None => return SubmitOutcome::None,
+        };
         let is_confirm_form = self.is_batch_confirm();
         self.mark_current(BatchStatus::Cancelled);
         if is_confirm_form {
             self.end_batch();
             return SubmitOutcome::BatchCancelled;
         }
+        let form_id = pending.form_id.clone();
         self.close_form_state();
         let real_pending = self
             .batch_statuses
@@ -315,7 +317,10 @@ impl FormModal {
         if !real_pending {
             self.end_batch();
         }
-        SubmitOutcome::None
+        SubmitOutcome::Single {
+            form_id,
+            answer: FormAnswer::Cancelled,
+        }
     }
 
     fn is_batch_confirm(&self) -> bool {
@@ -776,11 +781,17 @@ mod tests {
     }
 
     #[test]
-    fn cancel_from_open_returns_none_outcome() {
+    fn cancel_from_open_returns_cancelled_outcome() {
         let mut m = FormModal::default();
         m.attach_test(mk(FormKind::Confirm { prompt: "?".into() }));
         let outcome = m.cancel();
-        assert!(matches!(outcome, SubmitOutcome::None));
+        assert!(matches!(
+            outcome,
+            SubmitOutcome::Single {
+                answer: FormAnswer::Cancelled,
+                ..
+            }
+        ));
         assert!(!m.open);
     }
 }
