@@ -204,7 +204,7 @@ pub struct TermEntry {
     pub child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
     pub master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
     pub started_at: Instant,
-    pub task_id: Option<crate::task_registry::TaskId>,
+    pub task_id: Mutex<Option<crate::task_registry::TaskId>>,
 }
 
 impl TermEntry {
@@ -351,16 +351,6 @@ impl TermRegistry {
             .open(&log_path)
             .map_err(|e| RuntimeError::ToolFailed(format!("term.spawn: open log: {e}")))?;
 
-        let task_id = self.task_registry.as_ref().map(|tr| {
-            tr.register(
-                crate::task_registry::TaskKind::Terminal,
-                label,
-                handle_str.clone(),
-                session_id.clone(),
-                cancel,
-            )
-        });
-
         let entry = Arc::new(TermEntry {
             handle: handle.clone(),
             session_id: session_id.clone(),
@@ -379,8 +369,27 @@ impl TermRegistry {
             child: Mutex::new(Some(pty_result.child)),
             master: Mutex::new(Some(pty_result.master)),
             started_at: Instant::now(),
-            task_id: task_id.clone(),
+            task_id: Mutex::new(None),
         });
+
+        let kill_entry = entry.clone();
+        let task_id = self.task_registry.as_ref().map(|tr| {
+            let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                let mut child = kill_entry.child.lock().expect("child poisoned");
+                if let Some(child) = child.as_mut() {
+                    let _ = child.kill();
+                }
+            });
+            tr.register_with_kill_hook(
+                crate::task_registry::TaskKind::Terminal,
+                label,
+                handle_str.clone(),
+                session_id.clone(),
+                cancel,
+                Some(hook),
+            )
+        });
+        *entry.task_id.lock().unwrap() = task_id.clone();
 
         let reader = pty_result.reader;
         let handle_for_loop = handle_str.clone();
@@ -1173,7 +1182,7 @@ mod tests {
             child: Mutex::new(None),
             master: Mutex::new(None),
             started_at: Instant::now(),
-            task_id: None,
+            task_id: Mutex::new(None),
         });
         registry.insert(entry);
         assert!(registry.lookup(&h.to_string(), "session_a").is_ok());

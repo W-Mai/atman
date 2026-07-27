@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct TaskId(pub Uuid);
 
@@ -147,6 +147,7 @@ impl TaskFilter {
 struct TaskEntry {
     snapshot: TaskSnapshot,
     cancel: CancellationToken,
+    kill_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Central management layer for all observable tasks.
@@ -184,6 +185,18 @@ impl TaskRegistry {
         session_id: String,
         cancel: CancellationToken,
     ) -> TaskId {
+        self.register_with_kill_hook(kind, label, source_handle, session_id, cancel, None)
+    }
+
+    pub fn register_with_kill_hook(
+        &self,
+        kind: TaskKind,
+        label: String,
+        source_handle: String,
+        session_id: String,
+        cancel: CancellationToken,
+        kill_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    ) -> TaskId {
         let id = TaskId::now();
         let snapshot = TaskSnapshot {
             id: id.clone(),
@@ -198,6 +211,7 @@ impl TaskRegistry {
         let entry = TaskEntry {
             snapshot: snapshot.clone(),
             cancel,
+            kill_hook,
         };
         self.inner.lock().unwrap().insert(id.clone(), entry);
         let _ = self.event_tx.send(TaskEvent::Registered(snapshot));
@@ -242,6 +256,9 @@ impl TaskRegistry {
             return false;
         }
         entry.cancel.cancel();
+        if let Some(hook) = &entry.kill_hook {
+            hook();
+        }
         true
     }
 
