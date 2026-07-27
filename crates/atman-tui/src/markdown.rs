@@ -238,23 +238,16 @@ impl Renderer {
             Event::Code(text) => {
                 if self.in_table {
                     if let Some(cell) = self.table_row.last_mut() {
-                        cell.push('`');
                         cell.push_str(&text);
-                        cell.push('`');
                     }
                     return;
                 }
-                use unicode_width::UnicodeWidthStr;
-                let style = merge_style(
-                    self.active_style(),
-                    Style::default()
-                        .fg(Color::LightYellow)
-                        .add_modifier(Modifier::BOLD),
-                );
-                let formatted = format!("`{text}`");
-                self.current_width += formatted.width();
-                self.current.push(Span::styled(formatted, style));
-                self.fresh_line = false;
+                let code_style = Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD);
+                self.style_stack.push(code_style);
+                self.push_text(&text);
+                self.style_stack.pop();
             }
             Event::SoftBreak | Event::HardBreak => {
                 if self.in_table {
@@ -807,10 +800,27 @@ mod tests {
     }
 
     #[test]
-    fn inline_code_wraps_with_backticks() {
+    fn inline_code_renders_without_backticks() {
         let lines = render_markdown("call `foo()` please\n");
         let flat = plain(&lines);
-        assert!(flat.iter().any(|l| l.contains("`foo()`")), "{flat:?}");
+        let joined = flat.join("");
+        assert!(joined.contains("foo()"), "{flat:?}");
+        assert!(
+            !joined.contains('`'),
+            "backtick should be stripped: {flat:?}"
+        );
+    }
+
+    #[test]
+    fn inline_code_wraps_long_text() {
+        let long = "x".repeat(80);
+        let md = format!("call `{long}` please\n");
+        let lines = render_markdown_with_width(&md, 30);
+        let flat = plain(&lines);
+        assert!(flat.len() > 1, "long inline code should wrap: {flat:?}");
+        for l in &flat {
+            assert!(!l.contains('`'), "no backtick after wrap: {l:?}");
+        }
     }
 
     #[test]
@@ -840,8 +850,13 @@ mod tests {
         let flat = plain(&lines);
         assert!(
             flat.iter()
-                .any(|l| l.contains("`bar()`") && l.contains("foo")),
+                .any(|l| l.contains("bar()") && l.contains("foo")),
             "inline code lost from table cell: {flat:?}"
+        );
+        let joined = flat.join("");
+        assert!(
+            !joined.contains('`'),
+            "backtick stripped in table cells: {joined:?}"
         );
     }
 
