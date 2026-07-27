@@ -243,6 +243,7 @@ impl BgRegistry {
         }));
         let output = Arc::new(Mutex::new(BgOutput::default()));
         let cancel = ctx.cancel.clone();
+        let task_cancel = cancel.child_token();
 
         let task_id = self.task_registry.as_ref().map(|tr| {
             tr.register(
@@ -250,7 +251,7 @@ impl BgRegistry {
                 cmd.clone(),
                 handle_str.clone(),
                 session_id.clone(),
-                cancel.clone(),
+                task_cancel,
             )
         });
 

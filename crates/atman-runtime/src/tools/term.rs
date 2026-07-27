@@ -684,7 +684,10 @@ async fn spawn_impl(
         pty_result,
         ctx.stream_tx.clone(),
         cmd_str.unwrap_or_else(|| "terminal".into()),
-        ctx.cancel.clone(),
+        {
+            let tc = ctx.cancel.clone();
+            tc.child_token()
+        },
     )?;
 
     let state = entry.current_state();
