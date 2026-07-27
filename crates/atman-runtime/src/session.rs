@@ -752,7 +752,16 @@ impl Session {
                 plans: plans_watch,
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
-            compaction: CompactionState::new(),
+            compaction: {
+                let c = CompactionState::new();
+                if persisted.window_tokens > 0 {
+                    c.last_input_tokens.store(
+                        persisted.window_tokens,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                c
+            },
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
             injection_tx,
