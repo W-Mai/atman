@@ -299,10 +299,7 @@ pub fn render(
         let is_collapsed = collapsed_groups.contains(&kind);
         let glyph = if is_collapsed { "›" } else { "⌄" };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!(" {glyph} "),
-                Style::default().fg(t.subtle_fg.into()),
-            ),
+            Span::styled(format!("{glyph} "), Style::default().fg(t.subtle_fg.into())),
             Span::styled(
                 kind.label(),
                 Style::default()
@@ -329,6 +326,9 @@ pub fn render(
             continue;
         }
         let w = inner.width as usize;
+        // blank line between group header and first task
+        lines.push(Line::from(""));
+        row += 1;
         for (task_idx, snap) in running_tasks.iter().enumerate() {
             let is_task_hovered = hover.hovered_task_id == Some(snap.id.clone());
             let is_kill_hovered = hover.hovered_kill_id == Some(snap.id.clone());
@@ -493,7 +493,7 @@ pub fn render(
             } else {
                 content_lines
                     .iter()
-                    .map(|c| truncate_label(c, w.saturating_sub(3)))
+                    .map(|c| truncate_label(c, w.saturating_sub(4)))
                     .collect()
             };
             hitmap.task_rects.push((
@@ -506,12 +506,36 @@ pub fn render(
                 },
             ));
             row += 1;
+
+            // content top padding
+            let top_pad_y = row;
+            let pad_bg = if is_task_hovered {
+                content_bg_hover
+            } else {
+                content_bg
+            };
+            lines.push(Line::from(vec![Span::styled(
+                " ".repeat(w),
+                Style::default().bg(pad_bg),
+            )]));
+            hitmap.task_rects.push((
+                snap.source_handle.clone(),
+                Rect {
+                    x: inner.x,
+                    y: top_pad_y,
+                    width: inner.width.saturating_sub(4),
+                    height: 1,
+                },
+            ));
+            row += 1;
+
             for (i, content_trunc) in content_rows.iter().enumerate() {
-                let content_y = header_row + 1 + i as u16;
-                let content_pad = w.saturating_sub(1 + content_trunc.chars().count() + 2);
+                let content_y = header_row + 2 + i as u16;
+                let content_pad = w.saturating_sub(2 + content_trunc.chars().count() + 2);
                 lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default().bg(c_bg)),
                     Span::styled(
-                        format!(" {content_trunc}"),
+                        content_trunc.clone(),
                         Style::default().fg(t.meta_fg.into()).bg(c_bg),
                     ),
                     Span::styled(" ".repeat(content_pad), Style::default().bg(c_bg)),
@@ -528,6 +552,23 @@ pub fn render(
                 ));
                 row += 1;
             }
+
+            // content bottom padding
+            let bot_pad_y = row;
+            lines.push(Line::from(vec![Span::styled(
+                " ".repeat(w),
+                Style::default().bg(pad_bg),
+            )]));
+            hitmap.task_rects.push((
+                snap.source_handle.clone(),
+                Rect {
+                    x: inner.x,
+                    y: bot_pad_y,
+                    width: inner.width.saturating_sub(4),
+                    height: 1,
+                },
+            ));
+            row += 1;
             if task_idx + 1 < running_tasks.len() {
                 lines.push(Line::from(""));
                 row += 1;
@@ -587,14 +628,15 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
 
     let panel_bg: Color = t.modal_bg.into();
     f.render_widget(
-        Block::default()
-            .style(Style::default().bg(panel_bg))
-            .title(Line::from(vec![Span::styled(
+        Block::default().style(Style::default().bg(panel_bg)).title(
+            Line::from(vec![Span::styled(
                 "≡",
                 Style::default()
                     .fg(t.heading.into())
                     .add_modifier(Modifier::BOLD),
-            )])),
+            )])
+            .alignment(Alignment::Center),
+        ),
         area,
     );
     let inner = Rect {
