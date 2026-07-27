@@ -135,12 +135,12 @@ pub fn render(
     crate::sanitize_widget_edges(f, area);
     f.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(t.subtle_fg.into()))
-        .title(" ≡ ")
-        .title(
+    let panel_bg: Color = t.modal_bg.into();
+    f.render_widget(
+        Block::default()
+            .style(Style::default().bg(panel_bg))
+            .title(" ≡ ")
+            .title(
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled("Tasks", Style::default().fg(t.heading.into())),
@@ -151,13 +151,14 @@ pub fn render(
                 ),
             ])
             .alignment(Alignment::Right),
-        );
-    f.render_widget(block, area);
+        ),
+        area,
+    );
 
     let inner = Rect {
-        x: area.x + 1,
+        x: area.x + 2,
         y: area.y + 1,
-        width: area.width.saturating_sub(2),
+        width: area.width.saturating_sub(4),
         height: area.height.saturating_sub(2),
     };
     let mut hitmap = TaskPanelHitMap::default();
