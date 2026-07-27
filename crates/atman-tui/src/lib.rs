@@ -390,6 +390,34 @@ async fn run_frames(
                             interrupt_prompt = None;
                         }
                         Some(Ok(CtEvent::Mouse(me)))
+                            if app.history_search.open =>
+                        {
+                            match me.kind {
+                                MouseEventKind::ScrollUp => {
+                                    if let Some(crate::history_search_modal::HistoryArea::Preview) =
+                                        app.history_search.hit_test(me.column, me.row)
+                                    {
+                                        app.history_search.scroll_preview(true, 3);
+                                    } else {
+                                        app.history_search.move_up();
+                                        refresh_history_preview(&mut app);
+                                    }
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    if let Some(crate::history_search_modal::HistoryArea::Preview) =
+                                        app.history_search.hit_test(me.column, me.row)
+                                    {
+                                        app.history_search.scroll_preview(false, 3);
+                                    } else {
+                                        app.history_search.move_down();
+                                        refresh_history_preview(&mut app);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            interrupt_prompt = None;
+                        }
+                        Some(Ok(CtEvent::Mouse(me)))
                             if matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
                         {
                             let over_input = app
@@ -1309,6 +1337,18 @@ fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
         KeyAction::HistoryDown | KeyAction::CursorRight => {
             app.history_search.move_down();
             refresh_history_preview(app);
+        }
+        KeyAction::PageUp => {
+            app.history_search.scroll_preview(true, 10);
+        }
+        KeyAction::PageDown => {
+            app.history_search.scroll_preview(false, 10);
+        }
+        KeyAction::ScrollUp => {
+            app.history_search.scroll_preview(true, 3);
+        }
+        KeyAction::ScrollDown => {
+            app.history_search.scroll_preview(false, 3);
         }
         KeyAction::Tab => {
             app.history_search.scope = app.history_search.scope.toggle();
@@ -3003,7 +3043,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         compact_review_modal::render(f, area, modal);
     }
     if app.history_search.open {
-        history_search_modal::render(f, area, &app.history_search);
+        history_search_modal::render(f, area, &mut app.history_search);
     }
     if app.workflow_viewer.open {
         workflow_viewer_modal::render(f, area, app);

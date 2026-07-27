@@ -4,6 +4,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryArea {
+    Results,
+    Preview,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HistorySearchScope {
     #[default]
@@ -46,6 +52,9 @@ pub struct HistorySearchModal {
     pub error: Option<String>,
     pub last_query: String,
     pub preview_lines: Vec<String>,
+    pub preview_scroll: u16,
+    pub preview_rect: Option<Rect>,
+    pub results_rect: Option<Rect>,
 }
 
 impl std::fmt::Debug for HistorySearchModal {
@@ -68,6 +77,9 @@ impl HistorySearchModal {
         self.error = None;
         self.last_query.clear();
         self.preview_lines.clear();
+        self.preview_scroll = 0;
+        self.preview_rect = None;
+        self.results_rect = None;
     }
 
     pub fn close(&mut self) {
@@ -83,12 +95,36 @@ impl HistorySearchModal {
 
     pub fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.preview_scroll = 0;
     }
 
     pub fn move_down(&mut self) {
         if self.selected + 1 < self.results.len() {
             self.selected += 1;
+            self.preview_scroll = 0;
         }
+    }
+
+    pub fn scroll_preview(&mut self, up: bool, amount: u16) {
+        if up {
+            self.preview_scroll = self.preview_scroll.saturating_sub(amount);
+        } else {
+            self.preview_scroll = self.preview_scroll.saturating_add(amount);
+        }
+    }
+
+    pub fn hit_test(&self, col: u16, row: u16) -> Option<HistoryArea> {
+        if let Some(r) = self.preview_rect {
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                return Some(HistoryArea::Preview);
+            }
+        }
+        if let Some(r) = self.results_rect {
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                return Some(HistoryArea::Results);
+            }
+        }
+        None
     }
 
     pub fn selected_hit(&self) -> Option<&HistoryHit> {
@@ -111,7 +147,7 @@ impl HistorySearchModal {
     }
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
+pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal) {
     let w = area.width.saturating_sub(4).clamp(70, 140);
     let h = area.height.saturating_sub(4).clamp(20, 42);
     let x = area.x + area.width.saturating_sub(w) / 2;
@@ -153,6 +189,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
     render_query_row(f, rows[0], modal);
     render_results_row(f, rows[1], modal);
     render_preview_row(f, rows[2], modal);
+    modal.results_rect = Some(rows[1]);
+    modal.preview_rect = Some(rows[2]);
 }
 
 fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
@@ -290,15 +328,17 @@ fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
         return;
     }
     let lines = crate::markdown::render_markdown_with_width(&text, inner.width);
-    for (i, line) in lines.into_iter().enumerate() {
-        if i as u16 >= inner.height {
+    let scroll = modal.preview_scroll as usize;
+    for (i, line) in lines.iter().enumerate().skip(scroll) {
+        let display_row = i - scroll;
+        if display_row as u16 >= inner.height {
             break;
         }
         f.render_widget(
-            line,
+            line.clone(),
             Rect {
                 x: inner.x,
-                y: inner.y + i as u16,
+                y: inner.y + display_row as u16,
                 width: inner.width,
                 height: 1,
             },
