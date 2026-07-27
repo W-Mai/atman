@@ -519,6 +519,12 @@ async fn run_frames(
                                 {
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
                                     app.floating_panels.toggle_maximize(&max_id, canvas);
+                                } else if let Some(resize_id) =
+                                    app.floating_panels.hit_test_resize(me.column, me.row)
+                                {
+                                    app.floating_panels.focus(&resize_id);
+                                    app.resize_target = Some(resize_id);
+                                    app.resize_offset = (me.column, me.row);
                                 } else if let Some(fp) = app
                                     .floating_panels
                                     .hit_test_titlebar(me.column, me.row)
@@ -756,7 +762,23 @@ async fn run_frames(
                                     app.toggle_compaction_summary_expand(idx);
                                 }
                             } else if let MouseEventKind::Drag(MouseButton::Left) = me.kind {
-                                if let Some(id) = &app.drag_target {
+                                if let Some(id) = &app.resize_target {
+                                    let (ox, oy) = app.resize_offset;
+                                    let dx = me.column as i32 - ox as i32;
+                                    let dy = me.row as i32 - oy as i32;
+                                    if let Some(p) = app
+                                        .floating_panels
+                                        .panels
+                                        .iter()
+                                        .find(|p| &p.id == id)
+                                    {
+                                        let nw = (p.rect.width as i32 + dx).max(20) as u16;
+                                        let nh = (p.rect.height as i32 + dy).max(6) as u16;
+                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        app.floating_panels.resize_panel(id, nw, nh, canvas);
+                                        app.resize_offset = (me.column, me.row);
+                                    }
+                                } else if let Some(id) = &app.drag_target {
                                     let (ox, oy) = app.drag_offset;
                                     let dx = me.column as i32 - ox as i32;
                                     let dy = me.row as i32 - oy as i32;
@@ -775,7 +797,17 @@ async fn run_frames(
                                 }
                             } else if let MouseEventKind::Up(MouseButton::Left) = me.kind {
                                 app.drag_target = None;
+                                app.resize_target = None;
                             } else if let MouseEventKind::Moved = me.kind {
+                                // floating panel button hover
+                                let btn_hover = app
+                                    .floating_panels
+                                    .hit_test_btn(me.column, me.row);
+                                if app.hovered_panel_btn != btn_hover {
+                                    app.hovered_panel_btn = btn_hover;
+                                    app.items_version = app.items_version.wrapping_add(1);
+                                }
+
                                 if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::Thinking { .. }) =
                                         app.items.get(idx)
@@ -3011,6 +3043,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             &app.task_snapshots,
             &app.items,
             &app.activity_nodes,
+            &app.hovered_panel_btn,
         );
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {

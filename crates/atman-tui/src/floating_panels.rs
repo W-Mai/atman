@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use atman_runtime::{TaskKind, TaskSnapshot};
 
@@ -25,6 +25,13 @@ pub enum PanelKind {
     Task(TaskKind),
     History,
     Activity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelBtn {
+    Close,
+    Maximize,
+    Resize,
 }
 
 impl PanelKind {
@@ -128,25 +135,79 @@ impl FloatingPanels {
         }
     }
 
+    pub fn resize_panel(&mut self, id: &str, w: u16, h: u16, canvas: Rect) {
+        if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
+            let max_w = canvas.x + canvas.width - p.rect.x;
+            let max_h = canvas.y + canvas.height - p.rect.y;
+            p.rect.width = w.min(max_w).max(20);
+            p.rect.height = h.min(max_h).max(6);
+        }
+    }
+
     pub fn hit_test_titlebar(&self, col: u16, row: u16) -> Option<&FloatingPanel> {
+        // draggable = panel rect + shadow ring (2 cols left/right, 1 row top/bottom)
+        // EXCEPT content area and button hit areas
         self.panels
             .iter()
-            .filter(|p| row == p.rect.y && col >= p.rect.x && col < p.rect.x + p.rect.width)
+            .filter(|p| {
+                // expanded rect including shadow ring
+                let sx0 = p.rect.x.saturating_sub(2);
+                let sx1 = p.rect.x + p.rect.width + 1;
+                let sy0 = p.rect.y.saturating_sub(1);
+                let sy1 = p.rect.y + p.rect.height + 1;
+                col >= sx0 && col <= sx1 && row >= sy0 && row <= sy1
+            })
+            .filter(|p| {
+                // exclude content area
+                let cx0 = p.rect.x + 2;
+                let cx1 = p.rect.x + p.rect.width.saturating_sub(2);
+                let cy0 = p.rect.y + 3;
+                let cy1 = p.rect.y + p.rect.height.saturating_sub(2);
+                !(col >= cx0 && col < cx1 && row >= cy0 && row < cy1)
+            })
             .max_by_key(|p| p.z)
     }
 
     pub fn hit_test_close(&self, col: u16, row: u16) -> Option<String> {
         self.panels
             .iter()
-            .find(|p| col == p.rect.x && row == p.rect.y + 1)
+            .find(|p| col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 2)
             .map(|p| p.id.clone())
     }
 
     pub fn hit_test_maximize(&self, col: u16, row: u16) -> Option<String> {
         self.panels
             .iter()
-            .find(|p| col == p.rect.x && row == p.rect.y + 2)
+            .find(|p| col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 3)
             .map(|p| p.id.clone())
+    }
+
+    pub fn hit_test_resize(&self, col: u16, row: u16) -> Option<String> {
+        // 3x3 area around the resize button at (x+w-1, y+h-1)
+        self.panels
+            .iter()
+            .find(|p| {
+                let cx = p.rect.x + p.rect.width.saturating_sub(1);
+                let cy = p.rect.y + p.rect.height.saturating_sub(1);
+                col >= cx.saturating_sub(1)
+                    && col <= cx + 1
+                    && row >= cy.saturating_sub(1)
+                    && row <= cy + 1
+            })
+            .map(|p| p.id.clone())
+    }
+
+    pub fn hit_test_btn(&self, col: u16, row: u16) -> Option<(String, PanelBtn)> {
+        if let Some(id) = self.hit_test_close(col, row) {
+            return Some((id, PanelBtn::Close));
+        }
+        if let Some(id) = self.hit_test_maximize(col, row) {
+            return Some((id, PanelBtn::Maximize));
+        }
+        if let Some(id) = self.hit_test_resize(col, row) {
+            return Some((id, PanelBtn::Resize));
+        }
+        None
     }
 
     pub fn hit_test_panel(&self, col: u16, row: u16) -> Option<&FloatingPanel> {
@@ -169,75 +230,217 @@ pub fn render(
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
+    hovered_btn: &Option<(String, PanelBtn)>,
 ) {
     let mut sorted: Vec<&FloatingPanel> = panels.panels.iter().collect();
     sorted.sort_by_key(|p| p.z);
 
+    let t = crate::theme::theme();
     for panel in &sorted {
         let is_focused = panels.focused.as_deref() == Some(panel.id.as_str());
-        let border_color = if is_focused {
-            Color::LightBlue
+        let btn_hover = hovered_btn
+            .as_ref()
+            .and_then(|(id, btn)| if id == &panel.id { Some(*btn) } else { None });
+        let panel_bg: Color = if is_focused {
+            t.modal_bg.lerp(t.highlight_bg, 0.15)
         } else {
-            Color::DarkGray
+            t.modal_bg.into()
         };
 
+        // panel background
+        crate::sanitize_widget_edges(f, {
+            Rect {
+                x: panel.rect.x - 2,
+                y: panel.rect.y - 1,
+                width: panel.rect.width + 4,
+                height: panel.rect.height + 2,
+            }
+        });
         f.render_widget(Clear, panel.rect);
+        f.render_widget(
+            Block::default().style(Style::default().bg(panel_bg)),
+            panel.rect,
+        );
 
+        // title row
         let title_line = Line::from(vec![
             Span::styled(
                 format!(" {} ", panel.kind.icon()),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(t.heading.into()).bg(panel_bg),
             ),
             Span::styled(
                 truncate(&panel.title, panel.rect.width as usize - 6),
-                Style::default().fg(if is_focused {
-                    Color::White
-                } else {
-                    Color::Gray
-                }),
+                Style::default().fg(t.tinted_fg.into()).bg(panel_bg),
             ),
         ]);
+        f.render_widget(
+            Paragraph::new(title_line),
+            Rect {
+                x: panel.rect.x,
+                y: panel.rect.y,
+                width: panel.rect.width.saturating_sub(2),
+                height: 1,
+            },
+        );
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border_color))
-            .title(title_line);
+        // buttons
+        // ✕ at (x, y+2), ▢ at (x, y+3), ⇲ at (x+w-3, y+h-1)
+        if panel.rect.height >= 6 {
+            let hover_bg = t.user_msg_bg.into();
 
-        let inner = block.inner(panel.rect);
-        f.render_widget(block, panel.rect);
-
-        // Vertical button bar on left border: × (close) at row 1, ▢ (maximize) at row 2
-        // Left border is at x=panel.rect.x, y starts below the top-left corner.
-        if panel.rect.height >= 4 {
-            let bx = panel.rect.x;
+            // ✕ close
+            let btn_area = Rect {
+                x: panel.rect.x,
+                y: panel.rect.y + 2,
+                width: 3,
+                height: 1,
+            };
+            let (close_fg, close_bg) = if btn_hover == Some(PanelBtn::Close) {
+                (t.error.into(), hover_bg)
+            } else {
+                (t.error.into(), panel_bg)
+            };
+            f.render_widget(Clear, btn_area);
+            f.render_widget(
+                Block::default().style(Style::default().bg(close_bg)),
+                btn_area,
+            );
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
                     "✕",
-                    Style::default().fg(Color::Red),
-                )])),
-                Rect {
-                    x: bx,
-                    y: panel.rect.y + 1,
-                    width: 1,
-                    height: 1,
-                },
+                    Style::default().fg(close_fg).bg(close_bg),
+                )]))
+                .alignment(ratatui::layout::Alignment::Center),
+                btn_area,
+            );
+
+            // ▢ maximize
+            let btn_area = Rect {
+                x: panel.rect.x,
+                y: panel.rect.y + 3,
+                width: 3,
+                height: 1,
+            };
+            let (max_fg, max_bg) = if btn_hover == Some(PanelBtn::Maximize) {
+                (t.tinted_fg.into(), hover_bg)
+            } else {
+                (t.subtle_fg.into(), panel_bg)
+            };
+            f.render_widget(Clear, btn_area);
+            f.render_widget(
+                Block::default().style(Style::default().bg(max_bg)),
+                btn_area,
             );
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
                     "▢",
-                    Style::default().fg(Color::DarkGray),
-                )])),
-                Rect {
-                    x: bx,
-                    y: panel.rect.y + 2,
-                    width: 1,
-                    height: 1,
-                },
+                    Style::default().fg(max_fg).bg(max_bg),
+                )]))
+                .alignment(ratatui::layout::Alignment::Center),
+                btn_area,
+            );
+
+            // ⇲ resize handle
+            let btn_area = Rect {
+                x: panel.rect.x + panel.rect.width.saturating_sub(3),
+                y: panel.rect.y + panel.rect.height.saturating_sub(1),
+                width: 3,
+                height: 1,
+            };
+            let (res_fg, res_bg) = if btn_hover == Some(PanelBtn::Resize) {
+                (t.tinted_fg.into(), hover_bg)
+            } else {
+                (t.subtle_fg.into(), panel_bg)
+            };
+            f.render_widget(Clear, btn_area);
+            f.render_widget(
+                Block::default().style(Style::default().bg(res_bg)),
+                btn_area,
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(
+                    "⇲",
+                    Style::default().fg(res_fg).bg(res_bg),
+                )]))
+                .alignment(ratatui::layout::Alignment::Center),
+                btn_area,
             );
         }
 
-        render_panel_content(f, inner, panel, snapshots, items, activity_nodes);
+        // content area: left 3, right 3, top 2, bottom 1
+        let content_area = Rect {
+            x: panel.rect.x + 3,
+            y: panel.rect.y + 2,
+            width: panel.rect.width.saturating_sub(6),
+            height: panel.rect.height.saturating_sub(3),
+        };
+
+        if content_area.height > 0 && content_area.width > 0 {
+            let content_bg: Color = t.code_bg.into();
+            f.render_widget(Clear, content_area);
+            f.render_widget(
+                Block::default().style(Style::default().bg(content_bg)),
+                content_area,
+            );
+            render_panel_content(f, content_area, panel, snapshots, items, activity_nodes);
+        }
+
+        // shadow after panel+content render
+        render_shadow(f, panel.rect, &t);
+    }
+}
+
+fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
+    let buf = f.buffer_mut();
+    let area = *buf.area();
+    let bg_target: Color = t.modal_bg.into();
+
+    let bg_ratio = 0.5;
+    let fg_ratio = 0.4;
+
+    let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
+        if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
+            return;
+        }
+        let cell = &mut buf[(x, y)];
+        cell.bg = lerp_color(cell.bg, bg_target, bg_ratio);
+        cell.fg = lerp_color(cell.fg, bg_target, fg_ratio);
+    };
+
+    // ring: top 1 row, bottom 1 row, left 2 cols, right 2 cols
+    let top_y = rect.y.saturating_sub(1);
+    let bot_y = rect.y + rect.height;
+    let lx0 = rect.x.saturating_sub(2);
+    let lx1 = rect.x.saturating_sub(1);
+    let rx0 = rect.x + rect.width;
+    let rx1 = rect.x + rect.width + 1;
+
+    // darken all ring cells
+    for x in lx0..rx1.saturating_sub(1) {
+        darken(buf, x, top_y);
+    }
+    for x in lx0 + 2..=rx1 {
+        darken(buf, x, bot_y);
+    }
+    for y in top_y..bot_y {
+        darken(buf, rx0, y);
+        darken(buf, rx1, y);
+    }
+    for y in top_y.saturating_add(1)..=bot_y {
+        darken(buf, lx0, y);
+        darken(buf, lx1, y);
+    }
+}
+
+fn lerp_color(a: Color, b: Color, t: f64) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let r = (ar as f64 + (br as f64 - ar as f64) * t) as u8;
+            let g = (ag as f64 + (bg as f64 - ag as f64) * t) as u8;
+            let b = (ab as f64 + (bb as f64 - ab as f64) * t) as u8;
+            Color::Rgb(r, g, b)
+        }
+        _ => b,
     }
 }
 
@@ -252,6 +455,8 @@ fn render_panel_content(
     if area.height == 0 || area.width == 0 {
         return;
     }
+
+    let area = Rect::new(area.x + 1, area.y, area.width - 2, area.height - 1);
 
     match panel.kind {
         PanelKind::History => render_history_content(f, area, snapshots),
@@ -312,20 +517,19 @@ fn render_panel_content(
 
 fn render_history_content(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
     let t = crate::theme::theme();
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![Span::styled(
-        " Tool execution history",
-        Style::default().fg(t.subtle_fg.into()),
-    )]));
-    lines.push(Line::from(""));
+    let bar_color: Color = t.subtle_fg.into();
     let done: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| !s.is_running()).collect();
+
+    let mut lines: Vec<Line> = Vec::new();
     for snap in &done {
         let icon = status_icon(snap.status);
         let elapsed = format_elapsed(snap.elapsed_ms());
+        let st_color = status_color(snap.status);
         lines.push(Line::from(vec![
-            Span::styled(format!(" {icon} "), Style::default().fg(t.subtle_fg.into())),
+            Span::styled("▎ ", Style::default().fg(bar_color)),
+            Span::styled(format!("{icon} "), Style::default().fg(st_color)),
             Span::styled(
-                truncate(&snap.label, area.width as usize - 12),
+                truncate(&snap.label, area.width as usize - 16),
                 Style::default().fg(t.subtle_fg.into()),
             ),
             Span::raw(" "),
@@ -333,49 +537,72 @@ fn render_history_content(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot])
         ]));
     }
     if done.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            " (no completed tasks)",
-            Style::default().fg(t.subtle_fg.into()),
-        )]));
+        let msg = "no completed tasks";
+        let total_pad = area.width as usize;
+        let left = total_pad.saturating_sub(msg.len()) / 2;
+        lines.push(Line::from(vec![
+            Span::styled(" ".repeat(left), Style::default()),
+            Span::styled(msg, Style::default().fg(t.subtle_fg.into())),
+        ]));
     }
     f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_task_meta(f: &mut Frame, area: Rect, kind: TaskKind, snap: &TaskSnapshot) {
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled(" kind: ", Style::default().fg(Color::Yellow)),
-        Span::raw(kind.label()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(" label: ", Style::default().fg(Color::Yellow)),
-        Span::raw(&snap.label),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(" status: ", Style::default().fg(Color::Yellow)),
-        Span::styled(
-            format!("{:?}", snap.status),
-            Style::default().fg(status_color(snap.status)),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(" handle: ", Style::default().fg(Color::Yellow)),
-        Span::raw(&snap.source_handle),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(" elapsed: ", Style::default().fg(Color::Yellow)),
-        Span::raw(format_elapsed(snap.elapsed_ms())),
-    ]));
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-fn render_bash_content(f: &mut Frame, area: Rect, snap: &TaskSnapshot, output: &str, done: bool) {
+    let t = crate::theme::theme();
     let header = Line::from(vec![
         Span::styled(
             format!(" {} ", status_icon(snap.status)),
             Style::default().fg(status_color(snap.status)),
         ),
-        Span::styled(&snap.label, Style::default().fg(Color::White)),
+        Span::styled(&snap.label, Style::default().fg(t.tinted_fg.into())),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:?}", snap.status),
+            Style::default().fg(t.subtle_fg.into()),
+        ),
+    ]);
+    let header_area = Rect { height: 1, ..area };
+    f.render_widget(Paragraph::new(header), header_area);
+
+    let body_area = Rect {
+        y: area.y + 2,
+        height: area.height.saturating_sub(2),
+        ..area
+    };
+    if body_area.height == 0 {
+        return;
+    }
+
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("kind   ", Style::default().fg(t.subtle_fg.into())),
+            Span::styled(kind.label(), Style::default().fg(t.tinted_fg.into())),
+        ]),
+        Line::from(vec![
+            Span::styled("handle ", Style::default().fg(t.subtle_fg.into())),
+            Span::styled(&snap.source_handle, Style::default().fg(t.tinted_fg.into())),
+        ]),
+        Line::from(vec![
+            Span::styled("elapsed", Style::default().fg(t.subtle_fg.into())),
+            Span::raw(" "),
+            Span::styled(
+                format_elapsed(snap.elapsed_ms()),
+                Style::default().fg(t.tinted_fg.into()),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines), body_area);
+}
+
+fn render_bash_content(f: &mut Frame, area: Rect, snap: &TaskSnapshot, output: &str, done: bool) {
+    let t = crate::theme::theme();
+    let header = Line::from(vec![
+        Span::styled(
+            format!(" {} ", status_icon(snap.status)),
+            Style::default().fg(status_color(snap.status)),
+        ),
+        Span::styled(&snap.label, Style::default().fg(t.tinted_fg.into())),
         Span::raw(" "),
         Span::styled(
             if done {
@@ -383,15 +610,15 @@ fn render_bash_content(f: &mut Frame, area: Rect, snap: &TaskSnapshot, output: &
             } else {
                 format_elapsed(snap.elapsed_ms())
             },
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.subtle_fg.into()),
         ),
     ]);
     let header_area = Rect { height: 1, ..area };
     f.render_widget(Paragraph::new(header), header_area);
 
     let body_area = Rect {
-        y: area.y + 1,
-        height: area.height.saturating_sub(1),
+        y: area.y + 2,
+        height: area.height.saturating_sub(2),
         ..area
     };
     if body_area.height == 0 {
@@ -403,7 +630,12 @@ fn render_bash_content(f: &mut Frame, area: Rect, snap: &TaskSnapshot, output: &
     let start = all_lines.len().saturating_sub(max_visible);
     let visible: Vec<Line> = all_lines[start..]
         .iter()
-        .map(|l| Line::from(Span::styled(*l, Style::default().fg(Color::White))))
+        .map(|l| {
+            Line::from(Span::styled(
+                *l,
+                Style::default().fg(t.tinted_fg.into()).bg(t.code_bg.into()),
+            ))
+        })
         .collect();
     f.render_widget(Paragraph::new(visible), body_area);
 }
@@ -416,24 +648,25 @@ fn render_terminal_content(
     _accumulated_bytes: &[u8],
     _done: bool,
 ) {
+    let t = crate::theme::theme();
     let header = Line::from(vec![
         Span::styled(
             format!(" {} ", status_icon(snap.status)),
             Style::default().fg(status_color(snap.status)),
         ),
-        Span::styled(&snap.label, Style::default().fg(Color::White)),
+        Span::styled(&snap.label, Style::default().fg(t.tinted_fg.into())),
         Span::raw(" "),
         Span::styled(
             format_elapsed(snap.elapsed_ms()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.subtle_fg.into()),
         ),
     ]);
     let header_area = Rect { height: 1, ..area };
     f.render_widget(Paragraph::new(header), header_area);
 
     let body_area = Rect {
-        y: area.y + 1,
-        height: area.height.saturating_sub(1),
+        y: area.y + 2,
+        height: area.height.saturating_sub(2),
         ..area
     };
     if body_area.height == 0 || screen.cells.is_empty() {
@@ -444,7 +677,7 @@ fn render_terminal_content(
     let total_rows = screen.rows as usize;
     let max_rows = (body_area.height as usize).min(total_rows);
     let start_row = total_rows.saturating_sub(max_rows);
-    let bg = Color::Black;
+    let bg: Color = t.code_bg.into();
     let mut lines: Vec<Line> = Vec::with_capacity(max_rows);
     for row in start_row..total_rows {
         let mut spans: Vec<Span> = Vec::with_capacity(cols);
@@ -469,6 +702,7 @@ fn render_terminal_content(
 }
 
 fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
+    let t = crate::theme::theme();
     let (kind_icon, kind_color) = crate::task_panel::node_kind_glyph(&node.kind);
     let icon = match node.status {
         ActivityStatus::Running => "◐",
@@ -476,11 +710,11 @@ fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
         ActivityStatus::Err => "✗",
         ActivityStatus::Cancelled => "⊘",
     };
-    let color = match node.status {
-        ActivityStatus::Running => Color::LightBlue,
-        ActivityStatus::Ok => Color::Green,
-        ActivityStatus::Err => Color::Red,
-        ActivityStatus::Cancelled => Color::DarkGray,
+    let color: Color = match node.status {
+        ActivityStatus::Running => t.accent.into(),
+        ActivityStatus::Ok => t.success.into(),
+        ActivityStatus::Err => t.error.into(),
+        ActivityStatus::Cancelled => t.subtle_fg.into(),
     };
     let elapsed = node
         .ended_at
@@ -488,35 +722,55 @@ fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
         .unwrap_or_else(|| node.started_at.elapsed().as_millis() as u64);
     let elapsed_str = format_elapsed(elapsed);
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
+    let header = Line::from(vec![
         Span::styled(format!(" {kind_icon} "), Style::default().fg(kind_color)),
-        Span::styled(&node.label, Style::default().fg(Color::White)),
+        Span::styled(&node.label, Style::default().fg(t.tinted_fg.into())),
         Span::raw(" "),
         Span::styled(icon.to_string(), Style::default().fg(color)),
-    ]));
-    lines.push(Line::from(""));
+        Span::raw(" "),
+        Span::styled(&elapsed_str, Style::default().fg(t.subtle_fg.into())),
+    ]);
+    let header_area = Rect { height: 1, ..area };
+    f.render_widget(Paragraph::new(header), header_area);
+
+    let body_area = Rect {
+        y: area.y + 2,
+        height: area.height.saturating_sub(2),
+        ..area
+    };
+    if body_area.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(" status: ", Style::default().fg(Color::Yellow)),
+        Span::styled("status ", Style::default().fg(t.subtle_fg.into())),
         Span::styled(format!("{:?}", node.status), Style::default().fg(color)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(" elapsed: ", Style::default().fg(Color::Yellow)),
-        Span::raw(&elapsed_str),
+        Span::styled("run_id ", Style::default().fg(t.subtle_fg.into())),
+        Span::styled(&node.run_id, Style::default().fg(t.tinted_fg.into())),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(" run_id: ", Style::default().fg(Color::Yellow)),
-        Span::raw(&node.run_id),
+        Span::styled("node_id", Style::default().fg(t.subtle_fg.into())),
+        Span::raw(" "),
+        Span::styled(&node.node_id, Style::default().fg(t.tinted_fg.into())),
     ]));
-    lines.push(Line::from(vec![
-        Span::styled(" node_id: ", Style::default().fg(Color::Yellow)),
-        Span::raw(&node.node_id),
-    ]));
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines), body_area);
 }
 
 fn render_placeholder(f: &mut Frame, area: Rect, title: &str) {
-    f.render_widget(Paragraph::new(format!(" (no data: {title})")), area);
+    let t = crate::theme::theme();
+    let msg = format!("no data: {title}");
+    let total_pad = area.width as usize;
+    let left = total_pad.saturating_sub(msg.len()) / 2;
+    let top = area.height as usize / 2;
+    let mut lines: Vec<Line> = vec![Line::from(""); top];
+    lines.push(Line::from(vec![
+        Span::styled(" ".repeat(left), Style::default()),
+        Span::styled(msg, Style::default().fg(t.subtle_fg.into())),
+    ]));
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {
@@ -529,11 +783,12 @@ fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {
 }
 
 fn status_color(status: atman_runtime::TaskStatus) -> Color {
+    let t = crate::theme::theme();
     match status {
-        atman_runtime::TaskStatus::Running => Color::LightBlue,
-        atman_runtime::TaskStatus::Ok => Color::Green,
-        atman_runtime::TaskStatus::Err => Color::Red,
-        atman_runtime::TaskStatus::Killed => Color::DarkGray,
+        atman_runtime::TaskStatus::Running => t.accent.into(),
+        atman_runtime::TaskStatus::Ok => t.success.into(),
+        atman_runtime::TaskStatus::Err => t.error.into(),
+        atman_runtime::TaskStatus::Killed => t.subtle_fg.into(),
     }
 }
 
@@ -647,5 +902,91 @@ mod tests {
         let p = &fp.panels[0];
         assert!(p.rect.x < 100);
         assert!(p.rect.y < 40);
+    }
+
+    #[test]
+    fn hit_test_titlebar_includes_shadow_ring() {
+        let mut fp = FloatingPanels::default();
+        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        let p = fp.panels[0].clone();
+        // shadow ring: 2 cols left of panel
+        let hit = fp.hit_test_titlebar(p.rect.x - 1, p.rect.y + 1);
+        assert!(hit.is_some(), "should hit shadow ring left of panel");
+        // shadow ring: 1 row above panel
+        let hit = fp.hit_test_titlebar(p.rect.x + 5, p.rect.y - 1);
+        assert!(hit.is_some(), "should hit shadow ring above panel");
+        // shadow ring: 2 cols right of panel
+        let hit = fp.hit_test_titlebar(p.rect.x + p.rect.width, p.rect.y + 1);
+        assert!(hit.is_some(), "should hit shadow ring right of panel");
+    }
+
+    #[test]
+    fn hit_test_titlebar_excludes_content() {
+        let mut fp = FloatingPanels::default();
+        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        let p = fp.panels[0].clone();
+        // content area: x+2..x+w-2, y+3..y+h-2
+        let hit = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y + 4);
+        assert!(hit.is_none(), "should not hit content area");
+    }
+
+    #[test]
+    fn hit_test_close_at_correct_position() {
+        let mut fp = FloatingPanels::default();
+        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        let p = fp.panels[0].clone();
+        // ✕ at (x..x+3, y+2) — 3-wide area
+        let hit = fp.hit_test_close(p.rect.x + 1, p.rect.y + 2);
+        assert!(hit.is_some());
+        // also hits at x+0 (padding)
+        let hit_pad = fp.hit_test_close(p.rect.x, p.rect.y + 2);
+        assert!(hit_pad.is_some(), "should hit at padding position too");
+        // not at x+3
+        let miss = fp.hit_test_close(p.rect.x + 3, p.rect.y + 2);
+        assert!(miss.is_none(), "should not hit beyond 3-wide area");
+    }
+
+    #[test]
+    fn hit_test_resize_at_correct_position() {
+        let mut fp = FloatingPanels::default();
+        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        let p = fp.panels[0].clone();
+        // ⇲ at (x+w-1, y+h-1) — 3x3 area
+        let cx = p.rect.x + p.rect.width - 1;
+        let cy = p.rect.y + p.rect.height - 1;
+        // center
+        assert!(fp.hit_test_resize(cx, cy).is_some());
+        // surrounding
+        assert!(fp.hit_test_resize(cx - 1, cy).is_some());
+        assert!(fp.hit_test_resize(cx + 1, cy).is_some());
+        assert!(fp.hit_test_resize(cx, cy - 1).is_some());
+        assert!(fp.hit_test_resize(cx, cy + 1).is_some());
+        // too far
+        assert!(fp.hit_test_resize(cx - 2, cy).is_none());
+        assert!(fp.hit_test_resize(cx, cy + 2).is_none());
+    }
+
+    #[test]
+    fn resize_panel_min_size() {
+        let mut fp = FloatingPanels::default();
+        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        let c = canvas();
+        fp.resize_panel("a", 5, 3, c);
+        assert_eq!(fp.panels[0].rect.width, 20);
+        assert_eq!(fp.panels[0].rect.height, 6);
+    }
+
+    #[test]
+    fn shadow_border_not_overlapped_by_panel() {
+        // shadow border is at lx0 (rect.x - 2), which is outside panel.rect
+        // panel.rect starts at rect.x, so rect.x - 2 is NOT inside panel
+        let mut fp = FloatingPanels::default();
+        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        let p = fp.panels[0].clone();
+        // shadow top border y = rect.y - 1, panel starts at rect.y
+        // so shadow top is NOT inside panel
+        assert!(p.rect.y > 0, "panel should not be at y=0 for shadow test");
+        // shadow left border x = rect.x - 2, panel starts at rect.x
+        assert!(p.rect.x >= 2, "panel should not be at x<2 for shadow test");
     }
 }

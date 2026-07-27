@@ -4189,6 +4189,10 @@ const TUI_PREVIEW_SCENES: &[(&str, &str)] = &[
     ("workflow-running", "long-lived workflow with nested nodes"),
     ("workflow-cancelled", "workflow ended with Err cascade"),
     ("compact-review", "post-compaction summary review modal"),
+    (
+        "floating-panel",
+        "floating panels: bash + terminal + history",
+    ),
 ];
 
 async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
@@ -4395,6 +4399,10 @@ fn spawn_preview_scene(
             }
             "compact-review" => {
                 preview_scene_compact_review(session).await;
+                true
+            }
+            "floating-panel" => {
+                preview_scene_floating_panel(session).await;
                 true
             }
             _ => false,
@@ -4800,6 +4808,128 @@ subcommand, and wired it into the daemon. All tests pass."
             emitted_at: chrono::Utc::now(),
         });
     std::mem::forget(_rx);
+}
+
+async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
+    use atman_runtime::event::{FlowNodeStatus, FlowRunId};
+    use atman_runtime::nodegraph::NodeKind;
+    use atman_runtime::stream::StreamFrame;
+    use atman_runtime::tools::term::{TerminalCell, TerminalColor, TerminalScreen};
+
+    let tx = session.stream_tx();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // 1. Bash task with output
+    let bash_handle = "bg_s_demo_1".to_string();
+    let _ = tx.send(StreamFrame::BashChunk {
+        handle: bash_handle.clone(),
+        kind: "stdout".into(),
+        line: "$ cargo test --workspace\n".into(),
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let _ = tx.send(StreamFrame::BashChunk {
+        handle: bash_handle.clone(),
+        kind: "stdout".into(),
+        line: "    Finished test [unoptimized + debuginfo] target(s) in 0.52s\n".into(),
+    });
+    let _ = tx.send(StreamFrame::BashChunk {
+        handle: bash_handle.clone(),
+        kind: "stdout".into(),
+        line: "     Running unittests src/lib.rs\n".into(),
+    });
+    let _ = tx.send(StreamFrame::BashChunk {
+        handle: bash_handle.clone(),
+        kind: "stdout".into(),
+        line: "running 258 tests\ntest result: ok. 258 passed; 0 failed\n".into(),
+    });
+
+    // 2. Terminal task with screen
+    let term_handle = "term_s_demo_1".to_string();
+    let cols = 80u16;
+    let rows = 24u16;
+    let cells: Vec<TerminalCell> = (0..(rows as usize * cols as usize))
+        .map(|i| {
+            let row = i / cols as usize;
+            let col = i % cols as usize;
+            let chars = if row == 0 && col < 4 {
+                "vim ".to_string()
+            } else if (2..22).contains(&row) && col < 1 {
+                "~".to_string()
+            } else if row == 22 && col < 20 {
+                "test.sh - 1 line 1:1".to_string()
+            } else {
+                " ".to_string()
+            };
+            TerminalCell {
+                chars,
+                fg: TerminalColor::Default,
+                bg: TerminalColor::Default,
+                bold: false,
+                italic: false,
+                underline: false,
+                inverse: false,
+                dim: false,
+                wide: false,
+            }
+        })
+        .collect();
+    let screen = TerminalScreen {
+        rows,
+        cols,
+        cells,
+        cursor: Some((0, 0)),
+        alt_screen: false,
+    };
+    let _ = tx.send(StreamFrame::TerminalChunk {
+        handle: term_handle.clone(),
+        bytes: vec![],
+        screen: Some(screen),
+        state: atman_runtime::tools::term::TermStateSnapshot::Running,
+    });
+
+    // 3. Flow with activity nodes
+    let run_id = FlowRunId::now().0.to_string();
+    let _ = tx.send(StreamFrame::FlowStart {
+        run_id: run_id.clone(),
+        flow_name: "agent".into(),
+        parent_run_id: None,
+        parent_node_id: None,
+    });
+    let _ = tx.send(StreamFrame::FlowNodeStart {
+        run_id: run_id.clone(),
+        node_id: "stmt_0".into(),
+        kind: NodeKind::Llm {
+            model: Some("demo".into()),
+        },
+        label: "analyze task".into(),
+        parent_node_id: None,
+    });
+    let _ = tx.send(StreamFrame::FlowNodeEnd {
+        run_id: run_id.clone(),
+        node_id: "stmt_0".into(),
+        status: FlowNodeStatus::Ok,
+        output_preview: Some("done".into()),
+        parent_node_id: None,
+    });
+    let _ = tx.send(StreamFrame::FlowNodeStart {
+        run_id: run_id.clone(),
+        node_id: "stmt_1".into(),
+        kind: NodeKind::ToolCall {
+            path: "fs.read".into(),
+        },
+        label: "read src/lib.rs".into(),
+        parent_node_id: None,
+    });
+
+    // 4. System note
+    let _ = tx.send(StreamFrame::Note(
+        "Click any task in the left panel to open a floating panel. Try dragging, resizing, and the buttons.".into()
+    ));
+
+    // keep alive
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
 }
 
 async fn cmd_doctor(fix: bool) -> Result<()> {
