@@ -413,6 +413,17 @@ async fn run_frames(
                                         refresh_history_preview(&mut app);
                                     }
                                 }
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    if let Some(idx) =
+                                        app.history_search.click_result(me.column, me.row)
+                                    {
+                                        if app.history_search.selected != idx {
+                                            app.history_search.selected = idx;
+                                            app.history_search.preview_scroll = 0;
+                                            refresh_history_preview(&mut app);
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                             interrupt_prompt = None;

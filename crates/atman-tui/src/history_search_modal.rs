@@ -127,6 +127,19 @@ impl HistorySearchModal {
         None
     }
 
+    pub fn click_result(&self, col: u16, row: u16) -> Option<usize> {
+        let r = self.results_rect?;
+        if col < r.x || col >= r.x + r.width || row <= r.y || row >= r.y + r.height {
+            return None;
+        }
+        let idx = (row - r.y - 1) as usize;
+        if idx < self.results.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
     pub fn selected_hit(&self) -> Option<&HistoryHit> {
         self.results.get(self.selected)
     }
@@ -431,5 +444,26 @@ mod tests {
         let spans = highlight_snippet("plain text", "");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content.as_ref(), "plain text");
+    }
+
+    #[test]
+    fn click_result_maps_row_to_index() {
+        let mut m = HistorySearchModal::default();
+        m.set_results(
+            vec![hit("a", 1, "x"), hit("b", 2, "y"), hit("c", 3, "z")],
+            "q".into(),
+        );
+        m.results_rect = Some(Rect {
+            x: 10,
+            y: 5,
+            width: 80,
+            height: 10,
+        });
+        assert_eq!(m.click_result(10, 6), Some(0));
+        assert_eq!(m.click_result(10, 7), Some(1));
+        assert_eq!(m.click_result(10, 8), Some(2));
+        assert_eq!(m.click_result(10, 5), None, "border row should not select");
+        assert_eq!(m.click_result(10, 9), None, "past last result");
+        assert_eq!(m.click_result(5, 6), None, "outside rect");
     }
 }
