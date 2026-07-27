@@ -390,6 +390,45 @@ async fn run_frames(
                             interrupt_prompt = None;
                         }
                         Some(Ok(CtEvent::Mouse(me)))
+                            if app.history_search.open =>
+                        {
+                            match me.kind {
+                                MouseEventKind::ScrollUp => {
+                                    if let Some(crate::history_search_modal::HistoryArea::Preview) =
+                                        app.history_search.hit_test(me.column, me.row)
+                                    {
+                                        app.history_search.scroll_preview(true, 3);
+                                    } else {
+                                        app.history_search.move_up();
+                                        refresh_history_preview(&mut app);
+                                    }
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    if let Some(crate::history_search_modal::HistoryArea::Preview) =
+                                        app.history_search.hit_test(me.column, me.row)
+                                    {
+                                        app.history_search.scroll_preview(false, 3);
+                                    } else {
+                                        app.history_search.move_down();
+                                        refresh_history_preview(&mut app);
+                                    }
+                                }
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    if let Some(idx) =
+                                        app.history_search.click_result(me.column, me.row)
+                                    {
+                                        if app.history_search.selected != idx {
+                                            app.history_search.selected = idx;
+                                            app.history_search.preview_scroll = 0;
+                                            refresh_history_preview(&mut app);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            interrupt_prompt = None;
+                        }
+                        Some(Ok(CtEvent::Mouse(me)))
                             if matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
                         {
                             let over_input = app
@@ -1400,6 +1439,18 @@ fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
             app.history_search.move_down();
             refresh_history_preview(app);
         }
+        KeyAction::PageUp => {
+            app.history_search.scroll_preview(true, 10);
+        }
+        KeyAction::PageDown => {
+            app.history_search.scroll_preview(false, 10);
+        }
+        KeyAction::ScrollUp => {
+            app.history_search.scroll_preview(true, 3);
+        }
+        KeyAction::ScrollDown => {
+            app.history_search.scroll_preview(false, 3);
+        }
         KeyAction::Tab => {
             app.history_search.scope = app.history_search.scope.toggle();
         }
@@ -1432,12 +1483,7 @@ fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
             let hits: Vec<HistoryHit> = rows
                 .into_iter()
                 .map(|row| {
-                    let snippet: String = row
-                        .payload
-                        .chars()
-                        .take(200)
-                        .collect::<String>()
-                        .replace('\n', " ");
+                    let snippet = extract_event_snippet(&row.kind, &row.payload);
                     HistoryHit {
                         session_id: row.session_id,
                         seq: row.seq,
@@ -1451,7 +1497,15 @@ fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
             refresh_history_preview(app);
         }
         KeyAction::Char(c) => {
-            app.history_search.editor.insert_char(*c);
+            if *c == 'j' && app.history_search.editor.buf().is_empty() {
+                app.history_search.move_down();
+                refresh_history_preview(app);
+            } else if *c == 'k' && app.history_search.editor.buf().is_empty() {
+                app.history_search.move_up();
+                refresh_history_preview(app);
+            } else {
+                app.history_search.editor.insert_char(*c);
+            }
         }
         KeyAction::Backspace => {
             app.history_search.editor.backspace();
@@ -1485,36 +1539,62 @@ fn refresh_history_preview(app: &mut AppState) {
         .into_iter()
         .filter_map(|row| {
             let is_hit = row.seq == seq;
-            let text = extract_event_text(&row.payload);
+            let text = extract_event_text(&row.kind, &row.payload);
             if text.is_none() && !is_hit {
                 return None;
             }
             let marker = if is_hit { "▶" } else { " " };
-            let snippet: String = text
-                .unwrap_or_else(|| format!("<{}>", row.kind))
-                .chars()
-                .take(180)
-                .collect::<String>()
-                .replace('\n', " ");
-            Some(format!("{marker} [{}] {}: {}", row.seq, row.kind, snippet))
+            let body = text.unwrap_or_else(|| format!("<{}>", row.kind));
+            Some(format!(
+                "{marker} **[{}]** seq={}  \n{}",
+                row.kind, row.seq, body
+            ))
         })
         .collect();
     app.history_search.set_preview(lines);
 }
 
-fn extract_event_text(payload: &str) -> Option<String> {
+fn extract_event_text(kind: &str, payload: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
-    let parts = v.get("message")?.get("parts")?.as_array()?;
-    let joined = parts
-        .iter()
-        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-        .collect::<Vec<_>>()
-        .join("");
-    if joined.is_empty() {
-        None
-    } else {
-        Some(joined)
+    match kind {
+        "user_msg" | "assistant_msg" | "system_msg" | "tool_result_msg" => {
+            let parts = v.get("message")?.get("parts")?.as_array()?;
+            let mut chunks = Vec::new();
+            for p in parts {
+                if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        chunks.push(text.to_string());
+                    }
+                } else if let Some(thinking) = p.get("thinking").and_then(|t| t.as_str()) {
+                    if !thinking.is_empty() {
+                        chunks.push(format!("_{thinking}_"));
+                    }
+                } else if let Some(summary) = p.get("summary").and_then(|t| t.as_str()) {
+                    if !summary.is_empty() {
+                        chunks.push(summary.to_string());
+                    }
+                } else if let Some(content) = p.get("content").and_then(|t| t.as_str()) {
+                    if !content.is_empty() {
+                        chunks.push(format!("```\n{content}\n```"));
+                    }
+                }
+            }
+            if chunks.is_empty() {
+                None
+            } else {
+                Some(chunks.join("\n\n"))
+            }
+        }
+        _ => None,
     }
+}
+
+fn extract_event_snippet(kind: &str, payload: &str) -> String {
+    let text = extract_event_text(kind, payload).unwrap_or_else(|| format!("<{kind}>"));
+    text.chars()
+        .take(120)
+        .collect::<String>()
+        .replace('\n', " ")
 }
 
 fn handle_session_switcher_key(
@@ -3079,7 +3159,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         compact_review_modal::render(f, area, modal);
     }
     if app.history_search.open {
-        history_search_modal::render(f, area, &app.history_search);
+        history_search_modal::render(f, area, &mut app.history_search);
     }
     if app.workflow_viewer.open {
         workflow_viewer_modal::render(f, area, app);
@@ -3666,5 +3746,36 @@ mod tests {
             to_rgb(lerp_rgb(border, peak, above))
         );
         eprintln!("jump: {:?} → {:?}", border, lerp_rgb(border, peak, above));
+    }
+
+    #[test]
+    fn extract_event_text_user_msg() {
+        let payload = r#"{"type":"user_msg","seq":1,"message":{"role":"user","parts":[{"type":"text","text":"hello world"}]}}"#;
+        assert_eq!(
+            extract_event_text("user_msg", payload),
+            Some("hello world".into())
+        );
+    }
+
+    #[test]
+    fn extract_event_text_assistant_with_thinking() {
+        let payload = r#"{"type":"assistant_msg","message":{"role":"assistant","parts":[{"type":"thinking","thinking":"let me think"},{"type":"text","text":"answer"}]}}"#;
+        let text = extract_event_text("assistant_msg", payload).unwrap();
+        assert!(text.contains("answer"));
+        assert!(text.contains("let me think"));
+    }
+
+    #[test]
+    fn extract_event_text_tool_result_wraps_in_code_block() {
+        let payload = r#"{"type":"tool_result_msg","message":{"role":"tool","parts":[{"type":"tool_result","tool_use_id":"x","content":"line1\nline2","is_error":false}]}}"#;
+        let text = extract_event_text("tool_result_msg", payload).unwrap();
+        assert!(text.contains("```"));
+        assert!(text.contains("line1"));
+    }
+
+    #[test]
+    fn extract_event_text_unknown_kind_returns_none() {
+        let payload = r#"{"type":"flow_start"}"#;
+        assert_eq!(extract_event_text("flow_start", payload), None);
     }
 }

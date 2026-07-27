@@ -4,6 +4,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryArea {
+    Results,
+    Preview,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HistorySearchScope {
     #[default]
@@ -46,6 +52,9 @@ pub struct HistorySearchModal {
     pub error: Option<String>,
     pub last_query: String,
     pub preview_lines: Vec<String>,
+    pub preview_scroll: u16,
+    pub preview_rect: Option<Rect>,
+    pub results_rect: Option<Rect>,
 }
 
 impl std::fmt::Debug for HistorySearchModal {
@@ -68,6 +77,9 @@ impl HistorySearchModal {
         self.error = None;
         self.last_query.clear();
         self.preview_lines.clear();
+        self.preview_scroll = 0;
+        self.preview_rect = None;
+        self.results_rect = None;
     }
 
     pub fn close(&mut self) {
@@ -83,11 +95,48 @@ impl HistorySearchModal {
 
     pub fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.preview_scroll = 0;
     }
 
     pub fn move_down(&mut self) {
         if self.selected + 1 < self.results.len() {
             self.selected += 1;
+            self.preview_scroll = 0;
+        }
+    }
+
+    pub fn scroll_preview(&mut self, up: bool, amount: u16) {
+        if up {
+            self.preview_scroll = self.preview_scroll.saturating_sub(amount);
+        } else {
+            self.preview_scroll = self.preview_scroll.saturating_add(amount);
+        }
+    }
+
+    pub fn hit_test(&self, col: u16, row: u16) -> Option<HistoryArea> {
+        if let Some(r) = self.preview_rect {
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                return Some(HistoryArea::Preview);
+            }
+        }
+        if let Some(r) = self.results_rect {
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                return Some(HistoryArea::Results);
+            }
+        }
+        None
+    }
+
+    pub fn click_result(&self, col: u16, row: u16) -> Option<usize> {
+        let r = self.results_rect?;
+        if col < r.x || col >= r.x + r.width || row <= r.y || row >= r.y + r.height {
+            return None;
+        }
+        let idx = (row - r.y - 1) as usize;
+        if idx < self.results.len() {
+            Some(idx)
+        } else {
+            None
         }
     }
 
@@ -111,7 +160,7 @@ impl HistorySearchModal {
     }
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
+pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal) {
     let w = area.width.saturating_sub(4).clamp(70, 140);
     let h = area.height.saturating_sub(4).clamp(20, 42);
     let x = area.x + area.width.saturating_sub(w) / 2;
@@ -125,7 +174,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
     crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
     let title = format!(
-        " Search History · scope: {} · Tab to toggle · Enter to search · Esc to close ",
+        " Search History · {} · Enter=search · ↑↓/jk=navigate · Tab=scope · Esc=close ",
         modal.scope.label()
     );
     let outer = Block::default()
@@ -147,12 +196,14 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
-            Constraint::Length(11),
+            Constraint::Min(8),
         ])
         .split(inner);
     render_query_row(f, rows[0], modal);
     render_results_row(f, rows[1], modal);
     render_preview_row(f, rows[2], modal);
+    modal.results_rect = Some(rows[1]);
+    modal.preview_rect = Some(rows[2]);
 }
 
 fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
@@ -208,7 +259,7 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
             let sid_short: String = hit.session_id.chars().take(8).collect();
             let ts_short: String = hit.ts.chars().take(19).collect();
             let snippet: String = hit.snippet.chars().take(80).collect();
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     format!("{sid_short:<10}"),
                     Style::default()
@@ -227,12 +278,9 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
                     format!("{:<15} ", hit.kind),
                     Style::default().fg(crate::theme::theme().success.into()),
                 ),
-                Span::styled(
-                    snippet,
-                    Style::default().fg(crate::theme::theme().tinted_fg.into()),
-                ),
-            ]);
-            ListItem::new(line)
+            ];
+            spans.extend(highlight_snippet(&snippet, &modal.last_query));
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let list = List::new(items)
@@ -247,7 +295,34 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
     f.render_stateful_widget(list, inner, &mut state);
 }
 
-fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
+fn highlight_snippet(snippet: &str, query: &str) -> Vec<Span<'static>> {
+    let base_style = Style::default().fg(crate::theme::theme().tinted_fg.into());
+    let hl_style = Style::default()
+        .fg(crate::theme::theme().accent.into())
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    if query.is_empty() {
+        return vec![Span::styled(snippet.to_string(), base_style)];
+    }
+    let mut spans = Vec::new();
+    let mut remaining = snippet;
+    let needle = query.to_lowercase();
+    while !remaining.is_empty() {
+        if let Some(pos) = remaining.to_lowercase().find(&needle) {
+            if pos > 0 {
+                spans.push(Span::styled(remaining[..pos].to_string(), base_style));
+            }
+            let end = pos + needle.len();
+            spans.push(Span::styled(remaining[pos..end].to_string(), hl_style));
+            remaining = &remaining[end..];
+        } else {
+            spans.push(Span::styled(remaining.to_string(), base_style));
+            break;
+        }
+    }
+    spans
+}
+
+fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearchModal) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into()))
@@ -260,10 +335,32 @@ fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
             .map(|h| h.snippet.clone())
             .unwrap_or_default()
     } else {
-        modal.preview_lines.join("\n")
+        modal.preview_lines.join("\n\n")
     };
-    let para = Paragraph::new(text).wrap(Wrap { trim: false });
-    f.render_widget(para, inner);
+    if text.trim().is_empty() {
+        return;
+    }
+    let lines = crate::markdown::render_markdown_with_width(&text, inner.width);
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    if modal.preview_scroll as usize > max_scroll {
+        modal.preview_scroll = max_scroll as u16;
+    }
+    let scroll = modal.preview_scroll as usize;
+    for (i, line) in lines.iter().enumerate().skip(scroll) {
+        let display_row = i - scroll;
+        if display_row as u16 >= inner.height {
+            break;
+        }
+        f.render_widget(
+            line.clone(),
+            Rect {
+                x: inner.x,
+                y: inner.y + display_row as u16,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -324,5 +421,49 @@ mod tests {
             HistorySearchScope::Project.toggle(),
             HistorySearchScope::Session
         );
+    }
+
+    #[test]
+    fn highlight_snippet_splits_at_match() {
+        let spans = highlight_snippet("hello world foo", "world");
+        assert_eq!(spans.len(), 3);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "hello world foo");
+    }
+
+    #[test]
+    fn highlight_snippet_case_insensitive() {
+        let spans = highlight_snippet("Hello WORLD", "world");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), "Hello ");
+        assert_eq!(spans[1].content.as_ref(), "WORLD");
+    }
+
+    #[test]
+    fn highlight_snippet_empty_query_returns_single_span() {
+        let spans = highlight_snippet("plain text", "");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "plain text");
+    }
+
+    #[test]
+    fn click_result_maps_row_to_index() {
+        let mut m = HistorySearchModal::default();
+        m.set_results(
+            vec![hit("a", 1, "x"), hit("b", 2, "y"), hit("c", 3, "z")],
+            "q".into(),
+        );
+        m.results_rect = Some(Rect {
+            x: 10,
+            y: 5,
+            width: 80,
+            height: 10,
+        });
+        assert_eq!(m.click_result(10, 6), Some(0));
+        assert_eq!(m.click_result(10, 7), Some(1));
+        assert_eq!(m.click_result(10, 8), Some(2));
+        assert_eq!(m.click_result(10, 5), None, "border row should not select");
+        assert_eq!(m.click_result(10, 9), None, "past last result");
+        assert_eq!(m.click_result(5, 6), None, "outside rect");
     }
 }

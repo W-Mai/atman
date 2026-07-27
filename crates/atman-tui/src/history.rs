@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use atman_runtime::TranscriptEntry;
@@ -9,6 +9,17 @@ use atman_runtime::workflow::WorkflowGraph;
 use crate::app::{NoteLevel, OutputItem};
 
 pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
+    let mut tool_map: HashMap<String, String> = HashMap::new();
+    for entry in entries {
+        if let TranscriptEntry::Message { message, .. } = entry {
+            for part in &message.parts {
+                if let MessagePart::ToolUse { id, name, .. } = part {
+                    tool_map.insert(id.clone(), name.clone());
+                }
+            }
+        }
+    }
+
     let mut out: Vec<OutputItem> = Vec::new();
     let mut current_workflow_idx: Option<usize> = None;
     let ensure_panel = |out: &mut Vec<OutputItem>, current: &mut Option<usize>| -> usize {
@@ -82,7 +93,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 {
                     apply_message_to_workflow(graph, msg, flow_run_id.as_deref());
                 }
-                flatten_message(msg, &mut out);
+                flatten_message(msg, &mut out, &tool_map);
             }
             TranscriptEntry::DiffPreview {
                 title,
@@ -310,7 +321,7 @@ fn apply_message_to_workflow(graph: &mut WorkflowGraph, msg: &Message, flow_run_
     }
 }
 
-fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>) {
+fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>, tool_map: &HashMap<String, String>) {
     match msg.role {
         MessageRole::User => {
             let text = msg.text_concat();
@@ -340,12 +351,100 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>) {
                 }
             }
         }
-        MessageRole::Tool => {}
+        MessageRole::Tool => {
+            for part in &msg.parts {
+                if let MessagePart::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } = part
+                {
+                    let tool_name = tool_map.get(tool_use_id).map(|s| s.as_str()).unwrap_or("");
+                    if let Some(item) = restore_tool_item(tool_name, content, *is_error) {
+                        out.push(item);
+                    }
+                }
+            }
+        }
         MessageRole::System => {
             if let Some(summary) = parse_compaction_summary(msg) {
                 out.push(summary);
             }
         }
+    }
+}
+
+fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<OutputItem> {
+    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    if tool_name.starts_with("bash.") {
+        let output = parsed
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or(content);
+        Some(OutputItem::Bash {
+            handle: parsed
+                .get("handle")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            output: output.to_string(),
+            done: true,
+            expanded: false,
+        })
+    } else if tool_name.starts_with("term.") || tool_name == "terminal" {
+        use atman_runtime::tools::term::{TerminalCell, TerminalScreen};
+        let output = parsed
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or(content);
+        let handle = parsed
+            .get("handle")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let bytes = output.as_bytes().to_vec();
+        let rows = output.lines().count().max(1) as u16;
+        Some(OutputItem::Terminal {
+            handle,
+            screen: TerminalScreen {
+                rows,
+                cols: 80,
+                cells: vec![TerminalCell::default(); (rows as usize) * 80],
+                cursor: None,
+                alt_screen: false,
+            },
+            accumulated_bytes: bytes,
+            mode: crate::app::TerminalViewMode::Stream,
+            done: true,
+            expanded: false,
+            scroll_offset: None,
+        })
+    } else if tool_name.starts_with("fs.edit")
+        || tool_name.starts_with("fs.write")
+        || tool_name.starts_with("hunk.")
+    {
+        let diff = parsed.get("diff").and_then(|v| v.as_str())?;
+        if diff.is_empty() {
+            return None;
+        }
+        Some(OutputItem::DiffPreview {
+            title: parsed
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(tool_name)
+                .to_string(),
+            old_content: None,
+            new_content: None,
+            unified_diff: Some(diff.to_string()),
+            expanded: false,
+        })
+    } else if is_error {
+        Some(OutputItem::SystemNote {
+            text: format!("{tool_name} error: {content}"),
+            level: NoteLevel::Warn,
+        })
+    } else {
+        None
     }
 }
 
@@ -367,9 +466,10 @@ fn parse_compaction_summary(msg: &Message) -> Option<OutputItem> {
 }
 
 pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {
+    let tool_map: HashMap<String, String> = HashMap::new();
     let mut out: Vec<OutputItem> = Vec::new();
     for msg in messages {
-        flatten_message(msg, &mut out);
+        flatten_message(msg, &mut out, &tool_map);
     }
     out
 }
@@ -533,6 +633,103 @@ mod tests {
         assert!(
             panel.is_some(),
             "orphan panel without FlowDone must be closed on restore"
+        );
+    }
+
+    #[test]
+    fn flatten_transcript_restores_bash_panel_from_tool_result() {
+        let tool_use_id = "call_00_bash1";
+        let entries = vec![
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    parts: vec![MessagePart::ToolUse {
+                        id: tool_use_id.into(),
+                        name: "bash.spawn".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    turn_id: TurnId::now(),
+                },
+                flow_run_id: None,
+            },
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Tool,
+                    parts: vec![MessagePart::ToolResult {
+                        tool_use_id: tool_use_id.into(),
+                        content: r#"{"handle":"bg_1","output":"hello\nworld","status":"exited","exit_code":0}"#.into(),
+                        is_error: false,
+                    }],
+                    turn_id: TurnId::now(),
+                },
+                flow_run_id: None,
+            },
+        ];
+        let out = flatten_transcript(&entries);
+        let bash = out.iter().find_map(|it| match it {
+            OutputItem::Bash { output, .. } => Some(output.clone()),
+            _ => None,
+        });
+        assert_eq!(bash.as_deref(), Some("hello\nworld"));
+    }
+
+    #[test]
+    fn flatten_transcript_restores_diff_preview_from_fs_edit() {
+        let tool_use_id = "call_00_edit1";
+        let diff = "--- a.rs\n+++ b.rs\n@@ -1,1 +1,2 @@\n-old\n+new\n";
+        let entries = vec![
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    parts: vec![MessagePart::ToolUse {
+                        id: tool_use_id.into(),
+                        name: "fs.edit".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    turn_id: TurnId::now(),
+                },
+                flow_run_id: None,
+            },
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Tool,
+                    parts: vec![MessagePart::ToolResult {
+                        tool_use_id: tool_use_id.into(),
+                        content: format!(r#"{{"path":"a.rs","diff":{}}}"#, serde_json::json!(diff)),
+                        is_error: false,
+                    }],
+                    turn_id: TurnId::now(),
+                },
+                flow_run_id: None,
+            },
+        ];
+        let out = flatten_transcript(&entries);
+        let diff_item = out.iter().find_map(|it| match it {
+            OutputItem::DiffPreview { unified_diff, .. } => unified_diff.clone(),
+            _ => None,
+        });
+        assert_eq!(diff_item.as_deref(), Some(diff));
+    }
+
+    #[test]
+    fn flatten_transcript_skips_unknown_tool_results() {
+        let tool_use_id = "call_00_unknown";
+        let entries = vec![TranscriptEntry::Message {
+            message: Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: tool_use_id.into(),
+                    content: r#"{"result":"ok"}"#.into(),
+                    is_error: false,
+                }],
+                turn_id: TurnId::now(),
+            },
+            flow_run_id: None,
+        }];
+        let out = flatten_transcript(&entries);
+        assert!(
+            out.is_empty(),
+            "unknown tool without error should not produce an item"
         );
     }
 }
