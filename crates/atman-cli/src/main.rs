@@ -2049,6 +2049,12 @@ async fn cmd_repl_once(
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
         .await;
 
+    if let Some(tr) = &executor.tool_ctx.term_registry {
+        tr.kill_all();
+    }
+    if let Some(br) = &executor.tool_ctx.bg_registry {
+        br.kill_all();
+    }
     drop(executor);
     if let Some(sh) = tui_shutdown
         && let Some(tx) = sh.lock().unwrap().take()

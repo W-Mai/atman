@@ -278,6 +278,16 @@ impl TermRegistry {
             .cloned()
     }
 
+    pub fn kill_all(&self) {
+        let entries = self.entries.lock().expect("entries poisoned");
+        for (_, entry) in entries.iter() {
+            let mut child = entry.child.lock().expect("child poisoned");
+            if let Some(child) = child.as_mut() {
+                let _ = child.kill();
+            }
+        }
+    }
+
     pub fn lookup(
         &self,
         handle_str: &str,
@@ -411,6 +421,12 @@ impl TermRegistry {
 
         self.insert(entry.clone());
         Ok((handle, entry))
+    }
+}
+
+impl Drop for TermRegistry {
+    fn drop(&mut self) {
+        self.kill_all();
     }
 }
 

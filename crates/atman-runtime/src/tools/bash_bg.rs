@@ -200,6 +200,13 @@ impl BgRegistry {
         self
     }
 
+    pub fn kill_all(&self) {
+        let entries = self.entries.lock().unwrap();
+        for (_, entry) in entries.iter() {
+            let _ = entry.control_tx.try_send(BgControl::Kill);
+        }
+    }
+
     pub fn spawn(
         self: &Arc<Self>,
         cmd: String,
@@ -501,10 +508,7 @@ impl BgRegistry {
 
 impl Drop for BgRegistry {
     fn drop(&mut self) {
-        let entries = self.entries.lock().unwrap();
-        for (_, entry) in entries.iter() {
-            let _ = entry.control_tx.try_send(BgControl::Kill);
-        }
+        self.kill_all();
     }
 }
 
