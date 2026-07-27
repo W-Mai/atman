@@ -200,11 +200,11 @@ pub fn render(
             };
             let (kind_icon, kind_color) = node_kind_glyph(&node.kind);
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
-            let elapsed_w = elapsed.chars().count() + 1;
+            let elapsed_w = elapsed.chars().count();
             let icon_w = 2;
-            let content_w = w.saturating_sub(icon_w + elapsed_w + 1);
+            let content_w = w.saturating_sub(icon_w + elapsed_w + 2);
             let label = truncate_label(&node.label, content_w);
-            let pad = w.saturating_sub(icon_w + label.chars().count() + elapsed_w);
+            let pad = w.saturating_sub(icon_w + label.chars().count() + elapsed_w + 2);
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {kind_icon} "),
@@ -213,6 +213,7 @@ pub fn render(
                 Span::styled(label, Style::default().fg(t.tinted_fg.into()).bg(bg)),
                 Span::styled(" ".repeat(pad), Style::default().bg(bg)),
                 Span::styled(elapsed, Style::default().fg(t.meta_fg.into()).bg(bg)),
+                Span::styled(" ", Style::default().bg(bg)),
             ]));
             hitmap.activity_rects.push((
                 node.run_id.clone(),
@@ -461,11 +462,11 @@ pub fn render(
             row += 1;
             for (i, content_trunc) in content_rows.iter().enumerate() {
                 let content_y = header_row + 1 + i as u16;
-                let content_pad = w.saturating_sub(1 + content_trunc.chars().count() + 2);
+                let content_pad = w.saturating_sub(1 + 1 + content_trunc.chars().count() + 2);
                 lines.push(Line::from(vec![
                     Span::styled(bar, Style::default().fg(bar_color).bg(c_bg)),
                     Span::styled(
-                        format!(" {} ", content_trunc),
+                        format!(" {content_trunc}"),
                         Style::default().fg(t.meta_fg.into()).bg(c_bg),
                     ),
                     Span::styled(" ".repeat(content_pad), Style::default().bg(c_bg)),
