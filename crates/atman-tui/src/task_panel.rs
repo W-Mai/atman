@@ -35,6 +35,7 @@ pub struct TaskPanelHitMap {
     pub kill_rects: Vec<(TaskId, Rect)>,
     pub group_header_rects: Vec<(TaskKind, Rect)>,
     pub task_rects: Vec<(String, Rect)>,
+    pub task_header_rects: Vec<(String, Rect)>,
     pub activity_rects: Vec<(String, String, Rect)>,
     pub history_btn_rect: Option<Rect>,
     pub insert_rects: Vec<(String, Rect)>,
@@ -49,6 +50,7 @@ pub struct TaskPanelHover {
     pub hovered_history_btn: bool,
     pub kill_armed_id: Option<TaskId>,
     pub kill_armed_expired: bool,
+    pub expanded_tasks: std::collections::HashSet<String>,
 }
 
 pub fn compute_task_panel_rect(area: Rect, show: bool, collapsed: bool) -> Option<Rect> {
@@ -334,6 +336,7 @@ pub fn render(
             let is_kill_hovered = hover.hovered_kill_id == Some(snap.id.clone());
             let is_kill_armed =
                 hover.kill_armed_id == Some(snap.id.clone()) && !hover.kill_armed_expired;
+            let is_expanded = hover.expanded_tasks.contains(&snap.source_handle);
             let header_bg: Color = t.user_msg_bg.into();
             let content_bg: Color = t.code_bg.into();
             let header_bg_hover: Color = t.user_msg_bg.lerp(t.highlight_bg, 0.3);
@@ -347,6 +350,13 @@ pub fn render(
             // layout: bar(1) sp(1) icon(1) sp(1) label(...) pad sp(2) elapsed sp(1) insert(1) sp(1) kill(1) sp(1)
             let right_w = 2 + elapsed_w + 1 + 1 + 1 + 1 + 1; // sp(2) + elapsed + sp + ↵ + sp + ✕ + sp
             let left_w = 1 + 1 + 1 + 1; // bar + sp + icon + sp
+
+            // compute content lines (used for both collapsed summary and expanded view)
+            let content_lines: Vec<String> = compute_content_lines(snap, activity_nodes, items);
+            let summary = content_lines
+                .last()
+                .map(|l| truncate_label(l, w.saturating_sub(left_w + right_w + 1)))
+                .unwrap_or_default();
             let label_max = w.saturating_sub(left_w + right_w);
             let label = truncate_label(&snap.label, label_max);
             let label_w = label.chars().count();
@@ -385,13 +395,193 @@ pub fn render(
                 ("✕", t.error.into(), Modifier::empty())
             };
 
+            // kill is at width-2 (with trailing space), insert is 2 chars before
+            let kill_x = inner.x + inner.width.saturating_sub(2);
+            let insert_x = kill_x.saturating_sub(2);
+
+            if !is_expanded {
+                // collapsed: 3 rows = padding + single line + padding
+                let collapsed_max = w.saturating_sub(left_w + right_w);
+                let collapsed_bg = content_bg;
+                let collapsed_bg_hover = content_bg_hover;
+                let cbg = if is_task_hovered {
+                    collapsed_bg_hover
+                } else {
+                    collapsed_bg
+                };
+                // split label and summary for different fg colors
+                let (collapsed_label_text, collapsed_summary_text) = if summary.is_empty() {
+                    (label.clone(), String::new())
+                } else {
+                    (label.clone(), summary.clone())
+                };
+                let label_trunc = truncate_label(&collapsed_label_text, collapsed_max);
+                let remaining = collapsed_max.saturating_sub(label_trunc.chars().count() + 1);
+                let summary_trunc = if collapsed_summary_text.is_empty() {
+                    String::new()
+                } else {
+                    truncate_label(&collapsed_summary_text, remaining)
+                };
+                let collapsed_label_w = label_trunc.chars().count()
+                    + if summary_trunc.is_empty() {
+                        0
+                    } else {
+                        1 + summary_trunc.chars().count()
+                    };
+                let c_pad = w.saturating_sub(left_w + collapsed_label_w + right_w);
+
+                // top padding (with bar)
+                let top_y = row;
+                lines.push(Line::from(vec![
+                    Span::styled(bar, Style::default().fg(bar_color).bg(cbg)),
+                    Span::styled(" ".repeat(w.saturating_sub(1)), Style::default().bg(cbg)),
+                ]));
+                hitmap.task_rects.push((
+                    snap.source_handle.clone(),
+                    Rect {
+                        x: inner.x,
+                        y: top_y,
+                        width: inner.width.saturating_sub(4),
+                        height: 1,
+                    },
+                ));
+                hitmap.task_header_rects.push((
+                    snap.source_handle.clone(),
+                    Rect {
+                        x: inner.x,
+                        y: top_y,
+                        width: inner.width.saturating_sub(4),
+                        height: 1,
+                    },
+                ));
+                row += 1;
+
+                // single line (acts as header)
+                let mid_y = row;
+                hitmap.kill_rects.push((
+                    snap.id.clone(),
+                    Rect {
+                        x: kill_x,
+                        y: mid_y,
+                        width: 1,
+                        height: 1,
+                    },
+                ));
+                hitmap.insert_rects.push((
+                    snap.source_handle.clone(),
+                    Rect {
+                        x: insert_x,
+                        y: mid_y,
+                        width: 1,
+                        height: 1,
+                    },
+                ));
+                lines.push(Line::from({
+                    let mut spans = vec![
+                        Span::styled(bar, Style::default().fg(bar_color).bg(cbg)),
+                        Span::styled(format!(" {icon} "), Style::default().fg(bar_color).bg(cbg)),
+                        Span::styled(label_trunc, Style::default().fg(t.subtle_fg.into()).bg(cbg)),
+                    ];
+                    if !summary_trunc.is_empty() {
+                        spans.push(Span::styled(" ", Style::default().bg(cbg)));
+                        spans.push(Span::styled(
+                            summary_trunc,
+                            Style::default().fg(t.tinted_fg.into()).bg(cbg),
+                        ));
+                    }
+                    spans.push(Span::styled(" ".repeat(c_pad), Style::default().bg(cbg)));
+                    spans.push(Span::styled("  ", Style::default().bg(cbg)));
+                    spans.push(Span::styled(
+                        elapsed,
+                        Style::default().fg(t.subtle_fg.into()).bg(cbg),
+                    ));
+                    spans.push(Span::styled(" ", Style::default().bg(cbg)));
+                    spans.push(Span::styled(
+                        "↵",
+                        Style::default()
+                            .fg(insert_color)
+                            .bg(cbg)
+                            .add_modifier(insert_mod),
+                    ));
+                    spans.push(Span::styled(" ", Style::default().bg(cbg)));
+                    spans.push(Span::styled(
+                        kill_glyph,
+                        Style::default()
+                            .fg(kill_color)
+                            .bg(cbg)
+                            .add_modifier(kill_mod),
+                    ));
+                    spans.push(Span::styled(" ", Style::default().bg(cbg)));
+                    spans
+                }));
+                hitmap.task_rects.push((
+                    snap.source_handle.clone(),
+                    Rect {
+                        x: inner.x,
+                        y: mid_y,
+                        width: inner.width.saturating_sub(4),
+                        height: 1,
+                    },
+                ));
+                hitmap.task_header_rects.push((
+                    snap.source_handle.clone(),
+                    Rect {
+                        x: inner.x,
+                        y: mid_y,
+                        width: inner.width.saturating_sub(4),
+                        height: 1,
+                    },
+                ));
+                row += 1;
+
+                // bottom padding (with bar)
+                let bot_y = row;
+                lines.push(Line::from(vec![
+                    Span::styled(bar, Style::default().fg(bar_color).bg(cbg)),
+                    Span::styled(" ".repeat(w.saturating_sub(1)), Style::default().bg(cbg)),
+                ]));
+                hitmap.task_rects.push((
+                    snap.source_handle.clone(),
+                    Rect {
+                        x: inner.x,
+                        y: bot_y,
+                        width: inner.width.saturating_sub(4),
+                        height: 1,
+                    },
+                ));
+                hitmap.task_header_rects.push((
+                    snap.source_handle.clone(),
+                    Rect {
+                        x: inner.x,
+                        y: bot_y,
+                        width: inner.width.saturating_sub(4),
+                        height: 1,
+                    },
+                ));
+                row += 1;
+
+                if task_idx + 1 < running_tasks.len() {
+                    lines.push(Line::from(""));
+                    row += 1;
+                }
+                continue;
+            }
+
+            // expanded: header + content padding + content + content padding
+            let header_row = row;
             lines.push(Line::from(vec![
                 Span::styled(bar, Style::default().fg(bar_color).bg(h_bg)),
                 Span::styled(format!(" {icon} "), Style::default().fg(bar_color).bg(h_bg)),
-                Span::styled(label, Style::default().fg(t.tinted_fg.into()).bg(h_bg)),
+                Span::styled(
+                    label.clone(),
+                    Style::default().fg(t.tinted_fg.into()).bg(h_bg),
+                ),
                 Span::styled(" ".repeat(pad), Style::default().bg(h_bg)),
                 Span::styled("  ", Style::default().bg(h_bg)),
-                Span::styled(elapsed, Style::default().fg(t.meta_fg.into()).bg(h_bg)),
+                Span::styled(
+                    elapsed.clone(),
+                    Style::default().fg(t.meta_fg.into()).bg(h_bg),
+                ),
                 Span::styled(" ", Style::default().bg(h_bg)),
                 Span::styled(
                     "↵",
@@ -410,16 +600,11 @@ pub fn render(
                 ),
                 Span::styled(" ", Style::default().bg(h_bg)),
             ]));
-
-            // kill is at width-2 (with trailing space), insert is 2 chars before
-            let kill_x = inner.x + inner.width.saturating_sub(2);
-            let insert_x = kill_x.saturating_sub(2);
-            let header_row = row;
             hitmap.kill_rects.push((
                 snap.id.clone(),
                 Rect {
                     x: kill_x,
-                    y: row,
+                    y: header_row,
                     width: 1,
                     height: 1,
                 },
@@ -428,74 +613,11 @@ pub fn render(
                 snap.source_handle.clone(),
                 Rect {
                     x: insert_x,
-                    y: row,
+                    y: header_row,
                     width: 1,
                     height: 1,
                 },
             ));
-
-            // content line: sub-node for flow/agent, output tail for bash/terminal
-            let content_lines: Vec<String> = match snap.kind {
-                TaskKind::Flow | TaskKind::Subflow | TaskKind::Agent | TaskKind::Dispatch => {
-                    let sub = activity_nodes.iter().rev().find(|n| {
-                        n.run_id == snap.source_handle && n.status == ActivityStatus::Running
-                    });
-                    sub.map(|n| vec![n.label.clone()]).unwrap_or_default()
-                }
-                TaskKind::Bash => {
-                    let label = snap.label.trim();
-                    let exe = label.split_whitespace().next().unwrap_or("");
-                    let rest = label.strip_prefix(exe).unwrap_or(label).trim_start();
-                    if rest.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![rest.to_string()]
-                    }
-                }
-                TaskKind::Terminal => {
-                    let item = items.iter().rev().find(|it| match it {
-                        crate::app::OutputItem::Terminal { handle, .. } => {
-                            *handle == snap.source_handle
-                        }
-                        _ => false,
-                    });
-                    let mut found: Vec<String> = Vec::new();
-                    if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
-                        let cols = screen.cols as usize;
-                        let rows = screen.rows as usize;
-                        if cols > 0 && rows > 0 {
-                            for r in (0..rows).rev() {
-                                let start = r * cols;
-                                let end = start + cols;
-                                let line: String = screen
-                                    .cells
-                                    .get(start..end)
-                                    .map(|cells| {
-                                        cells.iter().map(|c| c.chars.as_str()).collect::<String>()
-                                    })
-                                    .unwrap_or_default();
-                                let trimmed = line.trim();
-                                if !trimmed.is_empty() {
-                                    found.push(trimmed.to_string());
-                                    if found.len() >= 3 {
-                                        break;
-                                    }
-                                }
-                            }
-                            found.reverse();
-                        }
-                    }
-                    found
-                }
-            };
-            let content_rows: Vec<String> = if content_lines.is_empty() {
-                vec![String::new()]
-            } else {
-                content_lines
-                    .iter()
-                    .map(|c| truncate_label(c, w.saturating_sub(4)))
-                    .collect()
-            };
             hitmap.task_rects.push((
                 snap.source_handle.clone(),
                 Rect {
@@ -505,7 +627,26 @@ pub fn render(
                     height: 1,
                 },
             ));
+            hitmap.task_header_rects.push((
+                snap.source_handle.clone(),
+                Rect {
+                    x: inner.x,
+                    y: header_row,
+                    width: inner.width.saturating_sub(4),
+                    height: 1,
+                },
+            ));
             row += 1;
+
+            // content lines already computed above
+            let content_rows: Vec<String> = if content_lines.is_empty() {
+                vec![String::new()]
+            } else {
+                content_lines
+                    .iter()
+                    .map(|c| truncate_label(c, w.saturating_sub(4)))
+                    .collect()
+            };
 
             // content top padding
             let top_pad_y = row;
@@ -603,6 +744,63 @@ pub fn render(
     }
 
     hitmap
+}
+
+fn compute_content_lines(
+    snap: &TaskSnapshot,
+    activity_nodes: &[ActivityNode],
+    items: &[crate::app::OutputItem],
+) -> Vec<String> {
+    match snap.kind {
+        TaskKind::Flow | TaskKind::Subflow | TaskKind::Agent | TaskKind::Dispatch => {
+            let sub = activity_nodes
+                .iter()
+                .rev()
+                .find(|n| n.run_id == snap.source_handle && n.status == ActivityStatus::Running);
+            sub.map(|n| vec![n.label.clone()]).unwrap_or_default()
+        }
+        TaskKind::Bash => {
+            let label = snap.label.trim();
+            let exe = label.split_whitespace().next().unwrap_or("");
+            let rest = label.strip_prefix(exe).unwrap_or(label).trim_start();
+            if rest.is_empty() {
+                Vec::new()
+            } else {
+                vec![rest.to_string()]
+            }
+        }
+        TaskKind::Terminal => {
+            let item = items.iter().rev().find(|it| match it {
+                crate::app::OutputItem::Terminal { handle, .. } => *handle == snap.source_handle,
+                _ => false,
+            });
+            let mut found: Vec<String> = Vec::new();
+            if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
+                let cols = screen.cols as usize;
+                let rows = screen.rows as usize;
+                if cols > 0 && rows > 0 {
+                    for r in (0..rows).rev() {
+                        let start = r * cols;
+                        let end = start + cols;
+                        let line: String = screen
+                            .cells
+                            .get(start..end)
+                            .map(|cells| cells.iter().map(|c| c.chars.as_str()).collect::<String>())
+                            .unwrap_or_default();
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            found.push(trimmed.to_string());
+                            if found.len() >= 3 {
+                                break;
+                            }
+                        }
+                    }
+                    found.reverse();
+                }
+            }
+            found
+        }
+    }
 }
 
 fn truncate_label(s: &str, max: usize) -> String {

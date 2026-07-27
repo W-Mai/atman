@@ -231,6 +231,7 @@ pub struct AppState {
     pub meta_collapsed: bool,
     pub mcp_collapsed: bool,
     pub sidebar_collapsed: bool,
+    pub expanded_tasks: std::collections::HashSet<String>,
     pub sidebar_collapse_locked: bool,
     pub task_registry: Option<atman_runtime::TaskRegistry>,
     pub task_snapshots: Vec<atman_runtime::TaskSnapshot>,

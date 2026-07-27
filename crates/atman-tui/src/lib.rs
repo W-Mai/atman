@@ -670,22 +670,37 @@ async fn run_frames(
                                             .iter()
                                             .find(|(_, tr)| rect_contains(*tr, me.column, me.row))
                                             .map(|(h, _)| h.clone());
+                                        let hit_header = hm
+                                            .task_header_rects
+                                            .iter()
+                                            .find(|(_, r)| rect_contains(*r, me.column, me.row))
+                                            .map(|(h, _)| h.clone());
                                         if let Some(handle) = hit_task {
                                             app.clear_kill_arm();
-                                            let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            let snap = app
-                                                .task_snapshots
-                                                .iter()
-                                                .find(|s| s.source_handle == handle);
-                                            if let Some(snap) = snap {
-                                                app.floating_panels.open(
-                                                    &snap.source_handle,
-                                                    crate::floating_panels::PanelKind::Task(
-                                                        snap.kind,
-                                                    ),
-                                                    &snap.label,
-                                                    canvas,
-                                                );
+                                            let is_header = hit_header.as_deref() == Some(&handle);
+                                            let is_expanded =
+                                                app.expanded_tasks.contains(&handle);
+                                            if is_header && is_expanded {
+                                                app.expanded_tasks.remove(&handle);
+                                            } else if is_header && !is_expanded {
+                                                app.expanded_tasks.insert(handle.clone());
+                                            } else {
+                                                let canvas =
+                                                    app.last_transcript_rect.unwrap_or_default();
+                                                let snap = app
+                                                    .task_snapshots
+                                                    .iter()
+                                                    .find(|s| s.source_handle == handle);
+                                                if let Some(snap) = snap {
+                                                    app.floating_panels.open(
+                                                        &snap.source_handle,
+                                                        crate::floating_panels::PanelKind::Task(
+                                                            snap.kind,
+                                                        ),
+                                                        &snap.label,
+                                                        canvas,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -2970,6 +2985,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             hovered_history_btn: app.hovered_history_btn,
             kill_armed_id: app.kill_armed_id.clone(),
             kill_armed_expired: app.kill_arm_expired(),
+            expanded_tasks: app.expanded_tasks.clone(),
         };
         let hitmap = crate::task_panel::render(
             f,
