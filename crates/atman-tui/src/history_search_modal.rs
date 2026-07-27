@@ -125,7 +125,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
     crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
     let title = format!(
-        " Search History · scope: {} · Tab to toggle · Enter to search · Esc to close ",
+        " Search History · {} · Enter=search · ↑↓/jk=navigate · Tab=scope · Esc=close ",
         modal.scope.label()
     );
     let outer = Block::default()
@@ -147,7 +147,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &HistorySearchModal) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
-            Constraint::Length(11),
+            Constraint::Min(8),
         ])
         .split(inner);
     render_query_row(f, rows[0], modal);
@@ -208,7 +208,7 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
             let sid_short: String = hit.session_id.chars().take(8).collect();
             let ts_short: String = hit.ts.chars().take(19).collect();
             let snippet: String = hit.snippet.chars().take(80).collect();
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     format!("{sid_short:<10}"),
                     Style::default()
@@ -227,12 +227,9 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
                     format!("{:<15} ", hit.kind),
                     Style::default().fg(crate::theme::theme().success.into()),
                 ),
-                Span::styled(
-                    snippet,
-                    Style::default().fg(crate::theme::theme().tinted_fg.into()),
-                ),
-            ]);
-            ListItem::new(line)
+            ];
+            spans.extend(highlight_snippet(&snippet, &modal.last_query));
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let list = List::new(items)
@@ -245,6 +242,33 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
     let mut state = ListState::default();
     state.select(Some(modal.selected));
     f.render_stateful_widget(list, inner, &mut state);
+}
+
+fn highlight_snippet(snippet: &str, query: &str) -> Vec<Span<'static>> {
+    let base_style = Style::default().fg(crate::theme::theme().tinted_fg.into());
+    let hl_style = Style::default()
+        .fg(crate::theme::theme().accent.into())
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    if query.is_empty() {
+        return vec![Span::styled(snippet.to_string(), base_style)];
+    }
+    let mut spans = Vec::new();
+    let mut remaining = snippet;
+    let needle = query.to_lowercase();
+    while !remaining.is_empty() {
+        if let Some(pos) = remaining.to_lowercase().find(&needle) {
+            if pos > 0 {
+                spans.push(Span::styled(remaining[..pos].to_string(), base_style));
+            }
+            let end = pos + needle.len();
+            spans.push(Span::styled(remaining[pos..end].to_string(), hl_style));
+            remaining = &remaining[end..];
+        } else {
+            spans.push(Span::styled(remaining.to_string(), base_style));
+            break;
+        }
+    }
+    spans
 }
 
 fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
@@ -324,5 +348,28 @@ mod tests {
             HistorySearchScope::Project.toggle(),
             HistorySearchScope::Session
         );
+    }
+
+    #[test]
+    fn highlight_snippet_splits_at_match() {
+        let spans = highlight_snippet("hello world foo", "world");
+        assert_eq!(spans.len(), 3);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "hello world foo");
+    }
+
+    #[test]
+    fn highlight_snippet_case_insensitive() {
+        let spans = highlight_snippet("Hello WORLD", "world");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), "Hello ");
+        assert_eq!(spans[1].content.as_ref(), "WORLD");
+    }
+
+    #[test]
+    fn highlight_snippet_empty_query_returns_single_span() {
+        let spans = highlight_snippet("plain text", "");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "plain text");
     }
 }

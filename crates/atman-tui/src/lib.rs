@@ -1361,7 +1361,15 @@ fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
             refresh_history_preview(app);
         }
         KeyAction::Char(c) => {
-            app.history_search.editor.insert_char(*c);
+            if *c == 'j' && app.history_search.editor.buf().is_empty() {
+                app.history_search.move_down();
+                refresh_history_preview(app);
+            } else if *c == 'k' && app.history_search.editor.buf().is_empty() {
+                app.history_search.move_up();
+                refresh_history_preview(app);
+            } else {
+                app.history_search.editor.insert_char(*c);
+            }
         }
         KeyAction::Backspace => {
             app.history_search.editor.backspace();
