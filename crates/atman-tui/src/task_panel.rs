@@ -353,12 +353,31 @@ pub fn render(
 
             // compute content lines (used for both collapsed summary and expanded view)
             let content_lines: Vec<String> = compute_content_lines(snap, activity_nodes, items);
+            let label_max = w.saturating_sub(left_w + right_w);
+            let collapse_label_max = if snap.kind == TaskKind::Bash {
+                (label_max / 3).max(8)
+            } else {
+                label_max
+            };
             let summary = content_lines
                 .last()
-                .map(|l| truncate_label(l, w.saturating_sub(left_w + right_w + 1)))
+                .map(|l| {
+                    let smax = if is_expanded {
+                        0
+                    } else {
+                        w.saturating_sub(left_w + collapse_label_max + right_w + 1)
+                    };
+                    truncate_label(l, smax.max(1))
+                })
                 .unwrap_or_default();
-            let label_max = w.saturating_sub(left_w + right_w);
-            let label = truncate_label(&snap.label, label_max);
+            let label = truncate_label(
+                &snap.label,
+                if is_expanded {
+                    label_max
+                } else {
+                    collapse_label_max
+                },
+            );
             let label_w = label.chars().count();
             let pad = w.saturating_sub(left_w + label_w + right_w);
 
@@ -760,14 +779,24 @@ fn compute_content_lines(
             sub.map(|n| vec![n.label.clone()]).unwrap_or_default()
         }
         TaskKind::Bash => {
-            let label = snap.label.trim();
-            let exe = label.split_whitespace().next().unwrap_or("");
-            let rest = label.strip_prefix(exe).unwrap_or(label).trim_start();
-            if rest.is_empty() {
-                Vec::new()
-            } else {
-                vec![rest.to_string()]
+            let item = items.iter().rev().find(|it| match it {
+                crate::app::OutputItem::Bash { handle, .. } => *handle == snap.source_handle,
+                _ => false,
+            });
+            let mut found: Vec<String> = Vec::new();
+            if let Some(crate::app::OutputItem::Bash { output, .. }) = item {
+                for line in output.lines().rev() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        found.push(trimmed.to_string());
+                        if found.len() >= 3 {
+                            break;
+                        }
+                    }
+                }
+                found.reverse();
             }
+            found
         }
         TaskKind::Terminal => {
             let item = items.iter().rev().find(|it| match it {
