@@ -183,20 +183,36 @@ pub fn render(
     let mut lines: Vec<Line> = Vec::new();
     let mut row = inner.y;
 
-    // --- Upper: Activity (running only, old→new, gradient bg) ---
+    // --- Upper: Activity (running only, old→new, fg gradient) ---
+    let activity_bg: Color = t.code_bg.into();
+    let w = inner.width as usize;
+
+    // top padding line
+    lines.push(Line::from(vec![Span::styled(
+        " ".repeat(w),
+        Style::default().bg(activity_bg),
+    )]));
+    row += 1;
+
     let running: Vec<&ActivityNode> = activity_nodes
         .iter()
         .filter(|n| n.status == ActivityStatus::Running)
         .collect();
     let running_count = running.len();
     if running_count == 0 {
-        lines.push(Line::from(vec![Span::styled(
-            "  no active tasks",
-            Style::default().fg(t.subtle_fg.into()),
-        )]));
+        let msg = "no active tasks";
+        let msg_w = msg.chars().count();
+        let total_pad = w.saturating_sub(msg_w);
+        let left_pad = total_pad / 2;
+        let right_pad = total_pad.saturating_sub(left_pad);
+        lines.push(Line::from(vec![
+            Span::styled(" ".repeat(left_pad), Style::default().bg(activity_bg)),
+            Span::styled(msg, Style::default().fg(t.subtle_fg.into()).bg(activity_bg)),
+            Span::styled(" ".repeat(right_pad), Style::default().bg(activity_bg)),
+        ]));
         row += 1;
     } else {
-        let w = inner.width as usize;
+        let inner_w = w.saturating_sub(2); // left+right padding
         for (i, node) in running.iter().enumerate() {
             let ratio = if running_count <= 1 {
                 1.0
@@ -207,7 +223,7 @@ pub fn render(
                 .hovered_activity
                 .as_ref()
                 .is_some_and(|(r, n)| *r == node.run_id && *n == node.node_id);
-            let fg = t.subtle_fg.lerp(t.tinted_fg, ratio);
+            let fg = t.code_bg.lerp(t.tinted_fg, 0.15 + ratio * 0.85);
             let label_fg = if is_hovered {
                 t.tinted_fg.lerp(t.highlight_bg, 0.3)
             } else {
@@ -217,15 +233,19 @@ pub fn render(
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
             let elapsed_w = elapsed.chars().count();
             let icon_w = 2;
-            let content_w = w.saturating_sub(icon_w + elapsed_w + 2);
+            let content_w = inner_w.saturating_sub(icon_w + elapsed_w + 2);
             let label = truncate_label(&node.label, content_w);
-            let pad = w.saturating_sub(icon_w + label.chars().count() + elapsed_w + 2);
+            let pad = inner_w.saturating_sub(icon_w + label.chars().count() + elapsed_w + 2);
             lines.push(Line::from(vec![
-                Span::styled(format!(" {kind_icon} "), Style::default().fg(label_fg)),
-                Span::styled(label, Style::default().fg(label_fg)),
-                Span::styled(" ".repeat(pad), Style::default()),
-                Span::styled(elapsed, Style::default().fg(fg)),
-                Span::raw(" "),
+                Span::styled(" ", Style::default().bg(activity_bg)),
+                Span::styled(
+                    format!(" {kind_icon} "),
+                    Style::default().fg(label_fg).bg(activity_bg),
+                ),
+                Span::styled(label, Style::default().fg(label_fg).bg(activity_bg)),
+                Span::styled(" ".repeat(pad), Style::default().bg(activity_bg)),
+                Span::styled(elapsed, Style::default().fg(fg).bg(activity_bg)),
+                Span::styled("  ", Style::default().bg(activity_bg)),
             ]));
             hitmap.activity_rects.push((
                 node.run_id.clone(),
@@ -238,18 +258,18 @@ pub fn render(
                 },
             ));
             row += 1;
-            if i + 1 < running_count {
-                lines.push(Line::from(""));
-                row += 1;
-            }
         }
     }
 
-    // separator
+    // bottom padding line
     lines.push(Line::from(vec![Span::styled(
-        "─".repeat(inner.width as usize),
-        Style::default().fg(t.subtle_fg.into()),
+        " ".repeat(w),
+        Style::default().bg(activity_bg),
     )]));
+    row += 1;
+
+    // blank line separates activity panel from task groups
+    lines.push(Line::from(""));
     row += 1;
 
     // --- Lower: Background tasks grouped by TaskKind ---
