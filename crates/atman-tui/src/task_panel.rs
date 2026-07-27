@@ -359,17 +359,6 @@ pub fn render(
             } else {
                 label_max
             };
-            let summary = content_lines
-                .last()
-                .map(|l| {
-                    let smax = if is_expanded {
-                        0
-                    } else {
-                        w.saturating_sub(left_w + collapse_label_max + right_w + 1)
-                    };
-                    truncate_label(l, smax.max(1))
-                })
-                .unwrap_or_default();
             let label = truncate_label(
                 &snap.label,
                 if is_expanded {
@@ -378,6 +367,20 @@ pub fn render(
                     collapse_label_max
                 },
             );
+            let summary = if is_expanded {
+                String::new()
+            } else {
+                let actual_label_w = label.chars().count();
+                content_lines
+                    .last()
+                    .map(|l| {
+                        let smax = w
+                            .saturating_sub(left_w + actual_label_w + right_w + 1)
+                            .max(1);
+                        truncate_label(l, smax)
+                    })
+                    .unwrap_or_default()
+            };
             let label_w = label.chars().count();
             let pad = w.saturating_sub(left_w + label_w + right_w);
 
