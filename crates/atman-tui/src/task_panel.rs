@@ -27,7 +27,7 @@ pub enum ActivityStatus {
 
 use atman_runtime::{TaskId, TaskKind, TaskSnapshot, TaskStatus};
 
-pub const TASK_PANEL_WIDTH: u16 = 32;
+pub const TASK_PANEL_WIDTH: u16 = 40;
 pub const TASK_PANEL_STRIP_WIDTH: u16 = 5;
 
 #[derive(Debug, Default)]
@@ -88,16 +88,6 @@ fn fmt_activity_elapsed(started: std::time::Instant, ended: Option<std::time::In
     let end = ended.unwrap_or_else(std::time::Instant::now);
     let ms = end.duration_since(started).as_millis() as u64;
     fmt_elapsed(ms)
-}
-
-fn status_color(status: TaskStatus) -> Color {
-    let t = crate::theme::theme();
-    match status {
-        TaskStatus::Running => t.accent.into(),
-        TaskStatus::Ok => t.success.into(),
-        TaskStatus::Err => t.error.into(),
-        TaskStatus::Killed => t.subtle_fg.into(),
-    }
 }
 
 pub fn node_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, Color) {
@@ -297,25 +287,34 @@ pub fn render(
             let is_kill_hovered = hover.hovered_kill_id == Some(snap.id.clone());
             let is_kill_armed =
                 hover.kill_armed_id == Some(snap.id.clone()) && !hover.kill_armed_expired;
-            let base_bg: Color = t.user_msg_bg.into();
-            let bg: Color = if is_task_hovered {
-                t.user_msg_bg.lerp(t.highlight_bg, 0.3)
-            } else {
-                base_bg
-            };
-            let bar_color: Color = status_color(snap.status);
+            let header_bg: Color = t.user_msg_bg.into();
+            let content_bg: Color = t.code_bg.into();
+            let header_bg_hover: Color = t.user_msg_bg.lerp(t.highlight_bg, 0.3);
+            let content_bg_hover: Color = t.code_bg.lerp(t.highlight_bg, 0.3);
+            let bar_color: Color = t.subtle_fg.into();
             let bar = if is_task_hovered { "▌" } else { "▎" };
 
             let icon = status_icon(snap.status);
             let elapsed = fmt_elapsed(snap.elapsed_ms());
             let elapsed_w = elapsed.chars().count();
-            // layout: bar(1) sp(1) icon(1) sp(1) label(...) pad sp(1) elapsed sp(1) insert(1) sp(1) kill(1) sp(1)
-            let right_w = 1 + elapsed_w + 1 + 1 + 1 + 1 + 1; // sp + elapsed + sp + ↵ + sp + ✕ + sp
+            // layout: bar(1) sp(1) icon(1) sp(1) label(...) pad sp(2) elapsed sp(1) insert(1) sp(1) kill(1) sp(1)
+            let right_w = 2 + elapsed_w + 1 + 1 + 1 + 1 + 1; // sp(2) + elapsed + sp + ↵ + sp + ✕ + sp
             let left_w = 1 + 1 + 1 + 1; // bar + sp + icon + sp
             let label_max = w.saturating_sub(left_w + right_w);
             let label = truncate_label(&snap.label, label_max);
             let label_w = label.chars().count();
             let pad = w.saturating_sub(left_w + label_w + right_w);
+
+            let h_bg = if is_task_hovered {
+                header_bg_hover
+            } else {
+                header_bg
+            };
+            let c_bg = if is_task_hovered {
+                content_bg_hover
+            } else {
+                content_bg
+            };
 
             let insert_color: Color = if is_kill_hovered || is_kill_armed {
                 t.meta_fg.into()
@@ -340,29 +339,29 @@ pub fn render(
             };
 
             lines.push(Line::from(vec![
-                Span::styled(bar, Style::default().fg(bar_color).bg(bg)),
-                Span::styled(format!(" {icon} "), Style::default().fg(bar_color).bg(bg)),
-                Span::styled(label, Style::default().fg(t.tinted_fg.into()).bg(bg)),
-                Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(elapsed, Style::default().fg(t.meta_fg.into()).bg(bg)),
-                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(bar, Style::default().fg(bar_color).bg(h_bg)),
+                Span::styled(format!(" {icon} "), Style::default().fg(bar_color).bg(h_bg)),
+                Span::styled(label, Style::default().fg(t.tinted_fg.into()).bg(h_bg)),
+                Span::styled(" ".repeat(pad), Style::default().bg(h_bg)),
+                Span::styled("  ", Style::default().bg(h_bg)),
+                Span::styled(elapsed, Style::default().fg(t.meta_fg.into()).bg(h_bg)),
+                Span::styled(" ", Style::default().bg(h_bg)),
                 Span::styled(
                     "↵",
                     Style::default()
                         .fg(insert_color)
-                        .bg(bg)
+                        .bg(h_bg)
                         .add_modifier(insert_mod),
                 ),
-                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(" ", Style::default().bg(h_bg)),
                 Span::styled(
                     kill_glyph,
                     Style::default()
                         .fg(kill_color)
-                        .bg(bg)
+                        .bg(h_bg)
                         .add_modifier(kill_mod),
                 ),
-                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(" ", Style::default().bg(h_bg)),
             ]));
 
             // kill is at width-2 (with trailing space), insert is 2 chars before
@@ -462,16 +461,15 @@ pub fn render(
             row += 1;
             for (i, content_trunc) in content_rows.iter().enumerate() {
                 let content_y = header_row + 1 + i as u16;
+                let content_pad = w.saturating_sub(1 + content_trunc.chars().count() + 2);
                 lines.push(Line::from(vec![
-                    Span::styled(bar, Style::default().fg(bar_color).bg(bg)),
+                    Span::styled(bar, Style::default().fg(bar_color).bg(c_bg)),
                     Span::styled(
                         format!(" {} ", content_trunc),
-                        Style::default().fg(t.meta_fg.into()).bg(bg),
+                        Style::default().fg(t.meta_fg.into()).bg(c_bg),
                     ),
-                    Span::styled(
-                        " ".repeat(w.saturating_sub(1 + content_trunc.chars().count() + 1)),
-                        Style::default().bg(bg),
-                    ),
+                    Span::styled(" ".repeat(content_pad), Style::default().bg(c_bg)),
+                    Span::styled("  ", Style::default().bg(c_bg)),
                 ]));
                 hitmap.task_rects.push((
                     snap.source_handle.clone(),
