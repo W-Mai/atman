@@ -281,6 +281,14 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             }
         }
     }
+    // A restored session cannot have a flow still running.
+    for item in out.iter_mut() {
+        if let OutputItem::WorkflowPanel { ended_at: e, .. } = item {
+            if e.is_none() {
+                *e = Some(Instant::now());
+            }
+        }
+    }
     out
 }
 
@@ -500,5 +508,31 @@ mod tests {
         assert_eq!(panel.0.root.len(), 1);
         assert_eq!(panel.0.root[0].label, "look_into");
         assert!(panel.1.is_some(), "FlowDone should close panel");
+    }
+
+    #[test]
+    fn flatten_transcript_closes_orphan_panels_without_flow_done() {
+        use atman_runtime::nodegraph::FlowGraph as StaticFlowGraph;
+        let entries = vec![TranscriptEntry::FlowGraph {
+            run_id: "r1".into(),
+            flow_name: "agent".into(),
+            graph: StaticFlowGraph {
+                flow_name: "agent".into(),
+                root: Vec::new(),
+            },
+            ts: None,
+        }];
+        let out = flatten_transcript(&entries);
+        let panel = out
+            .iter()
+            .find_map(|it| match it {
+                OutputItem::WorkflowPanel { ended_at, .. } => Some(*ended_at),
+                _ => None,
+            })
+            .expect("workflow panel");
+        assert!(
+            panel.is_some(),
+            "orphan panel without FlowDone must be closed on restore"
+        );
     }
 }

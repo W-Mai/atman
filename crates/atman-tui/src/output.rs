@@ -391,7 +391,9 @@ fn item_content_hash(
             panel_expanded.hash(&mut h);
             started_at.hash(&mut h);
             ended_at.hash(&mut h);
-            animation_frame.hash(&mut h);
+            if ended_at.is_none() {
+                animation_frame.hash(&mut h);
+            }
         }
         OutputItem::StartupCard { version, recent } => {
             6u8.hash(&mut h);
@@ -3936,6 +3938,46 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>()
+    }
+
+    #[test]
+    fn workflow_panel_hash_ignores_animation_frame_when_closed() {
+        use atman_runtime::workflow::{NodeStatus, WorkflowGraph, WorkflowNode, WorkflowNodeKind};
+        use std::collections::HashSet;
+        use std::time::Instant;
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root: vec![WorkflowNode {
+                id: "n0".into(),
+                kind: WorkflowNodeKind::Stmt {
+                    node_kind: atman_runtime::nodegraph::NodeKind::Return,
+                },
+                label: "done".into(),
+                status: NodeStatus::Ok,
+                started_at: None,
+                ended_at: None,
+                output_preview: None,
+                children: Vec::new(),
+                parallelism: atman_runtime::workflow::Parallelism::Serial,
+                approval: None,
+                llm_stats: None,
+            }],
+        };
+        let item = OutputItem::WorkflowPanel {
+            turn_index: 0,
+            graph,
+            expanded_nodes: HashSet::new(),
+            panel_expanded: false,
+            started_at: Instant::now(),
+            ended_at: Some(Instant::now()),
+            cancelled: false,
+        };
+        let h1 = item_content_hash(&item, false, &HashSet::new(), Some(0));
+        let h2 = item_content_hash(&item, false, &HashSet::new(), Some(999));
+        assert_eq!(
+            h1, h2,
+            "animation_frame must not affect hash when panel is closed"
+        );
     }
 
     #[test]
