@@ -199,21 +199,21 @@ pub fn render(
         let w = inner.width as usize;
         for (i, node) in running.iter().enumerate() {
             let ratio = if running_count <= 1 {
-                0.0
+                1.0
             } else {
-                1.0 - (i as f64 / (running_count - 1) as f64)
+                i as f64 / (running_count - 1) as f64
             };
-            let base_bg = t.user_msg_bg.lerp(t.panel_bg, ratio);
             let is_hovered = hover
                 .hovered_activity
                 .as_ref()
                 .is_some_and(|(r, n)| *r == node.run_id && *n == node.node_id);
-            let bg: Color = if is_hovered {
-                t.user_msg_bg.lerp(t.highlight_bg, 0.3)
+            let fg = t.subtle_fg.lerp(t.tinted_fg, ratio);
+            let label_fg = if is_hovered {
+                t.tinted_fg.lerp(t.highlight_bg, 0.3)
             } else {
-                base_bg
+                fg
             };
-            let (kind_icon, kind_color) = node_kind_glyph(&node.kind);
+            let (kind_icon, _) = node_kind_glyph(&node.kind);
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
             let elapsed_w = elapsed.chars().count();
             let icon_w = 2;
@@ -221,14 +221,11 @@ pub fn render(
             let label = truncate_label(&node.label, content_w);
             let pad = w.saturating_sub(icon_w + label.chars().count() + elapsed_w + 2);
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {kind_icon} "),
-                    Style::default().fg(kind_color).bg(bg),
-                ),
-                Span::styled(label, Style::default().fg(t.tinted_fg.into()).bg(bg)),
-                Span::styled(" ".repeat(pad), Style::default().bg(bg)),
-                Span::styled(elapsed, Style::default().fg(t.meta_fg.into()).bg(bg)),
-                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(format!(" {kind_icon} "), Style::default().fg(label_fg)),
+                Span::styled(label, Style::default().fg(label_fg)),
+                Span::styled(" ".repeat(pad), Style::default()),
+                Span::styled(elapsed, Style::default().fg(fg)),
+                Span::raw(" "),
             ]));
             hitmap.activity_rects.push((
                 node.run_id.clone(),
