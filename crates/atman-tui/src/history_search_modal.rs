@@ -309,7 +309,7 @@ fn highlight_snippet(snippet: &str, query: &str) -> Vec<Span<'static>> {
     spans
 }
 
-fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
+fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearchModal) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into()))
@@ -328,6 +328,10 @@ fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
         return;
     }
     let lines = crate::markdown::render_markdown_with_width(&text, inner.width);
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    if modal.preview_scroll as usize > max_scroll {
+        modal.preview_scroll = max_scroll as u16;
+    }
     let scroll = modal.preview_scroll as usize;
     for (i, line) in lines.iter().enumerate().skip(scroll) {
         let display_row = i - scroll;
