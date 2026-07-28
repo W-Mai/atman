@@ -864,7 +864,7 @@ fn render_history_content(
         let icon = status_icon(snap.status);
         let elapsed = format_elapsed(snap.elapsed_ms());
         let st_color = status_color(snap.status);
-        let visible_i = i as u16 - scroll;
+        let visible_i = (i as u16).saturating_sub(scroll);
         let row_y = area.y + visible_i;
         let is_hovered = hovered_row.as_deref() == Some(&snap.source_handle);
         if visible_i < visible_height {
