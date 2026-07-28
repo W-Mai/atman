@@ -472,18 +472,15 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
 
     let shadow = t.shadow.into();
     let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, 0.6);
-    let code_bg = t.code_bg.into();
     let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
             return;
         }
         let cell = &mut buf[(x, y)];
-        let bg = if matches!(cell.bg, Color::Reset) {
-            code_bg
-        } else {
-            cell.bg
-        };
-        cell.bg = multiply_color(bg, factor);
+        if matches!(cell.bg, Color::Reset) {
+            return;
+        }
+        cell.bg = multiply_color(cell.bg, factor);
     };
 
     let max_x = area.x.saturating_add(area.width).saturating_sub(1);
@@ -597,16 +594,14 @@ fn darken_cell(buf: &mut ratatui::buffer::Buffer, area: Rect, x: u16, y: u16, ra
     if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
         return;
     }
-    let t = crate::theme::theme();
     let cell = &mut buf[(x, y)];
-    let bg = if matches!(cell.bg, Color::Reset) {
-        t.code_bg.into()
-    } else {
-        cell.bg
-    };
+    if matches!(cell.bg, Color::Reset) {
+        return;
+    }
+    let t = crate::theme::theme();
     let shadow = t.shadow.into();
     let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, ratio);
-    cell.bg = multiply_color(bg, factor);
+    cell.bg = multiply_color(cell.bg, factor);
 }
 
 /// Top-to-bottom gradient: strongest at `rect.y`, fading to 0 over `rows` rows.
