@@ -601,7 +601,8 @@ fn render_history_content(
 ) {
     let t = crate::theme::theme();
     let bar_color: Color = t.subtle_fg.into();
-    let hover_bg: Color = t.user_msg_bg.into();
+    let content_bg: Color = t.code_bg.into();
+    let hover_bg: Color = t.code_bg.lerp(t.highlight_bg, 0.3);
     let done: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| !s.is_running()).collect();
 
     let mut lines: Vec<Line> = Vec::new();
@@ -620,7 +621,7 @@ fn render_history_content(
                 height: 1,
             },
         ));
-        let row_bg = if is_hovered { hover_bg } else { Color::Reset };
+        let row_bg = if is_hovered { hover_bg } else { content_bg };
         let bar = if is_hovered { "▌" } else { "▎" };
         let label_fg = if is_hovered {
             t.tinted_fg.into()
@@ -629,7 +630,7 @@ fn render_history_content(
         };
         let kind_icon = task_kind_icon(snap.kind);
         let prefix_len: u16 = 2 + 2 + 2; // "{bar} " + "{kind} " + "{icon} "
-        let suffix_len: u16 = 1 + elapsed.chars().count() as u16; // " " + elapsed
+        let suffix_len: u16 = 1 + elapsed.chars().count() as u16 + 1; // " " + elapsed + trailing " "
         let label_max = area.width.saturating_sub(prefix_len + suffix_len) as usize;
         let label = truncate(&snap.label, label_max);
         let label_actual = label.chars().count() as u16;
@@ -643,7 +644,9 @@ fn render_history_content(
             Span::styled(format!("{icon} "), Style::default().fg(st_color).bg(row_bg)),
             Span::styled(label, Style::default().fg(label_fg).bg(row_bg)),
             Span::styled(" ".repeat(pad as usize), Style::default().bg(row_bg)),
+            Span::styled(" ", Style::default().bg(row_bg)),
             Span::styled(elapsed, Style::default().fg(label_fg).bg(row_bg)),
+            Span::styled(" ", Style::default().bg(row_bg)),
         ]));
     }
     if done.is_empty() {
