@@ -516,7 +516,6 @@ fn darken_cell(buf: &mut ratatui::buffer::Buffer, area: Rect, x: u16, y: u16, ra
     let bg_target: Color = crate::theme::theme().modal_bg.into();
     let cell = &mut buf[(x, y)];
     cell.bg = lerp_color(cell.bg, bg_target, ratio);
-    cell.fg = lerp_color(cell.fg, bg_target, ratio * 0.8);
 }
 
 /// Top-to-bottom gradient: strongest at `rect.y`, fading to 0 over `rows` rows.
