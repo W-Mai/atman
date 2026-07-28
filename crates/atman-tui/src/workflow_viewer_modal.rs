@@ -101,6 +101,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
     dim_background_outside(f.buffer_mut(), area, modal_area);
     crate::sanitize_widget_edges(f, modal_area);
     f.render_widget(Clear, modal_area);
+    let t = crate::theme::theme();
     let title = format!(
         " Workflow · Esc close · h/l or Shift+←/→ · j/k up/down · offset {},{} ",
         app.workflow_viewer.h_offset, app.workflow_viewer.v_offset
@@ -108,11 +109,11 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(t.accent.into()))
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(t.accent.into())
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(modal_area);
@@ -129,7 +130,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
         }) => (graph.clone(), expanded_nodes.clone()),
         _ => {
             let msg = Paragraph::new("workflow panel is no longer available")
-                .style(Style::default().fg(Color::DarkGray));
+                .style(Style::default().fg(t.subtle_fg.into()));
             f.render_widget(msg, inner);
             return;
         }

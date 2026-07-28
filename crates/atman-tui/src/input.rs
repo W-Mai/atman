@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
@@ -47,9 +47,10 @@ pub fn input_paragraph<'a>(
     } else {
         " shift+enter · newline · enter · send ".to_string()
     };
+    let t = crate::theme::theme();
     let hint_line = Line::from(Span::styled(
         hint_right,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.subtle_fg.into()),
     ))
     .right_aligned();
     let block = Block::default()

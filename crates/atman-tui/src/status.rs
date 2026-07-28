@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -28,7 +28,7 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         Span::styled(
             " atman ",
             Style::default()
-                .fg(Color::Black)
+                .fg(t.code_bg.into())
                 .bg(t.accent.into())
                 .add_modifier(Modifier::BOLD),
         ),
