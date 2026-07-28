@@ -899,7 +899,7 @@ fn render_history_content(
             + 1
             + unicode_width::UnicodeWidthStr::width(elapsed.as_str()) as u16
             + 1;
-        let content_max = area.width.saturating_sub(prefix_w + suffix_w) as usize;
+        let content_max = area.width.saturating_sub(prefix_w + suffix_w + 1) as usize;
         let label_text = if summary.is_empty() {
             snap.label.clone()
         } else {
