@@ -524,6 +524,22 @@ async fn run_frames(
                                 {
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
                                     app.floating_panels.toggle_maximize(&max_id, canvas);
+                                    // sync terminal PTY on maximize/unmaximize
+                                    if let Some(p) = app.floating_panels.panels.iter().find(|p| p.id == max_id) {
+                                        if p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal) {
+                                            let inner_cols = p.rect.width.saturating_sub(8);
+                                            let inner_rows = p.rect.height.saturating_sub(5);
+                                            if inner_cols > 0 && inner_rows > 0 {
+                                                if let Some(tx) = &handle.control_tx {
+                                                    let _ = tx.send(TuiControl::TermResize {
+                                                        handle: max_id.clone(),
+                                                        rows: inner_rows,
+                                                        cols: inner_cols,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
                                 } else if let Some(resize_id) =
                                     app.floating_panels.hit_test_resize(me.column, me.row)
                                 {

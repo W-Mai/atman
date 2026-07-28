@@ -377,6 +377,31 @@ pub fn render(
                 .alignment(ratatui::layout::Alignment::Center),
                 btn_area,
             );
+
+            // show dimensions on resize hover
+            if btn_hover == Some(PanelBtn::Resize) {
+                let inner_cols = panel.rect.width.saturating_sub(8);
+                let inner_rows = panel.rect.height.saturating_sub(5);
+                let dim_text = format!("{inner_rows}×{inner_cols}");
+                let dim_w = dim_text.chars().count() as u16 + 2;
+                let dim_area = Rect {
+                    x: btn_area.x.saturating_sub(dim_w),
+                    y: btn_area.y,
+                    width: dim_w,
+                    height: 1,
+                };
+                let buf_area = f.buffer_mut().area;
+                let dim_area = dim_area.intersection(buf_area);
+                if dim_area.width > 0 {
+                    f.render_widget(
+                        Paragraph::new(Line::from(vec![Span::styled(
+                            format!(" {dim_text}"),
+                            Style::default().fg(t.subtle_fg.into()).bg(panel_bg),
+                        )])),
+                        dim_area,
+                    );
+                }
+            }
         }
 
         // content area: left 3, right 3, top 2, bottom 1
@@ -419,22 +444,24 @@ fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
         cell.fg = lerp_color(cell.fg, bg_target, fg_ratio);
     };
 
-    // ring: top 1 row, bottom 1 row, left 2 cols, right 2 cols
+    let max_x = area.x.saturating_add(area.width).saturating_sub(1);
+    let max_y = area.y.saturating_add(area.height).saturating_sub(1);
+
     let top_y = rect.y.saturating_sub(1);
-    let bot_y = rect.y + rect.height;
+    let bot_y = (rect.y + rect.height).min(max_y);
     let lx0 = rect.x.saturating_sub(2);
     let lx1 = rect.x.saturating_sub(1);
-    let rx0 = rect.x + rect.width;
-    let rx1 = rect.x + rect.width + 1;
+    let rx0 = (rect.x + rect.width).min(max_x);
+    let rx1 = (rect.x + rect.width + 1).min(max_x);
 
     // darken all ring cells
-    for x in lx0..rx1.saturating_sub(1) {
+    for x in lx0..=rx1 {
         darken(buf, x, top_y);
     }
-    for x in lx0 + 2..=rx1 {
+    for x in lx0..=rx1 {
         darken(buf, x, bot_y);
     }
-    for y in top_y..bot_y {
+    for y in top_y..=bot_y {
         darken(buf, rx0, y);
         darken(buf, rx1, y);
     }
