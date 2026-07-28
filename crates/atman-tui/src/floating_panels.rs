@@ -633,13 +633,22 @@ pub fn render_bottom_fade(f: &mut Frame, rect: Rect, rows: u16) {
     }
 }
 
-/// Input box shadow: sides + bottom fade.
+/// Input box shadow: top + sides + bottom fade.
 pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
     let buf = f.buffer_mut();
     let area = *buf.area();
     let h_cols = 4u16.min(rect.width / 2);
     let v_rows = 2u16;
 
+    // top
+    for ry in 0..v_rows {
+        let ratio = 0.6 * (1.0 - ry as f64 / v_rows as f64);
+        let y = rect.y.saturating_sub(1 + ry);
+        for x in rect.x..rect.x + rect.width {
+            darken_cell(buf, area, x, y, ratio);
+        }
+    }
+    // sides
     for rx in 0..h_cols {
         let ratio = 0.6 * (1.0 - rx as f64 / h_cols as f64);
         let xl = rect.x.saturating_sub(1 + rx);
@@ -649,6 +658,7 @@ pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
             darken_cell(buf, area, xr, y, ratio);
         }
     }
+    // bottom
     for ry in 0..v_rows {
         let ratio = 0.6 * (1.0 - ry as f64 / v_rows as f64);
         let y = rect.y + rect.height + ry;
