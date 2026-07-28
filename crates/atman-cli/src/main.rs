@@ -4878,6 +4878,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
                 inverse: false,
                 dim: false,
                 wide: false,
+                wide_continuation: false,
             }
         })
         .collect();

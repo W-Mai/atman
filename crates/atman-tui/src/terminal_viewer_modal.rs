@@ -180,6 +180,9 @@ fn render_capture_full(
                 break;
             }
             let cell = &screen.cells[idx];
+            if cell.wide_continuation {
+                continue;
+            }
             let cell_style = crate::output::cell_style_for_viewer(cell, bg.into());
             let chars = if cell.chars.is_empty() {
                 " "

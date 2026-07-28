@@ -107,6 +107,8 @@ pub struct TerminalCell {
     pub inverse: bool,
     pub dim: bool,
     pub wide: bool,
+    #[serde(default)]
+    pub wide_continuation: bool,
 }
 
 impl Default for TerminalCell {
@@ -121,6 +123,7 @@ impl Default for TerminalCell {
             inverse: false,
             dim: false,
             wide: false,
+            wide_continuation: false,
         }
     }
 }
@@ -159,6 +162,7 @@ pub fn snapshot_screen(parser: &vt100::Parser) -> TerminalScreen {
                     inverse: c.inverse(),
                     dim: c.dim(),
                     wide: c.is_wide(),
+                    wide_continuation: c.is_wide_continuation(),
                 });
             } else {
                 cells.push(TerminalCell::default());
@@ -757,6 +761,7 @@ fn screen_to_value(screen: &TerminalScreen) -> Value {
                 ("inverse".into(), Value::Bool(c.inverse)),
                 ("dim".into(), Value::Bool(c.dim)),
                 ("wide".into(), Value::Bool(c.wide)),
+                ("wide_continuation".into(), Value::Bool(c.wide_continuation)),
             ])
         })
         .collect();

@@ -3753,6 +3753,9 @@ fn render_terminal(
                         break;
                     }
                     let cell = &screen.cells[idx];
+                    if cell.wide_continuation {
+                        continue;
+                    }
                     let cs = cell_style_for_viewer(cell, bg);
                     let chars = if cell.chars.is_empty() {
                         " "

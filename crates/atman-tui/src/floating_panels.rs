@@ -1061,6 +1061,9 @@ fn render_terminal_content(
                 continue;
             }
             let cell = &screen.cells[idx];
+            if cell.wide_continuation {
+                continue;
+            }
             let style = crate::output::cell_style_for_viewer(cell, bg);
             let text = if cell.chars.is_empty() {
                 " ".to_string()
