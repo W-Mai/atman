@@ -37,15 +37,21 @@ pub enum PanelBtn {
 impl PanelKind {
     fn icon(self) -> &'static str {
         match self {
-            PanelKind::Task(TaskKind::Bash) => "$",
-            PanelKind::Task(TaskKind::Terminal) => "▶",
-            PanelKind::Task(TaskKind::Flow) => "⬡",
-            PanelKind::Task(TaskKind::Agent) => "✦",
-            PanelKind::Task(TaskKind::Subflow) => "↳",
-            PanelKind::Task(TaskKind::Dispatch) => "≡",
+            PanelKind::Task(kind) => task_kind_icon(kind),
             PanelKind::History => "⊞",
             PanelKind::Activity => "▸",
         }
+    }
+}
+
+pub fn task_kind_icon(kind: TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Bash => "$",
+        TaskKind::Terminal => "▶",
+        TaskKind::Flow => "⬡",
+        TaskKind::Agent => "✦",
+        TaskKind::Subflow => "↳",
+        TaskKind::Dispatch => "≡",
     }
 }
 
@@ -621,7 +627,8 @@ fn render_history_content(
         } else {
             t.subtle_fg.into()
         };
-        let prefix_len: u16 = 2 + 2; // "{bar} " + "{icon} "
+        let kind_icon = task_kind_icon(snap.kind);
+        let prefix_len: u16 = 2 + 2 + 2; // "{bar} " + "{kind} " + "{icon} "
         let suffix_len: u16 = 1 + elapsed.chars().count() as u16; // " " + elapsed
         let label_max = area.width.saturating_sub(prefix_len + suffix_len) as usize;
         let label = truncate(&snap.label, label_max);
@@ -629,6 +636,10 @@ fn render_history_content(
         let pad = area.width - prefix_len - label_actual - suffix_len;
         lines.push(Line::from(vec![
             Span::styled(format!("{bar} "), Style::default().fg(bar_color).bg(row_bg)),
+            Span::styled(
+                format!("{kind_icon} "),
+                Style::default().fg(st_color).bg(row_bg),
+            ),
             Span::styled(format!("{icon} "), Style::default().fg(st_color).bg(row_bg)),
             Span::styled(label, Style::default().fg(label_fg).bg(row_bg)),
             Span::styled(" ".repeat(pad as usize), Style::default().bg(row_bg)),
