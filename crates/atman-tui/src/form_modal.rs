@@ -372,7 +372,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(t.accent.into()))
         .style(Style::default().bg(t.modal_bg.into()))
         .title(Line::from(title_spans))
         .title_bottom(
@@ -406,8 +406,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
             let no_focused = modal.confirm_focus == 1;
             let yes_style = if yes_focused {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
+                    .fg(t.code_bg.into())
+                    .bg(t.success.into())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -416,8 +416,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
             };
             let no_style = if no_focused {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Red)
+                    .fg(t.code_bg.into())
+                    .bg(t.error.into())
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -451,8 +451,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                 let is_cursor = i == modal.cursor;
                 let row_style = if is_cursor {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(t.code_bg.into())
+                        .bg(t.accent.into())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     idle_row_style
@@ -479,18 +479,18 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                 let check_glyph = if checked { "✓" } else { " " };
                 let row_style = if is_cursor && checked {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Green)
+                        .fg(t.code_bg.into())
+                        .bg(t.success.into())
                         .add_modifier(Modifier::BOLD)
                 } else if is_cursor {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(t.code_bg.into())
+                        .bg(t.accent.into())
                         .add_modifier(Modifier::BOLD)
                 } else if checked {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Green)
+                        .fg(t.code_bg.into())
+                        .bg(t.success.into())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     idle_row_style
@@ -566,7 +566,9 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  ! {err}"),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(t.error.into())
+                .add_modifier(Modifier::BOLD),
         )));
     }
     let para = Paragraph::new(lines)
@@ -588,8 +590,9 @@ fn render_full_row<'a>(width: usize, text: &str, style: Style, fallback_bg: Colo
 }
 
 fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
+    let t = crate::theme::theme();
     let bold_cyan = Style::default()
-        .fg(Color::Cyan)
+        .fg(t.accent.into())
         .add_modifier(Modifier::BOLD);
     let mut spans: Vec<Span<'static>> = Vec::new();
     spans.push(Span::styled(format!(" form · {kind_name} "), bold_cyan));
@@ -600,20 +603,20 @@ fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
             let style = if i == modal.batch_index {
                 match status {
                     BatchStatus::Pending => Style::default()
-                        .fg(Color::Cyan)
+                        .fg(t.accent.into())
                         .add_modifier(Modifier::BOLD),
                     BatchStatus::Answered => Style::default()
-                        .fg(Color::Green)
+                        .fg(t.success.into())
                         .add_modifier(Modifier::BOLD),
-                    BatchStatus::Cancelled => {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    }
+                    BatchStatus::Cancelled => Style::default()
+                        .fg(t.error.into())
+                        .add_modifier(Modifier::BOLD),
                 }
             } else {
                 match status {
-                    BatchStatus::Pending => Style::default().fg(Color::DarkGray),
-                    BatchStatus::Answered => Style::default().fg(Color::Green),
-                    BatchStatus::Cancelled => Style::default().fg(Color::Red),
+                    BatchStatus::Pending => Style::default().fg(t.subtle_fg.into()),
+                    BatchStatus::Answered => Style::default().fg(t.success.into()),
+                    BatchStatus::Cancelled => Style::default().fg(t.error.into()),
                 }
             };
             spans.push(Span::styled("━━━", style));
@@ -623,7 +626,7 @@ fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
         }
         spans.push(Span::styled(
             format!(" {}/{} ", modal.batch_index + 1, total),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.subtle_fg.into()),
         ));
     }
     spans

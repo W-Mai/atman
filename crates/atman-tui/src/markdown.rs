@@ -219,6 +219,7 @@ impl Renderer {
     }
 
     fn consume(&mut self, ev: Event<'_>) {
+        let t = crate::theme::theme();
         match ev {
             Event::Start(tag) => self.enter(tag),
             Event::End(end) => self.leave(end),
@@ -243,7 +244,7 @@ impl Renderer {
                     return;
                 }
                 let code_style = Style::default()
-                    .fg(Color::LightYellow)
+                    .fg(t.warn.into())
                     .add_modifier(Modifier::BOLD);
                 self.style_stack.push(code_style);
                 self.push_text(&text);
@@ -270,7 +271,7 @@ impl Renderer {
                 let side = 4usize;
                 let dash_w = (self.rule_width as usize).saturating_sub(side * 2).max(4);
                 let style = Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(t.subtle_fg.into())
                     .add_modifier(Modifier::DIM);
                 self.lines.push(Line::from(vec![
                     Span::raw(" ".repeat(side)),
@@ -282,7 +283,7 @@ impl Renderer {
             Event::TaskListMarker(done) => {
                 use unicode_width::UnicodeWidthStr;
                 let mark = if done { "[x] " } else { "[ ] " };
-                let style = Style::default().fg(Color::Cyan);
+                let style = Style::default().fg(t.accent.into());
                 self.current.push(Span::styled(mark.to_string(), style));
                 self.current_width += mark.width();
                 self.fresh_line = false;
@@ -292,6 +293,7 @@ impl Renderer {
     }
 
     fn enter(&mut self, tag: Tag<'_>) {
+        let t = crate::theme::theme();
         match tag {
             Tag::Paragraph => {
                 use unicode_width::UnicodeWidthStr;
@@ -338,7 +340,7 @@ impl Renderer {
                     }
                     None => "• ".to_string(),
                 };
-                let style = Style::default().fg(Color::Cyan);
+                let style = Style::default().fg(t.accent.into());
                 self.current.push(Span::styled(bullet.clone(), style));
                 self.current_width += bullet.width();
                 self.fresh_line = false;
@@ -358,7 +360,7 @@ impl Renderer {
             Tag::Link { .. } => {
                 self.style_stack.push(
                     Style::default()
-                        .fg(Color::LightBlue)
+                        .fg(t.accent.into())
                         .add_modifier(Modifier::UNDERLINED),
                 );
             }
@@ -383,6 +385,7 @@ impl Renderer {
     }
 
     fn leave(&mut self, end: TagEnd) {
+        let t = crate::theme::theme();
         match end {
             TagEnd::Paragraph => {
                 self.end_line();
@@ -395,7 +398,7 @@ impl Renderer {
                     let side = 4usize;
                     let dash_w = (self.rule_width as usize).saturating_sub(side * 2).max(4);
                     let style = Style::default()
-                        .fg(Color::DarkGray)
+                        .fg(t.subtle_fg.into())
                         .add_modifier(Modifier::DIM);
                     self.lines.push(Line::from(vec![
                         Span::raw(" ".repeat(side)),
@@ -446,6 +449,7 @@ impl Renderer {
 
     fn flush_table(&mut self) {
         use unicode_width::UnicodeWidthStr;
+        let t = crate::theme::theme();
         if self.table_header.is_empty() && self.table_body.is_empty() {
             return;
         }
@@ -481,11 +485,11 @@ impl Renderer {
         }
         let bg = block_bg();
         let head_style = Style::default()
-            .fg(Color::LightCyan)
+            .fg(t.accent.into())
             .bg(bg)
             .add_modifier(Modifier::BOLD);
         let cell_style = Style::default().bg(bg);
-        let rule_style = Style::default().fg(Color::DarkGray).bg(bg);
+        let rule_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
 
         self.lines.push(blank_bg_line(target, bg));
         if !self.table_header.is_empty() {
@@ -510,7 +514,7 @@ impl Renderer {
             .collect::<Vec<_>>()
             .join(&" ".repeat(sep));
         let sep_style = Style::default()
-            .fg(Color::DarkGray)
+            .fg(t.subtle_fg.into())
             .bg(bg)
             .add_modifier(Modifier::DIM);
         for (i, row) in self.table_body.iter().enumerate() {
@@ -530,6 +534,7 @@ impl Renderer {
 
     fn render_code_block(&mut self, lang: &str, body: &str) {
         use unicode_width::UnicodeWidthStr;
+        let t = crate::theme::theme();
         self.blank_line();
         let bg = block_bg();
         let target = self.rule_width as usize;
@@ -539,10 +544,10 @@ impl Renderer {
         } else {
             lang.to_string()
         };
-        let gutter = Style::default().fg(Color::DarkGray).bg(bg);
+        let gutter = Style::default().fg(t.subtle_fg.into()).bg(bg);
         let bg_only = Style::default().bg(bg);
         let lineno_style = Style::default()
-            .fg(Color::DarkGray)
+            .fg(t.subtle_fg.into())
             .bg(bg)
             .add_modifier(Modifier::DIM);
         let header = format!("╭─ {lang_label} ─");
@@ -674,21 +679,22 @@ pub fn block_bg() -> Color {
 }
 
 fn heading_style(level: HeadingLevel) -> Style {
+    let t = crate::theme::theme();
     match level {
         HeadingLevel::H1 => Style::default()
-            .fg(Color::Cyan)
+            .fg(t.accent.into())
             .add_modifier(Modifier::BOLD),
         HeadingLevel::H2 => Style::default()
-            .fg(Color::LightCyan)
+            .fg(t.accent.into())
             .add_modifier(Modifier::BOLD),
         HeadingLevel::H3 => Style::default()
-            .fg(Color::Magenta)
+            .fg(t.accent.into())
             .add_modifier(Modifier::BOLD),
         HeadingLevel::H4 => Style::default()
-            .fg(Color::Gray)
+            .fg(t.tinted_fg.into())
             .add_modifier(Modifier::BOLD),
         HeadingLevel::H5 | HeadingLevel::H6 => Style::default()
-            .fg(Color::DarkGray)
+            .fg(t.subtle_fg.into())
             .add_modifier(Modifier::BOLD | Modifier::DIM),
     }
 }
