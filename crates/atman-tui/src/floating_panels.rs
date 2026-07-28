@@ -260,14 +260,15 @@ pub fn render(
         };
 
         // panel background
-        crate::sanitize_widget_edges(f, {
-            Rect {
-                x: panel.rect.x - 2,
-                y: panel.rect.y - 1,
-                width: panel.rect.width + 4,
-                height: panel.rect.height + 2,
-            }
-        });
+        let buf_area = f.buffer_mut().area;
+        let sanitize_rect = Rect {
+            x: panel.rect.x.saturating_sub(2),
+            y: panel.rect.y.saturating_sub(1),
+            width: panel.rect.width + 4,
+            height: panel.rect.height + 2,
+        }
+        .intersection(buf_area);
+        crate::sanitize_widget_edges(f, sanitize_rect);
         f.render_widget(Clear, panel.rect);
         f.render_widget(
             Block::default().style(Style::default().bg(panel_bg)),
@@ -382,7 +383,7 @@ pub fn render(
             if btn_hover == Some(PanelBtn::Resize) {
                 let inner_cols = panel.rect.width.saturating_sub(8);
                 let inner_rows = panel.rect.height.saturating_sub(5);
-                let dim_text = format!("{inner_rows}×{inner_cols}");
+                let dim_text = format!("{inner_cols}×{inner_rows}");
                 let dim_w = dim_text.chars().count() as u16 + 2;
                 let dim_area = Rect {
                     x: btn_area.x.saturating_sub(dim_w),
