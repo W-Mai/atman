@@ -890,8 +890,7 @@ fn render_history_content(
         let started = format_started_at(snap);
         let summary = task_summary_line(snap, items);
         let prefix_w: u16 = 2 + 2 + 2;
-        let suffix_w: u16 = 1
-            + unicode_width::UnicodeWidthStr::width(started.as_str()) as u16
+        let suffix_w: u16 = unicode_width::UnicodeWidthStr::width(started.as_str()) as u16
             + 1
             + unicode_width::UnicodeWidthStr::width(elapsed.as_str()) as u16
             + 1;
