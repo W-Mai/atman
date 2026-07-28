@@ -691,18 +691,25 @@ fn render_history_content(
         let kind_icon = task_kind_icon(snap.kind);
         let started = format_started_at(snap);
         let summary = task_summary_line(snap, items);
-        let prefix_len: u16 = 2 + 2 + 2;
-        let suffix_len: u16 =
-            1 + started.chars().count() as u16 + 1 + elapsed.chars().count() as u16 + 1;
-        let content_max = area.width.saturating_sub(prefix_len + suffix_len) as usize;
+        let prefix_w: u16 = 2 + 2 + 2;
+        let suffix_w: u16 = 1
+            + unicode_width::UnicodeWidthStr::width(started.as_str()) as u16
+            + 1
+            + unicode_width::UnicodeWidthStr::width(elapsed.as_str()) as u16
+            + 1;
+        let content_max = area.width.saturating_sub(prefix_w + suffix_w) as usize;
         let label_text = if summary.is_empty() {
             snap.label.clone()
         } else {
             format!("{} · {}", snap.label, summary)
         };
         let label = truncate(&label_text, content_max);
-        let label_actual = label.chars().count() as u16;
-        let pad = area.width - prefix_len - label_actual - suffix_len;
+        let label_w = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
+        let pad = area
+            .width
+            .saturating_sub(prefix_w)
+            .saturating_sub(label_w)
+            .saturating_sub(suffix_w);
         lines.push(Line::from(vec![
             Span::styled(format!("{bar} "), Style::default().fg(bar_color).bg(row_bg)),
             Span::styled(
@@ -984,12 +991,22 @@ fn format_elapsed(ms: u64) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{t}…")
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let width = UnicodeWidthStr::width(s);
+    if width <= max {
+        return s.to_string();
     }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > max.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    format!("{out}…")
 }
 
 #[cfg(test)]
@@ -998,6 +1015,20 @@ mod tests {
 
     fn canvas() -> Rect {
         Rect::new(0, 0, 100, 40)
+    }
+
+    #[test]
+    fn truncate_handles_cjk_wide_chars() {
+        // CJK chars are display width 2, not 1
+        assert_eq!(truncate("你好世界", 10), "你好世界");
+        assert_eq!(truncate("你好世界", 5), "你好…");
+        assert_eq!(truncate("你好ab", 6), "你好ab");
+        assert_eq!(truncate("你好ab", 5), "你好…");
+    }
+
+    #[test]
+    fn truncate_handles_zero_max() {
+        assert_eq!(truncate("hello", 0), "…");
     }
 
     #[test]
