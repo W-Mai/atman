@@ -129,8 +129,9 @@ pub fn render(
     hover: &TaskPanelHover,
 ) -> TaskPanelHitMap {
     if collapsed {
-        render_strip(f, area, snapshots);
-        return TaskPanelHitMap::default();
+        let hitmap = render_strip(f, area, snapshots);
+        crate::floating_panels::render_shadow(f, area, &crate::theme::theme());
+        return hitmap;
     }
 
     let t = crate::theme::theme();
@@ -767,6 +768,7 @@ pub fn render(
         hitmap.history_btn_rect = Some(btn_rect);
     }
 
+    crate::floating_panels::render_shadow(f, area, &t);
     hitmap
 }
 
@@ -846,10 +848,11 @@ fn truncate_label(s: &str, max: usize) -> String {
     }
 }
 
-fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
+fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPanelHitMap {
     let t = crate::theme::theme();
     crate::sanitize_widget_edges(f, area);
     f.render_widget(Clear, area);
+    let mut hitmap = TaskPanelHitMap::default();
 
     let running = snapshots.iter().filter(|s| s.is_running()).count();
     let dot = if running > 0 {
@@ -871,16 +874,46 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
         ),
         area,
     );
-    let inner = Rect {
+
+    // running dot — vertically centered in the remaining space
+    let btn_y = area.y + area.height.saturating_sub(1);
+    let dot_y = if area.height > 3 {
+        area.y + (area.height / 2)
+    } else {
+        area.y + 1
+    };
+    let dot_area = Rect {
         x: area.x,
-        y: area.y + 1,
+        y: dot_y,
         width: area.width,
-        height: area.height.saturating_sub(1),
+        height: 1,
     };
     f.render_widget(
         Paragraph::new(Line::from(dot)).alignment(Alignment::Center),
-        inner,
+        dot_area,
     );
+
+    // history icon at bottom row
+    if btn_y > dot_y && btn_y >= area.y {
+        let history_color: Color = t.subtle_fg.into();
+        let btn_rect = Rect {
+            x: area.x,
+            y: btn_y,
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "⊞",
+                Style::default().fg(history_color),
+            )]))
+            .alignment(Alignment::Center),
+            btn_rect,
+        );
+        hitmap.history_btn_rect = Some(btn_rect);
+    }
+
+    hitmap
 }
 
 #[cfg(test)]

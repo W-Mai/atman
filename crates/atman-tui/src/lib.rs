@@ -3238,6 +3238,24 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.has_running_workflow(),
         border_color,
     );
+
+    // Gradient shadows for transcript + input
+    if !intro_active && !startup_active {
+        let ta = transcript_area;
+        crate::floating_panels::render_top_fade(f, ta, 3);
+        let bottom_fade_rows = input_rect.y.saturating_sub(ta.y);
+        if bottom_fade_rows > 0 && input_rect.y < ta.y + ta.height {
+            let fade_rect = ratatui::layout::Rect {
+                x: ta.x,
+                y: input_rect.y,
+                width: ta.width,
+                height: ta.y + ta.height - input_rect.y,
+            };
+            crate::floating_panels::render_bottom_fade(f, fade_rect, fade_rect.height);
+        }
+        crate::floating_panels::render_input_shadow(f, input_rect);
+    }
+
     if app.cheatsheet_open {
         completion::render_cheatsheet(f, area);
     }
