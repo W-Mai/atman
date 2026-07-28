@@ -151,12 +151,10 @@ impl FloatingPanels {
         }
     }
 
-    pub fn resize_panel(&mut self, id: &str, w: u16, h: u16, canvas: Rect) {
+    pub fn resize_panel(&mut self, id: &str, w: u16, h: u16, _canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
-            let max_w = canvas.x + canvas.width - p.rect.x;
-            let max_h = canvas.y + canvas.height - p.rect.y;
-            p.rect.width = w.min(max_w).max(20);
-            p.rect.height = h.min(max_h).max(6);
+            p.rect.width = w.max(20);
+            p.rect.height = h.max(6);
         }
     }
 

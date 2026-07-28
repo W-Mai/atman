@@ -675,11 +675,18 @@ async fn run_frames(
                                         && rect_contains(*hr, me.column, me.row)
                                     {
                                         let canvas = app.last_transcript_rect.unwrap_or_default();
-                                        app.floating_panels.open(
+                                        let (pw, ph) = app
+                                            .panel_sizes
+                                            .get("__history__")
+                                            .copied()
+                                            .unwrap_or((48, 20));
+                                        app.floating_panels.open_with_size(
                                             "__history__",
                                             crate::floating_panels::PanelKind::History,
                                             "History",
                                             canvas,
+                                            pw,
+                                            ph,
                                         );
                                     } else if let Some((run_id, node_id, _)) = hm
                                         .activity_rects
