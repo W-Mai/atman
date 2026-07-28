@@ -3003,6 +3003,45 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
         f.render_widget(paragraph, transcript_area);
     }
+    if !intro_active && !startup_active {
+        let ta = transcript_area;
+        crate::floating_panels::render_top_fade(f, ta, 3);
+
+        let inj_rect = if injection_rows > 0 {
+            layout::compute_injection_rect(l.transcript, input_rect, approvals_rect, injection_rows)
+        } else {
+            None
+        };
+        let float_top = [inj_rect, approvals_rect, Some(input_rect)]
+            .iter()
+            .filter_map(|r| r.map(|r| r.y))
+            .min()
+            .unwrap_or(ta.y + ta.height);
+        if float_top < ta.y + ta.height {
+            let float_bottom = ta.y + ta.height;
+            let fade_h = float_bottom.saturating_sub(float_top);
+            let lg = ratatui::layout::Rect {
+                x: ta.x,
+                y: float_top,
+                width: input_rect.x.saturating_sub(ta.x),
+                height: fade_h,
+            };
+            if lg.width > 0 && lg.height > 0 {
+                crate::floating_panels::render_bottom_fade(f, lg, fade_h);
+            }
+            let right_edge = input_rect.x + input_rect.width;
+            let rg = ratatui::layout::Rect {
+                x: right_edge,
+                y: float_top,
+                width: ta.x + ta.width - right_edge,
+                height: fade_h,
+            };
+            if rg.width > 0 && rg.height > 0 {
+                crate::floating_panels::render_bottom_fade(f, rg, fade_h);
+            }
+        }
+        crate::floating_panels::render_input_shadow(f, input_rect);
+    }
     if let Some(area) = sidebar_rect {
         let project_root = app
             .session
@@ -3116,26 +3155,21 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         approval_bar::render(f, area, &app.pending_approvals);
     }
     // Render injection queue above approvals bar / input box.
-    if injection_rows > 0 {
-        let inj_rect = layout::compute_injection_rect(
-            l.transcript,
-            input_rect,
-            approvals_rect,
-            injection_rows,
-        );
-        if let Some(area) = inj_rect {
-            sanitize_widget_edges(f, area);
-            f.render_widget(ratatui::widgets::Clear, area);
-            let lines = output::render_injection_queue(&app.pending_injections, area.width);
-            let block = ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(
-                    ratatui::style::Style::default().fg(crate::theme::theme().warn.into()),
-                );
-            let para = ratatui::widgets::Paragraph::new(lines).block(block);
-            f.render_widget(para, area);
-        }
+    let injections_rect = if injection_rows > 0 {
+        layout::compute_injection_rect(l.transcript, input_rect, approvals_rect, injection_rows)
+    } else {
+        None
+    };
+    if let Some(area) = injections_rect {
+        sanitize_widget_edges(f, area);
+        f.render_widget(ratatui::widgets::Clear, area);
+        let lines = output::render_injection_queue(&app.pending_injections, area.width);
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(ratatui::style::Style::default().fg(crate::theme::theme().warn.into()));
+        let para = ratatui::widgets::Paragraph::new(lines).block(block);
+        f.render_widget(para, area);
     }
     // Wipe splash overlay ∪ docked rect for the entire lifetime of the intro,
     // including the very last frame where progress hits 1.0 and the banner /
@@ -3238,23 +3272,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.has_running_workflow(),
         border_color,
     );
-
-    // Gradient shadows for transcript + input
-    if !intro_active && !startup_active {
-        let ta = transcript_area;
-        crate::floating_panels::render_top_fade(f, ta, 3);
-        let bottom_fade_rows = input_rect.y.saturating_sub(ta.y);
-        if bottom_fade_rows > 0 && input_rect.y < ta.y + ta.height {
-            let fade_rect = ratatui::layout::Rect {
-                x: ta.x,
-                y: input_rect.y,
-                width: ta.width,
-                height: ta.y + ta.height - input_rect.y,
-            };
-            crate::floating_panels::render_bottom_fade(f, fade_rect, fade_rect.height);
-        }
-        crate::floating_panels::render_input_shadow(f, input_rect);
-    }
 
     if app.cheatsheet_open {
         completion::render_cheatsheet(f, area);
