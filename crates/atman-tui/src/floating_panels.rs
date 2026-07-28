@@ -471,18 +471,19 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
     };
 
     let shadow = t.shadow.into();
+    let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, 0.6);
+    let code_bg = t.code_bg.into();
     let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
             return;
         }
         let cell = &mut buf[(x, y)];
-        let current_bg = if matches!(cell.bg, Color::Reset) {
-            t.code_bg.into()
+        let bg = if matches!(cell.bg, Color::Reset) {
+            code_bg
         } else {
             cell.bg
         };
-        let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, 0.6);
-        cell.bg = multiply_color(current_bg, factor);
+        cell.bg = multiply_color(bg, factor);
     };
 
     let max_x = area.x.saturating_add(area.width).saturating_sub(1);
@@ -598,14 +599,14 @@ fn darken_cell(buf: &mut ratatui::buffer::Buffer, area: Rect, x: u16, y: u16, ra
     }
     let t = crate::theme::theme();
     let cell = &mut buf[(x, y)];
-    let current_bg = if matches!(cell.bg, Color::Reset) {
+    let bg = if matches!(cell.bg, Color::Reset) {
         t.code_bg.into()
     } else {
         cell.bg
     };
     let shadow = t.shadow.into();
     let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, ratio);
-    cell.bg = multiply_color(current_bg, factor);
+    cell.bg = multiply_color(bg, factor);
 }
 
 /// Top-to-bottom gradient: strongest at `rect.y`, fading to 0 over `rows` rows.
@@ -637,11 +638,12 @@ pub fn render_bottom_fade(f: &mut Frame, rect: Rect, rows: u16) {
     }
 }
 
-/// Input box shadow: horizontal fade (sides→center, strongest at edges).
+/// Input box shadow: sides + bottom fade.
 pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
     let buf = f.buffer_mut();
     let area = *buf.area();
     let h_cols = 4u16.min(rect.width / 2);
+    let v_rows = 2u16;
 
     for rx in 0..h_cols {
         let ratio = 0.6 * (1.0 - rx as f64 / h_cols as f64);
@@ -650,6 +652,13 @@ pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
         for y in rect.y..rect.y + rect.height {
             darken_cell(buf, area, xl, y, ratio);
             darken_cell(buf, area, xr, y, ratio);
+        }
+    }
+    for ry in 0..v_rows {
+        let ratio = 0.6 * (1.0 - ry as f64 / v_rows as f64);
+        let y = rect.y + rect.height + ry;
+        for x in rect.x..rect.x + rect.width {
+            darken_cell(buf, area, x, y, ratio);
         }
     }
 }
