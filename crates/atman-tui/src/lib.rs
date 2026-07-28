@@ -3003,9 +3003,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         let paragraph = ratatui::widgets::Paragraph::new(lines).scroll((0, 0));
         f.render_widget(paragraph, transcript_area);
     }
-    if !intro_active && !startup_active {
-        crate::floating_panels::render_input_shadow(f, input_rect);
-    }
     if let Some(area) = sidebar_rect {
         let project_root = app
             .session
