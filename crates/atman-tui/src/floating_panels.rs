@@ -678,9 +678,13 @@ pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
             let nx = dx as f64 / h_cols as f64;
             let ny = dy as f64 / v_rows as f64;
 
-            // elliptical falloff: 1.0 at edge, 0.0 at max distance
+            // elliptical falloff shaped like a quarter circle.
+            // cells beyond 0.8 radius are cut to create the rounded gap.
             let dist = (nx * nx + ny * ny).sqrt();
-            let ratio = max_ratio * (1.0 - dist.min(1.0));
+            if dist > 0.8 {
+                continue;
+            }
+            let ratio = max_ratio * (1.0 - dist / 0.8);
             if ratio > 0.0 {
                 darken_cell(buf, area, x, y, ratio);
             }
