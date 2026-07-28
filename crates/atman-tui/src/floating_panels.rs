@@ -458,7 +458,6 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
     use unicode_width::UnicodeWidthStr;
     let buf = f.buffer_mut();
     let area = *buf.area();
-    let bg_target: Color = t.shadow.into();
 
     let sanitize = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
@@ -471,6 +470,7 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
         }
     };
 
+    let shadow = t.shadow.into();
     let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
             return;
@@ -481,7 +481,8 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
         } else {
             cell.bg
         };
-        cell.bg = lerp_color(current_bg, bg_target, 0.6);
+        let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, 0.6);
+        cell.bg = multiply_color(current_bg, factor);
     };
 
     let max_x = area.x.saturating_add(area.width).saturating_sub(1);
@@ -557,19 +558,54 @@ pub fn lerp_color(a: Color, b: Color, t: f64) -> Color {
     )
 }
 
+/// Multiply blend: `result = a * b / 255`. Always darkens (or keeps same).
+/// `shadow` color acts as a brightness factor — e.g. (128,128,128) = 50% darken.
+pub fn multiply_color(a: Color, b: Color) -> Color {
+    let mode = crate::theme::current_mode();
+    fn to_rgb(c: Color, mode: crate::theme::ThemeMode) -> (u8, u8, u8) {
+        use crate::theme::ThemeMode;
+        match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Cyan => (40, 180, 180),
+            Color::DarkGray => (96, 96, 96),
+            Color::Gray => (128, 128, 128),
+            Color::Green => (70, 175, 70),
+            Color::Yellow => (190, 175, 55),
+            Color::Red => (190, 65, 65),
+            Color::Blue => (0, 0, 200),
+            Color::Magenta => (200, 0, 200),
+            Color::White => (240, 240, 240),
+            Color::Black => (16, 16, 16),
+            Color::Reset => match mode {
+                ThemeMode::Dark => (220, 220, 220),
+                ThemeMode::Light => (40, 40, 40),
+            },
+            _ => (128, 128, 128),
+        }
+    }
+    let (ar, ag, ab) = to_rgb(a, mode);
+    let (br, bg, bb) = to_rgb(b, mode);
+    Color::Rgb(
+        ((ar as u32 * br as u32) / 255) as u8,
+        ((ag as u32 * bg as u32) / 255) as u8,
+        ((ab as u32 * bb as u32) / 255) as u8,
+    )
+}
+
 fn darken_cell(buf: &mut ratatui::buffer::Buffer, area: Rect, x: u16, y: u16, ratio: f64) {
     if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
         return;
     }
     let t = crate::theme::theme();
-    let bg_target: Color = t.shadow.into();
     let cell = &mut buf[(x, y)];
     let current_bg = if matches!(cell.bg, Color::Reset) {
         t.code_bg.into()
     } else {
         cell.bg
     };
-    cell.bg = lerp_color(current_bg, bg_target, ratio);
+    let shadow = t.shadow.into();
+    let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, ratio);
+    cell.bg = multiply_color(current_bg, factor);
 }
 
 /// Top-to-bottom gradient: strongest at `rect.y`, fading to 0 over `rows` rows.
