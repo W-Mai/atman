@@ -722,15 +722,17 @@ async fn run_frames(
                                                     let (pw, ph) = if snap.kind
                                                         == atman_runtime::TaskKind::Terminal
                                                     {
-                                                        let item = app.items.iter().rev().find(|it| {
-                                                            matches!(it, crate::app::OutputItem::Terminal { handle, .. } if *handle == snap.source_handle)
-                                                        });
-                                                        if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
-                                                            let cols = screen.cols;
-                                                            let rows = screen.rows;
-                                                            (cols + 8, rows + 5)
+                                                        if let Some((sw, sh)) = app.terminal_panel_size {
+                                                            (sw, sh)
                                                         } else {
-                                                            (48, 20)
+                                                            let item = app.items.iter().rev().find(|it| {
+                                                                matches!(it, crate::app::OutputItem::Terminal { handle, .. } if *handle == snap.source_handle)
+                                                            });
+                                                            if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
+                                                                (screen.cols + 8, screen.rows + 5)
+                                                            } else {
+                                                                (48, 20)
+                                                            }
                                                         }
                                                     } else {
                                                         (48, 20)
@@ -849,6 +851,17 @@ async fn run_frames(
                                     }
                                 }
                             } else if let MouseEventKind::Up(MouseButton::Left) = me.kind {
+                                if app.resize_target.is_some() {
+                                    let id = app.resize_target.clone();
+                                    if let Some(id) = id {
+                                        if let Some(p) = app.floating_panels.panels.iter().find(|p| p.id == id) {
+                                            if p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal) {
+                                                app.terminal_panel_size = Some((p.rect.width, p.rect.height));
+                                                app.save_ui_state();
+                                            }
+                                        }
+                                    }
+                                }
                                 app.drag_target = None;
                                 app.resize_target = None;
                             } else if let MouseEventKind::Moved = me.kind {

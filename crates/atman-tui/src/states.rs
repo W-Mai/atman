@@ -28,6 +28,8 @@ pub struct PersistedUiState {
     pub context_collapsed: bool,
     #[serde(default)]
     pub meta_collapsed: bool,
+    #[serde(default)]
+    pub terminal_panel_size: Option<(u16, u16)>,
 }
 
 impl Default for PersistedUiState {
@@ -43,6 +45,7 @@ impl Default for PersistedUiState {
             todo_collapsed: false,
             context_collapsed: false,
             meta_collapsed: false,
+            terminal_panel_size: None,
         }
     }
 }
@@ -99,6 +102,7 @@ impl PersistedUiState {
             todo_collapsed: app.todo_collapsed,
             context_collapsed: app.context_collapsed,
             meta_collapsed: app.meta_collapsed,
+            terminal_panel_size: app.terminal_panel_size,
         }
     }
 
@@ -114,6 +118,7 @@ impl PersistedUiState {
         app.todo_collapsed = self.todo_collapsed;
         app.context_collapsed = self.context_collapsed;
         app.meta_collapsed = self.meta_collapsed;
+        app.terminal_panel_size = self.terminal_panel_size;
     }
 }
 

@@ -244,6 +244,7 @@ pub struct AppState {
     pub resize_target: Option<String>,
     pub resize_offset: (u16, u16),
     pub hovered_panel_btn: Option<(String, crate::floating_panels::PanelBtn)>,
+    pub terminal_panel_size: Option<(u16, u16)>,
     pub last_task_panel_rect: Option<ratatui::layout::Rect>,
     pub last_task_panel_hitmap: crate::task_panel::TaskPanelHitMap,
     pub tick: u64,

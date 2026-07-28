@@ -498,8 +498,10 @@ fn render_panel_content(
 
     let area = Rect::new(area.x + 1, area.y, area.width - 2, area.height - 1);
 
+    let mut hitmap = FloatingPanelHitmap::default();
+
     match panel.kind {
-        PanelKind::History => render_history_content(f, area, snapshots),
+        PanelKind::History => render_history_content(f, area, snapshots, &mut hitmap),
         PanelKind::Activity => {
             let parts: Vec<&str> = panel.id.splitn(2, ':').collect();
             if parts.len() == 2 {
@@ -555,16 +557,36 @@ fn render_panel_content(
     }
 }
 
-fn render_history_content(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) {
+#[derive(Debug, Default)]
+pub struct FloatingPanelHitmap {
+    pub history_row_rects: Vec<(String, Rect)>,
+}
+
+fn render_history_content(
+    f: &mut Frame,
+    area: Rect,
+    snapshots: &[TaskSnapshot],
+    hitmap: &mut FloatingPanelHitmap,
+) {
     let t = crate::theme::theme();
     let bar_color: Color = t.subtle_fg.into();
     let done: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| !s.is_running()).collect();
 
     let mut lines: Vec<Line> = Vec::new();
-    for snap in &done {
+    for (i, snap) in done.iter().enumerate() {
         let icon = status_icon(snap.status);
         let elapsed = format_elapsed(snap.elapsed_ms());
         let st_color = status_color(snap.status);
+        let row_y = area.y + i as u16;
+        hitmap.history_row_rects.push((
+            snap.source_handle.clone(),
+            Rect {
+                x: area.x,
+                y: row_y,
+                width: area.width,
+                height: 1,
+            },
+        ));
         lines.push(Line::from(vec![
             Span::styled("▎ ", Style::default().fg(bar_color)),
             Span::styled(format!("{icon} "), Style::default().fg(st_color)),
