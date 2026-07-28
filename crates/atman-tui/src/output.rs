@@ -108,6 +108,7 @@ struct CompactionSummaryRender<'a> {
 }
 
 pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
+    let t = crate::theme::theme();
     let BoxSpec {
         row0,
         col0,
@@ -163,7 +164,7 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
         top_spans.push(Span::styled(
             text,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(t.warn.into())
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -997,24 +998,30 @@ pub fn render_startup_intro_fade(
     recent: &[crate::app::StartupSessionEntry],
     progress: f32,
 ) -> StartupOverlayLayout {
+    let t = crate::theme::theme();
     let layout = compute_startup_overlay(transcript_area, recent);
     if progress >= 0.9 {
         return layout;
     }
     let (fg_banner, fg_subtle, fg_bold, extra_mod) = if progress < 0.33 {
         (
-            Color::Cyan,
-            Color::DarkGray,
-            Color::Reset,
+            t.accent.into(),
+            t.subtle_fg.into(),
+            t.tinted_fg.into(),
             Modifier::empty(),
         )
     } else if progress < 0.66 {
-        (Color::Cyan, Color::DarkGray, Color::Reset, Modifier::DIM)
+        (
+            t.accent.into(),
+            t.subtle_fg.into(),
+            t.tinted_fg.into(),
+            Modifier::DIM,
+        )
     } else {
         (
-            Color::DarkGray,
-            Color::DarkGray,
-            Color::DarkGray,
+            t.subtle_fg.into(),
+            t.subtle_fg.into(),
+            t.subtle_fg.into(),
             Modifier::DIM,
         )
     };
@@ -1022,7 +1029,7 @@ pub fn render_startup_intro_fade(
         .fg(fg_banner)
         .add_modifier(Modifier::BOLD | extra_mod);
     let subtle = Style::default().fg(fg_subtle).add_modifier(extra_mod);
-    let bold_plain = if fg_bold == Color::Reset {
+    let bold_plain = if fg_bold == t.tinted_fg.into() {
         Style::default().add_modifier(Modifier::BOLD | extra_mod)
     } else {
         Style::default()
@@ -1099,6 +1106,7 @@ pub fn render_startup_overlay(
     dim: bool,
     reveal_count: usize,
 ) -> StartupOverlayLayout {
+    let t = crate::theme::theme();
     let recent = &recent[..reveal_count.min(recent.len())];
     let layout = compute_startup_overlay(area, recent);
     f.render_widget(ratatui::widgets::Clear, area);
@@ -1107,7 +1115,7 @@ pub fn render_startup_overlay(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let logo_style = {
         let mut s = Style::default()
-            .fg(Color::Cyan)
+            .fg(t.accent.into())
             .add_modifier(Modifier::BOLD);
         if dim {
             s = s.add_modifier(Modifier::DIM);
@@ -1115,7 +1123,7 @@ pub fn render_startup_overlay(
         s
     };
     let subtle = {
-        let mut s = Style::default().fg(Color::DarkGray);
+        let mut s = Style::default().fg(t.subtle_fg.into());
         if dim {
             s = s.add_modifier(Modifier::DIM);
         }
@@ -1203,6 +1211,7 @@ fn render_session_card(
     dim: bool,
 ) -> Vec<Line<'static>> {
     use unicode_width::UnicodeWidthStr;
+    let t = crate::theme::theme();
     let bg = crate::markdown::block_bg();
     let mut extra = Modifier::empty();
     if dim {
@@ -1210,12 +1219,12 @@ fn render_session_card(
     }
     let bg_only = Style::default().bg(bg).add_modifier(extra);
     let index_style = Style::default()
-        .fg(Color::Cyan)
+        .fg(t.accent.into())
         .bg(bg)
         .add_modifier(Modifier::BOLD | extra);
     let title_style = Style::default().bg(bg).add_modifier(Modifier::BOLD | extra);
     let meta_style = Style::default()
-        .fg(Color::DarkGray)
+        .fg(t.subtle_fg.into())
         .bg(bg)
         .add_modifier(extra);
 
@@ -1258,11 +1267,12 @@ fn clamp_len(s: &str, max: usize) -> String {
 }
 
 fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
     let side_gap = 4u16;
     let dash_width = panel_width.saturating_sub(side_gap * 2).max(4) as usize;
     let pad = " ".repeat(side_gap as usize);
     let dash_style = Style::default()
-        .fg(Color::DarkGray)
+        .fg(t.subtle_fg.into())
         .add_modifier(Modifier::DIM);
     vec![
         Line::from(""),
@@ -1383,11 +1393,11 @@ fn render_assistant(md: &str, streaming: bool, panel_width: u16) -> Vec<Line<'st
 fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let (glyph, fg, bg) = match level {
-        NoteLevel::Info => ("·", Color::Cyan, t.note_info_bg),
-        NoteLevel::Warn => ("!", Color::Yellow, t.note_warn_bg),
-        NoteLevel::Error => ("✗", Color::Red, t.note_error_bg),
-        NoteLevel::Success => ("✓", Color::Green, t.note_success_bg),
-        NoteLevel::Debug => ("›", Color::Gray, t.note_debug_bg),
+        NoteLevel::Info => ("·", t.accent.into(), t.note_info_bg),
+        NoteLevel::Warn => ("!", t.warn.into(), t.note_warn_bg),
+        NoteLevel::Error => ("✗", t.error.into(), t.note_error_bg),
+        NoteLevel::Success => ("✓", t.success.into(), t.note_success_bg),
+        NoteLevel::Debug => ("›", t.tinted_fg.into(), t.note_debug_bg),
     };
     let cleaned = text
         .strip_prefix("[atman] ")
@@ -1418,9 +1428,10 @@ fn render_system_note(text: &str, level: NoteLevel, panel_width: u16) -> Vec<Lin
 }
 
 fn render_user_turn(text: &str, panel_width: u16) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
     let bg = user_message_bg();
     let prompt_style = Style::default()
-        .fg(Color::Cyan)
+        .fg(t.accent.into())
         .bg(bg)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().bg(bg);
@@ -1569,7 +1580,7 @@ fn render_diff_preview(
     let target = panel_width.max(20) as usize;
     let base_style = Style::default().bg(bg);
     let header_style = Style::default()
-        .fg(Color::Cyan)
+        .fg(t.accent.into())
         .bg(bg)
         .add_modifier(Modifier::BOLD);
     let hint_style = Style::default()
@@ -1656,6 +1667,7 @@ fn render_diff_cell_rows(
     bg: Color,
     first_change: Option<usize>,
 ) -> (Vec<Line<'static>>, usize) {
+    let t = crate::theme::theme();
     let total = rows.len();
     let sep = " │ ";
     let sep_w = 3usize;
@@ -1663,7 +1675,7 @@ fn render_diff_cell_rows(
     let panes_w = target.saturating_sub(sep_w + margin_w * 2);
     let left_w = panes_w / 2;
     let right_w = panes_w.saturating_sub(left_w);
-    let sep_style = Style::default().fg(Color::DarkGray).bg(bg);
+    let sep_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
     let margin_style = Style::default().bg(bg);
     let mut out = Vec::new();
     if expanded || total <= 15 {
@@ -2011,9 +2023,14 @@ fn empty_cell() -> DiffCell {
 }
 
 fn render_diff_side(cell: &DiffCell, width: usize, lang: &str, bg: Color) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
     let mark_style = match cell.kind {
-        DiffCellKind::Delete => Style::default().fg(Color::Red).bg(Color::Rgb(62, 30, 34)),
-        DiffCellKind::Insert => Style::default().fg(Color::Green).bg(Color::Rgb(28, 56, 36)),
+        DiffCellKind::Delete => Style::default()
+            .fg(t.error.into())
+            .bg(Color::Rgb(62, 30, 34)),
+        DiffCellKind::Insert => Style::default()
+            .fg(t.success.into())
+            .bg(Color::Rgb(28, 56, 36)),
         DiffCellKind::Normal | DiffCellKind::Empty => Style::default().bg(bg),
     };
     let gutter_w = 6usize;
@@ -2322,11 +2339,12 @@ pub fn render_workflow_panel_with_regions(
     animation_frame: u32,
     panel_width: u16,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
+    let t = crate::theme::theme();
     let count = count_workflow_nodes(&graph.root);
     let (mut status_str, mut status_style, running) = workflow_overall_status(&graph.root);
     if cancelled {
         status_str = "Cancelled".to_string();
-        status_style = Style::default().fg(Color::Yellow);
+        status_style = Style::default().fg(t.warn.into());
     }
     let elapsed = compute_elapsed_secs(&graph.root, running);
     let fold_glyph = if panel_expanded { "▼" } else { "▶" };
@@ -2338,12 +2356,12 @@ pub fn render_workflow_panel_with_regions(
     let header = Line::from(vec![
         Span::styled(
             format!(" {fold_glyph} "),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.subtle_fg.into()),
         ),
         Span::styled(
             format!("{flow_glyph} workflow"),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(t.accent.into())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
@@ -2529,8 +2547,9 @@ fn render_collapsed_workflow_card(
     running: bool,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     use unicode_width::UnicodeWidthStr;
+    let t = crate::theme::theme();
     let outer_width = panel_width.clamp(40, MAX_BOX_WIDTH);
-    let border_style = Style::default().fg(Color::Cyan);
+    let border_style = Style::default().fg(t.accent.into());
     let mut stats = WorkflowStats::default();
     collect_stats(&graph.root, &mut stats);
     let flow_glyph = if running {
@@ -2558,11 +2577,11 @@ fn render_collapsed_workflow_card(
         Span::styled(
             title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(t.accent.into())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" · "),
-        Span::styled(stats_text, Style::default().fg(Color::Gray)),
+        Span::styled(stats_text, Style::default().fg(t.tinted_fg.into())),
     ];
     if fill_w > 0 {
         top_spans.push(Span::styled("─".repeat(fill_w), border_style));
@@ -2572,7 +2591,7 @@ fn render_collapsed_workflow_card(
     top_spans.push(Span::styled(
         button_text.to_string(),
         Style::default()
-            .fg(Color::Yellow)
+            .fg(t.warn.into())
             .add_modifier(Modifier::BOLD),
     ));
     top_spans.push(Span::styled("─╮".to_string(), border_style));
@@ -2694,6 +2713,7 @@ fn workflow_overall_status(
     nodes: &[atman_runtime::workflow::WorkflowNode],
 ) -> (String, Style, bool) {
     use atman_runtime::workflow::NodeStatus;
+    let t = crate::theme::theme();
     fn walk(ns: &[atman_runtime::workflow::WorkflowNode], running: &mut bool, err: &mut bool) {
         for n in ns {
             match n.status {
@@ -2708,13 +2728,17 @@ fn workflow_overall_status(
     let mut has_err = false;
     walk(nodes, &mut has_running, &mut has_err);
     if has_running {
-        ("running…".into(), Style::default().fg(Color::Yellow), true)
+        ("running…".into(), Style::default().fg(t.warn.into()), true)
     } else if has_err {
-        ("err".into(), Style::default().fg(Color::Red), false)
+        ("err".into(), Style::default().fg(t.error.into()), false)
     } else if nodes.is_empty() {
-        ("empty".into(), Style::default().fg(Color::DarkGray), false)
+        (
+            "empty".into(),
+            Style::default().fg(t.subtle_fg.into()),
+            false,
+        )
     } else {
-        ("ok".into(), Style::default().fg(Color::Green), false)
+        ("ok".into(), Style::default().fg(t.success.into()), false)
     }
 }
 
@@ -2757,6 +2781,7 @@ fn append_fanout_horizontal(
     pending_counter: &mut u8,
     panel_width: u16,
 ) {
+    let t = crate::theme::theme();
     let branch_count = branches.len();
     let prefix_cols = child_prefix.chars().count() as u16;
     let usable = panel_width.saturating_sub(prefix_cols);
@@ -2787,7 +2812,7 @@ fn append_fanout_horizontal(
     let fork_row = out.len() as u16;
     let mut fork_spans = vec![Span::styled(
         child_prefix.to_string(),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.subtle_fg.into()),
     )];
     let mut cursor: u32 = 0;
     for i in 0..branch_count {
@@ -2795,20 +2820,20 @@ fn append_fanout_horizontal(
         while cursor < mid {
             fork_spans.push(Span::styled(
                 "─".to_string(),
-                Style::default().fg(Color::Magenta),
+                Style::default().fg(t.accent.into()),
             ));
             cursor += 1;
         }
         fork_spans.push(Span::styled(
             "┬".to_string(),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(t.accent.into()),
         ));
         cursor += 1;
         let _ = i;
         while cursor < ((i + 1) as u32 * col_width as u32) {
             fork_spans.push(Span::styled(
                 "─".to_string(),
-                Style::default().fg(Color::Magenta),
+                Style::default().fg(t.accent.into()),
             ));
             cursor += 1;
         }
@@ -2847,7 +2872,7 @@ fn append_fanout_horizontal(
     let merge_row = out.len() as u16;
     let mut merge_spans = vec![Span::styled(
         child_prefix.to_string(),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.subtle_fg.into()),
     )];
     let mut cursor: u32 = 0;
     for i in 0..branch_count {
@@ -2855,19 +2880,19 @@ fn append_fanout_horizontal(
         while cursor < mid {
             merge_spans.push(Span::styled(
                 "─".to_string(),
-                Style::default().fg(Color::Magenta),
+                Style::default().fg(t.accent.into()),
             ));
             cursor += 1;
         }
         merge_spans.push(Span::styled(
             "┴".to_string(),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(t.accent.into()),
         ));
         cursor += 1;
         while cursor < ((i + 1) as u32 * col_width as u32) {
             merge_spans.push(Span::styled(
                 "─".to_string(),
-                Style::default().fg(Color::Magenta),
+                Style::default().fg(t.accent.into()),
             ));
             cursor += 1;
         }
@@ -2891,7 +2916,8 @@ const MAX_BOX_WIDTH: u16 = crate::layout::CONTENT_MAX_WIDTH;
 const INDENT_PER_DEPTH: u16 = 4;
 
 fn tree_prefix_spans(ancestor_last: &[bool], is_last: Option<bool>) -> Vec<Span<'static>> {
-    let style = Style::default().fg(Color::DarkGray);
+    let t = crate::theme::theme();
+    let style = Style::default().fg(t.subtle_fg.into());
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(ancestor_last.len() + 1);
     for &last in ancestor_last {
         spans.push(Span::styled(
@@ -2909,7 +2935,8 @@ fn tree_prefix_spans(ancestor_last: &[bool], is_last: Option<bool>) -> Vec<Span<
 }
 
 fn tree_continuation_spans(ancestor_last: &[bool], is_last: bool) -> Vec<Span<'static>> {
-    let style = Style::default().fg(Color::DarkGray);
+    let t = crate::theme::theme();
+    let style = Style::default().fg(t.subtle_fg.into());
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(ancestor_last.len() + 1);
     for &last in ancestor_last {
         spans.push(Span::styled(
@@ -2940,6 +2967,7 @@ fn append_workflow_node_boxed(
     visible_paths: Option<&std::collections::HashSet<String>>,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
+    let t = crate::theme::theme();
     let depth = ancestor_last.len() as u16;
     let prefix_w = depth.saturating_mul(INDENT_PER_DEPTH);
     let col0 = prefix_w;
@@ -2948,10 +2976,10 @@ fn append_workflow_node_boxed(
         return;
     }
     let mut border_style = match node.status {
-        NodeStatus::Ok => Style::default().fg(Color::Green),
-        NodeStatus::Err => Style::default().fg(Color::Red),
-        NodeStatus::Cancelled => Style::default().fg(Color::DarkGray),
-        NodeStatus::Running | NodeStatus::Pending => Style::default().fg(Color::Cyan),
+        NodeStatus::Ok => Style::default().fg(t.success.into()),
+        NodeStatus::Err => Style::default().fg(t.error.into()),
+        NodeStatus::Cancelled => Style::default().fg(t.subtle_fg.into()),
+        NodeStatus::Running | NodeStatus::Pending => Style::default().fg(t.accent.into()),
     };
     let status_glyph = match node.status {
         NodeStatus::Ok => "✓",
@@ -2966,11 +2994,11 @@ fn append_workflow_node_boxed(
         }
     };
     let (kind_glyph, _kind_color) = match &node.kind {
-        WorkflowNodeKind::Flow { .. } => ("⚡", Color::Cyan),
-        WorkflowNodeKind::Subflow { .. } => ("↳", Color::Cyan),
+        WorkflowNodeKind::Flow { .. } => ("⚡", t.accent.into()),
+        WorkflowNodeKind::Subflow { .. } => ("↳", t.accent.into()),
         WorkflowNodeKind::Stmt { node_kind } => stmt_kind_glyph(node_kind),
-        WorkflowNodeKind::ToolCall { .. } => ("🔧", Color::Blue),
-        WorkflowNodeKind::FanoutBranch { .. } => ("⇉", Color::Magenta),
+        WorkflowNodeKind::ToolCall { .. } => ("🔧", t.accent.into()),
+        WorkflowNodeKind::FanoutBranch { .. } => ("⇉", t.accent.into()),
     };
     let label = match &node.kind {
         WorkflowNodeKind::ToolCall {
@@ -3001,11 +3029,11 @@ fn append_workflow_node_boxed(
             approval_hotkey = Some(*pending_counter);
         }
         border_style = Style::default()
-            .fg(Color::Yellow)
+            .fg(t.warn.into())
             .add_modifier(Modifier::BOLD);
         auto_expand = true;
     } else if matches!(&node.approval, Some(ApprovalState::Denied { .. })) {
-        border_style = Style::default().fg(Color::Red);
+        border_style = Style::default().fg(t.error.into());
     }
     let is_expanded = auto_expand || expanded_nodes.contains(path);
     let mut inner_lines: Vec<Line<'static>> = Vec::new();
@@ -3240,9 +3268,10 @@ fn collect_boxed_details(
 }
 
 fn push_detail_section(out: &mut Vec<Line<'static>>, header: &str, body: &str) {
+    let t = crate::theme::theme();
     out.push(Line::from(Span::styled(
         format!("{header}:"),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(t.subtle_fg.into()),
     )));
     for line in body.lines().take(20) {
         out.push(Line::from(Span::raw(line.to_string())));
@@ -3264,41 +3293,42 @@ fn append_workflow_node(
     panel_width: u16,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
+    let t = crate::theme::theme();
     let start_row = out.len() as u32;
     let effective = node;
     let (branch_glyph, branch_color) = if matches!(node.kind, WorkflowNodeKind::FanoutBranch { .. })
     {
         if is_last {
-            ("╚═", Color::Magenta)
+            ("╚═", t.accent.into())
         } else {
-            ("╠═", Color::Magenta)
+            ("╠═", t.accent.into())
         }
     } else if is_last {
-        ("└─", Color::DarkGray)
+        ("└─", t.subtle_fg.into())
     } else {
-        ("├─", Color::DarkGray)
+        ("├─", t.subtle_fg.into())
     };
     let (status_glyph, status_style) = match effective.status {
-        NodeStatus::Ok => ("✓", Style::default().fg(Color::Green)),
-        NodeStatus::Err => ("✗", Style::default().fg(Color::Red)),
-        NodeStatus::Cancelled => ("⊘", Style::default().fg(Color::DarkGray)),
+        NodeStatus::Ok => ("✓", Style::default().fg(t.success.into())),
+        NodeStatus::Err => ("✗", Style::default().fg(t.error.into())),
+        NodeStatus::Cancelled => ("⊘", Style::default().fg(t.subtle_fg.into())),
         NodeStatus::Running | NodeStatus::Pending => {
             if flow_running {
                 (
                     spinner_char(animation_frame),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(t.warn.into()),
                 )
             } else {
-                ("○", Style::default().fg(Color::DarkGray))
+                ("○", Style::default().fg(t.subtle_fg.into()))
             }
         }
     };
     let (kind_glyph, kind_color) = match &effective.kind {
-        WorkflowNodeKind::Flow { .. } => ("⚡", Color::Cyan),
-        WorkflowNodeKind::Subflow { .. } => ("↳", Color::Cyan),
+        WorkflowNodeKind::Flow { .. } => ("⚡", t.accent.into()),
+        WorkflowNodeKind::Subflow { .. } => ("↳", t.accent.into()),
         WorkflowNodeKind::Stmt { node_kind } => stmt_kind_glyph(node_kind),
-        WorkflowNodeKind::ToolCall { .. } => ("🔧", Color::Blue),
-        WorkflowNodeKind::FanoutBranch { .. } => ("⇉", Color::Magenta),
+        WorkflowNodeKind::ToolCall { .. } => ("🔧", t.accent.into()),
+        WorkflowNodeKind::FanoutBranch { .. } => ("⇉", t.accent.into()),
     };
     let base_label = match &effective.kind {
         WorkflowNodeKind::ToolCall {
@@ -3338,12 +3368,12 @@ fn append_workflow_node(
                 Some((
                     format!("[{key}] "),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(t.warn.into())
                         .add_modifier(Modifier::BOLD),
                 )),
                 Some((
                     format!("  ⏸ waiting approval ({level})"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(t.warn.into()),
                 )),
             )
         }
@@ -3351,7 +3381,7 @@ fn append_workflow_node(
             None,
             Some((
                 format!("  ⊘ denied: {reason}"),
-                Style::default().fg(Color::Red),
+                Style::default().fg(t.error.into()),
             )),
         ),
         _ => (None, None),
@@ -3365,7 +3395,7 @@ fn append_workflow_node(
         Span::styled(format!("{status_glyph} "), status_style),
         Span::styled(
             expand_glyph.to_string(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.subtle_fg.into()),
         ),
     ];
     if let Some((text, style)) = approval_prefix {
@@ -3437,6 +3467,7 @@ fn append_expanded_details(
     prefix: &str,
 ) {
     use atman_runtime::workflow::WorkflowNodeKind;
+    let t = crate::theme::theme();
     let mut sections: Vec<(&str, String)> = Vec::new();
     if let WorkflowNodeKind::ToolCall {
         args_preview,
@@ -3469,16 +3500,16 @@ fn append_expanded_details(
     for (label, body) in sections {
         out.push(Line::from(vec![Span::styled(
             format!("{prefix}  ▪ {label}:"),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.subtle_fg.into()),
         )]));
         for line in body.lines().take(20) {
             let trimmed: String = line.chars().take(200).collect();
             out.push(Line::from(vec![
                 Span::styled(
                     format!("{prefix}    "),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.subtle_fg.into()),
                 ),
-                Span::styled(trimmed, Style::default().fg(Color::Gray)),
+                Span::styled(trimmed, Style::default().fg(t.tinted_fg.into())),
             ]));
         }
     }
@@ -3486,16 +3517,17 @@ fn append_expanded_details(
 
 fn stmt_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, Color) {
     use atman_runtime::nodegraph::NodeKind;
+    let t = crate::theme::theme();
     match kind {
-        NodeKind::Llm { .. } => ("✦", Color::Magenta),
-        NodeKind::ToolCall { .. } => ("🔧", Color::Blue),
-        NodeKind::Fanout { .. } => ("⇉", Color::Magenta),
-        NodeKind::UserConfirm => ("?", Color::LightCyan),
-        NodeKind::Subflow { .. } => ("↳", Color::Cyan),
-        NodeKind::Message { .. } => ("✉", Color::White),
-        NodeKind::FixUntilTest => ("↻", Color::LightMagenta),
-        NodeKind::When { .. } => ("⋯", Color::DarkGray),
-        NodeKind::Return => ("←", Color::Green),
+        NodeKind::Llm { .. } => ("✦", t.accent.into()),
+        NodeKind::ToolCall { .. } => ("🔧", t.accent.into()),
+        NodeKind::Fanout { .. } => ("⇉", t.accent.into()),
+        NodeKind::UserConfirm => ("?", t.accent.into()),
+        NodeKind::Subflow { .. } => ("↳", t.accent.into()),
+        NodeKind::Message { .. } => ("✉", t.tinted_fg.into()),
+        NodeKind::FixUntilTest => ("↻", t.accent.into()),
+        NodeKind::When { .. } => ("⋯", t.subtle_fg.into()),
+        NodeKind::Return => ("←", t.success.into()),
     }
 }
 
@@ -3540,8 +3572,9 @@ fn format_llm_stats_brief(stats: &atman_runtime::workflow::LlmStats) -> String {
 }
 
 pub fn empty_hint<'a>() -> Paragraph<'a> {
+    let t = crate::theme::theme();
     Paragraph::new("plain text → agent · :help for builtins · Ctrl+C to interrupt")
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(t.subtle_fg.into()))
         .wrap(Wrap { trim: true })
 }
 
@@ -4006,6 +4039,7 @@ mod tests {
 
     #[test]
     fn diff_rows_wrap_and_align_long_sides() {
+        let t = crate::theme::theme();
         let long = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789中文中文中文";
         let rows = vec![(
             DiffCell {
@@ -4019,7 +4053,8 @@ mod tests {
                 kind: DiffCellKind::Insert,
             },
         )];
-        let (lines, total) = render_diff_cell_rows(&rows, "rust", true, 44, Color::Black, Some(0));
+        let (lines, total) =
+            render_diff_cell_rows(&rows, "rust", true, 44, t.code_bg.into(), Some(0));
         assert_eq!(total, 1);
         assert!(lines.len() > 1, "long side should wrap: {lines:?}");
         for line in &lines {
@@ -4034,12 +4069,13 @@ mod tests {
 
     #[test]
     fn diff_side_marks_extreme_wrap_with_ellipsis() {
+        let t = crate::theme::theme();
         let cell = DiffCell {
             line_no: Some(1),
             text: "x".repeat(200),
             kind: DiffCellKind::Normal,
         };
-        let lines = render_diff_side(&cell, 16, "", Color::Black);
+        let lines = render_diff_side(&cell, 16, "", t.code_bg.into());
         assert_eq!(lines.len(), 3);
         let last = plain_line(lines.last().unwrap());
         assert!(last.contains('⋯'), "ellipsis missing: {last:?}");
@@ -4615,7 +4651,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
     let t = crate::theme::theme();
     let bg: Color = t.code_bg.into();
     let header_style = Style::default()
-        .fg(Color::Yellow)
+        .fg(t.warn.into())
         .bg(bg)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
