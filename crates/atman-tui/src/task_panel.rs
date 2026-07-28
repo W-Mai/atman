@@ -770,7 +770,7 @@ pub fn render(
     hitmap
 }
 
-fn compute_content_lines(
+pub fn compute_content_lines(
     snap: &TaskSnapshot,
     activity_nodes: &[ActivityNode],
     items: &[crate::app::OutputItem],

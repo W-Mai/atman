@@ -530,7 +530,7 @@ fn render_panel_content(
 
     match panel.kind {
         PanelKind::History => {
-            render_history_content(f, area, snapshots, hitmap_out, hovered_history_row)
+            render_history_content(f, area, snapshots, items, hitmap_out, hovered_history_row)
         }
         PanelKind::Activity => {
             let parts: Vec<&str> = panel.id.splitn(2, ':').collect();
@@ -592,10 +592,68 @@ pub struct FloatingPanelHitmap {
     pub history_row_rects: Vec<(String, Rect)>,
 }
 
+fn task_summary_line(snap: &TaskSnapshot, items: &[OutputItem]) -> String {
+    match snap.kind {
+        TaskKind::Bash => {
+            let item = items.iter().rev().find(|it| match it {
+                OutputItem::Bash { handle, .. } => *handle == snap.source_handle,
+                _ => false,
+            });
+            if let Some(OutputItem::Bash { output, .. }) = item {
+                for line in output.lines().rev() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
+                }
+            }
+            String::new()
+        }
+        TaskKind::Terminal => {
+            let item = items.iter().rev().find(|it| match it {
+                OutputItem::Terminal { handle, .. } => *handle == snap.source_handle,
+                _ => false,
+            });
+            if let Some(OutputItem::Terminal { screen, .. }) = item {
+                let cols = screen.cols as usize;
+                let rows = screen.rows as usize;
+                if cols > 0 && rows > 0 {
+                    for r in (0..rows).rev() {
+                        let start = r * cols;
+                        let end = start + cols;
+                        let line: String = screen
+                            .cells
+                            .get(start..end)
+                            .map(|cells| cells.iter().map(|c| c.chars.as_str()).collect::<String>())
+                            .unwrap_or_default();
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            return trimmed.to_string();
+                        }
+                    }
+                }
+            }
+            String::new()
+        }
+        _ => String::new(),
+    }
+}
+
+fn format_started_at(snap: &TaskSnapshot) -> String {
+    if let Some(ts) = snap.id.0.get_timestamp() {
+        let (secs, _nanos) = ts.to_unix();
+        if let Some(dt) = chrono::DateTime::from_timestamp(secs as i64, 0) {
+            return dt.format("%H:%M:%S").to_string();
+        }
+    }
+    String::new()
+}
+
 fn render_history_content(
     f: &mut Frame,
     area: Rect,
     snapshots: &[TaskSnapshot],
+    items: &[OutputItem],
     hitmap: &mut FloatingPanelHitmap,
     hovered_row: &Option<String>,
 ) {
@@ -628,11 +686,19 @@ fn render_history_content(
         } else {
             t.subtle_fg.into()
         };
+        let time_fg: Color = t.meta_fg.into();
         let kind_icon = task_kind_icon(snap.kind);
-        let prefix_len: u16 = 2 + 2 + 2; // "{bar} " + "{kind} " + "{icon} "
-        let suffix_len: u16 = 1 + elapsed.chars().count() as u16 + 1; // " " + elapsed + trailing " "
-        let label_max = area.width.saturating_sub(prefix_len + suffix_len) as usize;
-        let label = truncate(&snap.label, label_max);
+        let started = format_started_at(snap);
+        let summary = task_summary_line(snap, items);
+        let prefix_len: u16 = 2 + 2 + 2 + started.chars().count() as u16 + 1;
+        let suffix_len: u16 = 1 + elapsed.chars().count() as u16 + 1;
+        let content_max = area.width.saturating_sub(prefix_len + suffix_len) as usize;
+        let label_text = if summary.is_empty() {
+            snap.label.clone()
+        } else {
+            format!("{} · {}", snap.label, summary)
+        };
+        let label = truncate(&label_text, content_max);
         let label_actual = label.chars().count() as u16;
         let pad = area.width - prefix_len - label_actual - suffix_len;
         lines.push(Line::from(vec![
@@ -642,6 +708,10 @@ fn render_history_content(
                 Style::default().fg(st_color).bg(row_bg),
             ),
             Span::styled(format!("{icon} "), Style::default().fg(st_color).bg(row_bg)),
+            Span::styled(
+                format!("{started} "),
+                Style::default().fg(time_fg).bg(row_bg),
+            ),
             Span::styled(label, Style::default().fg(label_fg).bg(row_bg)),
             Span::styled(" ".repeat(pad as usize), Style::default().bg(row_bg)),
             Span::styled(" ", Style::default().bg(row_bg)),
