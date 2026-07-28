@@ -151,6 +151,11 @@ pub enum TuiControl {
     RefreshProviderModels {
         provider_id: String,
     },
+    TermResize {
+        handle: String,
+        rows: u16,
+        cols: u16,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -698,13 +703,31 @@ async fn run_frames(
                                                     .iter()
                                                     .find(|s| s.source_handle == handle);
                                                 if let Some(snap) = snap {
-                                                    app.floating_panels.open(
+                                                    let (pw, ph) = if snap.kind
+                                                        == atman_runtime::TaskKind::Terminal
+                                                    {
+                                                        let item = app.items.iter().rev().find(|it| {
+                                                            matches!(it, crate::app::OutputItem::Terminal { handle, .. } if *handle == snap.source_handle)
+                                                        });
+                                                        if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
+                                                            let cols = screen.cols;
+                                                            let rows = screen.rows;
+                                                            (cols + 8, rows + 5)
+                                                        } else {
+                                                            (48, 20)
+                                                        }
+                                                    } else {
+                                                        (48, 20)
+                                                    };
+                                                    app.floating_panels.open_with_size(
                                                         &snap.source_handle,
                                                         crate::floating_panels::PanelKind::Task(
                                                             snap.kind,
                                                         ),
                                                         &snap.label,
                                                         canvas,
+                                                        pw,
+                                                        ph,
                                                     );
                                                 }
                                             }
@@ -772,11 +795,25 @@ async fn run_frames(
                                         .iter()
                                         .find(|p| &p.id == id)
                                     {
+                                        let is_term = p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal);
                                         let nw = (p.rect.width as i32 + dx).max(20) as u16;
                                         let nh = (p.rect.height as i32 + dy).max(6) as u16;
                                         let canvas = app.last_transcript_rect.unwrap_or_default();
                                         app.floating_panels.resize_panel(id, nw, nh, canvas);
                                         app.resize_offset = (me.column, me.row);
+                                        if is_term {
+                                            let inner_cols = nw.saturating_sub(8);
+                                            let inner_rows = nh.saturating_sub(5);
+                                            if inner_cols > 0 && inner_rows > 0 {
+                                                if let Some(tx) = &handle.control_tx {
+                                                    let _ = tx.send(TuiControl::TermResize {
+                                                        handle: id.clone(),
+                                                        rows: inner_rows,
+                                                        cols: inner_cols,
+                                                    });
+                                                }
+                                            }
+                                        }
                                     }
                                 } else if let Some(id) = &app.drag_target {
                                     let (ox, oy) = app.drag_offset;

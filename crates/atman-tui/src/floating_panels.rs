@@ -58,6 +58,18 @@ pub struct FloatingPanels {
 
 impl FloatingPanels {
     pub fn open(&mut self, id: &str, kind: PanelKind, title: &str, canvas: Rect) {
+        self.open_with_size(id, kind, title, canvas, 48, 20);
+    }
+
+    pub fn open_with_size(
+        &mut self,
+        id: &str,
+        kind: PanelKind,
+        title: &str,
+        canvas: Rect,
+        w: u16,
+        h: u16,
+    ) {
         if self.panels.iter().any(|p| p.id == id) {
             self.focused = Some(id.to_string());
             self.bring_to_front(id);
@@ -65,8 +77,8 @@ impl FloatingPanels {
         }
         self.z_counter += 1;
         let offset = (self.panels.len() as u16) * 3;
-        let w = 48.min(canvas.width.saturating_sub(4));
-        let h = 20.min(canvas.height.saturating_sub(4));
+        let w = w.min(canvas.width.saturating_sub(4));
+        let h = h.min(canvas.height.saturating_sub(4));
         let panel = FloatingPanel {
             id: id.to_string(),
             kind,

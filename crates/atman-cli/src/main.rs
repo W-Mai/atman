@@ -1611,6 +1611,7 @@ async fn cmd_repl_once(
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<atman_tui::TuiCommand>();
         let cmd_tx_for_models = cmd_tx.clone();
         let session_for_ctrl = std::sync::Arc::clone(&session);
+        let session_for_ctrl_term_registry = executor.tool_ctx.term_registry.clone();
         let switch_target_for_ctrl = switch_target.clone();
         let providers_for_ctrl = executor.providers.clone();
         let data_root_for_ctrl = root.clone();
@@ -1801,14 +1802,12 @@ async fn cmd_repl_once(
                         let tx = cmd_tx_for_models.clone();
                         let pid = provider_id.clone();
                         tokio::spawn(async move {
-                            // Load the provider from auth store
                             let Ok(store) = atman_runtime::auth_store::AuthStore::load() else {
                                 return;
                             };
                             let Some(p) = store.providers.iter().find(|x| x.id == pid) else {
                                 return;
                             };
-                            // Create a temporary provider to discover models
                             let provider = atman_runtime::providers::codex::CodexProvider::new(
                                 &p.name,
                                 &p.access_token,
@@ -1826,6 +1825,15 @@ async fn cmd_repl_once(
                             }
                             let _ = tx.send(atman_tui::TuiCommand::ProviderModelsUpdated);
                         });
+                    }
+                    atman_tui::TuiControl::TermResize { handle, rows, cols } => {
+                        if let Some(tr) = &session_for_ctrl_term_registry {
+                            if let Ok(entry) =
+                                tr.lookup(&handle, &session_for_ctrl.id().to_string())
+                            {
+                                let _ = entry.resize(rows, cols);
+                            }
+                        }
                     }
                 }
             }
