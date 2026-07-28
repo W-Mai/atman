@@ -436,6 +436,25 @@ async fn run_frames(
                         Some(Ok(CtEvent::Mouse(me)))
                             if matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
                         {
+                            let over_floating = app
+                                .floating_panels
+                                .hit_test_panel(me.column, me.row)
+                                .is_some();
+                            if over_floating {
+                                let id = app
+                                    .floating_panels
+                                    .hit_test_panel(me.column, me.row)
+                                    .unwrap()
+                                    .id
+                                    .clone();
+                                if let Some(p) = app.floating_panels.panels.iter_mut().find(|p| p.id == id) {
+                                    if matches!(me.kind, MouseEventKind::ScrollUp) {
+                                        p.scroll = p.scroll.saturating_sub(3);
+                                    } else {
+                                        p.scroll = p.scroll.saturating_add(3);
+                                    }
+                                }
+                            } else {
                             let over_input = app
                                 .input_rect
                                 .map(|r| rect_contains(r, me.column, me.row))
@@ -478,6 +497,7 @@ async fn run_frames(
                                 scroll_delta = scroll_delta.saturating_sub(3);
                             } else {
                                 scroll_delta = scroll_delta.saturating_add(3);
+                            }
                             }
                             interrupt_prompt = None;
                         }
@@ -2597,6 +2617,18 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ScrollUp | KeyAction::PageUp => {
+            if let Some(id) = &app.floating_panels.focused.clone()
+                && let Some(p) = app.floating_panels.panels.iter_mut().find(|p| &p.id == id)
+            {
+                p.scroll = p
+                    .scroll
+                    .saturating_sub(if matches!(action, KeyAction::PageUp) {
+                        10
+                    } else {
+                        3
+                    });
+                return;
+            }
             app.scroll_up(if matches!(action, KeyAction::PageUp) {
                 10
             } else {
@@ -2605,6 +2637,18 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ScrollDown | KeyAction::PageDown => {
+            if let Some(id) = &app.floating_panels.focused.clone()
+                && let Some(p) = app.floating_panels.panels.iter_mut().find(|p| &p.id == id)
+            {
+                p.scroll = p
+                    .scroll
+                    .saturating_add(if matches!(action, KeyAction::PageDown) {
+                        10
+                    } else {
+                        3
+                    });
+                return;
+            }
             app.scroll_down(if matches!(action, KeyAction::PageDown) {
                 10
             } else {

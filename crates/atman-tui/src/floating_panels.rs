@@ -18,6 +18,7 @@ pub struct FloatingPanel {
     pub z: u32,
     pub maximized: bool,
     pub prev_rect: Option<Rect>,
+    pub scroll: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +99,7 @@ impl FloatingPanels {
             z: self.z_counter,
             maximized: false,
             prev_rect: None,
+            scroll: 0,
         };
         self.panels.push(panel);
         self.focused = Some(id.to_string());
@@ -711,9 +713,15 @@ fn render_panel_content(
     let area = Rect::new(area.x + 1, area.y, area.width - 2, area.height - 1);
 
     match panel.kind {
-        PanelKind::History => {
-            render_history_content(f, area, snapshots, items, hitmap_out, hovered_history_row)
-        }
+        PanelKind::History => render_history_content(
+            f,
+            area,
+            snapshots,
+            items,
+            hitmap_out,
+            hovered_history_row,
+            panel.scroll,
+        ),
         PanelKind::Activity => {
             let parts: Vec<&str> = panel.id.splitn(2, ':').collect();
             if parts.len() == 2 {
@@ -838,6 +846,7 @@ fn render_history_content(
     items: &[OutputItem],
     hitmap: &mut FloatingPanelHitmap,
     hovered_row: &Option<String>,
+    scroll: u16,
 ) {
     let t = crate::theme::theme();
     let bar_color: Color = t.subtle_fg.into();
@@ -846,22 +855,29 @@ fn render_history_content(
     let mut done: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| !s.is_running()).collect();
     done.sort_by_key(|b| std::cmp::Reverse(b.ended_at));
 
+    let visible_height = area.height;
+    let max_scroll = done.len().saturating_sub(visible_height as usize) as u16;
+    let scroll = scroll.min(max_scroll);
+
     let mut lines: Vec<Line> = Vec::new();
     for (i, snap) in done.iter().enumerate() {
         let icon = status_icon(snap.status);
         let elapsed = format_elapsed(snap.elapsed_ms());
         let st_color = status_color(snap.status);
-        let row_y = area.y + i as u16;
+        let visible_i = i as u16 - scroll;
+        let row_y = area.y + visible_i;
         let is_hovered = hovered_row.as_deref() == Some(&snap.source_handle);
-        hitmap.history_row_rects.push((
-            snap.source_handle.clone(),
-            Rect {
-                x: area.x,
-                y: row_y,
-                width: area.width,
-                height: 1,
-            },
-        ));
+        if visible_i < visible_height {
+            hitmap.history_row_rects.push((
+                snap.source_handle.clone(),
+                Rect {
+                    x: area.x,
+                    y: row_y,
+                    width: area.width,
+                    height: 1,
+                },
+            ));
+        }
         let row_bg = if is_hovered { hover_bg } else { content_bg };
         let bar = if is_hovered { "▌" } else { "▎" };
         let label_fg = if is_hovered {
@@ -891,7 +907,8 @@ fn render_history_content(
             .width
             .saturating_sub(prefix_w)
             .saturating_sub(label_w)
-            .saturating_sub(suffix_w);
+            .saturating_sub(suffix_w)
+            .max(1);
         lines.push(Line::from(vec![
             Span::styled(format!("{bar} "), Style::default().fg(bar_color).bg(row_bg)),
             Span::styled(
@@ -916,7 +933,7 @@ fn render_history_content(
             Span::styled(msg, Style::default().fg(t.subtle_fg.into())),
         ]));
     }
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 }
 
 fn render_task_meta(f: &mut Frame, area: Rect, kind: TaskKind, snap: &TaskSnapshot) {
