@@ -710,7 +710,7 @@ fn render_panel_content(
         return;
     }
 
-    let area = Rect::new(area.x + 1, area.y, area.width - 2, area.height - 1);
+    let area = Rect::new(area.x + 1, area.y, area.width - 2, area.height);
 
     match panel.kind {
         PanelKind::History => render_history_content(
