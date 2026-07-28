@@ -454,30 +454,61 @@ pub fn render(
 }
 
 pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
+    use ratatui::buffer::CellDiffOption;
+    use unicode_width::UnicodeWidthStr;
     let buf = f.buffer_mut();
     let area = *buf.area();
     let bg_target: Color = t.modal_bg.into();
+
+    let sanitize = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
+        if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
+            return;
+        }
+        let cell = &mut buf[(x, y)];
+        if UnicodeWidthStr::width(cell.symbol()) > 1 || cell.symbol().is_empty() {
+            cell.set_symbol(" ");
+            cell.set_diff_option(CellDiffOption::None);
+        }
+    };
 
     let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ratio: f64| {
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
             return;
         }
         let cell = &mut buf[(x, y)];
-        if matches!(cell.bg, Color::Reset) {
-            return;
-        }
-        cell.bg = lerp_color(cell.bg, bg_target, ratio);
+        let current_bg = if matches!(cell.bg, Color::Reset) {
+            t.code_bg.into()
+        } else {
+            cell.bg
+        };
+        cell.bg = lerp_color(current_bg, bg_target, ratio);
     };
 
     let max_x = area.x.saturating_add(area.width).saturating_sub(1);
     let max_y = area.y.saturating_add(area.height).saturating_sub(1);
 
     let top_y = rect.y.saturating_sub(1);
+    let top_y0 = rect.y.saturating_sub(2);
     let bot_y = (rect.y + rect.height).min(max_y);
+    let bot_y1 = (rect.y + rect.height + 1).min(max_y);
     let lx0 = rect.x.saturating_sub(2);
     let lx1 = rect.x.saturating_sub(1);
     let rx0 = (rect.x + rect.width).min(max_x);
     let rx1 = (rect.x + rect.width + 1).min(max_x);
+
+    // sanitize wide glyphs in shadow ring before darkening
+    for x in lx0..=rx1 {
+        sanitize(buf, x, top_y0);
+        sanitize(buf, x, top_y);
+        sanitize(buf, x, bot_y);
+        sanitize(buf, x, bot_y1);
+    }
+    for y in top_y0..=bot_y1 {
+        sanitize(buf, lx0, y);
+        sanitize(buf, lx1, y);
+        sanitize(buf, rx0, y);
+        sanitize(buf, rx1, y);
+    }
 
     // inner ring — strongest
     for x in lx1..=rx0 {
@@ -492,12 +523,12 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
     }
     // outer ring — lighter
     for x in lx0..=rx1 {
-        darken(buf, x, top_y.saturating_sub(1), 0.4);
+        darken(buf, x, top_y0, 0.4);
     }
     for x in lx0..=rx1 {
-        darken(buf, x, bot_y + 1, 0.4);
+        darken(buf, x, bot_y1, 0.4);
     }
-    for y in top_y.saturating_sub(1)..=bot_y + 1 {
+    for y in top_y0..=bot_y1 {
         darken(buf, rx1, y, 0.4);
         darken(buf, lx0, y, 0.4);
     }
@@ -541,13 +572,15 @@ fn darken_cell(buf: &mut ratatui::buffer::Buffer, area: Rect, x: u16, y: u16, ra
     if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
         return;
     }
-    let cell = &mut buf[(x, y)];
-    if matches!(cell.bg, Color::Reset) {
-        return;
-    }
     let t = crate::theme::theme();
     let bg_target: Color = t.modal_bg.into();
-    cell.bg = lerp_color(cell.bg, bg_target, ratio);
+    let cell = &mut buf[(x, y)];
+    let current_bg = if matches!(cell.bg, Color::Reset) {
+        t.code_bg.into()
+    } else {
+        cell.bg
+    };
+    cell.bg = lerp_color(current_bg, bg_target, ratio);
 }
 
 /// Top-to-bottom gradient: strongest at `rect.y`, fading to 0 over `rows` rows.
