@@ -622,6 +622,7 @@ async fn run_frames(
                                     && me.row == r.y + 1
                                 {
                                     app.task_panel_collapsed = !app.task_panel_collapsed;
+                                    app.save_ui_state();
                                 } else if let Some(r) = app.last_task_panel_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -3058,7 +3059,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(
         l.transcript,
-        !intro_active,
+        show_sidebar,
         app.task_panel_collapsed,
     ) {
         let hover = crate::task_panel::TaskPanelHover {

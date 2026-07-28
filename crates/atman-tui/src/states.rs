@@ -30,6 +30,8 @@ pub struct PersistedUiState {
     pub meta_collapsed: bool,
     #[serde(default)]
     pub panel_sizes: std::collections::HashMap<String, (u16, u16)>,
+    #[serde(default)]
+    pub task_panel_collapsed: bool,
 }
 
 impl Default for PersistedUiState {
@@ -46,6 +48,7 @@ impl Default for PersistedUiState {
             context_collapsed: false,
             meta_collapsed: false,
             panel_sizes: std::collections::HashMap::new(),
+            task_panel_collapsed: false,
         }
     }
 }
@@ -103,6 +106,7 @@ impl PersistedUiState {
             context_collapsed: app.context_collapsed,
             meta_collapsed: app.meta_collapsed,
             panel_sizes: app.panel_sizes.clone(),
+            task_panel_collapsed: app.task_panel_collapsed,
         }
     }
 
@@ -119,6 +123,7 @@ impl PersistedUiState {
         app.context_collapsed = self.context_collapsed;
         app.meta_collapsed = self.meta_collapsed;
         app.panel_sizes = self.panel_sizes.clone();
+        app.task_panel_collapsed = self.task_panel_collapsed;
     }
 }
 
