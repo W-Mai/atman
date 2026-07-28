@@ -3005,7 +3005,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if !intro_active && !startup_active {
         let ta = transcript_area;
-        crate::floating_panels::render_top_fade(f, ta, 3);
+        crate::floating_panels::render_top_fade(f, ta, 4);
 
         let inj_rect = if injection_rows > 0 {
             layout::compute_injection_rect(l.transcript, input_rect, approvals_rect, injection_rows)
