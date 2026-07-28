@@ -498,15 +498,37 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
 }
 
 pub fn lerp_color(a: Color, b: Color, t: f64) -> Color {
-    match (a, b) {
-        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
-            let r = (ar as f64 + (br as f64 - ar as f64) * t) as u8;
-            let g = (ag as f64 + (bg as f64 - ag as f64) * t) as u8;
-            let b = (ab as f64 + (bb as f64 - ab as f64) * t) as u8;
-            Color::Rgb(r, g, b)
+    let mode = crate::theme::current_mode();
+    fn to_rgb(c: Color, mode: crate::theme::ThemeMode) -> (u8, u8, u8) {
+        use crate::theme::ThemeMode;
+        match c {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Cyan => (40, 180, 180),
+            Color::DarkGray => (96, 96, 96),
+            Color::Gray => (128, 128, 128),
+            Color::Green => (70, 175, 70),
+            Color::Yellow => (190, 175, 55),
+            Color::Red => (190, 65, 65),
+            Color::Blue => (0, 0, 200),
+            Color::Magenta => (200, 0, 200),
+            Color::White => (240, 240, 240),
+            Color::Black => (16, 16, 16),
+            // Reset = terminal default; fg is light in dark mode, dark in light mode
+            Color::Reset => match mode {
+                ThemeMode::Dark => (220, 220, 220),
+                ThemeMode::Light => (40, 40, 40),
+            },
+            _ => (128, 128, 128),
         }
-        _ => b,
     }
+    let (ar, ag, ab) = to_rgb(a, mode);
+    let (br, bg, bb) = to_rgb(b, mode);
+    let t = t.clamp(0.0, 1.0);
+    Color::Rgb(
+        (ar as f64 + (br as f64 - ar as f64) * t).round() as u8,
+        (ag as f64 + (bg as f64 - ag as f64) * t).round() as u8,
+        (ab as f64 + (bb as f64 - ab as f64) * t).round() as u8,
+    )
 }
 
 fn darken_cell(buf: &mut ratatui::buffer::Buffer, area: Rect, x: u16, y: u16, ratio: f64) {
