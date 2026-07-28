@@ -661,7 +661,8 @@ fn render_history_content(
     let bar_color: Color = t.subtle_fg.into();
     let content_bg: Color = t.code_bg.into();
     let hover_bg: Color = t.code_bg.lerp(t.highlight_bg, 0.3);
-    let done: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| !s.is_running()).collect();
+    let mut done: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| !s.is_running()).collect();
+    done.sort_by_key(|b| std::cmp::Reverse(b.ended_at));
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, snap) in done.iter().enumerate() {
@@ -690,8 +691,9 @@ fn render_history_content(
         let kind_icon = task_kind_icon(snap.kind);
         let started = format_started_at(snap);
         let summary = task_summary_line(snap, items);
-        let prefix_len: u16 = 2 + 2 + 2 + started.chars().count() as u16 + 1;
-        let suffix_len: u16 = 1 + elapsed.chars().count() as u16 + 1;
+        let prefix_len: u16 = 2 + 2 + 2;
+        let suffix_len: u16 =
+            1 + started.chars().count() as u16 + 1 + elapsed.chars().count() as u16 + 1;
         let content_max = area.width.saturating_sub(prefix_len + suffix_len) as usize;
         let label_text = if summary.is_empty() {
             snap.label.clone()
@@ -708,12 +710,9 @@ fn render_history_content(
                 Style::default().fg(st_color).bg(row_bg),
             ),
             Span::styled(format!("{icon} "), Style::default().fg(st_color).bg(row_bg)),
-            Span::styled(
-                format!("{started} "),
-                Style::default().fg(time_fg).bg(row_bg),
-            ),
             Span::styled(label, Style::default().fg(label_fg).bg(row_bg)),
             Span::styled(" ".repeat(pad as usize), Style::default().bg(row_bg)),
+            Span::styled(started, Style::default().fg(time_fg).bg(row_bg)),
             Span::styled(" ", Style::default().bg(row_bg)),
             Span::styled(elapsed, Style::default().fg(label_fg).bg(row_bg)),
             Span::styled(" ", Style::default().bg(row_bg)),
