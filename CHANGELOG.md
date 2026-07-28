@@ -4,6 +4,90 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [1.3.0] — 2026-07-30
+
+A major TUI overhaul: floating panels with drag/resize/scroll, a redesigned task panel with completed-task history, terminal emulator rendering fixes, shadow rendering with multiply blend, and full theme color migration.
+
+---
+
+### 🎯 Highlights
+
+- **Floating panel system** — draggable, resizable, scrollable overlay panels for terminal, bash output, workflow activity, and task history. Panel positions and sizes persist across sessions.
+- **Task history panel** — click any completed task in the History panel to reopen its detail view. Rows show kind icon, status, label, output summary, start time, and elapsed duration — all column-aligned.
+- **Terminal rendering** — wide character (CJK/emoji) trailing-space bug fixed. VT100 `wide_continuation` cells are now properly skipped in all three terminal renderers.
+- **Shadow rendering** — switched from linear interpolation to multiply blend so shadows never brighten the underlying surface. Added `theme.shadow` color token for consistent shadow intensity across light/dark modes.
+
+---
+
+### ✨ Features
+
+#### Floating Panels
+
+- **Drag & resize** — panels can be dragged anywhere on screen with no canvas clamp. Resize from the bottom-right `⇲` handle; minimum size enforced at 20×6. Resize dimensions display on hover.
+- **Maximize** — click `▢` to toggle fullscreen; terminal panels sync PTY dimensions on maximize/unmaximize.
+- **Scroll** — mouse wheel and `PgUp`/`PgDn` scroll floating panels when focused. History panel supports scroll with content-overflow clamping.
+- **Size persistence** — panel sizes stored in `PersistedUiState` as a `HashMap<String, (u16, u16)>`. History panel, terminal panels, and task panels all restore their last size on reopen.
+
+#### Task Panel
+
+- **Borderless redesign** — `modal_bg` background, no outer border, left status bar, group headers with collapse/expand, activity foreground gradient (oldest fades to `subtle_fg`).
+- **Task collapse/expand** — default collapsed 3-row card (padding + label+summary + padding). Click header to toggle; click content to open floating detail panel.
+- **Kill confirmation** — two-click arm mechanism with expiry. `✕` button on each running task row.
+- **Insert button** — `↵` button prefills the input with the task handle for quick `@handle` references.
+- **Completed-task history** — finished tasks move to a History panel accessible from a `⊞ History` button. Sortable by end time (newest first).
+- **Collapsed strip** — when the task panel is collapsed to a 5-column strip, a `⊞` icon at the bottom provides one-click history access. Hamburger position is consistent across collapse/expand states.
+- **Startup hiding** — task panel hides during startup/intro animation, matching sidebar behavior. Collapsed state persists across sessions.
+
+#### History Panel
+
+- **Rich rows** — each row shows: bar indicator, kind icon (`$` Bash / `▶` Terminal / `⬡` Flow / `✦` Agent / `↳` Subflow / `≡` Dispatch), status icon, label + output summary, start time (`HH:MM:SS`), elapsed duration.
+- **Click to open** — clicking a history row opens the corresponding task detail panel with persisted size.
+- **Scroll** — wheel scroll and `PgUp`/`PgDn` navigate history with overflow clamping.
+
+#### History Search
+
+- **Full-text search modal** — `Ctrl+K` opens a search overlay across current and project-wide session events. Results are structured hits with markdown rendering, highlighted query terms, and `j`/`k` keyboard navigation.
+- **Scrollable preview** — mouse wheel and page keys scroll the search result preview pane.
+- **Click to select** — click a search result to jump to the corresponding event in the preview.
+- **CJK search** — FTS5 falls back to `LIKE` for Chinese queries, since SQLite FTS5 tokenizers don't handle CJK without custom configuration.
+
+#### Terminal Emulator Rendering
+
+- **Wide character fix** — `TerminalCell.wide_continuation` field added (with `#[serde(default)]` for backward compatibility). All three terminal renderers (floating panel, fullscreen modal, transcript inline) now skip continuation cells, eliminating the phantom space after CJK characters.
+
+#### Shadow & Color
+
+- **Multiply blend** — `multiply_color(a, b)` replaces `lerp_color` for shadow rendering. `result = a * b / 255` — black stays black, shadows only darken. A `theme.shadow` color token controls intensity.
+- **Theme color migration** — all `Color::White`/`Black`/`Gray`/`Cyan`/etc. named constants replaced with `theme()` equivalents across `output.rs`, `form_modal.rs`, `markdown.rs`, `floating_panels.rs`, `lib.rs`, `status.rs`, `input.rs`, and viewer modals. `lerp_color` handles named colors via a theme-aware `to_rgb` lookup table.
+
+#### Markdown
+
+- **Inline code wrapping** — backticks stripped from inline code; long inline code wraps at content width.
+
+---
+
+### 🐛 Bug Fixes
+
+- **Shadow brightening** — `lerp_color` toward `modal_bg` could brighten black terminal backgrounds. Switched to multiply blend.
+- **`Color::Reset` in shadows** — terminal-default-colored cells were assigned `code_bg` before blending, producing visible artifacts. Reset cells are now skipped in shadow/fade.
+- **Panel move/resize clamp** — canvas boundary clamps removed; panels can be dragged and resized freely.
+- **Maximize crash** — `sanitize_widget_edges` rect clamped to buffer area to prevent out-of-bounds writes on maximize.
+- **Form modal Esc** — Esc now sends `Cancelled` answer to runtime instead of silently closing the modal.
+- **Task kill poisoning** — flow cancellation could kill unrelated bash tasks. Fixed by using `child_token` in the wait loop.
+- **Terminal scroll capture** — mouse wheel no longer captured by terminal panels; passes through to the document scroll.
+- **Terminal refresh scroll** — terminal/bash refresh no longer forces scroll to bottom; respects user scroll position.
+- **Idle CPU 100%** — orphan workflow panels on session restore caused busy loop. Fixed by closing orphan panels.
+
+---
+
+### ♻️ Refactors
+
+- **Theme color unification** — ~180 named `Color::` constant usages replaced with `theme()` tokens across the entire TUI crate. Only `theme.rs` (theme definitions) and `floating_panels.rs` `to_rgb` (lerp lookup table) retain named colors.
+- **`AppState::open_task_panel`** — extracted shared panel-size lookup + `open_with_size` logic into a single method, reused by task panel clicks and history row clicks.
+- **`FloatingPanelHitmap`** — `render()` returns aggregated hitmap for click/hover detection across all panels.
+
+---
+
 ## [1.2.0] — 2026-07-26
 
 ### Templates

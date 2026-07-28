@@ -2519,6 +2519,10 @@ fn handle_key(
             app.palette.open();
             *interrupt_prompt = None;
         }
+        KeyAction::SearchHistory => {
+            app.history_search.open();
+            *interrupt_prompt = None;
+        }
         KeyAction::Backspace => {
             editor.backspace();
             *interrupt_prompt = None;

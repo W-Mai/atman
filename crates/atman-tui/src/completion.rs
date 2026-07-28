@@ -264,7 +264,7 @@ pub fn render_hint_strip(
     let text = if narrow {
         " /  :  !  @  F1  F3  ^P"
     } else {
-        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar · F3 select · Ctrl+P palette"
+        " hint: / flow · : cmd · ! interject · @ path · F1 help · F2 sidebar · F3 select · Ctrl+P palette · Ctrl+K search"
     };
     let p = Paragraph::new(Line::from(Span::styled(
         text,
@@ -331,6 +331,7 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
         kv("F1", "this cheatsheet"),
         kv("F2 / :sidebar", "toggle sidebar"),
         kv("Ctrl+P", "command palette"),
+        kv("Ctrl+K", "search history"),
         Line::from(""),
         Line::from(section("Meta Commands")),
     ];
