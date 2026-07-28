@@ -889,7 +889,12 @@ fn render_history_content(
         let kind_icon = task_kind_icon(snap.kind);
         let started = format_started_at(snap);
         let summary = task_summary_line(snap, items);
-        let prefix_w: u16 = 2 + 2 + 2;
+        let bar_str = format!("{bar} ");
+        let kind_str = format!("{kind_icon} ");
+        let icon_str = format!("{icon} ");
+        let prefix_w: u16 = unicode_width::UnicodeWidthStr::width(bar_str.as_str()) as u16
+            + unicode_width::UnicodeWidthStr::width(kind_str.as_str()) as u16
+            + unicode_width::UnicodeWidthStr::width(icon_str.as_str()) as u16;
         let suffix_w: u16 = unicode_width::UnicodeWidthStr::width(started.as_str()) as u16
             + 1
             + unicode_width::UnicodeWidthStr::width(elapsed.as_str()) as u16
@@ -909,12 +914,9 @@ fn render_history_content(
             .saturating_sub(suffix_w)
             .max(1);
         lines.push(Line::from(vec![
-            Span::styled(format!("{bar} "), Style::default().fg(bar_color).bg(row_bg)),
-            Span::styled(
-                format!("{kind_icon} "),
-                Style::default().fg(st_color).bg(row_bg),
-            ),
-            Span::styled(format!("{icon} "), Style::default().fg(st_color).bg(row_bg)),
+            Span::styled(bar_str, Style::default().fg(bar_color).bg(row_bg)),
+            Span::styled(kind_str, Style::default().fg(st_color).bg(row_bg)),
+            Span::styled(icon_str, Style::default().fg(st_color).bg(row_bg)),
             Span::styled(label, Style::default().fg(label_fg).bg(row_bg)),
             Span::styled(" ".repeat(pad as usize), Style::default().bg(row_bg)),
             Span::styled(started, Style::default().fg(time_fg).bg(row_bg)),
@@ -1184,11 +1186,14 @@ fn status_color(status: atman_runtime::TaskStatus) -> Color {
 
 fn format_elapsed(ms: u64) -> String {
     let s = ms / 1000;
-    if s < 60 {
-        format!("{:>4}s", s)
+    let raw = if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}:{:02}", s / 60, s % 60)
     } else {
-        format!("{:>2}:{:02}", s / 60, s % 60)
-    }
+        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
+    };
+    format!("{:>5}", raw)
 }
 
 fn truncate(s: &str, max: usize) -> String {
