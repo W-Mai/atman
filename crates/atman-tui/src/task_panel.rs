@@ -65,13 +65,13 @@ pub fn compute_task_panel_rect(area: Rect, show: bool, collapsed: bool) -> Optio
     if !collapsed && area.width < TASK_PANEL_WIDTH + 40 {
         return None;
     }
-    let height = area.height.saturating_sub(4);
+    let height = area.height.saturating_sub(2);
     if height == 0 {
         return None;
     }
     Some(Rect {
         x: area.x + 1,
-        y: area.y + 2,
+        y: area.y + 1,
         width,
         height,
     })
@@ -159,6 +159,16 @@ pub fn render(
             Style::default().fg(t.subtle_fg.into()),
         ),
     ]);
+    // top padding row with panel bg
+    f.render_widget(
+        Block::default().style(Style::default().bg(panel_bg)),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
     f.render_widget(
         Block::default()
             .style(Style::default().bg(panel_bg))
@@ -169,14 +179,19 @@ pub fn render(
                 top: 1,
                 bottom: 0,
             }),
-        area,
+        Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        },
     );
 
     let inner = Rect {
         x: area.x + 2,
-        y: area.y + 2,
+        y: area.y + 3,
         width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(3),
+        height: area.height.saturating_sub(4),
     };
     let mut hitmap = TaskPanelHitMap::default();
     if inner.height == 0 || inner.width < 3 {
@@ -862,6 +877,17 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPa
     };
 
     let panel_bg: Color = t.modal_bg.into();
+    // top padding row
+    f.render_widget(
+        Block::default().style(Style::default().bg(panel_bg)),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
+    // hamburger on second row — matches expanded mode
     f.render_widget(
         Block::default().style(Style::default().bg(panel_bg)).title(
             Line::from(vec![Span::styled(
@@ -872,12 +898,17 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPa
             )])
             .alignment(Alignment::Center),
         ),
-        area,
+        Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        },
     );
 
-    // running dot — vertically centered in the remaining space
-    let btn_y = area.y + area.height.saturating_sub(1);
-    let dot_y = if area.height > 3 {
+    // history icon near bottom — keep 1-row gap from edge like expanded mode
+    let btn_y = area.y + area.height.saturating_sub(2);
+    let dot_y = if area.height > 5 {
         area.y + (area.height / 2)
     } else {
         area.y + 1

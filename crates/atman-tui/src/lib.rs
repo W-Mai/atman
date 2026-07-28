@@ -619,7 +619,7 @@ async fn run_frames(
                                 } else if let Some(r) = app.last_task_panel_rect
                                     && me.column >= r.x
                                     && me.column < r.x + 10
-                                    && me.row == r.y
+                                    && me.row == r.y + 1
                                 {
                                     app.task_panel_collapsed = !app.task_panel_collapsed;
                                 } else if let Some(r) = app.last_task_panel_rect
