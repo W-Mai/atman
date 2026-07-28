@@ -548,24 +548,11 @@ pub fn render_bottom_fade(f: &mut Frame, rect: Rect, rows: u16) {
     }
 }
 
-/// Input box shadow: vertical fade (top→bottom, strongest at edges) +
-/// horizontal fade (sides→center, strongest at edges).
+/// Input box shadow: horizontal fade (sides→center, strongest at edges).
 pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
     let buf = f.buffer_mut();
     let area = *buf.area();
-    let v_rows = 3u16.min(rect.height);
     let h_cols = 4u16.min(rect.width / 2);
-
-    // vertical: top and bottom edges
-    for ry in 0..v_rows {
-        let ratio = 0.35 * (1.0 - ry as f64 / v_rows as f64);
-        let yt = rect.y.saturating_sub(1 + ry);
-        let yb = rect.y + rect.height + ry;
-        for x in rect.x.saturating_sub(1)..rect.x + rect.width + 1 {
-            darken_cell(buf, area, x, yt, ratio);
-            darken_cell(buf, area, x, yb, ratio);
-        }
-    }
 
     // horizontal: left and right edges
     for rx in 0..h_cols {
