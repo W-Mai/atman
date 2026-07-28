@@ -719,20 +719,17 @@ async fn run_frames(
                                                     .iter()
                                                     .find(|s| s.source_handle == handle);
                                                 if let Some(snap) = snap {
-                                                    let (pw, ph) = if snap.kind
-                                                        == atman_runtime::TaskKind::Terminal
-                                                    {
-                                                        if let Some((sw, sh)) = app.terminal_panel_size {
-                                                            (sw, sh)
+                                                    let handle_key = &snap.source_handle;
+                                                    let (pw, ph) = if let Some((sw, sh)) = app.panel_sizes.get(handle_key) {
+                                                        (*sw, *sh)
+                                                    } else if snap.kind == atman_runtime::TaskKind::Terminal {
+                                                        let item = app.items.iter().rev().find(|it| {
+                                                            matches!(it, crate::app::OutputItem::Terminal { handle, .. } if *handle == snap.source_handle)
+                                                        });
+                                                        if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
+                                                            (screen.cols + 8, screen.rows + 5)
                                                         } else {
-                                                            let item = app.items.iter().rev().find(|it| {
-                                                                matches!(it, crate::app::OutputItem::Terminal { handle, .. } if *handle == snap.source_handle)
-                                                            });
-                                                            if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
-                                                                (screen.cols + 8, screen.rows + 5)
-                                                            } else {
-                                                                (48, 20)
-                                                            }
+                                                            (48, 20)
                                                         }
                                                     } else {
                                                         (48, 20)
@@ -855,10 +852,8 @@ async fn run_frames(
                                     let id = app.resize_target.clone();
                                     if let Some(id) = id {
                                         if let Some(p) = app.floating_panels.panels.iter().find(|p| p.id == id) {
-                                            if p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal) {
-                                                app.terminal_panel_size = Some((p.rect.width, p.rect.height));
-                                                app.save_ui_state();
-                                            }
+                                            app.panel_sizes.insert(id.clone(), (p.rect.width, p.rect.height));
+                                            app.save_ui_state();
                                         }
                                     }
                                 }
@@ -3110,6 +3105,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             &app.items,
             &app.activity_nodes,
             &app.hovered_panel_btn,
+            &app.hovered_history_row,
         );
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {

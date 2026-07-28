@@ -235,6 +235,7 @@ impl FloatingPanels {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     _canvas: Rect,
@@ -243,6 +244,7 @@ pub fn render(
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
     hovered_btn: &Option<(String, PanelBtn)>,
+    hovered_history_row: &Option<String>,
 ) {
     let mut sorted: Vec<&FloatingPanel> = panels.panels.iter().collect();
     sorted.sort_by_key(|p| p.z);
@@ -413,6 +415,7 @@ pub fn render(
             height: panel.rect.height.saturating_sub(3),
         };
 
+        let mut panel_hitmap = FloatingPanelHitmap::default();
         if content_area.height > 0 && content_area.width > 0 {
             let content_bg: Color = t.code_bg.into();
             f.render_widget(Clear, content_area);
@@ -420,7 +423,17 @@ pub fn render(
                 Block::default().style(Style::default().bg(content_bg)),
                 content_area,
             );
-            render_panel_content(f, content_area, panel, snapshots, items, activity_nodes);
+            render_panel_content(
+                f,
+                content_area,
+                panel,
+                snapshots,
+                items,
+                activity_nodes,
+                hovered_btn,
+                hovered_history_row,
+                &mut panel_hitmap,
+            );
         }
 
         // shadow after panel+content render
@@ -484,6 +497,7 @@ fn lerp_color(a: Color, b: Color, t: f64) -> Color {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_panel_content(
     f: &mut Frame,
     area: Rect,
@@ -491,17 +505,21 @@ fn render_panel_content(
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
+    hovered_btn: &Option<(String, PanelBtn)>,
+    hovered_history_row: &Option<String>,
+    hitmap_out: &mut FloatingPanelHitmap,
 ) {
+    let _hovered_btn = hovered_btn;
     if area.height == 0 || area.width == 0 {
         return;
     }
 
     let area = Rect::new(area.x + 1, area.y, area.width - 2, area.height - 1);
 
-    let mut hitmap = FloatingPanelHitmap::default();
-
     match panel.kind {
-        PanelKind::History => render_history_content(f, area, snapshots, &mut hitmap),
+        PanelKind::History => {
+            render_history_content(f, area, snapshots, hitmap_out, hovered_history_row)
+        }
         PanelKind::Activity => {
             let parts: Vec<&str> = panel.id.splitn(2, ':').collect();
             if parts.len() == 2 {
@@ -567,9 +585,11 @@ fn render_history_content(
     area: Rect,
     snapshots: &[TaskSnapshot],
     hitmap: &mut FloatingPanelHitmap,
+    hovered_row: &Option<String>,
 ) {
     let t = crate::theme::theme();
     let bar_color: Color = t.subtle_fg.into();
+    let hover_bg: Color = t.user_msg_bg.into();
     let done: Vec<&TaskSnapshot> = snapshots.iter().filter(|s| !s.is_running()).collect();
 
     let mut lines: Vec<Line> = Vec::new();
@@ -578,6 +598,7 @@ fn render_history_content(
         let elapsed = format_elapsed(snap.elapsed_ms());
         let st_color = status_color(snap.status);
         let row_y = area.y + i as u16;
+        let is_hovered = hovered_row.as_deref() == Some(&snap.source_handle);
         hitmap.history_row_rects.push((
             snap.source_handle.clone(),
             Rect {
@@ -587,15 +608,22 @@ fn render_history_content(
                 height: 1,
             },
         ));
+        let row_bg = if is_hovered { hover_bg } else { Color::Reset };
+        let bar = if is_hovered { "▌" } else { "▎" };
+        let label_fg = if is_hovered {
+            t.tinted_fg.into()
+        } else {
+            t.subtle_fg.into()
+        };
         lines.push(Line::from(vec![
-            Span::styled("▎ ", Style::default().fg(bar_color)),
-            Span::styled(format!("{icon} "), Style::default().fg(st_color)),
+            Span::styled(format!("{bar} "), Style::default().fg(bar_color).bg(row_bg)),
+            Span::styled(format!("{icon} "), Style::default().fg(st_color).bg(row_bg)),
             Span::styled(
                 truncate(&snap.label, area.width as usize - 16),
-                Style::default().fg(t.subtle_fg.into()),
+                Style::default().fg(label_fg).bg(row_bg),
             ),
             Span::raw(" "),
-            Span::styled(elapsed, Style::default().fg(t.subtle_fg.into())),
+            Span::styled(elapsed, Style::default().fg(label_fg).bg(row_bg)),
         ]));
     }
     if done.is_empty() {

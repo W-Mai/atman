@@ -29,7 +29,7 @@ pub struct PersistedUiState {
     #[serde(default)]
     pub meta_collapsed: bool,
     #[serde(default)]
-    pub terminal_panel_size: Option<(u16, u16)>,
+    pub panel_sizes: std::collections::HashMap<String, (u16, u16)>,
 }
 
 impl Default for PersistedUiState {
@@ -45,7 +45,7 @@ impl Default for PersistedUiState {
             todo_collapsed: false,
             context_collapsed: false,
             meta_collapsed: false,
-            terminal_panel_size: None,
+            panel_sizes: std::collections::HashMap::new(),
         }
     }
 }
@@ -102,7 +102,7 @@ impl PersistedUiState {
             todo_collapsed: app.todo_collapsed,
             context_collapsed: app.context_collapsed,
             meta_collapsed: app.meta_collapsed,
-            terminal_panel_size: app.terminal_panel_size,
+            panel_sizes: app.panel_sizes.clone(),
         }
     }
 
@@ -118,7 +118,7 @@ impl PersistedUiState {
         app.todo_collapsed = self.todo_collapsed;
         app.context_collapsed = self.context_collapsed;
         app.meta_collapsed = self.meta_collapsed;
-        app.terminal_panel_size = self.terminal_panel_size;
+        app.panel_sizes = self.panel_sizes.clone();
     }
 }
 
