@@ -554,6 +554,15 @@ async fn run_frames(
                                     app.floating_panels.focus(&id);
                                     app.drag_target = Some(id);
                                     app.drag_offset = (me.column, me.row);
+                                } else if let Some((handle, _)) = app
+                                    .last_floating_hitmap
+                                    .history_row_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
+                                    .cloned()
+                                {
+                                    let canvas = app.last_transcript_rect.unwrap_or_default();
+                                    app.open_task_panel(&handle, canvas);
                                 } else if app
                                     .floating_panels
                                     .hit_test_panel(me.column, me.row)
@@ -714,37 +723,7 @@ async fn run_frames(
                                             } else {
                                                 let canvas =
                                                     app.last_transcript_rect.unwrap_or_default();
-                                                let snap = app
-                                                    .task_snapshots
-                                                    .iter()
-                                                    .find(|s| s.source_handle == handle);
-                                                if let Some(snap) = snap {
-                                                    let handle_key = &snap.source_handle;
-                                                    let (pw, ph) = if let Some((sw, sh)) = app.panel_sizes.get(handle_key) {
-                                                        (*sw, *sh)
-                                                    } else if snap.kind == atman_runtime::TaskKind::Terminal {
-                                                        let item = app.items.iter().rev().find(|it| {
-                                                            matches!(it, crate::app::OutputItem::Terminal { handle, .. } if *handle == snap.source_handle)
-                                                        });
-                                                        if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
-                                                            (screen.cols + 8, screen.rows + 5)
-                                                        } else {
-                                                            (48, 20)
-                                                        }
-                                                    } else {
-                                                        (48, 20)
-                                                    };
-                                                    app.floating_panels.open_with_size(
-                                                        &snap.source_handle,
-                                                        crate::floating_panels::PanelKind::Task(
-                                                            snap.kind,
-                                                        ),
-                                                        &snap.label,
-                                                        canvas,
-                                                        pw,
-                                                        ph,
-                                                    );
-                                                }
+                                                app.open_task_panel(&handle, canvas);
                                             }
                                         }
                                     }
@@ -866,6 +845,18 @@ async fn run_frames(
                                     .hit_test_btn(me.column, me.row);
                                 if app.hovered_panel_btn != btn_hover {
                                     app.hovered_panel_btn = btn_hover;
+                                    app.items_version = app.items_version.wrapping_add(1);
+                                }
+
+                                // floating panel history row hover
+                                let history_hover = app
+                                    .last_floating_hitmap
+                                    .history_row_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
+                                    .map(|(h, _)| h.clone());
+                                if app.hovered_history_row != history_hover {
+                                    app.hovered_history_row = history_hover;
                                     app.items_version = app.items_version.wrapping_add(1);
                                 }
 
@@ -3097,7 +3088,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
     }
     if !app.floating_panels.panels.is_empty() {
-        crate::floating_panels::render(
+        app.last_floating_hitmap = crate::floating_panels::render(
             f,
             l.transcript,
             &app.floating_panels,
@@ -3107,6 +3098,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             &app.hovered_panel_btn,
             &app.hovered_history_row,
         );
+    } else {
+        app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(

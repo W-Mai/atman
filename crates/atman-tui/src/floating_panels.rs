@@ -245,7 +245,8 @@ pub fn render(
     activity_nodes: &[ActivityNode],
     hovered_btn: &Option<(String, PanelBtn)>,
     hovered_history_row: &Option<String>,
-) {
+) -> FloatingPanelHitmap {
+    let mut all_hitmap = FloatingPanelHitmap::default();
     let mut sorted: Vec<&FloatingPanel> = panels.panels.iter().collect();
     sorted.sort_by_key(|p| p.z);
 
@@ -434,11 +435,16 @@ pub fn render(
                 hovered_history_row,
                 &mut panel_hitmap,
             );
+            all_hitmap
+                .history_row_rects
+                .append(&mut panel_hitmap.history_row_rects);
         }
 
         // shadow after panel+content render
         render_shadow(f, panel.rect, &t);
     }
+
+    all_hitmap
 }
 
 fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {

@@ -246,6 +246,7 @@ pub struct AppState {
     pub hovered_panel_btn: Option<(String, crate::floating_panels::PanelBtn)>,
     pub panel_sizes: std::collections::HashMap<String, (u16, u16)>,
     pub hovered_history_row: Option<String>,
+    pub last_floating_hitmap: crate::floating_panels::FloatingPanelHitmap,
     pub last_task_panel_rect: Option<ratatui::layout::Rect>,
     pub last_task_panel_hitmap: crate::task_panel::TaskPanelHitMap,
     pub tick: u64,
@@ -288,6 +289,39 @@ impl AppState {
         if let Err(e) = state.save() {
             atman_runtime::notify!(warn, "failed to save ui state: {e}");
         }
+    }
+
+    pub fn open_task_panel(&mut self, handle: &str, canvas: ratatui::layout::Rect) {
+        let snap = match self
+            .task_snapshots
+            .iter()
+            .find(|s| s.source_handle == handle)
+        {
+            Some(s) => s,
+            None => return,
+        };
+        let (pw, ph) = if let Some((sw, sh)) = self.panel_sizes.get(handle) {
+            (*sw, *sh)
+        } else if snap.kind == atman_runtime::TaskKind::Terminal {
+            let item = self.items.iter().rev().find(|it| {
+                matches!(it, crate::app::OutputItem::Terminal { handle: h, .. } if *h == snap.source_handle)
+            });
+            if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
+                (screen.cols + 8, screen.rows + 5)
+            } else {
+                (48, 20)
+            }
+        } else {
+            (48, 20)
+        };
+        self.floating_panels.open_with_size(
+            &snap.source_handle,
+            crate::floating_panels::PanelKind::Task(snap.kind),
+            &snap.label,
+            canvas,
+            pw,
+            ph,
+        );
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
