@@ -471,7 +471,7 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
         }
     };
 
-    let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ratio: f64| {
+    let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
             return;
         }
@@ -481,56 +481,45 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
         } else {
             cell.bg
         };
-        cell.bg = lerp_color(current_bg, bg_target, ratio);
+        cell.bg = lerp_color(current_bg, bg_target, 0.6);
     };
 
     let max_x = area.x.saturating_add(area.width).saturating_sub(1);
     let max_y = area.y.saturating_add(area.height).saturating_sub(1);
 
     let top_y = rect.y.saturating_sub(1);
-    let top_y0 = rect.y.saturating_sub(2);
     let bot_y = (rect.y + rect.height).min(max_y);
-    let bot_y1 = (rect.y + rect.height + 1).min(max_y);
     let lx0 = rect.x.saturating_sub(2);
     let lx1 = rect.x.saturating_sub(1);
     let rx0 = (rect.x + rect.width).min(max_x);
     let rx1 = (rect.x + rect.width + 1).min(max_x);
 
-    // sanitize wide glyphs in shadow ring before darkening
+    // sanitize wide glyphs in shadow ring
     for x in lx0..=rx1 {
-        sanitize(buf, x, top_y0);
         sanitize(buf, x, top_y);
         sanitize(buf, x, bot_y);
-        sanitize(buf, x, bot_y1);
     }
-    for y in top_y0..=bot_y1 {
+    for y in top_y..=bot_y {
         sanitize(buf, lx0, y);
         sanitize(buf, lx1, y);
         sanitize(buf, rx0, y);
         sanitize(buf, rx1, y);
     }
 
-    // inner ring — strongest
-    for x in lx1..=rx0 {
-        darken(buf, x, top_y, 0.7);
+    // spiral shadow: top row, bottom row, right 2 cols, left 2 cols (offset to avoid corner overlap)
+    for x in lx0..=rx1 {
+        darken(buf, x, top_y);
     }
-    for x in lx1..=rx0 {
-        darken(buf, x, bot_y, 0.7);
+    for x in lx0..=rx1 {
+        darken(buf, x, bot_y);
     }
     for y in top_y..=bot_y {
-        darken(buf, rx0, y, 0.7);
-        darken(buf, lx1, y, 0.7);
+        darken(buf, rx0, y);
+        darken(buf, rx1, y);
     }
-    // outer ring — lighter
-    for x in lx0..=rx1 {
-        darken(buf, x, top_y0, 0.4);
-    }
-    for x in lx0..=rx1 {
-        darken(buf, x, bot_y1, 0.4);
-    }
-    for y in top_y0..=bot_y1 {
-        darken(buf, rx1, y, 0.4);
-        darken(buf, lx0, y, 0.4);
+    for y in top_y.saturating_add(1)..=bot_y {
+        darken(buf, lx0, y);
+        darken(buf, lx1, y);
     }
 }
 

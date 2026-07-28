@@ -143,7 +143,7 @@ impl Theme {
             border: ThemeColor(Color::DarkGray),
             heading: ThemeColor(Color::Cyan),
             meta_fg: ThemeColor(Color::DarkGray),
-            shadow: ThemeColor(Color::Rgb(0, 0, 0)),
+            shadow: ThemeColor(Color::Rgb(6, 8, 12)),
         }
     }
 
