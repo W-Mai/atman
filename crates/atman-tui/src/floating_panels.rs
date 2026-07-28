@@ -643,23 +643,24 @@ pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
 
     // iterate over the L-shaped shadow region (left + right + bottom)
     // and compute ratio from elliptical distance to the input box edge
-    let shadow_y0 = rect.y;
-    let shadow_y1 = rect.y + rect.height + v_rows;
+    let offset_y = 1u16;
+    let shadow_y0 = rect.y + offset_y;
+    let shadow_y1 = rect.y + rect.height + v_rows + offset_y;
     let shadow_x0 = rect.x.saturating_sub(h_cols);
     let shadow_x1 = rect.x + rect.width + h_cols;
 
     for y in shadow_y0..shadow_y1 {
         for x in shadow_x0..shadow_x1 {
-            // skip the input box interior
-            if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
-                continue;
-            }
-            // skip top area (no top shadow)
-            if y < rect.y {
+            // skip the input box interior (shifted down by offset_y)
+            if x >= rect.x
+                && x < rect.x + rect.width
+                && y >= rect.y + offset_y
+                && y < rect.y + rect.height + offset_y
+            {
                 continue;
             }
 
-            // distance to nearest input box edge
+            // distance to nearest input box edge (shifted down by offset_y)
             let dx = if x < rect.x {
                 rect.x.saturating_sub(x)
             } else if x >= rect.x + rect.width {
@@ -667,8 +668,10 @@ pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
             } else {
                 0
             };
-            let dy = if y >= rect.y + rect.height {
-                y.saturating_sub(rect.y + rect.height)
+            let dy = if y >= rect.y + rect.height + offset_y {
+                y.saturating_sub(rect.y + rect.height + offset_y)
+            } else if y < rect.y + offset_y {
+                (rect.y + offset_y).saturating_sub(y)
             } else {
                 0
             };
