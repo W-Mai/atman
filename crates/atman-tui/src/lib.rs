@@ -3004,42 +3004,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         f.render_widget(paragraph, transcript_area);
     }
     if !intro_active && !startup_active {
-        let ta = transcript_area;
-        crate::floating_panels::render_top_fade(f, ta, 4);
-
-        let inj_rect = if injection_rows > 0 {
-            layout::compute_injection_rect(l.transcript, input_rect, approvals_rect, injection_rows)
-        } else {
-            None
-        };
-        let float_top = [inj_rect, approvals_rect, Some(input_rect)]
-            .iter()
-            .filter_map(|r| r.map(|r| r.y))
-            .min()
-            .unwrap_or(ta.y + ta.height);
-        if float_top < ta.y + ta.height {
-            let float_bottom = ta.y + ta.height;
-            let fade_h = float_bottom.saturating_sub(float_top);
-            let lg = ratatui::layout::Rect {
-                x: ta.x,
-                y: float_top,
-                width: input_rect.x.saturating_sub(ta.x),
-                height: fade_h,
-            };
-            if lg.width > 0 && lg.height > 0 {
-                crate::floating_panels::render_bottom_fade(f, lg, fade_h);
-            }
-            let right_edge = input_rect.x + input_rect.width;
-            let rg = ratatui::layout::Rect {
-                x: right_edge,
-                y: float_top,
-                width: ta.x + ta.width - right_edge,
-                height: fade_h,
-            };
-            if rg.width > 0 && rg.height > 0 {
-                crate::floating_panels::render_bottom_fade(f, rg, fade_h);
-            }
-        }
         crate::floating_panels::render_input_shadow(f, input_rect);
     }
     if let Some(area) = sidebar_rect {
