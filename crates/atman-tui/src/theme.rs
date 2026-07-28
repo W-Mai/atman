@@ -117,6 +117,7 @@ pub struct Theme {
     pub border: ThemeColor,
     pub heading: ThemeColor,
     pub meta_fg: ThemeColor,
+    pub shadow: ThemeColor,
 }
 
 impl Theme {
@@ -142,6 +143,7 @@ impl Theme {
             border: ThemeColor(Color::DarkGray),
             heading: ThemeColor(Color::Cyan),
             meta_fg: ThemeColor(Color::DarkGray),
+            shadow: ThemeColor(Color::Rgb(0, 0, 0)),
         }
     }
 
@@ -167,6 +169,7 @@ impl Theme {
             border: ThemeColor(Color::Rgb(180, 180, 180)),
             heading: ThemeColor(Color::Rgb(0, 100, 140)),
             meta_fg: ThemeColor(Color::Rgb(140, 140, 140)),
+            shadow: ThemeColor(Color::Rgb(180, 180, 180)),
         }
     }
 }

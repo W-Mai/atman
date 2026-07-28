@@ -458,7 +458,7 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
     use unicode_width::UnicodeWidthStr;
     let buf = f.buffer_mut();
     let area = *buf.area();
-    let bg_target: Color = t.modal_bg.into();
+    let bg_target: Color = t.shadow.into();
 
     let sanitize = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
@@ -573,7 +573,7 @@ fn darken_cell(buf: &mut ratatui::buffer::Buffer, area: Rect, x: u16, y: u16, ra
         return;
     }
     let t = crate::theme::theme();
-    let bg_target: Color = t.modal_bg.into();
+    let bg_target: Color = t.shadow.into();
     let cell = &mut buf[(x, y)];
     let current_bg = if matches!(cell.bg, Color::Reset) {
         t.code_bg.into()
