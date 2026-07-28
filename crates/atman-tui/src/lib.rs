@@ -2818,7 +2818,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let area = f.area();
     if area.width < 40 || area.height < 8 {
         let msg = Paragraph::new(Line::from("terminal too small (need 40×8)"))
-            .style(Style::default().fg(Color::Yellow))
+            .style(Style::default().fg(crate::theme::theme().warn.into()))
             .alignment(Alignment::Center);
         f.render_widget(msg, area);
         return;
@@ -3327,16 +3327,17 @@ fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect,
     use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
 
     let modes = atman_runtime::trust::TrustMode::all();
+    let t = crate::theme::theme();
     let items: Vec<ListItem> = modes
         .iter()
         .map(|&m| {
             let d = app.trust.theme.display(m);
             let color = match d.color {
-                atman_runtime::trust::ModeColor::Cyan => ratatui::style::Color::Cyan,
-                atman_runtime::trust::ModeColor::Green => ratatui::style::Color::Green,
-                atman_runtime::trust::ModeColor::Yellow => ratatui::style::Color::Yellow,
+                atman_runtime::trust::ModeColor::Cyan => t.accent.into(),
+                atman_runtime::trust::ModeColor::Green => t.success.into(),
+                atman_runtime::trust::ModeColor::Yellow => t.warn.into(),
                 atman_runtime::trust::ModeColor::Orange => ratatui::style::Color::Rgb(208, 135, 22),
-                atman_runtime::trust::ModeColor::Red => ratatui::style::Color::Red,
+                atman_runtime::trust::ModeColor::Red => t.error.into(),
             };
             let marker = if m == app.trust.mode {
                 "← current"
@@ -3374,7 +3375,7 @@ fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect,
     f.render_stateful_widget(
         List::new(items).block(block).highlight_style(
             Style::default()
-                .bg(ratatui::style::Color::DarkGray)
+                .bg(t.highlight_bg.into())
                 .add_modifier(Modifier::BOLD),
         ),
         popup,
@@ -3452,36 +3453,11 @@ pub(crate) fn render_toast_notes(
 
         for (i, toast) in group.iter().enumerate() {
             let (glyph, color, bg, label) = match toast.level {
-                NoteLevel::Error => (
-                    "✗",
-                    ratatui::style::Color::Red,
-                    theme.note_error_bg,
-                    " ERROR ",
-                ),
-                NoteLevel::Warn => (
-                    "!",
-                    ratatui::style::Color::Yellow,
-                    theme.note_warn_bg,
-                    " WARN ",
-                ),
-                NoteLevel::Info => (
-                    "·",
-                    ratatui::style::Color::Cyan,
-                    theme.note_info_bg,
-                    " INFO ",
-                ),
-                NoteLevel::Success => (
-                    "✓",
-                    ratatui::style::Color::Green,
-                    theme.note_success_bg,
-                    " OK ",
-                ),
-                NoteLevel::Debug => (
-                    "›",
-                    ratatui::style::Color::Gray,
-                    theme.note_debug_bg,
-                    " DEBUG ",
-                ),
+                NoteLevel::Error => ("✗", theme.error.into(), theme.note_error_bg, " ERROR "),
+                NoteLevel::Warn => ("!", theme.warn.into(), theme.note_warn_bg, " WARN "),
+                NoteLevel::Info => ("·", theme.accent.into(), theme.note_info_bg, " INFO "),
+                NoteLevel::Success => ("✓", theme.success.into(), theme.note_success_bg, " OK "),
+                NoteLevel::Debug => ("›", theme.tinted_fg.into(), theme.note_debug_bg, " DEBUG "),
             };
 
             // Accumulate offset from all fading toasts before this one
@@ -3586,11 +3562,11 @@ fn render_notify_modal(f: &mut ratatui::Frame, area: ratatui::layout::Rect, mess
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Thick)
-        .border_style(Style::default().fg(ratatui::style::Color::Red))
+        .border_style(Style::default().fg(theme.error.into()))
         .title(Span::styled(
             " ⚠ ERROR ",
             Style::default()
-                .fg(ratatui::style::Color::Red)
+                .fg(theme.error.into())
                 .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(theme.note_error_bg.into()));
@@ -3631,6 +3607,7 @@ fn render_theme_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app:
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
 
+    let t = crate::theme::theme();
     let themes = [
         ("default", "calm / steady / eager / reckless"),
         ("wuxia", "守拙 / 行云 / 破竹 / 逍遥"),
@@ -3672,7 +3649,7 @@ fn render_theme_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app:
     f.render_stateful_widget(
         List::new(items).block(block).highlight_style(
             Style::default()
-                .bg(ratatui::style::Color::DarkGray)
+                .bg(t.highlight_bg.into())
                 .add_modifier(Modifier::BOLD),
         ),
         popup,
