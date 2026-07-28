@@ -144,12 +144,10 @@ impl FloatingPanels {
         }
     }
 
-    pub fn move_panel(&mut self, id: &str, x: u16, y: u16, canvas: Rect) {
+    pub fn move_panel(&mut self, id: &str, x: u16, y: u16, _canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
-            let x = x.min(canvas.x + canvas.width.saturating_sub(20));
-            let y = y.min(canvas.y + canvas.height.saturating_sub(3));
-            p.rect.x = x.max(canvas.x);
-            p.rect.y = y.max(canvas.y);
+            p.rect.x = x;
+            p.rect.y = y;
         }
     }
 
@@ -1294,13 +1292,13 @@ mod tests {
     }
 
     #[test]
-    fn move_panel_clamps_to_canvas() {
+    fn move_panel_no_clamp() {
         let mut fp = FloatingPanels::default();
         fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
         fp.move_panel("a", 200, 200, canvas());
         let p = &fp.panels[0];
-        assert!(p.rect.x < 100);
-        assert!(p.rect.y < 40);
+        assert_eq!(p.rect.x, 200);
+        assert_eq!(p.rect.y, 200);
     }
 
     #[test]
