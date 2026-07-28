@@ -170,11 +170,11 @@ impl FloatingPanels {
                 col >= sx0 && col <= sx1 && row >= sy0 && row <= sy1
             })
             .filter(|p| {
-                // exclude content area
+                // exclude content area: starts at y+2 (same as content_area.y)
                 let cx0 = p.rect.x + 2;
                 let cx1 = p.rect.x + p.rect.width.saturating_sub(2);
-                let cy0 = p.rect.y + 3;
-                let cy1 = p.rect.y + p.rect.height.saturating_sub(2);
+                let cy0 = p.rect.y + 2;
+                let cy1 = p.rect.y + p.rect.height.saturating_sub(1);
                 !(col >= cx0 && col < cx1 && row >= cy0 && row < cy1)
             })
             .max_by_key(|p| p.z)
@@ -621,14 +621,17 @@ fn render_history_content(
         } else {
             t.subtle_fg.into()
         };
+        let prefix_len: u16 = 2 + 2; // "{bar} " + "{icon} "
+        let suffix_len: u16 = 1 + elapsed.chars().count() as u16; // " " + elapsed
+        let label_max = area.width.saturating_sub(prefix_len + suffix_len) as usize;
+        let label = truncate(&snap.label, label_max);
+        let label_actual = label.chars().count() as u16;
+        let pad = area.width - prefix_len - label_actual - suffix_len;
         lines.push(Line::from(vec![
             Span::styled(format!("{bar} "), Style::default().fg(bar_color).bg(row_bg)),
             Span::styled(format!("{icon} "), Style::default().fg(st_color).bg(row_bg)),
-            Span::styled(
-                truncate(&snap.label, area.width as usize - 16),
-                Style::default().fg(label_fg).bg(row_bg),
-            ),
-            Span::raw(" "),
+            Span::styled(label, Style::default().fg(label_fg).bg(row_bg)),
+            Span::styled(" ".repeat(pad as usize), Style::default().bg(row_bg)),
             Span::styled(elapsed, Style::default().fg(label_fg).bg(row_bg)),
         ]));
     }
@@ -1024,6 +1027,28 @@ mod tests {
         // content area: x+2..x+w-2, y+3..y+h-2
         let hit = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y + 4);
         assert!(hit.is_none(), "should not hit content area");
+    }
+
+    #[test]
+    fn hit_test_titlebar_first_content_row_is_draggable() {
+        // Content area starts at y+2 (panel.rect.y + 2). The titlebar
+        // exclusion must cover y+2 so that clicks on the first content row
+        // (e.g. first history row) are not captured as drag.
+        let mut fp = FloatingPanels::default();
+        fp.open("a", PanelKind::History, "History", canvas());
+        let p = fp.panels[0].clone();
+        // first content row is at y+2, x+3 (inside content x range)
+        let hit = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y + 2);
+        assert!(
+            hit.is_none(),
+            "first content row y+2 must be excluded from titlebar"
+        );
+        // second content row at y+3 is excluded
+        let hit2 = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y + 3);
+        assert!(hit2.is_none(), "second content row y+3 is excluded");
+        // title bar at y+0 is draggable
+        let hit3 = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y);
+        assert!(hit3.is_some(), "title bar y+0 is draggable");
     }
 
     #[test]
