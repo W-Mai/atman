@@ -639,41 +639,51 @@ pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
     let area = *buf.area();
     let h_cols = 4u16.min(rect.width / 2);
     let v_rows = 2u16;
+    let max_ratio = 0.6;
 
-    // sides
-    for rx in 0..h_cols {
-        let ratio = 0.6 * (1.0 - rx as f64 / h_cols as f64);
-        let xl = rect.x.saturating_sub(1 + rx);
-        let xr = rect.x + rect.width + rx;
-        for y in rect.y..rect.y + rect.height {
-            darken_cell(buf, area, xl, y, ratio);
-            darken_cell(buf, area, xr, y, ratio);
-        }
-    }
-    // bottom
-    for ry in 0..v_rows {
-        let ratio = 0.6 * (1.0 - ry as f64 / v_rows as f64);
-        let y = rect.y + rect.height + ry;
-        for x in rect.x..rect.x + rect.width {
-            darken_cell(buf, area, x, y, ratio);
-        }
-    }
-    // rounded corners: fade out at the 4 corners of the shadow ring
-    // using elliptical distance — corner cells get progressively lighter
-    let corners = [
-        (rect.x.saturating_sub(1), rect.y + rect.height),
-        (rect.x + rect.width, rect.y + rect.height),
-        (rect.x.saturating_sub(2), rect.y + rect.height + 1),
-        (rect.x + rect.width + 1, rect.y + rect.height + 1),
-    ];
-    for (cx, cy) in corners {
-        let dx = cx.abs_diff(if cx < rect.x { rect.x } else { rect.x + rect.width - 1 }) as f64;
-        let dy = cy.abs_diff(rect.y + rect.height - 1) as f64;
-        let dist = (dx * dx + dy * dy).sqrt();
-        let max_dist = ((h_cols as f64).powi(2) + (v_rows as f64).powi(2)).sqrt();
-        let ratio = 0.6 * (1.0 - (dist / max_dist).min(1.0));
-        if ratio > 0.0 {
-            darken_cell(buf, area, cx, cy, ratio);
+    // iterate over the L-shaped shadow region (left + right + bottom)
+    // and compute ratio from elliptical distance to the input box edge
+    let shadow_y0 = rect.y;
+    let shadow_y1 = rect.y + rect.height + v_rows;
+    let shadow_x0 = rect.x.saturating_sub(h_cols);
+    let shadow_x1 = rect.x + rect.width + h_cols;
+
+    for y in shadow_y0..shadow_y1 {
+        for x in shadow_x0..shadow_x1 {
+            // skip the input box interior
+            if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
+                continue;
+            }
+            // skip top area (no top shadow)
+            if y < rect.y {
+                continue;
+            }
+
+            // distance to nearest input box edge
+            let dx = if x < rect.x {
+                rect.x.saturating_sub(x)
+            } else if x >= rect.x + rect.width {
+                x.saturating_sub(rect.x + rect.width)
+            } else {
+                0
+            };
+            let dy = if y >= rect.y + rect.height {
+                y.saturating_sub(rect.y + rect.height)
+            } else {
+                0
+            };
+
+            // normalize: horizontal distance relative to h_cols,
+            // vertical distance relative to v_rows
+            let nx = dx as f64 / h_cols as f64;
+            let ny = dy as f64 / v_rows as f64;
+
+            // elliptical falloff: 1.0 at edge, 0.0 at max distance
+            let dist = (nx * nx + ny * ny).sqrt();
+            let ratio = max_ratio * (1.0 - dist.min(1.0));
+            if ratio > 0.0 {
+                darken_cell(buf, area, x, y, ratio);
+            }
         }
     }
 }
