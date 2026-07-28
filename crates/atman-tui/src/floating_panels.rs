@@ -832,7 +832,7 @@ fn format_started_at(snap: &TaskSnapshot) -> String {
             return dt.format("%H:%M:%S").to_string();
         }
     }
-    String::new()
+    "--:--:--".to_string()
 }
 
 fn render_history_content(
@@ -1170,9 +1170,9 @@ fn status_color(status: atman_runtime::TaskStatus) -> Color {
 fn format_elapsed(ms: u64) -> String {
     let s = ms / 1000;
     if s < 60 {
-        format!("{s}s")
+        format!("{:>4}s", s)
     } else {
-        format!("{}:{:02}", s / 60, s % 60)
+        format!("{:>2}:{:02}", s / 60, s % 60)
     }
 }
 
