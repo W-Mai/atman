@@ -288,12 +288,11 @@ impl FloatingPanels {
 }
 
 fn maximized_rect(canvas: Rect) -> Rect {
-    Rect {
-        x: canvas.x + 1,
-        y: canvas.y + 1,
-        width: canvas.width.saturating_sub(2),
-        height: canvas.height.saturating_sub(2),
-    }
+    let w = canvas.width.saturating_sub(8);
+    let h = canvas.height.saturating_sub(4);
+    let x = canvas.x + 4;
+    let y = canvas.y + 2;
+    Rect { x, y, width: w, height: h }
 }
 
 fn default_rect(canvas: Rect) -> Rect {
