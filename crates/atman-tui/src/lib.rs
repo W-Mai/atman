@@ -597,10 +597,23 @@ async fn run_frames(
                                 {
                                     let id = fp.id.clone();
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
-                                    app.floating_panels.unmaximize(&id, canvas);
-                                    app.floating_panels.focus(&id);
-                                    app.drag_target = Some(id);
-                                    app.drag_offset = (me.column, me.row);
+                                    let now = std::time::Instant::now();
+                                    let is_double = app
+                                        .last_titlebar_click
+                                        .as_ref()
+                                        .is_some_and(|(prev_id, ts)| {
+                                            prev_id == &id && now.duration_since(*ts).as_millis() < 400
+                                        });
+                                    if is_double {
+                                        app.floating_panels.toggle_maximize(&id, canvas);
+                                        app.last_titlebar_click = None;
+                                    } else {
+                                        app.floating_panels.unmaximize(&id, canvas);
+                                        app.floating_panels.focus(&id);
+                                        app.drag_target = Some(id.clone());
+                                        app.drag_offset = (me.column, me.row);
+                                        app.last_titlebar_click = Some((id, now));
+                                    }
                                 } else if let Some((handle, _)) = app
                                     .last_floating_hitmap
                                     .history_row_rects
@@ -2671,6 +2684,12 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Escape => {
+            if let Some(id) = app.floating_panels.focused.clone() {
+                if app.floating_panels.panels.iter().any(|p| p.id == id) {
+                    app.floating_panels.close(&id);
+                    return;
+                }
+            }
             if app.streaming || app.has_running_workflow() {
                 if let Some(tx) = control_tx {
                     let _ = tx.send(TuiControl::CancelFlow);

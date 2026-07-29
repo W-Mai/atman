@@ -243,6 +243,7 @@ pub struct AppState {
     pub floating_panels: crate::floating_panels::FloatingPanels,
     pub drag_target: Option<String>,
     pub drag_offset: (u16, u16),
+    pub last_titlebar_click: Option<(String, std::time::Instant)>,
     pub resize_target: Option<String>,
     pub resize_offset: (u16, u16),
     pub hovered_panel_btn: Option<(String, crate::floating_panels::PanelBtn)>,
