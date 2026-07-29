@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
@@ -33,8 +33,9 @@ pub enum PanelKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelBtn {
-    Close,
+    Minimize,
     Maximize,
+    Close,
     Resize,
 }
 
@@ -217,7 +218,7 @@ impl FloatingPanels {
             .max_by_key(|p| p.z)
     }
 
-    pub fn hit_test_close(&self, col: u16, row: u16) -> Option<String> {
+    pub fn hit_test_minimize(&self, col: u16, row: u16) -> Option<String> {
         self.panels
             .iter()
             .find(|p| col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 2)
@@ -228,6 +229,15 @@ impl FloatingPanels {
         self.panels
             .iter()
             .find(|p| col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 3)
+            .map(|p| p.id.clone())
+    }
+
+    pub fn hit_test_close(&self, col: u16, row: u16) -> Option<String> {
+        self.panels
+            .iter()
+            .find(|p| {
+                p.rect.height >= 8 && col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 5
+            })
             .map(|p| p.id.clone())
     }
 
@@ -247,11 +257,14 @@ impl FloatingPanels {
     }
 
     pub fn hit_test_btn(&self, col: u16, row: u16) -> Option<(String, PanelBtn)> {
-        if let Some(id) = self.hit_test_close(col, row) {
-            return Some((id, PanelBtn::Close));
+        if let Some(id) = self.hit_test_minimize(col, row) {
+            return Some((id, PanelBtn::Minimize));
         }
         if let Some(id) = self.hit_test_maximize(col, row) {
             return Some((id, PanelBtn::Maximize));
+        }
+        if let Some(id) = self.hit_test_close(col, row) {
+            return Some((id, PanelBtn::Close));
         }
         if let Some(id) = self.hit_test_resize(col, row) {
             return Some((id, PanelBtn::Resize));
@@ -283,6 +296,7 @@ pub fn render(
     hovered_btn: &Option<(String, PanelBtn)>,
     hovered_history_row: &Option<String>,
     animation_frame: u32,
+    panel_close_armed: Option<(&str, bool)>,
 ) -> FloatingPanelHitmap {
     let mut all_hitmap = FloatingPanelHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
@@ -338,48 +352,48 @@ pub fn render(
             },
         );
 
-        // buttons
-        // ✕ at (x, y+2), ▢ at (x, y+3), ⇲ at (x+w-3, y+h-1)
+        // buttons: minimize(y+2), maximize(y+3), close(y+5, only if killable)
         if panel.rect.height >= 6 {
             let hover_bg = t.user_msg_bg.into();
 
-            // ✕ close
+            // — minimize (yellow)
             let btn_area = Rect {
                 x: panel.rect.x,
                 y: panel.rect.y + 2,
                 width: 3,
                 height: 1,
             };
-            let (close_fg, close_bg) = if btn_hover == Some(PanelBtn::Close) {
-                (t.error.into(), hover_bg)
+            let (min_fg, min_bg) = if btn_hover == Some(PanelBtn::Minimize) {
+                (Color::Rgb(180, 130, 0), hover_bg)
             } else {
-                (t.error.into(), panel_bg)
+                (Color::Rgb(200, 150, 20), panel_bg)
             };
             f.render_widget(Clear, btn_area);
             f.render_widget(
-                Block::default().style(Style::default().bg(close_bg)),
+                Block::default().style(Style::default().bg(min_bg)),
                 btn_area,
             );
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
-                    "✕",
-                    Style::default().fg(close_fg).bg(close_bg),
+                    "—",
+                    Style::default().fg(min_fg).bg(min_bg),
                 )]))
                 .alignment(ratatui::layout::Alignment::Center),
                 btn_area,
             );
 
-            // ▢ maximize
+            // ▢ maximize (green, highlighted when maximized)
             let btn_area = Rect {
                 x: panel.rect.x,
                 y: panel.rect.y + 3,
                 width: 3,
                 height: 1,
             };
-            let (max_fg, max_bg) = if btn_hover == Some(PanelBtn::Maximize) {
-                (t.tinted_fg.into(), hover_bg)
+            let is_max = panel.maximized;
+            let (max_fg, max_bg) = if btn_hover == Some(PanelBtn::Maximize) || is_max {
+                (Color::Rgb(40, 200, 80), hover_bg)
             } else {
-                (t.subtle_fg.into(), panel_bg)
+                (Color::Rgb(80, 180, 100), panel_bg)
             };
             f.render_widget(Clear, btn_area);
             f.render_widget(
@@ -394,6 +408,57 @@ pub fn render(
                 .alignment(ratatui::layout::Alignment::Center),
                 btn_area,
             );
+
+            // ✕ close (red, two-click kill, only for killable running task panels)
+            if panel.rect.height >= 8 {
+                let killable = match &panel.kind {
+                    PanelKind::Task(kind) => {
+                        matches!(kind, TaskKind::Terminal | TaskKind::Bash)
+                            && snapshots
+                                .iter()
+                                .any(|s| s.source_handle == panel.id && s.is_running())
+                    }
+                    _ => false,
+                };
+                if killable {
+                    let btn_area = Rect {
+                        x: panel.rect.x,
+                        y: panel.rect.y + 5,
+                        width: 3,
+                        height: 1,
+                    };
+                    let armed = panel_close_armed
+                        .as_ref()
+                        .is_some_and(|(id, expired)| id == &panel.id && !expired);
+                    let (close_fg, close_bg) = if btn_hover == Some(PanelBtn::Close) || armed {
+                        (t.error.into(), hover_bg)
+                    } else {
+                        (Color::Rgb(220, 90, 90), panel_bg)
+                    };
+                    f.render_widget(Clear, btn_area);
+                    f.render_widget(
+                        Block::default().style(Style::default().bg(close_bg)),
+                        btn_area,
+                    );
+                    let glyph = if armed { "✕" } else { "✕" };
+                    let mod_add = if armed {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    };
+                    f.render_widget(
+                        Paragraph::new(Line::from(vec![Span::styled(
+                            glyph,
+                            Style::default()
+                                .fg(close_fg)
+                                .bg(close_bg)
+                                .add_modifier(mod_add),
+                        )]))
+                        .alignment(ratatui::layout::Alignment::Center),
+                        btn_area,
+                    );
+                }
+            }
 
             // ⇲ resize handle
             let btn_area = Rect {
@@ -474,6 +539,7 @@ pub fn render(
                 hovered_history_row,
                 &mut panel_hitmap,
                 animation_frame,
+                panel_close_armed,
             );
             all_hitmap
                 .history_row_rects
@@ -743,6 +809,7 @@ fn render_panel_content(
     hovered_history_row: &Option<String>,
     hitmap_out: &mut FloatingPanelHitmap,
     animation_frame: u32,
+    panel_close_armed: Option<(&str, bool)>,
 ) {
     let _hovered_btn = hovered_btn;
     if area.height == 0 || area.width == 0 {
@@ -1579,14 +1646,11 @@ mod tests {
         let mut fp = FloatingPanels::default();
         fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
         let p = fp.panels[0].clone();
-        // ✕ at (x..x+3, y+2) — 3-wide area
-        let hit = fp.hit_test_close(p.rect.x + 1, p.rect.y + 2);
+        let hit = fp.hit_test_close(p.rect.x + 1, p.rect.y + 5);
         assert!(hit.is_some());
-        // also hits at x+0 (padding)
-        let hit_pad = fp.hit_test_close(p.rect.x, p.rect.y + 2);
+        let hit_pad = fp.hit_test_close(p.rect.x, p.rect.y + 5);
         assert!(hit_pad.is_some(), "should hit at padding position too");
-        // not at x+3
-        let miss = fp.hit_test_close(p.rect.x + 3, p.rect.y + 2);
+        let miss = fp.hit_test_close(p.rect.x + 3, p.rect.y + 5);
         assert!(miss.is_none(), "should not hit beyond 3-wide area");
     }
 

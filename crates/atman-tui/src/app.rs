@@ -192,6 +192,7 @@ pub struct AppState {
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_node_regions: Vec<crate::output::NodeRegion>,
     pub last_transcript_rect: Option<ratatui::layout::Rect>,
+    pub last_full_rect: Option<ratatui::layout::Rect>,
     pub last_sidebar_rect: Option<ratatui::layout::Rect>,
     pub input_rect: Option<ratatui::layout::Rect>,
     pub hovered_thinking_idx: Option<usize>,
@@ -202,6 +203,8 @@ pub struct AppState {
     pub hovered_history_btn: bool,
     pub kill_armed_id: Option<atman_runtime::TaskId>,
     pub kill_armed_at: Option<Instant>,
+    pub panel_close_armed_id: Option<String>,
+    pub panel_close_armed_at: Option<Instant>,
     pub startup_intro: Option<StartupIntro>,
     pub form_modal: crate::form_modal::FormModal,
     pub animation_frame: u32,
@@ -385,22 +388,27 @@ impl AppState {
     }
 
     fn maximized_canvas(&self) -> ratatui::layout::Rect {
-        let transcript = self.last_transcript_rect.unwrap_or_default();
+        let full = self.last_full_rect.unwrap_or_default();
+        let transcript = self.last_transcript_rect.unwrap_or(full);
         let bottom_reserved = self
             .input_rect
             .map(|r| {
-                transcript
-                    .y
-                    .saturating_add(transcript.height)
+                full.y
+                    .saturating_add(full.height)
                     .saturating_sub(r.y)
                     .saturating_add(1)
             })
             .unwrap_or(0);
+        let top = full
+            .y
+            .saturating_add(full.height)
+            .saturating_sub(bottom_reserved);
+        let y = transcript.y.max(full.y);
         ratatui::layout::Rect {
-            x: transcript.x,
-            y: transcript.y,
-            width: transcript.width,
-            height: transcript.height.saturating_sub(bottom_reserved),
+            x: full.x,
+            y,
+            width: full.width,
+            height: top.saturating_sub(y),
         }
     }
 
@@ -530,6 +538,27 @@ impl AppState {
 
     pub fn kill_arm_expired(&self) -> bool {
         match self.kill_armed_at {
+            Some(t) => t.elapsed() > std::time::Duration::from_secs(2),
+            None => true,
+        }
+    }
+
+    pub fn arm_panel_close(&mut self, id: String) {
+        self.panel_close_armed_id = Some(id);
+        self.panel_close_armed_at = Some(Instant::now());
+        self.items_version = self.items_version.wrapping_add(1);
+    }
+
+    pub fn clear_panel_close_arm(&mut self) {
+        if self.panel_close_armed_id.is_some() {
+            self.panel_close_armed_id = None;
+            self.panel_close_armed_at = None;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn panel_close_arm_expired(&self) -> bool {
+        match self.panel_close_armed_at {
             Some(t) => t.elapsed() > std::time::Duration::from_secs(2),
             None => true,
         }

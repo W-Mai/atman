@@ -531,16 +531,15 @@ async fn run_frames(
                                 editor.set_cursor(pos);
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 // Floating panels take priority — they float on top.
-                                if let Some(close_id) =
-                                    app.floating_panels.hit_test_close(me.column, me.row)
+                                if let Some(min_id) =
+                                    app.floating_panels.hit_test_minimize(me.column, me.row)
                                 {
-                                    app.floating_panels.close(&close_id);
+                                    app.floating_panels.close(&min_id);
                                 } else if let Some(max_id) =
                                     app.floating_panels.hit_test_maximize(me.column, me.row)
                                 {
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
                                     app.floating_panels.toggle_maximize(&max_id, canvas);
-                                    // sync terminal PTY on maximize/unmaximize
                                     if let Some(p) = app.floating_panels.panels.iter().find(|p| p.id == max_id) {
                                         if p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal) {
                                             let inner_cols = p.rect.width.saturating_sub(8);
@@ -555,6 +554,34 @@ async fn run_frames(
                                                 }
                                             }
                                         }
+                                    }
+                                } else if let Some(close_id) =
+                                    app.floating_panels.hit_test_close(me.column, me.row)
+                                {
+                                    let armed = app.panel_close_armed_id == Some(close_id.clone())
+                                        && !app.panel_close_arm_expired();
+                                    if armed {
+                                        let tid = app
+                                            .task_snapshots
+                                            .iter()
+                                            .find(|s| s.source_handle == close_id)
+                                            .map(|s| s.id.clone());
+                                        if let (Some(tr), Some(tid)) = (&app.task_registry, tid) {
+                                            tr.kill(&tid);
+                                        }
+                                        app.clear_panel_close_arm();
+                                    } else {
+                                        let label = app
+                                            .task_snapshots
+                                            .iter()
+                                            .find(|s| s.source_handle == close_id)
+                                            .map(|s| s.label.clone())
+                                            .unwrap_or_default();
+                                        app.arm_panel_close(close_id.clone());
+                                        app.push_note(
+                                            format!("press ✕ again to kill {label}"),
+                                            app::NoteLevel::Warn,
+                                        );
                                     }
                                 } else if let Some(resize_id) =
                                     app.floating_panels.hit_test_resize(me.column, me.row)
@@ -2813,6 +2840,7 @@ pub fn sanitize_widget_edges(f: &mut ratatui::Frame, area: ratatui::layout::Rect
 
 fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor) {
     let area = f.area();
+    app.last_full_rect = Some(area);
     if area.width < 40 || area.height < 8 {
         let msg = Paragraph::new(Line::from("terminal too small (need 40×8)"))
             .style(Style::default().fg(crate::theme::theme().warn.into()))
@@ -3085,6 +3113,10 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
     }
     if !app.floating_panels.panels.is_empty() {
+        let close_armed = app
+            .panel_close_armed_id
+            .clone()
+            .zip(Some(app.panel_close_arm_expired()));
         app.last_floating_hitmap = crate::floating_panels::render(
             f,
             l.transcript,
@@ -3095,6 +3127,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             &app.hovered_panel_btn,
             &app.hovered_history_row,
             app.animation_frame,
+            close_armed.as_ref().map(|(id, exp)| (id.as_str(), *exp)),
         );
     } else {
         app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();
