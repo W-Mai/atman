@@ -201,6 +201,7 @@ pub struct AppState {
     pub hovered_insert_handle: Option<String>,
     pub hovered_activity: Option<(String, String)>,
     pub hovered_history_btn: bool,
+    pub hovered_hamburger: bool,
     pub kill_armed_id: Option<atman_runtime::TaskId>,
     pub kill_armed_at: Option<Instant>,
     pub panel_close_armed_id: Option<String>,
@@ -529,6 +530,13 @@ impl AppState {
     pub fn set_hovered_history_btn(&mut self, hovered: bool) {
         if self.hovered_history_btn != hovered {
             self.hovered_history_btn = hovered;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn set_hovered_hamburger(&mut self, hovered: bool) {
+        if self.hovered_hamburger != hovered {
+            self.hovered_hamburger = hovered;
             self.items_version = self.items_version.wrapping_add(1);
         }
     }

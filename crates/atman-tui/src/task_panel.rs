@@ -38,6 +38,7 @@ pub struct TaskPanelHitMap {
     pub task_header_rects: Vec<(String, Rect)>,
     pub activity_rects: Vec<(String, String, Rect)>,
     pub history_btn_rect: Option<Rect>,
+    pub hamburger_rect: Option<Rect>,
     pub insert_rects: Vec<(String, Rect)>,
 }
 
@@ -48,6 +49,7 @@ pub struct TaskPanelHover {
     pub hovered_insert_handle: Option<String>,
     pub hovered_activity: Option<(String, String)>,
     pub hovered_history_btn: bool,
+    pub hovered_hamburger: bool,
     pub kill_armed_id: Option<TaskId>,
     pub kill_armed_expired: bool,
     pub expanded_tasks: std::collections::HashSet<String>,
@@ -129,7 +131,7 @@ pub fn render(
     hover: &TaskPanelHover,
 ) -> TaskPanelHitMap {
     if collapsed {
-        let hitmap = render_strip(f, area, snapshots);
+        let hitmap = render_strip(f, area, snapshots, hover);
         crate::floating_panels::render_shadow(f, area, &crate::theme::theme());
         return hitmap;
     }
@@ -139,19 +141,20 @@ pub fn render(
     f.render_widget(Clear, area);
 
     let panel_bg: Color = t.modal_bg.into();
+    let hamburger_fg: Color = if hover.hovered_hamburger {
+        t.highlight_bg.lerp(t.heading, 0.3)
+    } else {
+        t.heading.into()
+    };
     let title_line = Line::from(vec![
         Span::styled(
             "  ≡",
-            Style::default()
-                .fg(t.heading.into())
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(hamburger_fg).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
             "Tasks",
-            Style::default()
-                .fg(t.heading.into())
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(hamburger_fg).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -159,6 +162,12 @@ pub fn render(
             Style::default().fg(t.subtle_fg.into()),
         ),
     ]);
+    let hamburger_rect = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: 1,
+    };
     // top padding row with panel bg
     f.render_widget(
         Block::default().style(Style::default().bg(panel_bg)),
@@ -782,6 +791,7 @@ pub fn render(
         );
         hitmap.history_btn_rect = Some(btn_rect);
     }
+    hitmap.hamburger_rect = Some(hamburger_rect);
 
     crate::floating_panels::render_shadow(f, area, &t);
     hitmap
@@ -854,7 +864,12 @@ pub fn compute_content_lines(
     }
 }
 
-fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPanelHitMap {
+fn render_strip(
+    f: &mut Frame,
+    area: Rect,
+    snapshots: &[TaskSnapshot],
+    hover: &TaskPanelHover,
+) -> TaskPanelHitMap {
     let t = crate::theme::theme();
     crate::sanitize_widget_edges(f, area);
     f.render_widget(Clear, area);
@@ -878,17 +893,28 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPa
             height: 1,
         },
     );
-    // hamburger on second row — matches expanded mode
+    let hamburger_area = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: 1,
+    };
+    let hamburger_fg: Color = if hover.hovered_hamburger {
+        t.highlight_bg.lerp(t.heading, 0.3)
+    } else {
+        t.heading.into()
+    };
     f.render_widget(
-        Block::default().style(Style::default().bg(panel_bg)).title(
-            Line::from(vec![Span::styled(
-                "≡",
-                Style::default()
-                    .fg(t.heading.into())
-                    .add_modifier(Modifier::BOLD),
-            )])
-            .alignment(Alignment::Center),
-        ),
+        Block::default()
+            .style(Style::default().bg(panel_bg))
+            .title(
+                Line::from(vec![Span::styled(
+                    "≡",
+                    Style::default().fg(hamburger_fg)
+                        .add_modifier(Modifier::BOLD),
+                )])
+                .alignment(Alignment::Center),
+            ),
         Rect {
             x: area.x,
             y: area.y + 1,
@@ -896,6 +922,7 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPa
             height: area.height.saturating_sub(1),
         },
     );
+    hitmap.hamburger_rect = Some(hamburger_area);
 
     // history icon near bottom — keep 1-row gap from edge like expanded mode
     let btn_y = area.y + area.height.saturating_sub(2);
@@ -917,7 +944,11 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPa
 
     // history icon at bottom row
     if btn_y > dot_y && btn_y >= area.y {
-        let history_color: Color = t.subtle_fg.into();
+        let history_color: Color = if hover.hovered_history_btn {
+            t.tinted_fg.into()
+        } else {
+            t.subtle_fg.into()
+        };
         let btn_rect = Rect {
             x: area.x,
             y: btn_y,

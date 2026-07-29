@@ -1002,6 +1002,16 @@ async fn run_frames(
                                     && rect_contains(*hr, me.column, me.row)
                                 {
                                     app.set_hovered_history_btn(true);
+                                    app.set_hovered_hamburger(false);
+                                    app.set_hovered_kill(None);
+                                    app.set_hovered_task(None);
+                                    app.set_hovered_insert(None);
+                                    app.set_hovered_activity(None);
+                                } else if let Some(hr) = &hm.hamburger_rect
+                                    && rect_contains(*hr, me.column, me.row)
+                                {
+                                    app.set_hovered_hamburger(true);
+                                    app.set_hovered_history_btn(false);
                                     app.set_hovered_kill(None);
                                     app.set_hovered_task(None);
                                     app.set_hovered_insert(None);
@@ -1012,6 +1022,7 @@ async fn run_frames(
                                     app.set_hovered_insert(None);
                                     app.set_hovered_activity(None);
                                     app.set_hovered_history_btn(false);
+                                    app.set_hovered_hamburger(false);
                                 }
                             }
                             interrupt_prompt = None;
@@ -3114,6 +3125,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             hovered_insert_handle: app.hovered_insert_handle.clone(),
             hovered_activity: app.hovered_activity.clone(),
             hovered_history_btn: app.hovered_history_btn,
+            hovered_hamburger: app.hovered_hamburger,
             kill_armed_id: app.kill_armed_id.clone(),
             kill_armed_expired: app.kill_arm_expired(),
             expanded_tasks: app.expanded_tasks.clone(),
