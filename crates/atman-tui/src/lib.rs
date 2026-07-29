@@ -41,6 +41,7 @@ pub mod task_panel;
 pub mod terminal_guard;
 pub mod terminal_viewer_modal;
 pub mod theme;
+pub mod width;
 pub mod workflow_viewer_modal;
 
 use app::{AppState, NoteLevel, OutputItem};
