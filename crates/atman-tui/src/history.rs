@@ -324,19 +324,22 @@ fn dedup_by_handle(out: &mut Vec<OutputItem>) {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut i = 0;
     while i < out.len() {
-        if let Some(h) = out[i].handle() {
-            if let Some(&prev) = seen.get(h) {
+        if let Some(h) = out[i].handle().map(|s| s.to_string()) {
+            if let Some(&prev) = seen.get(&h) {
                 out.remove(prev);
                 seen.iter_mut().for_each(|(_, idx)| {
                     if *idx > prev {
                         *idx -= 1;
                     }
                 });
-                continue;
+                seen.insert(h, i);
+            } else {
+                seen.insert(h, i);
+                i += 1;
             }
-            seen.insert(h.to_string(), i);
+        } else {
+            i += 1;
         }
-        i += 1;
     }
 }
 
@@ -638,6 +641,61 @@ mod tests {
         let out = flatten_messages(&msgs);
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], OutputItem::AssistantMd { .. }));
+    }
+
+    #[test]
+    fn flatten_transcript_dedup_same_handle_terminal_with_final_state() {
+        let handle = "term_s_0";
+        let mk_tool_pair = |id: &str, text: &str| -> Vec<TranscriptEntry> {
+            vec![
+                TranscriptEntry::Message {
+                    message: Message {
+                        role: MessageRole::Assistant,
+                        parts: vec![MessagePart::ToolUse {
+                            id: id.into(),
+                            name: "term.capture".into(),
+                            input: serde_json::json!({}),
+                        }],
+                        turn_id: TurnId::now(),
+                    },
+                    flow_run_id: None,
+                },
+                TranscriptEntry::Message {
+                    message: Message {
+                        role: MessageRole::Tool,
+                        parts: vec![MessagePart::ToolResult {
+                            tool_use_id: id.into(),
+                            content: format!(
+                                r#"{{"handle":"{handle}","state":{{"kind":"running"}},"rows":2,"cols":3,"text":"{text}"}}"#
+                            ),
+                            is_error: false,
+                        }],
+                        turn_id: TurnId::now(),
+                    },
+                    flow_run_id: None,
+                },
+            ]
+        };
+        let mut entries = Vec::new();
+        entries.extend(mk_tool_pair("c1", "aaa"));
+        entries.extend(mk_tool_pair("c2", "bbb"));
+        entries.extend(mk_tool_pair("c3", "ccc"));
+        entries.push(TranscriptEntry::TerminalFinalState {
+            handle: handle.into(),
+            screen: atman_runtime::tools::term::TerminalScreen {
+                rows: 2,
+                cols: 3,
+                cells: vec![atman_runtime::tools::term::TerminalCell::default(); 6],
+                cursor: None,
+                alt_screen: false,
+            },
+        });
+        let out = flatten_transcript(&entries);
+        let terminals: Vec<_> = out
+            .iter()
+            .filter(|it| matches!(it, OutputItem::Terminal { .. }))
+            .collect();
+        assert_eq!(terminals.len(), 1, "should dedup to 1 Terminal item");
     }
 
     #[test]
