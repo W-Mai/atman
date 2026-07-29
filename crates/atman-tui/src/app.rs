@@ -376,8 +376,11 @@ impl AppState {
     pub fn workflow_panel_task_handle(&self, panel_idx: usize) -> Option<String> {
         let item = self.items.get(panel_idx)?;
         if let crate::app::OutputItem::WorkflowPanel { graph, .. } = item {
-            let node = graph.root.last()?;
-            return Some(node.id.clone());
+            for node in &graph.root {
+                if let atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. } = &node.kind {
+                    return Some(run_id.clone());
+                }
+            }
         }
         None
     }
