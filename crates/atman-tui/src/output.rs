@@ -239,7 +239,7 @@ pub fn build_lines_with_ranges(
                     None
                 },
             };
-            render_item_with_regions(item, &item_ctx)
+            render_item_with_regions(item, &item_ctx, idx)
         };
         let (rows, line_row_offsets) = wrap_row_offsets(&item_lines, width);
         ranges.push(ItemRange {
@@ -493,6 +493,7 @@ fn wrap_row_offsets(lines: &[Line<'static>], _width: u16) -> (u32, Vec<u32>) {
 pub fn render_item_with_regions(
     item: &OutputItem,
     ctx: &RenderCtx<'_>,
+    item_index: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     if let OutputItem::WorkflowPanel {
         graph,
@@ -516,7 +517,7 @@ pub fn render_item_with_regions(
             OutputItem::Terminal { .. } if lines.len() >= 2 => {
                 let panel_width = ctx.panel_width as usize;
                 vec![NodeRegion {
-                    panel_item_index: 0,
+                    panel_item_index: item_index,
                     path_key: TERMINAL_FULLSCREEN_KEY.to_string(),
                     start_row: 1,
                     end_row: 2,
@@ -527,7 +528,7 @@ pub fn render_item_with_regions(
             OutputItem::Bash { .. } if lines.len() >= 2 => {
                 let panel_width = ctx.panel_width as usize;
                 vec![NodeRegion {
-                    panel_item_index: 0,
+                    panel_item_index: item_index,
                     path_key: BASH_FULLSCREEN_KEY.to_string(),
                     start_row: 1,
                     end_row: 2,
@@ -627,7 +628,7 @@ impl LayoutCache {
                     None
                 },
             };
-            let (item_lines, item_regions) = render_item_with_regions(item, &item_ctx);
+            let (item_lines, item_regions) = render_item_with_regions(item, &item_ctx, idx);
             let (new_rows, _) = wrap_row_offsets(&item_lines, key.width);
             self.item_cache[idx] = Some(ItemCacheEntry {
                 content_hash,
@@ -689,7 +690,7 @@ impl LayoutCache {
                 panel_width: ctx.panel_width,
                 hovered_thinking_idx: None,
             };
-            let (item_lines, item_regions) = render_item_with_regions(item, &item_ctx);
+            let (item_lines, item_regions) = render_item_with_regions(item, &item_ctx, idx);
             let (rows, _) = wrap_row_offsets(&item_lines, key.width);
             self.item_cache[idx] = Some(ItemCacheEntry {
                 content_hash,
