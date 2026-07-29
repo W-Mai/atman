@@ -307,8 +307,7 @@ pub fn render(
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
     sorted.sort_by_key(|&i| panels.panels[i].z);
 
-    // Keep maximized panels in sync with the current canvas — window resizes
-    // must update their rect every frame, not just on toggle_maximize.
+    // Window resizes must update maximized rects every frame.
     for panel in &mut panels.panels {
         if panel.maximized {
             panel.rect = maximized_rect(max_canvas);
@@ -900,8 +899,6 @@ fn render_panel_content(
                     }
                 }
                 _ => {
-                    // Find the WorkflowPanel whose graph contains panel.id as a
-                    // root run_id — not just the last one in items.
                     let wp_idx = items.iter().enumerate().rev().find(|(_, it)| {
                         if let OutputItem::WorkflowPanel { graph, .. } = it {
                             graph.root.iter().any(|node| {
@@ -1289,7 +1286,6 @@ fn render_terminal_content(
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
-/// Render terminal screen without a TaskSnapshot (restored/historical data).
 fn render_terminal_screen(
     f: &mut Frame,
     area: Rect,
@@ -1344,7 +1340,6 @@ fn render_terminal_screen(
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
-/// Render bash output without a TaskSnapshot (restored/historical data).
 fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done: bool) {
     let t = crate::theme::theme();
     let icon = if done { "✓" } else { "◐" };

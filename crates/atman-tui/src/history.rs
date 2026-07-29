@@ -414,17 +414,25 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>, tool_map: &HashMap<
 fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<OutputItem> {
     let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
     if tool_name.starts_with("bash.") {
+        let handle = parsed
+            .get("handle")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let output = parsed
             .get("output")
             .and_then(|v| v.as_str())
-            .unwrap_or(content);
+            .map(String::from)
+            .or_else(|| {
+                parsed
+                    .get("log_path")
+                    .and_then(|v| v.as_str())
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+            })
+            .unwrap_or_default();
         Some(OutputItem::Bash {
-            handle: parsed
-                .get("handle")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            output: output.to_string(),
+            handle,
+            output,
             done: true,
             expanded: false,
         })
@@ -449,7 +457,6 @@ fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<O
             .unwrap_or(DEFAULT_COLS);
         let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("");
 
-        // Fill cells with plain text (no ANSI parsing, no colors).
         // TerminalFinalState events will overwrite this with the full cell grid.
         let mut cells = vec![TerminalCell::default(); (rows as usize) * (cols as usize)];
         for (row, line) in text.lines().enumerate() {
@@ -736,6 +743,53 @@ mod tests {
             _ => None,
         });
         assert_eq!(bash.as_deref(), Some("hello\nworld"));
+    }
+
+    #[test]
+    fn flatten_transcript_restores_bash_from_log_path() {
+        let dir = std::env::temp_dir().join(format!("atman_test_bash_log_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("bg_test1.log");
+        std::fs::write(&log_path, "line1\nline2\n").unwrap();
+
+        let tool_use_id = "call_00_bash2";
+        let content = format!(
+            r#"{{"handle":"bg_test1","status":"running","pid":123,"log_path":"{}"}}"#,
+            log_path.display()
+        );
+        let entries = vec![
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    parts: vec![MessagePart::ToolUse {
+                        id: tool_use_id.into(),
+                        name: "bash.spawn".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    turn_id: TurnId::now(),
+                },
+                flow_run_id: None,
+            },
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Tool,
+                    parts: vec![MessagePart::ToolResult {
+                        tool_use_id: tool_use_id.into(),
+                        content,
+                        is_error: false,
+                    }],
+                    turn_id: TurnId::now(),
+                },
+                flow_run_id: None,
+            },
+        ];
+        let out = flatten_transcript(&entries);
+        let bash = out.iter().find_map(|it| match it {
+            OutputItem::Bash { output, .. } => Some(output.clone()),
+            _ => None,
+        });
+        assert_eq!(bash.as_deref(), Some("line1\nline2\n"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
