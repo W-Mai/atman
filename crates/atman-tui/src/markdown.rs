@@ -207,8 +207,8 @@ impl Renderer {
         }
         flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
         while !out.is_empty()
-            & !out.last().unwrap().is_newline
-            & out.last().unwrap().text.chars().all(|c| c == ' ')
+            && !out.last().unwrap().is_newline
+            && out.last().unwrap().text.chars().all(|c| c == ' ')
         {
             out.pop();
         }
