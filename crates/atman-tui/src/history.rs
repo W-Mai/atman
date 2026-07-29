@@ -320,12 +320,22 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
 }
 
 /// Remove earlier Terminal/Bash items that share a handle with a later one.
+/// When the later item has empty output but the earlier one has content
+/// (last call was bash.spawn with no output, but a prior bash.output had
+/// the real result), keep the one with content.
 fn dedup_by_handle(out: &mut Vec<OutputItem>) {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut i = 0;
     while i < out.len() {
         if let Some(h) = out[i].handle().map(|s| s.to_string()) {
             if let Some(&prev) = seen.get(&h) {
+                let prev_has_content = bash_has_content(&out[prev]);
+                let cur_has_content = bash_has_content(&out[i]);
+                if prev_has_content && !cur_has_content {
+                    // Keep the earlier item with content, skip current.
+                    i += 1;
+                    continue;
+                }
                 out.remove(prev);
                 seen.iter_mut().for_each(|(_, idx)| {
                     if *idx > prev {
@@ -340,6 +350,14 @@ fn dedup_by_handle(out: &mut Vec<OutputItem>) {
         } else {
             i += 1;
         }
+    }
+}
+
+fn bash_has_content(item: &OutputItem) -> bool {
+    match item {
+        OutputItem::Bash { output, .. } => !output.is_empty(),
+        OutputItem::Terminal { screen, .. } => !screen.cells.is_empty(),
+        _ => true,
     }
 }
 
@@ -440,7 +458,7 @@ fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<O
         let output = parsed
             .get("output")
             .and_then(|v| v.as_str())
-            .map(String::from)
+            .map(strip_log_prefixes)
             .or_else(|| {
                 parsed.get("log_path").and_then(|v| v.as_str()).map(|p| {
                     if !std::path::Path::new(p).exists() {
