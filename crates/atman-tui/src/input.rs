@@ -1,7 +1,6 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
-use unicode_width::UnicodeWidthStr;
 
 use crate::ModeColorExt;
 
@@ -11,11 +10,10 @@ pub fn cursor_display_row(input: &str, cursor: usize) -> u16 {
 }
 
 pub fn cursor_display_col(input: &str, cursor: usize) -> u16 {
-    use unicode_width::UnicodeWidthStr;
     let clamped = cursor.min(input.len());
     let head = &input[..clamped];
     let last_line = head.rsplit('\n').next().unwrap_or("");
-    UnicodeWidthStr::width(last_line) as u16
+    crate::width::width(last_line) as u16
 }
 
 pub fn input_paragraph<'a>(
@@ -84,13 +82,12 @@ pub fn display_line_count(input: &str) -> usize {
 pub fn display_width(input: &str) -> usize {
     input
         .split('\n')
-        .map(UnicodeWidthStr::width)
+        .map(crate::width::width)
         .max()
         .unwrap_or(0)
 }
 
 pub fn wrapped_line_count(input: &str, content_width: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
     if content_width == 0 {
         return input.split('\n').count().max(1);
     }
@@ -102,8 +99,7 @@ pub fn wrapped_line_count(input: &str, content_width: usize) -> usize {
         }
         let mut cur_w = 0usize;
         let mut rows_in_line = 1usize;
-        for ch in row.chars() {
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        for (_, cw) in crate::width::graphemes(row) {
             if cur_w + cw > content_width {
                 rows_in_line += 1;
                 cur_w = cw;
@@ -148,7 +144,7 @@ fn compute_wrapped_lines(input: &str, content_width: usize) -> Vec<WrappedLine> 
         let mut cur_width: usize = 0;
         for seg in &segments {
             let seg_abs_start = logical_start + seg.rel_start;
-            let seg_width = UnicodeWidthStr::width(seg.text);
+            let seg_width = crate::width::width(seg.text);
             if seg.is_space {
                 cur_width += seg_width;
             } else if cur_width == 0 {
@@ -243,17 +239,16 @@ fn char_break_word(word: &str, abs_base: usize, cw: usize) -> Vec<SubLine> {
     let mut out = Vec::new();
     let mut cur_start = 0usize;
     let mut cur_width = 0usize;
-    for (char_offset, c) in word.char_indices() {
-        let cw_char = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if cur_width + cw_char > cw && cur_width > 0 {
+    for (char_offset, _g, gw) in crate::width::grapheme_indices(word) {
+        if cur_width + gw > cw && cur_width > 0 {
             out.push(SubLine {
                 byte_range: (abs_base + cur_start, abs_base + char_offset),
                 width: cur_width,
             });
             cur_start = char_offset;
-            cur_width = cw_char;
+            cur_width = gw;
         } else {
-            cur_width += cw_char;
+            cur_width += gw;
         }
     }
     if cur_start < word.len() || cur_width > 0 {
@@ -296,13 +291,12 @@ pub fn cursor_from_wrapped(
     let slice = &input[line.byte_range.0..line.byte_range.1];
     let mut byte_offset = line.byte_range.0;
     let mut used: usize = 0;
-    for c in slice.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if used + cw > visual_col {
+    for (g, gw) in crate::width::graphemes(slice) {
+        if used + gw > visual_col {
             break;
         }
-        used += cw;
-        byte_offset += c.len_utf8();
+        used += gw;
+        byte_offset += g.len();
         if used >= visual_col {
             break;
         }
@@ -338,13 +332,13 @@ pub fn wrapped_cursor_col(input: &str, cursor: usize, content_width: usize) -> u
     for line in &lines {
         if cursor >= line.byte_range.0 && cursor < line.byte_range.1 {
             let slice = &input[line.byte_range.0..cursor];
-            return UnicodeWidthStr::width(slice);
+            return crate::width::width(slice);
         }
     }
     // Cursor in a gap (at `\n`) or past all lines — return full line width.
     for line in lines.iter().rev() {
         if cursor >= line.byte_range.1 {
-            return UnicodeWidthStr::width(&input[line.byte_range.0..line.byte_range.1]);
+            return crate::width::width(&input[line.byte_range.0..line.byte_range.1]);
         }
     }
     0
@@ -477,9 +471,6 @@ impl InputEditor {
     }
 
     pub fn move_line_up(&mut self) -> bool {
-        use unicode_width::UnicodeWidthChar;
-        // If cursor sits on a `\n`, back up one byte so rfind can find the
-        // preceding newline.
         let effective =
             if self.cursor > 0 && self.buf.as_bytes().get(self.cursor).copied() == Some(b'\n') {
                 self.cursor - 1
@@ -491,22 +482,18 @@ impl InputEditor {
             return false;
         };
         let cur_line_start = cur_line_start_off + 1;
-        let cur_col: u16 = self.buf[cur_line_start..self.cursor]
-            .chars()
-            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0) as u16)
-            .sum();
+        let cur_col: u16 = crate::width::width(&self.buf[cur_line_start..self.cursor]) as u16;
         let prev_head = &self.buf[..cur_line_start_off];
         let prev_line_start = prev_head.rfind('\n').map(|p| p + 1).unwrap_or(0);
         let prev_line = &self.buf[prev_line_start..cur_line_start_off];
         let mut used: u16 = 0;
         let mut byte_off = prev_line_start;
-        for c in prev_line.chars() {
-            let w = UnicodeWidthChar::width(c).unwrap_or(0) as u16;
-            if used.saturating_add(w) > cur_col {
+        for (g, gw) in crate::width::graphemes(prev_line) {
+            if used.saturating_add(gw as u16) > cur_col {
                 break;
             }
-            used = used.saturating_add(w);
-            byte_off += c.len_utf8();
+            used = used.saturating_add(gw as u16);
+            byte_off += g.len();
             if used >= cur_col {
                 break;
             }
@@ -516,7 +503,6 @@ impl InputEditor {
     }
 
     pub fn move_line_down(&mut self) -> bool {
-        use unicode_width::UnicodeWidthChar;
         let tail = &self.buf[self.cursor..];
         let Some(rel) = tail.find('\n') else {
             return false;
@@ -525,10 +511,7 @@ impl InputEditor {
             .rfind('\n')
             .map(|p| p + 1)
             .unwrap_or(0);
-        let cur_col: u16 = self.buf[cur_line_start..self.cursor]
-            .chars()
-            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0) as u16)
-            .sum();
+        let cur_col: u16 = crate::width::width(&self.buf[cur_line_start..self.cursor]) as u16;
         let next_line_start = self.cursor + rel + 1;
         let next_line_end = self.buf[next_line_start..]
             .find('\n')
@@ -537,13 +520,12 @@ impl InputEditor {
         let next_line = &self.buf[next_line_start..next_line_end];
         let mut used: u16 = 0;
         let mut byte_off = next_line_start;
-        for c in next_line.chars() {
-            let w = UnicodeWidthChar::width(c).unwrap_or(0) as u16;
-            if used.saturating_add(w) > cur_col {
+        for (g, gw) in crate::width::graphemes(next_line) {
+            if used.saturating_add(gw as u16) > cur_col {
                 break;
             }
-            used = used.saturating_add(w);
-            byte_off += c.len_utf8();
+            used = used.saturating_add(gw as u16);
+            byte_off += g.len();
             if used >= cur_col {
                 break;
             }
@@ -582,7 +564,6 @@ impl InputEditor {
     // Walks by char width, not char count, so double-wide CJK chars occupy
     // the two display columns they visually take.
     pub fn set_cursor_by_display(&mut self, line: usize, display_col: u16) {
-        use unicode_width::UnicodeWidthChar;
         self.consume_history_view();
         let mut line_start = 0usize;
         for _ in 0..line {
@@ -601,13 +582,12 @@ impl InputEditor {
         let slice = &self.buf[line_start..line_end];
         let mut used: u16 = 0;
         let mut byte_offset = line_start;
-        for c in slice.chars() {
-            let w = UnicodeWidthChar::width(c).unwrap_or(0) as u16;
-            if used.saturating_add(w) > display_col {
+        for (g, gw) in crate::width::graphemes(slice) {
+            if used.saturating_add(gw as u16) > display_col {
                 break;
             }
-            used = used.saturating_add(w);
-            byte_offset += c.len_utf8();
+            used = used.saturating_add(gw as u16);
+            byte_offset += g.len();
             if used >= display_col {
                 break;
             }

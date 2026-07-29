@@ -13,6 +13,13 @@ pub fn graphemes(s: &str) -> impl Iterator<Item = (&str, usize)> {
     })
 }
 
+pub fn grapheme_indices(s: &str) -> impl Iterator<Item = (usize, &str, usize)> {
+    s.grapheme_indices(true).map(|(i, g)| {
+        let w = UnicodeWidthStr::width(g);
+        (i, g, w)
+    })
+}
+
 pub fn truncate(s: &str, max_w: usize) -> String {
     if width(s) <= max_w {
         return s.to_string();

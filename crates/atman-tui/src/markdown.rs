@@ -83,11 +83,10 @@ impl Renderer {
     }
 
     fn push_text(&mut self, text: &str) {
-        use unicode_width::UnicodeWidthStr;
         let style = self.active_style();
         let limit = self.content_width();
         let indent = self.indent_prefix();
-        let indent_w = indent.width();
+        let indent_w = crate::width::width(&indent);
         for piece in self.wrap_text(text, limit, indent_w) {
             if piece.is_newline {
                 self.end_line();
@@ -104,7 +103,7 @@ impl Renderer {
     }
 
     fn end_line(&mut self) {
-        if self.current.is_empty() && self.fresh_line {
+        if self.current.is_empty() & self.fresh_line {
             return;
         }
         let spans = std::mem::take(&mut self.current);
@@ -134,7 +133,6 @@ impl Renderer {
     }
 
     fn wrap_text(&self, text: &str, limit: usize, indent_w: usize) -> Vec<WrapPiece> {
-        use unicode_width::UnicodeWidthChar;
         let effective_limit = limit.saturating_sub(indent_w).max(1);
         let mut out = Vec::new();
         let mut buf = String::new();
@@ -170,14 +168,13 @@ impl Renderer {
             *line_w = 0;
         }
 
-        for ch in text.chars() {
-            if ch == '\n' {
+        for (g, gw) in crate::width::graphemes(text) {
+            if g == "\n" {
                 flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
                 newline(&mut out, &mut line_w);
                 continue;
             }
-            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if ch == ' ' {
+            if g == " " {
                 flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
                 if line_w > 0 && line_w < effective_limit {
                     out.push(WrapPiece {
@@ -189,12 +186,12 @@ impl Renderer {
                 }
                 continue;
             }
-            let is_word_break = is_cjk(ch) || w >= 2;
+            let is_word_break = is_cjk(g.chars().next().unwrap_or('\0')) || gw >= 2;
             if is_word_break {
                 flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
             }
-            if line_w + buf_w + w > effective_limit {
-                if buf_w + w <= effective_limit {
+            if line_w + buf_w + gw > effective_limit {
+                if buf_w + gw <= effective_limit {
                     if line_w > 0 {
                         newline(&mut out, &mut line_w);
                     }
@@ -205,13 +202,13 @@ impl Renderer {
                     }
                 }
             }
-            buf.push(ch);
-            buf_w += w;
+            buf.push_str(g);
+            buf_w += gw;
         }
         flush(&mut out, &mut buf, &mut buf_w, &mut line_w);
         while !out.is_empty()
-            && !out.last().unwrap().is_newline
-            && out.last().unwrap().text.chars().all(|c| c == ' ')
+            & !out.last().unwrap().is_newline
+            & out.last().unwrap().text.chars().all(|c| c == ' ')
         {
             out.pop();
         }
@@ -260,10 +257,9 @@ impl Renderer {
                 self.end_line();
                 let indent = self.indent_prefix();
                 if !indent.is_empty() {
-                    use unicode_width::UnicodeWidthStr;
                     let style = self.active_style();
                     self.current.push(Span::styled(indent.clone(), style));
-                    self.current_width = indent.width();
+                    self.current_width = crate::width::width(&indent);
                 }
             }
             Event::Rule => {
@@ -281,11 +277,10 @@ impl Renderer {
                 self.fresh_line = true;
             }
             Event::TaskListMarker(done) => {
-                use unicode_width::UnicodeWidthStr;
                 let mark = if done { "[x] " } else { "[ ] " };
                 let style = Style::default().fg(t.accent.into());
                 self.current.push(Span::styled(mark.to_string(), style));
-                self.current_width += mark.width();
+                self.current_width += crate::width::width(mark);
                 self.fresh_line = false;
             }
             _ => {}
@@ -296,12 +291,11 @@ impl Renderer {
         let t = crate::theme::theme();
         match tag {
             Tag::Paragraph => {
-                use unicode_width::UnicodeWidthStr;
                 let indent = self.indent_prefix();
                 if !indent.is_empty() {
                     let style = self.active_style();
                     self.current.push(Span::styled(indent.clone(), style));
-                    self.current_width += indent.width();
+                    self.current_width += crate::width::width(&indent);
                 }
             }
             Tag::Heading { level, .. } => {
@@ -324,12 +318,11 @@ impl Renderer {
                     .push(start.map(ListKind::Ordered).unwrap_or(ListKind::Bullet));
             }
             Tag::Item => {
-                use unicode_width::UnicodeWidthStr;
                 let indent = self.indent_prefix();
                 if !indent.is_empty() {
                     let style = self.active_style();
                     self.current.push(Span::styled(indent.clone(), style));
-                    self.current_width += indent.width();
+                    self.current_width += crate::width::width(&indent);
                 }
                 let bullet = match self.list_stack.last_mut() {
                     Some(ListKind::Bullet) => "• ".to_string(),
@@ -342,7 +335,7 @@ impl Renderer {
                 };
                 let style = Style::default().fg(t.accent.into());
                 self.current.push(Span::styled(bullet.clone(), style));
-                self.current_width += bullet.width();
+                self.current_width += crate::width::width(&bullet);
                 self.fresh_line = false;
             }
             Tag::Emphasis => {
@@ -448,9 +441,8 @@ impl Renderer {
     }
 
     fn flush_table(&mut self) {
-        use unicode_width::UnicodeWidthStr;
         let t = crate::theme::theme();
-        if self.table_header.is_empty() && self.table_body.is_empty() {
+        if self.table_header.is_empty() & self.table_body.is_empty() {
             return;
         }
         let col_count = self
@@ -467,11 +459,11 @@ impl Renderer {
         let sep = 3usize;
         let mut widths = vec![col_min; col_count];
         for (i, cell) in self.table_header.iter().enumerate() {
-            widths[i] = widths[i].max(cell.width());
+            widths[i] = widths[i].max(crate::width::width(cell));
         }
         for row in &self.table_body {
             for (i, cell) in row.iter().enumerate() {
-                widths[i] = widths[i].max(cell.width());
+                widths[i] = widths[i].max(crate::width::width(cell));
             }
         }
         let cells_total: usize = widths.iter().sum::<usize>() + sep * col_count.saturating_sub(1);
@@ -533,7 +525,6 @@ impl Renderer {
     }
 
     fn render_code_block(&mut self, lang: &str, body: &str) {
-        use unicode_width::UnicodeWidthStr;
         let t = crate::theme::theme();
         self.blank_line();
         let bg = block_bg();
@@ -561,12 +552,12 @@ impl Renderer {
         let width = digits_for(highlighted.len());
         for (i, hl) in highlighted.into_iter().enumerate() {
             let lineno = format!("{:>width$}  ", i + 1);
-            let mut used = inner_pad + UnicodeWidthStr::width(lineno.as_str());
+            let mut used = inner_pad + crate::width::width(lineno.as_str());
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(hl.spans.len() + 3);
             spans.push(Span::styled(" ".repeat(inner_pad), bg_only));
             spans.push(Span::styled(lineno, lineno_style));
             for src in hl.spans {
-                used += UnicodeWidthStr::width(src.content.as_ref());
+                used += crate::width::width(src.content.as_ref());
                 let style = if src.style.bg.is_none() {
                     src.style.bg(bg)
                 } else {
@@ -605,8 +596,7 @@ fn blank_bg_line(width: usize, bg: Color) -> Line<'static> {
 }
 
 fn bg_padded_line(text: &str, style: Style, target: usize, bg: Color) -> Line<'static> {
-    use unicode_width::UnicodeWidthStr;
-    let used = text.width();
+    let used = crate::width::width(text);
     let mut spans = Vec::with_capacity(2);
     spans.push(Span::styled(text.to_string(), style));
     if target > used {
@@ -625,9 +615,8 @@ fn table_line(
     style: Style,
     bg: Color,
 ) -> Line<'static> {
-    use unicode_width::UnicodeWidthStr;
     let bg_only = Style::default().bg(bg);
-    let content_w = text.width();
+    let content_w = crate::width::width(text);
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
     spans.push(Span::styled(" ".repeat(inner_pad), bg_only));
     spans.push(Span::styled(text.to_string(), style));
@@ -647,7 +636,6 @@ fn table_row(
     bg: Color,
     sep: usize,
 ) -> Line<'static> {
-    use unicode_width::UnicodeWidthStr;
     let bg_only = Style::default().bg(bg);
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(widths.len() * 2 + 3);
     spans.push(Span::styled(" ".repeat(inner_pad), bg_only));
@@ -658,7 +646,7 @@ fn table_row(
             used += sep;
         }
         let cell = cells.get(i).map(String::as_str).unwrap_or("");
-        let pad = w.saturating_sub(cell.width());
+        let pad = w.saturating_sub(crate::width::width(cell));
         spans.push(Span::styled(cell.to_string(), style));
         spans.push(Span::styled(" ".repeat(pad), bg_only));
         used += w;
@@ -845,11 +833,11 @@ mod tests {
         let lines = render_markdown("| a | b |\n| - | - |\n| 1 | 2 |\n");
         let flat = plain(&lines);
         assert!(
-            flat.iter().any(|l| l.contains("1") && l.contains("2")),
+            flat.iter().any(|l| l.contains("1") & l.contains("2")),
             "want data row: {flat:?}"
         );
         assert!(
-            flat.iter().any(|l| l.contains("a") && l.contains("b")),
+            flat.iter().any(|l| l.contains("a") & l.contains("b")),
             "want header row: {flat:?}"
         );
     }
@@ -859,8 +847,7 @@ mod tests {
         let lines = render_markdown("| name | code |\n| - | - |\n| foo | `bar()` |\n");
         let flat = plain(&lines);
         assert!(
-            flat.iter()
-                .any(|l| l.contains("bar()") && l.contains("foo")),
+            flat.iter().any(|l| l.contains("bar()") & l.contains("foo")),
             "inline code lost from table cell: {flat:?}"
         );
         let joined = flat.join("");
@@ -876,7 +863,7 @@ mod tests {
         let flat = plain(&lines);
         assert!(
             flat.iter()
-                .any(|l| l.contains("bold run") && l.contains("plain")),
+                .any(|l| l.contains("bold run") & l.contains("plain")),
             "bold text run split across cells: {flat:?}"
         );
     }
@@ -887,7 +874,7 @@ mod tests {
         let flat = plain(&lines);
         let data_row = flat
             .iter()
-            .find(|l| l.contains("x") && l.contains("z"))
+            .find(|l| l.contains("x") & l.contains("z"))
             .unwrap_or_else(|| panic!("no data row: {flat:?}"));
         let x_pos = data_row.find("x").unwrap();
         let z_pos = data_row.find("z").unwrap();
@@ -916,13 +903,12 @@ mod tests {
     }
 
     fn line_widths(lines: &[Line<'_>]) -> Vec<usize> {
-        use unicode_width::UnicodeWidthStr;
         lines
             .iter()
             .map(|l| {
                 l.spans
                     .iter()
-                    .map(|s| s.content.as_ref().width())
+                    .map(|s| crate::width::width(s.content.as_ref()))
                     .sum::<usize>()
             })
             .collect()
