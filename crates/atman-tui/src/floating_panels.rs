@@ -818,13 +818,15 @@ fn render_panel_content(
         }
         PanelKind::Task(kind) => {
             let snap = snapshots.iter().find(|s| s.source_handle == panel.id);
-            if snap.is_none() {
-                render_placeholder(f, area, &panel.title);
-                return;
-            }
-            let snap = snap.unwrap();
             match kind {
                 TaskKind::Bash => {
+                    let snap = match snap {
+                        Some(s) => s,
+                        None => {
+                            render_placeholder(f, area, &panel.title);
+                            return;
+                        }
+                    };
                     let item = items.iter().rev().find(|it| match it {
                         OutputItem::Bash { handle, .. } => *handle == panel.id,
                         _ => false,
@@ -836,6 +838,13 @@ fn render_panel_content(
                     }
                 }
                 TaskKind::Terminal => {
+                    let snap = match snap {
+                        Some(s) => s,
+                        None => {
+                            render_placeholder(f, area, &panel.title);
+                            return;
+                        }
+                    };
                     let item = items.iter().rev().find(|it| match it {
                         OutputItem::Terminal { handle, .. } => *handle == panel.id,
                         _ => false,
@@ -905,7 +914,7 @@ fn render_panel_content(
                             .scroll((panel.scroll, panel.h_scroll));
                         f.render_widget(p, area);
                     } else {
-                        render_task_meta(f, area, kind, snap);
+                        render_placeholder(f, area, &panel.title);
                     }
                 }
             }
