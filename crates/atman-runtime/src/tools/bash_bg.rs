@@ -339,6 +339,10 @@ impl BgRegistry {
             ("handle".into(), Value::Str(handle_str.into())),
             ("status".into(), Value::Str(st.kind().into())),
             ("started_at".into(), Value::Int(st.started_at())),
+            (
+                "log_path".into(),
+                Value::Str(entry.log_path.to_string_lossy().into_owned()),
+            ),
         ];
         if let Some(ec) = st.exit_code() {
             fields.push(("exit_code".into(), Value::Int(ec as i64)));
@@ -866,6 +870,7 @@ instead, or use the sleep tool to pause the workflow.",
             let st = entry.status.lock().unwrap().clone();
             let out = entry.output.lock().unwrap();
             let combined = String::from_utf8_lossy(&out.combined).into_owned();
+            let log_path = entry.log_path.to_string_lossy().into_owned();
             Ok(Value::Struct(vec![
                 ("handle".into(), Value::Str(handle_s)),
                 ("status".into(), Value::Str(st.kind().into())),
@@ -877,6 +882,7 @@ instead, or use the sleep tool to pause the workflow.",
                 ),
                 ("output".into(), Value::Str(combined)),
                 ("bytes_total".into(), Value::Int(out.total_bytes as i64)),
+                ("log_path".into(), Value::Str(log_path)),
             ]))
         })
     }
