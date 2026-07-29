@@ -586,6 +586,7 @@ async fn run_frames(
                                 } else if let Some(resize_id) =
                                     app.floating_panels.hit_test_resize(me.column, me.row)
                                 {
+                                    app.floating_panels.unmaximize(&resize_id);
                                     app.floating_panels.focus(&resize_id);
                                     app.resize_target = Some(resize_id);
                                     app.resize_offset = (me.column, me.row);
@@ -594,6 +595,7 @@ async fn run_frames(
                                     .hit_test_titlebar(me.column, me.row)
                                 {
                                     let id = fp.id.clone();
+                                    app.floating_panels.unmaximize(&id);
                                     app.floating_panels.focus(&id);
                                     app.drag_target = Some(id);
                                     app.drag_offset = (me.column, me.row);

@@ -151,23 +151,19 @@ impl FloatingPanels {
 
     pub fn move_panel(&mut self, id: &str, x: u16, y: u16, _canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
-            if p.maximized {
-                if let Some(prev) = p.prev_rect.take() {
-                    let dx = x.saturating_sub(p.rect.x);
-                    let dy = y.saturating_sub(p.rect.y);
-                    p.rect = prev;
-                    p.rect.x = p.rect.x.saturating_add(dx);
-                    p.rect.y = p.rect.y.saturating_add(dy);
-                }
-                p.maximized = false;
-            } else {
-                p.rect.x = x;
-                p.rect.y = y;
-            }
+            p.rect.x = x;
+            p.rect.y = y;
         }
     }
 
     pub fn resize_panel(&mut self, id: &str, w: u16, h: u16, _canvas: Rect) {
+        if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
+            p.rect.width = w.max(20);
+            p.rect.height = h.max(6);
+        }
+    }
+
+    pub fn unmaximize(&mut self, id: &str) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
             if p.maximized {
                 if let Some(prev) = p.prev_rect.take() {
@@ -175,8 +171,6 @@ impl FloatingPanels {
                 }
                 p.maximized = false;
             }
-            p.rect.width = w.max(20);
-            p.rect.height = h.max(6);
         }
     }
 
