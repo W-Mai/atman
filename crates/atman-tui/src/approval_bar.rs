@@ -31,7 +31,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, pending: &[PendingApproval]) {
     for (i, p) in pending.iter().take(9).enumerate() {
         let key = format!("[{}] ", i + 1);
         let head_len = key.len() + p.tool_name.len() + 2;
-        let args = truncate_line(&p.args_preview, inner_width.saturating_sub(head_len));
+        let args_flat = p.args_preview.replace('\n', " ");
+        let args = crate::width::truncate(&args_flat, inner_width.saturating_sub(head_len));
         lines.push(Line::from(vec![
             Span::styled(
                 key,
@@ -56,23 +57,4 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, pending: &[PendingApproval]) {
         )));
     }
     f.render_widget(Paragraph::new(lines).block(block), area);
-}
-
-fn truncate_line(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::with_capacity(max);
-    for (i, c) in s.chars().enumerate() {
-        if i + 1 >= max {
-            out.push('…');
-            break;
-        }
-        if c == '\n' {
-            out.push(' ');
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }

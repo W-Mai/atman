@@ -406,7 +406,7 @@ fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
         }
         Some(p) => {
             lines.push(Line::from(Span::styled(
-                truncate_line(&p.title, 30),
+                crate::width::truncate(&p.title, 30),
                 Style::default()
                     .fg(t.tinted_fg.into())
                     .add_modifier(Modifier::BOLD),
@@ -435,7 +435,7 @@ fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
                     ),
                     Span::styled(format!("{glyph} "), glyph_style),
                     Span::styled(format!("{num:>2}. "), Style::default().fg(t.meta_fg.into())),
-                    Span::styled(truncate_line(&step.text, 22), text_style),
+                    Span::styled(crate::width::truncate(&step.text, 22), text_style),
                 ]));
             }
         }
@@ -477,15 +477,15 @@ fn todos_body<'a>(todos: &'a [atman_runtime::memory::todo::Todo]) -> Vec<Line<'a
         lines.push(Line::from(vec![
             Span::styled(format!("  {glyph} "), glyph_style),
             Span::styled(
-                truncate_line(&todo.why, 32),
+                crate::width::truncate(&todo.why, 32),
                 Style::default().fg(t.tinted_fg.into()),
             ),
         ]));
         lines.push(Line::from(Span::styled(
             format!(
                 "    {} · {}",
-                truncate_line(&todo.where_, 20),
-                truncate_line(&todo.how, 8)
+                crate::width::truncate(&todo.where_, 20),
+                crate::width::truncate(&todo.how, 8)
             ),
             Style::default().fg(t.meta_fg.into()),
         )));
@@ -572,18 +572,6 @@ fn context_section<'a>(
         ),
     ];
     Paragraph::new(lines)
-}
-
-fn truncate_line(s: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i >= max_chars {
-            out.push('…');
-            return out;
-        }
-        out.push(c);
-    }
-    out
 }
 
 fn meta_section<'a>(
@@ -755,7 +743,7 @@ fn abbreviate_dir(dir: &str) -> String {
     } else {
         dir.to_string()
     };
-    if short.chars().count() <= 28 {
+    if crate::width::width(&short) <= 28 {
         return short;
     }
     let head: String = short.chars().take(10).collect();

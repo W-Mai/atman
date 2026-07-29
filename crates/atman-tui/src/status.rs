@@ -41,7 +41,7 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
     if let Some(g) = inputs.goal {
         spans.push(Span::raw("  · goal "));
         spans.push(Span::styled(
-            truncate(g, 60),
+            crate::width::truncate(g, 60),
             Style::default().fg(t.warn.into()),
         ));
     }
@@ -63,19 +63,9 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
     for (_key, text) in inputs.status_notes.iter() {
         spans.push(Span::raw("  · "));
         spans.push(Span::styled(
-            truncate(text, 60),
+            crate::width::truncate(text, 60),
             Style::default().fg(t.tinted_fg.into()),
         ));
     }
     Line::from(spans)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
-    }
 }
