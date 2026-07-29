@@ -1332,23 +1332,30 @@ fn render_thinking(
     lines.push(Line::from(header_spans));
     lines.push(blank.clone());
 
-    let all_lines: Vec<&str> = text.lines().collect();
+    let all_lines =
+        crate::markdown::render_markdown_with_width(text, panel_width.saturating_sub(4));
     let max_lines = if expanded {
         all_lines.len()
     } else {
         6.min(all_lines.len())
     };
-    for line in all_lines.iter().take(max_lines) {
-        let rows = wrap_with_prefix(line, target, "    ", "    ");
-        for row in rows {
-            lines.push(line_with_right_pad(
-                &row.prefix,
-                &row.body,
-                target,
-                body_style,
-                body_style,
-            ));
+    for md_line in all_lines.iter().take(max_lines) {
+        let content_w: usize = md_line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let used = content_w + 4;
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(md_line.spans.len() + 2);
+        spans.push(Span::styled("    ", body_style));
+        for src in &md_line.spans {
+            let style = src.style.patch(body_style);
+            spans.push(Span::styled(src.content.clone(), style));
         }
+        if target > used {
+            spans.push(Span::styled(" ".repeat(target - used), body_style));
+        }
+        lines.push(Line::from(spans));
     }
     if !expanded && all_lines.len() > max_lines {
         let hint = format!(
@@ -4344,6 +4351,33 @@ mod tests {
             let w = unicode_width::UnicodeWidthStr::width(s.as_str());
             assert!(w <= 30, "CJK thinking line {i} width {w} > 30");
         }
+    }
+
+    #[test]
+    fn thinking_renders_markdown_bold() {
+        // **bold** in thinking text should produce a BOLD span, not literal asterisks
+        let lines = render_thinking("this is **bold** text", true, true, false, 0, 60);
+        let has_bold = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|s| s.style.add_modifier == ratatui::style::Modifier::BOLD);
+        assert!(has_bold, "thinking should render **bold** as BOLD style");
+    }
+
+    #[test]
+    fn thinking_collapsed_limits_to_six_lines() {
+        let text = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10";
+        let lines = render_thinking(text, true, false, false, 0, 60);
+        // header(3) + 6 body lines + hint(1) + blank(1) = 11
+        // (blank + header + blank + 6 body + hint + blank)
+        let body_count = lines
+            .iter()
+            .filter(|l| {
+                let s: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                s.starts_with("    line")
+            })
+            .count();
+        assert_eq!(body_count, 6, "collapsed thinking should show 6 body lines");
     }
 
     #[test]

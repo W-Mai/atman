@@ -67,6 +67,8 @@ pub fn highlight_ansi(body: &str) -> Vec<Line<'static>> {
     let mut out = Vec::with_capacity(screen.rows as usize);
     for row in 0..screen.rows as usize {
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(cols);
+        let mut cur_text = String::new();
+        let mut cur_style: Option<Style> = None;
         for col in 0..cols {
             let idx = row * cols + col;
             if idx >= screen.cells.len() {
@@ -78,11 +80,26 @@ pub fn highlight_ansi(body: &str) -> Vec<Line<'static>> {
             }
             let style = crate::output::cell_style_for_viewer(cell, bg);
             let text = if cell.chars.is_empty() {
-                " ".to_string()
+                " "
             } else {
-                cell.chars.clone()
+                &cell.chars
             };
-            spans.push(Span::styled(text, style));
+            if cur_style == Some(style) {
+                cur_text.push_str(text);
+            } else {
+                if !cur_text.is_empty() {
+                    if let Some(s) = cur_style.take() {
+                        spans.push(Span::styled(std::mem::take(&mut cur_text), s));
+                    }
+                }
+                cur_style = Some(style);
+                cur_text.push_str(text);
+            }
+        }
+        if !cur_text.is_empty() {
+            if let Some(s) = cur_style {
+                spans.push(Span::styled(cur_text, s));
+            }
         }
         out.push(Line::from(spans));
     }

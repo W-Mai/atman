@@ -187,16 +187,28 @@ pub fn snapshot_screen(parser: &vt100::Parser) -> TerminalScreen {
 ///
 /// Used by the TUI to render ` ```ansi ` code blocks with real colors.
 /// cols is sized to the widest line (clamped 80..=256) so nothing wraps.
+///
+/// `\n` is upgraded to `\r\n` because vt100 treats bare LF as "line feed"
+/// (move down, keep column) — most ANSI output expects carriage return too.
+/// Trailing newlines are stripped so they don't trigger a scroll that
+/// pushes the first line off the visible screen.
 pub fn parse_ansi_to_screen(body: &str) -> TerminalScreen {
-    let rows = body.lines().count().max(1) as u16;
-    let cols = body
-        .lines()
+    let body = body.strip_suffix('\n').unwrap_or(body);
+    let lines: Vec<&str> = body.split('\n').collect();
+    let rows = lines.len().max(1) as u16;
+    let cols = lines
+        .iter()
         .map(|l| l.chars().count())
         .max()
         .unwrap_or(0)
         .clamp(80, 256) as u16;
     let mut parser = vt100::Parser::new(rows, cols, 0);
-    parser.process(body.as_bytes());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            parser.process(b"\r\n");
+        }
+        parser.process(line.as_bytes());
+    }
     snapshot_screen(&parser)
 }
 
