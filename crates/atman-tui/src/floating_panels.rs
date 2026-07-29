@@ -65,8 +65,10 @@ pub struct FloatingPanels {
     z_counter: u32,
 }
 
-const DEFAULT_PANEL_W: u16 = 80;
-const DEFAULT_PANEL_H: u16 = 24;
+// Content area is panel minus padding: width-8, height-5.
+// 88×29 panel → 80×24 content.
+const DEFAULT_PANEL_W: u16 = 88;
+const DEFAULT_PANEL_H: u16 = 29;
 
 impl FloatingPanels {
     pub fn open(&mut self, id: &str, kind: PanelKind, title: &str, canvas: Rect) {
