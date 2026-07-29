@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -272,7 +271,6 @@ impl TermEntry {
 
 #[derive(Default)]
 pub struct TermRegistry {
-    next_id: AtomicU64,
     entries: Mutex<HashMap<String, Arc<TermEntry>>>,
     task_registry: Option<crate::task_registry::TaskRegistry>,
 }
@@ -288,7 +286,7 @@ impl TermRegistry {
     }
 
     pub fn next_handle(&self, session_id: &str) -> TermHandle {
-        let local_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let local_id = uuid::Uuid::now_v7().as_u64_pair().0;
         TermHandle {
             session_id: session_id.to_string(),
             local_id,

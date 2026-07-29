@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -185,7 +184,6 @@ pub struct BgEntry {
 
 #[derive(Default)]
 pub struct BgRegistry {
-    next_id: AtomicU64,
     entries: Mutex<HashMap<String, Arc<BgEntry>>>,
     task_registry: Option<TaskRegistry>,
 }
@@ -215,7 +213,7 @@ impl BgRegistry {
         ctx: &ToolCtx,
     ) -> Result<Value, RuntimeError> {
         let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
-        let local_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let local_id = uuid::Uuid::now_v7().as_u64_pair().0;
         let handle = BgHandle {
             session_id: session_id.clone(),
             local_id,
