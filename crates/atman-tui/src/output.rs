@@ -512,20 +512,30 @@ pub fn render_item_with_regions(
         )
     } else {
         let lines = render_item(item, ctx);
-        let regions = if matches!(item, OutputItem::Terminal { .. } | OutputItem::Bash { .. })
-            && lines.len() >= 2
-        {
-            let panel_width = ctx.panel_width as usize;
-            vec![NodeRegion {
-                panel_item_index: 0,
-                path_key: TERMINAL_FULLSCREEN_KEY.to_string(),
-                start_row: 1,
-                end_row: 2,
-                col_start: panel_width.saturating_sub(6) as u16,
-                col_end: panel_width as u16,
-            }]
-        } else {
-            Vec::new()
+        let regions = match item {
+            OutputItem::Terminal { .. } if lines.len() >= 2 => {
+                let panel_width = ctx.panel_width as usize;
+                vec![NodeRegion {
+                    panel_item_index: 0,
+                    path_key: TERMINAL_FULLSCREEN_KEY.to_string(),
+                    start_row: 1,
+                    end_row: 2,
+                    col_start: panel_width.saturating_sub(6) as u16,
+                    col_end: panel_width as u16,
+                }]
+            }
+            OutputItem::Bash { .. } if lines.len() >= 2 => {
+                let panel_width = ctx.panel_width as usize;
+                vec![NodeRegion {
+                    panel_item_index: 0,
+                    path_key: BASH_FULLSCREEN_KEY.to_string(),
+                    start_row: 1,
+                    end_row: 2,
+                    col_start: panel_width.saturating_sub(6) as u16,
+                    col_end: panel_width as u16,
+                }]
+            }
+            _ => Vec::new(),
         };
         (lines, regions)
     }
@@ -2514,6 +2524,7 @@ fn collect_stats(nodes: &[atman_runtime::workflow::WorkflowNode], acc: &mut Work
 
 pub const COLLAPSED_CARD_FULLSCREEN_KEY: &str = "__collapsed_card_fullscreen__";
 pub const TERMINAL_FULLSCREEN_KEY: &str = "__terminal_fullscreen__";
+pub const BASH_FULLSCREEN_KEY: &str = "__bash_fullscreen__";
 
 fn collect_all_leaves(
     nodes: &[atman_runtime::workflow::WorkflowNode],
@@ -3637,11 +3648,23 @@ fn render_bash(
 
     let header_prefix = format!("  {glyph} {label} ");
     let header_used = crate::width::width(header_prefix.as_str());
-    let header_pad = target.saturating_sub(header_used);
+    let fs_btn = "⤢";
+    let fs_btn_used = crate::width::width(fs_btn);
+    let gap = 1;
+    let header_pad = target
+        .saturating_sub(header_used)
+        .saturating_sub(fs_btn_used)
+        .saturating_sub(gap * 2);
     let mut header_spans = vec![Span::styled(header_prefix, header_style)];
     if header_pad > 0 {
         header_spans.push(Span::styled(" ".repeat(header_pad), header_style));
     }
+    header_spans.push(Span::styled(" ".repeat(gap), header_style));
+    header_spans.push(Span::styled(
+        fs_btn.to_string(),
+        hint_style.add_modifier(Modifier::BOLD),
+    ));
+    header_spans.push(Span::styled(" ".repeat(gap), header_style));
     lines.push(Line::from(header_spans));
     lines.push(blank.clone());
 

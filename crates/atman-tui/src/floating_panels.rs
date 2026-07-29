@@ -67,9 +67,10 @@ pub struct FloatingPanels {
 
 impl FloatingPanels {
     pub fn open(&mut self, id: &str, kind: PanelKind, title: &str, canvas: Rect) {
-        self.open_with_size(id, kind, title, canvas, 48, 20);
+        self.open_with_size(id, kind, title, canvas, 48, 20, false);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn open_with_size(
         &mut self,
         id: &str,
@@ -78,28 +79,47 @@ impl FloatingPanels {
         canvas: Rect,
         w: u16,
         h: u16,
+        maximized: bool,
     ) {
-        if self.panels.iter().any(|p| p.id == id) {
+        if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
+            p.kind = kind;
+            p.title = title.to_string();
+            if !p.maximized && !maximized {
+                let w = w.min(canvas.width.saturating_sub(4));
+                let h = h.min(canvas.height.saturating_sub(4));
+                p.rect.width = w;
+                p.rect.height = h;
+            }
+            if maximized && !p.maximized {
+                p.prev_rect = Some(p.rect);
+                p.rect = maximized_rect(canvas);
+                p.maximized = true;
+            }
             self.focused = Some(id.to_string());
             self.bring_to_front(id);
             return;
         }
         self.z_counter += 1;
         let offset = (self.panels.len() as u16) * 3;
-        let w = w.min(canvas.width.saturating_sub(4));
-        let h = h.min(canvas.height.saturating_sub(4));
-        let panel = FloatingPanel {
-            id: id.to_string(),
-            kind,
-            title: title.to_string(),
-            rect: Rect {
+        let rect = if maximized {
+            maximized_rect(canvas)
+        } else {
+            let w = w.min(canvas.width.saturating_sub(4));
+            let h = h.min(canvas.height.saturating_sub(4));
+            Rect {
                 x: canvas.x + 2 + offset,
                 y: canvas.y + 1 + offset,
                 width: w,
                 height: h,
-            },
+            }
+        };
+        let panel = FloatingPanel {
+            id: id.to_string(),
+            kind,
+            title: title.to_string(),
+            rect,
             z: self.z_counter,
-            maximized: false,
+            maximized,
             prev_rect: None,
             scroll: 0,
             h_scroll: 0,
@@ -137,12 +157,7 @@ impl FloatingPanels {
                 p.maximized = false;
             } else {
                 p.prev_rect = Some(p.rect);
-                p.rect = Rect {
-                    x: canvas.x + 1,
-                    y: canvas.y + 1,
-                    width: canvas.width.saturating_sub(2),
-                    height: canvas.height.saturating_sub(2),
-                };
+                p.rect = maximized_rect(canvas);
                 p.maximized = true;
             }
             self.bring_to_front(id);
@@ -265,6 +280,15 @@ impl FloatingPanels {
     }
 }
 
+fn maximized_rect(canvas: Rect) -> Rect {
+    Rect {
+        x: canvas.x + 1,
+        y: canvas.y + 1,
+        width: canvas.width.saturating_sub(2),
+        height: canvas.height.saturating_sub(2),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
@@ -277,10 +301,19 @@ pub fn render(
     hovered_history_row: &Option<String>,
     animation_frame: u32,
     panel_close_armed: Option<(&str, bool)>,
+    max_canvas: Rect,
 ) -> FloatingPanelHitmap {
     let mut all_hitmap = FloatingPanelHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
     sorted.sort_by_key(|&i| panels.panels[i].z);
+
+    // Keep maximized panels in sync with the current canvas — window resizes
+    // must update their rect every frame, not just on toggle_maximize.
+    for panel in &mut panels.panels {
+        if panel.maximized {
+            panel.rect = maximized_rect(max_canvas);
+        }
+    }
 
     let t = crate::theme::theme();
     for &idx in &sorted {
@@ -820,31 +853,23 @@ fn render_panel_content(
             let snap = snapshots.iter().find(|s| s.source_handle == panel.id);
             match kind {
                 TaskKind::Bash => {
-                    let snap = match snap {
-                        Some(s) => s,
-                        None => {
-                            render_placeholder(f, area, &panel.title);
-                            return;
-                        }
-                    };
                     let item = items.iter().rev().find(|it| match it {
                         OutputItem::Bash { handle, .. } => *handle == panel.id,
                         _ => false,
                     });
                     if let Some(OutputItem::Bash { output, done, .. }) = item {
-                        render_bash_content(f, area, snap, output, *done);
-                    } else {
+                        if let Some(snap) = snap {
+                            render_bash_content(f, area, snap, output, *done);
+                        } else {
+                            render_bash_screen(f, area, &panel.title, output, *done);
+                        }
+                    } else if let Some(snap) = snap {
                         render_task_meta(f, area, kind, snap);
+                    } else {
+                        render_placeholder(f, area, &panel.title);
                     }
                 }
                 TaskKind::Terminal => {
-                    let snap = match snap {
-                        Some(s) => s,
-                        None => {
-                            render_placeholder(f, area, &panel.title);
-                            return;
-                        }
-                    };
                     let item = items.iter().rev().find(|it| match it {
                         OutputItem::Terminal { handle, .. } => *handle == panel.id,
                         _ => false,
@@ -856,9 +881,22 @@ fn render_panel_content(
                         ..
                     }) = item
                     {
-                        render_terminal_content(f, area, snap, screen, accumulated_bytes, *done);
-                    } else {
+                        if let Some(snap) = snap {
+                            render_terminal_content(
+                                f,
+                                area,
+                                snap,
+                                screen,
+                                accumulated_bytes,
+                                *done,
+                            );
+                        } else {
+                            render_terminal_screen(f, area, &panel.title, screen);
+                        }
+                    } else if let Some(snap) = snap {
                         render_task_meta(f, area, kind, snap);
+                    } else {
+                        render_placeholder(f, area, &panel.title);
                     }
                 }
                 _ => {
@@ -1237,6 +1275,97 @@ fn render_terminal_content(
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), body_area);
+}
+
+/// Render terminal screen without a TaskSnapshot (restored/historical data).
+fn render_terminal_screen(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    screen: &atman_runtime::tools::term::TerminalScreen,
+) {
+    let t = crate::theme::theme();
+    let header = Line::from(vec![
+        Span::styled(" ✓ ", Style::default().fg(t.success.into())),
+        Span::styled(title, Style::default().fg(t.tinted_fg.into())),
+    ]);
+    let header_area = Rect { height: 1, ..area };
+    f.render_widget(Paragraph::new(header), header_area);
+
+    let body_area = Rect {
+        y: area.y + 2,
+        height: area.height.saturating_sub(2),
+        ..area
+    };
+    if body_area.height == 0 || screen.cells.is_empty() {
+        return;
+    }
+
+    let cols = screen.cols as usize;
+    let total_rows = screen.rows as usize;
+    let max_rows = (body_area.height as usize).min(total_rows);
+    let start_row = total_rows.saturating_sub(max_rows);
+    let bg: Color = t.code_bg.into();
+    let mut lines: Vec<Line> = Vec::with_capacity(max_rows);
+    for row in start_row..total_rows {
+        let mut spans: Vec<Span> = Vec::with_capacity(cols);
+        for col in 0..cols {
+            let idx = row * cols + col;
+            if idx >= screen.cells.len() {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+            let cell = &screen.cells[idx];
+            if cell.wide_continuation {
+                continue;
+            }
+            let style = crate::output::cell_style_for_viewer(cell, bg);
+            let text = if cell.chars.is_empty() {
+                " ".to_string()
+            } else {
+                cell.chars.clone()
+            };
+            spans.push(Span::styled(text, style));
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), body_area);
+}
+
+/// Render bash output without a TaskSnapshot (restored/historical data).
+fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done: bool) {
+    let t = crate::theme::theme();
+    let icon = if done { "✓" } else { "◐" };
+    let icon_color = if done { t.success } else { t.accent };
+    let header = Line::from(vec![
+        Span::styled(format!(" {icon} "), Style::default().fg(icon_color.into())),
+        Span::styled(title, Style::default().fg(t.tinted_fg.into())),
+    ]);
+    let header_area = Rect { height: 1, ..area };
+    f.render_widget(Paragraph::new(header), header_area);
+
+    let body_area = Rect {
+        y: area.y + 2,
+        height: area.height.saturating_sub(2),
+        ..area
+    };
+    if body_area.height == 0 {
+        return;
+    }
+
+    let all_lines: Vec<&str> = output.lines().collect();
+    let max_visible = body_area.height as usize;
+    let start = all_lines.len().saturating_sub(max_visible);
+    let visible: Vec<Line> = all_lines[start..]
+        .iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                *l,
+                Style::default().fg(t.tinted_fg.into()).bg(t.code_bg.into()),
+            ))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(visible), body_area);
 }
 
 fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {

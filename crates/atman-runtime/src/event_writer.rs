@@ -284,6 +284,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::ToolPendingApproval { .. } => "tool_pending_approval",
         Event::ToolApproved { .. } => "tool_approved",
         Event::ToolDenied { .. } => "tool_denied",
+        Event::TerminalFinalState { .. } => "terminal_final_state",
     }
 }
 
@@ -365,7 +366,8 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         | Event::ContextCompact { .. }
         | Event::Checkpoint { .. }
         | Event::PendingPrompt { .. }
-        | Event::PromptResolved { .. } => (None, None),
+        | Event::PromptResolved { .. }
+        | Event::TerminalFinalState { .. } => (None, None),
     }
 }
 

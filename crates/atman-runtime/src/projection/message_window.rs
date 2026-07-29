@@ -82,6 +82,10 @@ pub enum TranscriptEntry {
         node_id: Option<String>,
         ts: Option<chrono::DateTime<chrono::Utc>>,
     },
+    TerminalFinalState {
+        handle: String,
+        screen: crate::tools::term::TerminalScreen,
+    },
 }
 
 pub fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
@@ -389,6 +393,15 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                     node_id,
                     ts,
                 });
+            }
+            "terminal_final_state" => {
+                let handle = v["handle"].as_str().unwrap_or("").to_string();
+                if let Some(screen) = v.get("screen")
+                    && let Ok(screen) =
+                        serde_json::from_value::<crate::tools::term::TerminalScreen>(screen.clone())
+                {
+                    out.push(TranscriptEntry::TerminalFinalState { handle, screen });
+                }
             }
             _ => {}
         }

@@ -290,6 +290,21 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     *ts,
                 );
             }
+            TranscriptEntry::TerminalFinalState { handle, screen } => {
+                // Overwrite the Terminal item's screen with the final state.
+                for item in out.iter_mut() {
+                    if let OutputItem::Terminal {
+                        handle: h,
+                        screen: s,
+                        ..
+                    } = item
+                    {
+                        if h == handle {
+                            *s = screen.clone();
+                        }
+                    }
+                }
+            }
         }
     }
     // A restored session cannot have a flow still running.
@@ -300,7 +315,29 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             }
         }
     }
+    dedup_by_handle(&mut out);
     out
+}
+
+/// Remove earlier Terminal/Bash items that share a handle with a later one.
+fn dedup_by_handle(out: &mut Vec<OutputItem>) {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut i = 0;
+    while i < out.len() {
+        if let Some(h) = out[i].handle() {
+            if let Some(&prev) = seen.get(h) {
+                out.remove(prev);
+                seen.iter_mut().for_each(|(_, idx)| {
+                    if *idx > prev {
+                        *idx -= 1;
+                    }
+                });
+                continue;
+            }
+            seen.insert(h.to_string(), i);
+        }
+        i += 1;
+    }
 }
 
 fn apply_message_to_workflow(graph: &mut WorkflowGraph, msg: &Message, flow_run_id: Option<&str>) {
@@ -392,29 +429,56 @@ fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<O
             expanded: false,
         })
     } else if tool_name.starts_with("term.") || tool_name == "terminal" {
-        use atman_runtime::tools::term::{TerminalCell, TerminalScreen};
-        let output = parsed
-            .get("output")
-            .and_then(|v| v.as_str())
-            .unwrap_or(content);
+        use atman_runtime::tools::term::{
+            DEFAULT_COLS, DEFAULT_ROWS, TerminalCell, TerminalScreen,
+        };
         let handle = parsed
             .get("handle")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let bytes = output.as_bytes().to_vec();
-        let rows = output.lines().count().max(1) as u16;
+        let rows = parsed
+            .get("rows")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as u16)
+            .unwrap_or(DEFAULT_ROWS);
+        let cols = parsed
+            .get("cols")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as u16)
+            .unwrap_or(DEFAULT_COLS);
+        let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Fill cells with plain text (no ANSI parsing, no colors).
+        // TerminalFinalState events will overwrite this with the full cell grid.
+        let mut cells = vec![TerminalCell::default(); (rows as usize) * (cols as usize)];
+        for (row, line) in text.lines().enumerate() {
+            if row >= rows as usize {
+                break;
+            }
+            let row_start = row * cols as usize;
+            for (col, ch) in line.chars().enumerate() {
+                if col >= cols as usize {
+                    break;
+                }
+                cells[row_start + col] = TerminalCell {
+                    chars: ch.to_string(),
+                    ..Default::default()
+                };
+            }
+        }
+
         Some(OutputItem::Terminal {
             handle,
             screen: TerminalScreen {
                 rows,
-                cols: 80,
-                cells: vec![TerminalCell::default(); (rows as usize) * 80],
+                cols,
+                cells,
                 cursor: None,
                 alt_screen: false,
             },
-            accumulated_bytes: bytes,
-            mode: crate::app::TerminalViewMode::Stream,
+            accumulated_bytes: text.as_bytes().to_vec(),
+            mode: crate::app::TerminalViewMode::Capture,
             done: true,
             expanded: false,
             scroll_offset: None,
@@ -471,6 +535,7 @@ pub fn flatten_messages(messages: &[Message]) -> Vec<OutputItem> {
     for msg in messages {
         flatten_message(msg, &mut out, &tool_map);
     }
+    dedup_by_handle(&mut out);
     out
 }
 

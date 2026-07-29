@@ -11,8 +11,8 @@ use tokio::task::JoinHandle;
 
 use crate::error::RuntimeError;
 
-const DEFAULT_ROWS: u16 = 24;
-const DEFAULT_COLS: u16 = 80;
+pub const DEFAULT_ROWS: u16 = 24;
+pub const DEFAULT_COLS: u16 = 80;
 const STREAM_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -371,6 +371,7 @@ impl TermRegistry {
         tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
         label: String,
         cancel: tokio_util::sync::CancellationToken,
+        events: Option<crate::event::EventSink>,
     ) -> Result<(TermHandle, Arc<TermEntry>), RuntimeError> {
         let handle = self.next_handle(&session_id);
         let handle_str = handle.to_string();
@@ -448,6 +449,7 @@ impl TermRegistry {
                 handle_for_loop,
                 task_registry,
                 task_id,
+                events,
             );
         });
         *entry.reader_task.lock().expect("reader_task poisoned") = Some(join);
@@ -474,6 +476,7 @@ fn run_reader_loop(
     handle: String,
     task_registry: Option<crate::task_registry::TaskRegistry>,
     task_id: Option<crate::task_registry::TaskId>,
+    events_sink: Option<crate::event::EventSink>,
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
     let mut last_screen: Option<TerminalScreen> = None;
@@ -518,11 +521,32 @@ fn run_reader_loop(
     let exit_code = None;
     {
         let mut s = state.lock().expect("state poisoned");
-        *s = TermState::Exited {
-            exit_code,
-            ended_at: now_ms(),
-        };
+        // Only transition to Exited if not already Killed — term.kill sets
+        // Killed before the reader loop observes the closed PTY.
+        if matches!(*s, TermState::Running { .. }) {
+            *s = TermState::Exited {
+                exit_code,
+                ended_at: now_ms(),
+            };
+        }
     }
+
+    // Persist the last screen state before notifying exit — restore reads this
+    // to recover the full cell grid (with colors) that stream frames never wrote.
+    if let Some(sink) = &events_sink {
+        let (final_screen, final_state) = {
+            let p = parser.lock().expect("parser poisoned");
+            let screen = snapshot_screen(&p);
+            let st = state.lock().expect("state poisoned").to_snapshot();
+            (screen, st)
+        };
+        sink.emit(crate::event::Event::TerminalFinalState {
+            handle: handle.clone(),
+            screen: final_screen,
+            state: final_state,
+        });
+    }
+
     let _ = stream_tx.send(TermStreamEvent::Exited { exit_code });
     if let Some(tx) = &tui_stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::TerminalExited { handle, exit_code });
@@ -721,6 +745,7 @@ async fn spawn_impl(
             let tc = ctx.cancel.clone();
             tc.child_token()
         },
+        ctx.events.clone(),
     )?;
 
     let state = entry.current_state();

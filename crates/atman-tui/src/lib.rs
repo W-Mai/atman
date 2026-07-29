@@ -744,6 +744,7 @@ async fn run_frames(
                                             canvas,
                                             pw,
                                             ph,
+                                            false,
                                         );
                                     } else if let Some((run_id, node_id, _)) = hm
                                         .activity_rects
@@ -798,15 +799,24 @@ async fn run_frames(
                                     if node_id
                                         == crate::output::COLLAPSED_CARD_FULLSCREEN_KEY
                                     {
-                                        if let Some(handle) = app.workflow_panel_task_handle(panel_idx) {
-                                            let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.open_task_panel(&handle, canvas);
+                                        if let Some(handle) =
+                                            app.workflow_panel_task_handle(panel_idx)
+                                        {
+                                            app.open_task_panel_maximized(&handle);
                                         }
                                     } else if node_id
                                         == crate::output::TERMINAL_FULLSCREEN_KEY
                                     {
                                         if let Some(handle) = app.terminal_item_handle(panel_idx) {
-                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            let canvas =
+                                                app.last_transcript_rect.unwrap_or_default();
+                                            app.open_task_panel(&handle, canvas);
+                                        }
+                                    } else if node_id == crate::output::BASH_FULLSCREEN_KEY
+                                    {
+                                        if let Some(handle) = app.bash_item_handle(panel_idx) {
+                                            let canvas =
+                                                app.last_transcript_rect.unwrap_or_default();
                                             app.open_task_panel(&handle, canvas);
                                         }
                                     } else if node_id.is_empty() {
@@ -825,32 +835,21 @@ async fn run_frames(
                                 {
                                     if me.modifiers.contains(KeyModifiers::SHIFT) {
                                         if let Some(handle) = app.workflow_panel_task_handle(idx) {
-                                            let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.open_task_panel(&handle, canvas);
+                                            app.open_task_panel_maximized(&handle);
                                         }
                                     } else {
                                         app.toggle_workflow_panel_expansion(idx);
                                     }
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(crate::app::OutputItem::Terminal { .. }) =
+                                        app.items.get(idx)
                                 {
-                                    let handle = app.items.get(idx).and_then(|it| match it {
-                                        crate::app::OutputItem::Terminal { handle, .. } => Some(handle.clone()),
-                                        _ => None,
-                                    });
-                                    if let Some(handle) = handle {
-                                        let canvas = app.last_transcript_rect.unwrap_or_default();
-                                        app.open_task_panel(&handle, canvas);
-                                    }
+                                    app.toggle_terminal_expand(idx);
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(crate::app::OutputItem::Bash { .. }) =
+                                        app.items.get(idx)
                                 {
-                                    let handle = app.items.get(idx).and_then(|it| match it {
-                                        crate::app::OutputItem::Bash { handle, .. } => Some(handle.clone()),
-                                        _ => None,
-                                    });
-                                    if let Some(handle) = handle {
-                                        let canvas = app.last_transcript_rect.unwrap_or_default();
-                                        app.open_task_panel(&handle, canvas);
-                                    }
+                                    app.toggle_bash_expand(idx);
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::DiffPreview { .. }) =
                                         app.items.get(idx)
@@ -3138,6 +3137,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             .panel_close_armed_id
             .clone()
             .zip(Some(app.panel_close_arm_expired()));
+        let max_canvas = app.maximized_canvas();
         app.last_floating_hitmap = crate::floating_panels::render(
             f,
             l.transcript,
@@ -3149,6 +3149,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             &app.hovered_history_row,
             app.animation_frame,
             close_armed.as_ref().map(|(id, exp)| (id.as_str(), *exp)),
+            max_canvas,
         );
     } else {
         app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();

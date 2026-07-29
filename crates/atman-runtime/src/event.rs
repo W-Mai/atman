@@ -261,6 +261,14 @@ pub enum Event {
         tool_use_id: String,
         reason: String,
     },
+    /// Persisted when a terminal's reader loop exits (normal exit or kill).
+    /// Carries the last screen state so TUI restore can show it instead of
+    /// the empty placeholder from the spawn-time ToolResultMsg.
+    TerminalFinalState {
+        handle: String,
+        screen: crate::tools::term::TerminalScreen,
+        state: crate::tools::term::TermStateSnapshot,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

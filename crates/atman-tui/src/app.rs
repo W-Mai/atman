@@ -293,30 +293,76 @@ impl AppState {
     }
 
     pub fn open_task_panel(&mut self, handle: &str, canvas: ratatui::layout::Rect) {
+        self.open_task_panel_impl(handle, canvas, false);
+    }
+
+    pub fn open_task_panel_maximized(&mut self, handle: &str) {
+        let canvas = self.maximized_canvas();
+        self.open_task_panel_impl(handle, canvas, true);
+    }
+
+    fn open_task_panel_impl(
+        &mut self,
+        handle: &str,
+        canvas: ratatui::layout::Rect,
+        maximized: bool,
+    ) {
+        let item = self
+            .items
+            .iter()
+            .rev()
+            .find(|it| it.handle() == Some(handle));
         let snap = self
             .task_snapshots
             .iter()
             .find(|s| s.source_handle == handle)
             .cloned();
-        let (kind, label, pw, ph) = if let Some(ref snap) = snap {
-            let (pw, ph) = if let Some((sw, sh)) = self.panel_sizes.get(handle) {
-                (*sw, *sh)
-            } else if snap.kind == atman_runtime::TaskKind::Terminal {
-                let item = self.items.iter().rev().find(|it| {
-                    matches!(it, crate::app::OutputItem::Terminal { handle: h, .. } if *h == snap.source_handle)
-                });
-                if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
-                    (screen.cols + 8, screen.rows + 5)
-                } else {
-                    (48, 20)
+
+        let (kind, label, pw, ph) = if let Some(item) = item {
+            match item {
+                OutputItem::Terminal {
+                    handle: h, screen, ..
+                } => {
+                    let (pw, ph) = (screen.cols + 8, screen.rows + 5);
+                    let label = snap
+                        .as_ref()
+                        .map(|s| s.label.clone())
+                        .unwrap_or_else(|| h.clone());
+                    (atman_runtime::TaskKind::Terminal, label, pw, ph)
                 }
-            } else {
-                (48, 20)
-            };
-            (snap.kind, snap.label.clone(), pw, ph)
+                OutputItem::Bash { handle: h, .. } => {
+                    let (pw, ph) = self.panel_sizes.get(h).copied().unwrap_or((48, 20));
+                    let label = snap
+                        .as_ref()
+                        .map(|s| s.label.clone())
+                        .unwrap_or_else(|| h.clone());
+                    (atman_runtime::TaskKind::Bash, label, pw, ph)
+                }
+                OutputItem::WorkflowPanel { .. } => {
+                    let kind = snap
+                        .as_ref()
+                        .map(|s| s.kind)
+                        .unwrap_or(atman_runtime::TaskKind::Flow);
+                    let label = snap
+                        .as_ref()
+                        .map(|s| s.label.clone())
+                        .unwrap_or_else(|| handle.to_string());
+                    (kind, label, 48, 20)
+                }
+                _ => unreachable!("handle() only returns Some for Terminal/Bash"),
+            }
         } else {
-            (atman_runtime::TaskKind::Flow, handle.to_string(), 48, 20)
+            let kind = snap
+                .as_ref()
+                .map(|s| s.kind)
+                .unwrap_or(atman_runtime::TaskKind::Flow);
+            let label = snap
+                .as_ref()
+                .map(|s| s.label.clone())
+                .unwrap_or_else(|| handle.to_string());
+            (kind, label, 48, 20)
         };
+
         self.floating_panels.open_with_size(
             handle,
             crate::floating_panels::PanelKind::Task(kind),
@@ -324,6 +370,7 @@ impl AppState {
             canvas,
             pw,
             ph,
+            maximized,
         );
     }
 
@@ -388,6 +435,14 @@ impl AppState {
     pub fn terminal_item_handle(&self, idx: usize) -> Option<String> {
         let item = self.items.get(idx)?;
         if let crate::app::OutputItem::Terminal { handle, .. } = item {
+            return Some(handle.clone());
+        }
+        None
+    }
+
+    pub fn bash_item_handle(&self, idx: usize) -> Option<String> {
+        let item = self.items.get(idx)?;
+        if let crate::app::OutputItem::Bash { handle, .. } = item {
             return Some(handle.clone());
         }
         None
