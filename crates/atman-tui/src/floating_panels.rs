@@ -123,7 +123,11 @@ impl FloatingPanels {
                 height: h,
             }
         };
-        let prev_rect = if maximized { Some(default_rect(canvas)) } else { None };
+        let prev_rect = if maximized {
+            Some(default_rect(canvas))
+        } else {
+            None
+        };
         let panel = FloatingPanel {
             id: id.to_string(),
             kind,
@@ -292,7 +296,12 @@ fn maximized_rect(canvas: Rect) -> Rect {
     let h = canvas.height.saturating_sub(4);
     let x = canvas.x + 4;
     let y = canvas.y + 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 fn default_rect(canvas: Rect) -> Rect {
@@ -300,7 +309,12 @@ fn default_rect(canvas: Rect) -> Rect {
     let h = DEFAULT_PANEL_H.min(canvas.height.saturating_sub(4));
     let x = canvas.x + (canvas.width.saturating_sub(w)) / 2;
     let y = canvas.y + (canvas.height.saturating_sub(h)) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

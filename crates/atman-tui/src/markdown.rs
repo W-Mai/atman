@@ -11,6 +11,7 @@ pub fn render_markdown_with_width(md: &str, rule_width: u16) -> Vec<Line<'static
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
+    opts.insert(Options::ENABLE_MATH);
     let parser = Parser::new_ext(md, opts);
     let mut renderer = Renderer::with_rule_width(rule_width);
     for ev in parser {
@@ -283,6 +284,27 @@ impl Renderer {
                 self.current_width += crate::width::width(mark);
                 self.fresh_line = false;
             }
+            Event::InlineMath(tex) | Event::DisplayMath(tex) => {
+                self.end_line();
+                self.blank_line();
+                let math_lines = crate::highlight::render_math(&tex);
+                let target = self.rule_width as usize;
+                let math_style = Style::default().fg(t.tinted_fg.into());
+                for ml in &math_lines {
+                    let w = crate::width::spans_width(&ml.spans);
+                    let pad = target.saturating_sub(w) / 2;
+                    let mut spans: Vec<Span<'static>> = Vec::new();
+                    if pad > 0 {
+                        spans.push(Span::raw(" ".repeat(pad)));
+                    }
+                    for s in &ml.spans {
+                        spans.push(Span::styled(s.content.clone(), s.style.patch(math_style)));
+                    }
+                    self.lines.push(Line::from(spans));
+                }
+                self.blank_line();
+                self.fresh_line = true;
+            }
             _ => {}
         }
     }
@@ -546,6 +568,14 @@ impl Renderer {
         self.lines.push(blank_bg_line(target, bg));
         let highlighted = if lang == "ansi" || lang == "terminal" {
             crate::highlight::highlight_ansi(body)
+        } else if lang == "mermaid" {
+            let mermaid_lines = crate::mermaid::render_mermaid(body, self.rule_width);
+            for ml in &mermaid_lines {
+                self.lines.push(ml.clone());
+            }
+            self.blank_line();
+            self.fresh_line = true;
+            return;
         } else {
             crate::highlight::highlight_code(lang, body)
         };

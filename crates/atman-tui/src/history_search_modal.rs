@@ -161,6 +161,7 @@ impl HistorySearchModal {
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal) {
+    let t = crate::theme::theme();
     let w = area.width.saturating_sub(4).clamp(70, 140);
     let h = area.height.saturating_sub(4).clamp(20, 42);
     let x = area.x + area.width.saturating_sub(w) / 2;
@@ -173,24 +174,48 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal
     };
     crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
-    let title = format!(
-        " Search History · {} · Enter=search · ↑↓/jk=navigate · Tab=scope · Esc=close ",
-        modal.scope.label()
-    );
+    let scope_color = match modal.scope {
+        HistorySearchScope::Session => t.accent,
+        HistorySearchScope::Project => t.warn,
+    };
+    let title = Line::from(vec![
+        Span::styled(
+            " Search History · ",
+            Style::default()
+                .fg(t.accent.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            modal.scope.label(),
+            Style::default()
+                .fg(scope_color.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default().fg(t.accent.into())),
+    ]);
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().accent.into()))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(crate::theme::theme().accent.into())
-                .add_modifier(Modifier::BOLD),
-        ));
+        .border_style(Style::default().fg(t.accent.into()))
+        .title(title);
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
-    if inner.height < 6 {
+    if inner.height < 8 {
         return;
     }
+    let help_h = 1u16;
+    let content_h = inner.height.saturating_sub(help_h);
+    let content_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: content_h,
+    };
+    let help_area = Rect {
+        x: inner.x,
+        y: inner.y + content_h,
+        width: inner.width,
+        height: help_h,
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -198,12 +223,44 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal
             Constraint::Min(6),
             Constraint::Min(8),
         ])
-        .split(inner);
+        .split(content_area);
     render_query_row(f, rows[0], modal);
     render_results_row(f, rows[1], modal);
     render_preview_row(f, rows[2], modal);
     modal.results_rect = Some(rows[1]);
     modal.preview_rect = Some(rows[2]);
+    render_help_bar(f, help_area);
+}
+
+fn render_help_bar(f: &mut ratatui::Frame, area: Rect) {
+    let t = crate::theme::theme();
+    let hints = [
+        ("Enter", "search"),
+        ("↑↓/jk", "navigate"),
+        ("Tab", "scope"),
+        ("Esc", "close"),
+        ("regex", "/pattern/"),
+    ];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default().fg(t.subtle_fg.into())));
+        }
+        spans.push(Span::styled(
+            *key,
+            Style::default()
+                .fg(t.tinted_fg.into())
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {desc}"),
+            Style::default().fg(t.subtle_fg.into()),
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(t.code_bg.into())),
+        area,
+    );
 }
 
 fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
@@ -238,18 +295,55 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
         return;
     }
     if modal.results.is_empty() {
-        let hint = if modal.last_query.is_empty() {
-            "type a query and press Enter to search"
+        let t = crate::theme::theme();
+        let lines = if modal.last_query.is_empty() {
+            vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Search across session or project history.",
+                    Style::default().fg(t.subtle_fg.into()),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("  try:  ", Style::default().fg(t.subtle_fg.into())),
+                    Span::styled("error", Style::default().fg(t.tinted_fg.into())),
+                    Span::styled(
+                        "           full-text search",
+                        Style::default().fg(t.subtle_fg.into()),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("        ", Style::default().fg(t.subtle_fg.into())),
+                    Span::styled("role:user", Style::default().fg(t.tinted_fg.into())),
+                    Span::styled(
+                        "        filter by role",
+                        Style::default().fg(t.subtle_fg.into()),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("        ", Style::default().fg(t.subtle_fg.into())),
+                    Span::styled("/regex/", Style::default().fg(t.tinted_fg.into())),
+                    Span::styled(
+                        "          regex match",
+                        Style::default().fg(t.subtle_fg.into()),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("        ", Style::default().fg(t.subtle_fg.into())),
+                    Span::styled("Tab", Style::default().fg(t.tinted_fg.into())),
+                    Span::styled(
+                        "              toggle scope",
+                        Style::default().fg(t.subtle_fg.into()),
+                    ),
+                ]),
+            ]
         } else {
-            "no matches"
+            vec![Line::from(Span::styled(
+                "no matches",
+                Style::default().fg(t.subtle_fg.into()),
+            ))]
         };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                hint,
-                Style::default().fg(crate::theme::theme().subtle_fg.into()),
-            ))),
-            inner,
-        );
+        f.render_widget(Paragraph::new(lines), inner);
         return;
     }
     let items: Vec<ListItem<'static>> = modal

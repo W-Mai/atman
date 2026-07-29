@@ -29,6 +29,7 @@ pub mod input;
 pub mod keys;
 pub mod layout;
 pub mod markdown;
+pub mod mermaid;
 pub mod output;
 pub mod palette;
 pub mod prompt_resolver;

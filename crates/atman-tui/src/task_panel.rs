@@ -149,12 +149,16 @@ pub fn render(
     let title_line = Line::from(vec![
         Span::styled(
             "  ≡",
-            Style::default().fg(hamburger_fg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(hamburger_fg)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
             "Tasks",
-            Style::default().fg(hamburger_fg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(hamburger_fg)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -905,16 +909,15 @@ fn render_strip(
         t.heading.into()
     };
     f.render_widget(
-        Block::default()
-            .style(Style::default().bg(panel_bg))
-            .title(
-                Line::from(vec![Span::styled(
-                    "≡",
-                    Style::default().fg(hamburger_fg)
-                        .add_modifier(Modifier::BOLD),
-                )])
-                .alignment(Alignment::Center),
-            ),
+        Block::default().style(Style::default().bg(panel_bg)).title(
+            Line::from(vec![Span::styled(
+                "≡",
+                Style::default()
+                    .fg(hamburger_fg)
+                    .add_modifier(Modifier::BOLD),
+            )])
+            .alignment(Alignment::Center),
+        ),
         Rect {
             x: area.x,
             y: area.y + 1,

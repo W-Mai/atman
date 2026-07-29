@@ -333,6 +333,13 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
         kv("Ctrl+P", "command palette"),
         kv("Ctrl+K", "search history"),
         Line::from(""),
+        Line::from(section("Search History (Ctrl+K)")),
+        kv("Enter", "search"),
+        kv("↑↓ / j k", "navigate results"),
+        kv("Tab", "toggle scope (session / project)"),
+        kv("Esc", "close"),
+        kv("/pattern/", "regex match"),
+        Line::from(""),
         Line::from(section("Meta Commands")),
     ];
     for cmd in atman_runtime::meta_commands::META_COMMANDS {

@@ -106,6 +106,20 @@ pub fn highlight_ansi(body: &str) -> Vec<Line<'static>> {
     out
 }
 
+pub fn render_math(tex: &str) -> Vec<Line<'static>> {
+    match txm::render(tex) {
+        Ok(ansi_string) => {
+            let lines = highlight_ansi(&ansi_string);
+            if lines.is_empty() {
+                vec![Line::raw(tex.to_string())]
+            } else {
+                lines
+            }
+        }
+        Err(_) => vec![Line::raw(tex.to_string())],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
