@@ -55,6 +55,40 @@ fn to_ratatui(s: SynStyle) -> Style {
     Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b))
 }
 
+/// Render a string containing ANSI escape sequences into colored [Line]s,
+/// reusing the vt100 parser + terminal cell pipeline.
+///
+/// Returns the same `Vec<Line<'static>>` shape as [highlight_code] so the
+/// markdown renderer can treat both uniformly.
+pub fn highlight_ansi(body: &str) -> Vec<Line<'static>> {
+    let screen = atman_runtime::tools::term::parse_ansi_to_screen(body);
+    let bg: Color = crate::theme::theme().code_bg.into();
+    let cols = screen.cols as usize;
+    let mut out = Vec::with_capacity(screen.rows as usize);
+    for row in 0..screen.rows as usize {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(cols);
+        for col in 0..cols {
+            let idx = row * cols + col;
+            if idx >= screen.cells.len() {
+                break;
+            }
+            let cell = &screen.cells[idx];
+            if cell.wide_continuation {
+                continue;
+            }
+            let style = crate::output::cell_style_for_viewer(cell, bg);
+            let text = if cell.chars.is_empty() {
+                " ".to_string()
+            } else {
+                cell.chars.clone()
+            };
+            spans.push(Span::styled(text, style));
+        }
+        out.push(Line::from(spans));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +124,46 @@ mod tests {
     #[test]
     fn empty_body_returns_empty() {
         assert!(highlight_code("rust", "").is_empty());
+    }
+
+    #[test]
+    fn ansi_produces_colored_spans() {
+        let lines = highlight_ansi("\x1b[31mred\x1b[0m");
+        assert_eq!(lines.len(), 1);
+        let has_red = lines[0].spans.iter().any(|s| {
+            matches!(
+                s.style.fg,
+                Some(Color::Indexed(1)) | Some(Color::Rgb(190, 65, 65))
+            )
+        });
+        assert!(has_red, "want a red fg span, got {:?}", lines[0].spans);
+    }
+
+    #[test]
+    fn ansi_multiline_body_produces_correct_line_count() {
+        let body = "\x1b[31merr\x1b[0m\n\x1b[32mok\x1b[0m\n";
+        let lines = highlight_ansi(body);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn ansi_wide_chars_no_trailing_spaces() {
+        // CJK wide char should not produce a trailing space after it
+        // (wide_continuation cell is skipped, not rendered as space)
+        let lines = highlight_ansi("中文");
+        assert_eq!(lines.len(), 1);
+        // The line should contain the two CJK chars without a phantom space
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.trim(), "中文");
+    }
+
+    #[test]
+    fn ansi_plain_text_renders_without_codes() {
+        // No escape codes — should render as plain text, no literal \x1b
+        let lines = highlight_ansi("hello world");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.trim(), "hello world");
+        assert!(!text.contains('\x1b'));
     }
 }

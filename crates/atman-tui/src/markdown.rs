@@ -553,7 +553,11 @@ impl Renderer {
         let header = format!("╭─ {lang_label} ─");
         self.lines.push(bg_padded_line(&header, gutter, target, bg));
         self.lines.push(blank_bg_line(target, bg));
-        let highlighted = crate::highlight::highlight_code(lang, body);
+        let highlighted = if lang == "ansi" || lang == "terminal" {
+            crate::highlight::highlight_ansi(body)
+        } else {
+            crate::highlight::highlight_code(lang, body)
+        };
         let width = digits_for(highlighted.len());
         for (i, hl) in highlighted.into_iter().enumerate() {
             let lineno = format!("{:>width$}  ", i + 1);

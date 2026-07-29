@@ -183,6 +183,23 @@ pub fn snapshot_screen(parser: &vt100::Parser) -> TerminalScreen {
     }
 }
 
+/// Parse a string containing ANSI escape sequences into a [TerminalScreen].
+///
+/// Used by the TUI to render ` ```ansi ` code blocks with real colors.
+/// cols is sized to the widest line (clamped 80..=256) so nothing wraps.
+pub fn parse_ansi_to_screen(body: &str) -> TerminalScreen {
+    let rows = body.lines().count().max(1) as u16;
+    let cols = body
+        .lines()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(80, 256) as u16;
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(body.as_bytes());
+    snapshot_screen(&parser)
+}
+
 #[derive(Debug, Clone)]
 pub enum TermStreamEvent {
     Chunk {
