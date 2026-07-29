@@ -427,10 +427,13 @@ fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<O
             .and_then(|v| v.as_str())
             .map(String::from)
             .or_else(|| {
-                parsed
-                    .get("log_path")
-                    .and_then(|v| v.as_str())
-                    .and_then(|p| std::fs::read_to_string(p).ok())
+                parsed.get("log_path").and_then(|v| v.as_str()).map(|p| {
+                    if std::path::Path::new(p).exists() {
+                        std::fs::read_to_string(p).unwrap_or_default()
+                    } else {
+                        format!("[log file removed: {p}]\n\n{content}")
+                    }
+                })
             })
             .unwrap_or_default();
         Some(OutputItem::Bash {
@@ -848,6 +851,56 @@ mod tests {
         });
         assert_eq!(bash.as_deref(), Some("line1\nline2\n"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flatten_transcript_bash_log_missing_falls_back_to_json() {
+        let tool_use_id = "call_00_bash3";
+        let fake_path = "/tmp/atman_nonexistent_bg_test.log";
+        let content = format!(
+            r#"{{"handle":"bg_test2","status":"running","pid":123,"log_path":"{}"}}"#,
+            fake_path
+        );
+        let entries = vec![
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Assistant,
+                    parts: vec![MessagePart::ToolUse {
+                        id: tool_use_id.into(),
+                        name: "bash.spawn".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    turn_id: TurnId::now(),
+                },
+                flow_run_id: None,
+            },
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Tool,
+                    parts: vec![MessagePart::ToolResult {
+                        tool_use_id: tool_use_id.into(),
+                        content,
+                        is_error: false,
+                    }],
+                    turn_id: TurnId::now(),
+                },
+                flow_run_id: None,
+            },
+        ];
+        let out = flatten_transcript(&entries);
+        let bash = out.iter().find_map(|it| match it {
+            OutputItem::Bash { output, .. } => Some(output.clone()),
+            _ => None,
+        });
+        let bash = bash.expect("bash item should exist");
+        assert!(
+            bash.contains("[log file removed:"),
+            "should show log removed notice: {bash}"
+        );
+        assert!(
+            bash.contains("\"handle\":\"bg_test2\""),
+            "should include original JSON: {bash}"
+        );
     }
 
     #[test]
