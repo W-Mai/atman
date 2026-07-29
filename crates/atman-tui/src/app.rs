@@ -293,32 +293,34 @@ impl AppState {
     }
 
     pub fn open_task_panel(&mut self, handle: &str, canvas: ratatui::layout::Rect) {
-        let snap = match self
+        let snap = self
             .task_snapshots
             .iter()
             .find(|s| s.source_handle == handle)
-        {
-            Some(s) => s,
-            None => return,
-        };
-        let (pw, ph) = if let Some((sw, sh)) = self.panel_sizes.get(handle) {
-            (*sw, *sh)
-        } else if snap.kind == atman_runtime::TaskKind::Terminal {
-            let item = self.items.iter().rev().find(|it| {
-                matches!(it, crate::app::OutputItem::Terminal { handle: h, .. } if *h == snap.source_handle)
-            });
-            if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
-                (screen.cols + 8, screen.rows + 5)
+            .cloned();
+        let (kind, label, pw, ph) = if let Some(ref snap) = snap {
+            let (pw, ph) = if let Some((sw, sh)) = self.panel_sizes.get(handle) {
+                (*sw, *sh)
+            } else if snap.kind == atman_runtime::TaskKind::Terminal {
+                let item = self.items.iter().rev().find(|it| {
+                    matches!(it, crate::app::OutputItem::Terminal { handle: h, .. } if *h == snap.source_handle)
+                });
+                if let Some(crate::app::OutputItem::Terminal { screen, .. }) = item {
+                    (screen.cols + 8, screen.rows + 5)
+                } else {
+                    (48, 20)
+                }
             } else {
                 (48, 20)
-            }
+            };
+            (snap.kind, snap.label.clone(), pw, ph)
         } else {
-            (48, 20)
+            (atman_runtime::TaskKind::Flow, handle.to_string(), 48, 20)
         };
         self.floating_panels.open_with_size(
-            &snap.source_handle,
-            crate::floating_panels::PanelKind::Task(snap.kind),
-            &snap.label,
+            handle,
+            crate::floating_panels::PanelKind::Task(kind),
+            &label,
             canvas,
             pw,
             ph,
