@@ -123,6 +123,7 @@ impl FloatingPanels {
                 height: h,
             }
         };
+        let prev_rect = if maximized { Some(default_rect(canvas)) } else { None };
         let panel = FloatingPanel {
             id: id.to_string(),
             kind,
@@ -130,7 +131,7 @@ impl FloatingPanels {
             rect,
             z: self.z_counter,
             maximized,
-            prev_rect: None,
+            prev_rect,
             scroll: 0,
             h_scroll: 0,
         };
@@ -161,9 +162,7 @@ impl FloatingPanels {
     pub fn toggle_maximize(&mut self, id: &str, canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
             if p.maximized {
-                if let Some(prev) = p.prev_rect.take() {
-                    p.rect = prev;
-                }
+                p.rect = p.prev_rect.take().unwrap_or_else(|| default_rect(canvas));
                 p.maximized = false;
             } else {
                 p.prev_rect = Some(p.rect);
@@ -188,12 +187,10 @@ impl FloatingPanels {
         }
     }
 
-    pub fn unmaximize(&mut self, id: &str) {
+    pub fn unmaximize(&mut self, id: &str, canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
             if p.maximized {
-                if let Some(prev) = p.prev_rect.take() {
-                    p.rect = prev;
-                }
+                p.rect = p.prev_rect.take().unwrap_or_else(|| default_rect(canvas));
                 p.maximized = false;
             }
         }
@@ -297,6 +294,14 @@ fn maximized_rect(canvas: Rect) -> Rect {
         width: canvas.width.saturating_sub(2),
         height: canvas.height.saturating_sub(2),
     }
+}
+
+fn default_rect(canvas: Rect) -> Rect {
+    let w = DEFAULT_PANEL_W.min(canvas.width.saturating_sub(4));
+    let h = DEFAULT_PANEL_H.min(canvas.height.saturating_sub(4));
+    let x = canvas.x + (canvas.width.saturating_sub(w)) / 2;
+    let y = canvas.y + (canvas.height.saturating_sub(h)) / 2;
+    Rect { x, y, width: w, height: h }
 }
 
 #[allow(clippy::too_many_arguments)]
