@@ -219,7 +219,7 @@ pub fn render(
     let running_count = running.len();
     if running_count == 0 {
         let msg = "no active tasks";
-        let msg_w = msg.chars().count();
+        let msg_w = crate::width::width(msg);
         let total_pad = w.saturating_sub(msg_w);
         let left_pad = total_pad / 2;
         let right_pad = total_pad.saturating_sub(left_pad);
@@ -249,11 +249,11 @@ pub fn render(
             };
             let (kind_icon, _) = node_kind_glyph(&node.kind);
             let elapsed = fmt_activity_elapsed(node.started_at, node.ended_at);
-            let elapsed_w = elapsed.chars().count();
+            let elapsed_w = crate::width::width(&elapsed);
             let icon_w = 2;
             let content_w = inner_w.saturating_sub(icon_w + elapsed_w + 2);
-            let label = truncate_label(&node.label, content_w);
-            let pad = inner_w.saturating_sub(icon_w + label.chars().count() + elapsed_w + 2);
+            let label = crate::width::truncate(&node.label, content_w);
+            let pad = inner_w.saturating_sub(icon_w + crate::width::width(&label) + elapsed_w + 2);
             lines.push(Line::from(vec![
                 Span::styled(" ", Style::default().bg(activity_bg)),
                 Span::styled(
@@ -362,7 +362,7 @@ pub fn render(
 
             let icon = status_icon(snap.status);
             let elapsed = fmt_elapsed(snap.elapsed_ms());
-            let elapsed_w = elapsed.chars().count();
+            let elapsed_w = crate::width::width(&elapsed);
             // layout: bar(1) sp(1) icon(1) sp(1) label(...) pad sp(2) elapsed sp(1) insert(1) sp(1) kill(1) sp(1)
             let right_w = 2 + elapsed_w + 1 + 1 + 1 + 1 + 1; // sp(2) + elapsed + sp + ↵ + sp + ✕ + sp
             let left_w = 1 + 1 + 1 + 1; // bar + sp + icon + sp
@@ -375,7 +375,7 @@ pub fn render(
             } else {
                 label_max
             };
-            let label = truncate_label(
+            let label = crate::width::truncate(
                 &snap.label,
                 if is_expanded {
                     label_max
@@ -386,18 +386,18 @@ pub fn render(
             let summary = if is_expanded {
                 String::new()
             } else {
-                let actual_label_w = label.chars().count();
+                let actual_label_w = crate::width::width(&label);
                 content_lines
                     .last()
                     .map(|l| {
                         let smax = w
                             .saturating_sub(left_w + actual_label_w + right_w + 1)
                             .max(1);
-                        truncate_label(l, smax)
+                        crate::width::truncate(l, smax)
                     })
                     .unwrap_or_default()
             };
-            let label_w = label.chars().count();
+            let label_w = crate::width::width(&label);
             let pad = w.saturating_sub(left_w + label_w + right_w);
 
             let h_bg = if is_task_hovered {
@@ -453,18 +453,18 @@ pub fn render(
                 } else {
                     (label.clone(), summary.clone())
                 };
-                let label_trunc = truncate_label(&collapsed_label_text, collapsed_max);
-                let remaining = collapsed_max.saturating_sub(label_trunc.chars().count() + 1);
+                let label_trunc = crate::width::truncate(&collapsed_label_text, collapsed_max);
+                let remaining = collapsed_max.saturating_sub(crate::width::width(&label_trunc) + 1);
                 let summary_trunc = if collapsed_summary_text.is_empty() || remaining < 2 {
                     String::new()
                 } else {
-                    truncate_label(&collapsed_summary_text, remaining)
+                    crate::width::truncate(&collapsed_summary_text, remaining)
                 };
-                let collapsed_label_w = label_trunc.chars().count()
+                let collapsed_label_w = crate::width::width(&label_trunc)
                     + if summary_trunc.is_empty() {
                         0
                     } else {
-                        1 + summary_trunc.chars().count()
+                        1 + crate::width::width(&summary_trunc)
                     };
                 let c_pad = w
                     .saturating_sub(left_w + collapsed_label_w + right_w)
@@ -684,7 +684,7 @@ pub fn render(
             } else {
                 content_lines
                     .iter()
-                    .map(|c| truncate_label(c, w.saturating_sub(4)))
+                    .map(|c| crate::width::truncate(c, w.saturating_sub(4)))
                     .collect()
             };
 
@@ -712,7 +712,7 @@ pub fn render(
 
             for (i, content_trunc) in content_rows.iter().enumerate() {
                 let content_y = header_row + 2 + i as u16;
-                let content_pad = w.saturating_sub(2 + content_trunc.chars().count() + 2);
+                let content_pad = w.saturating_sub(2 + crate::width::width(content_trunc) + 2);
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default().bg(c_bg)),
                     Span::styled(
@@ -854,15 +854,6 @@ pub fn compute_content_lines(
     }
 }
 
-fn truncate_label(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{truncated}…")
-    }
-}
-
 fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPanelHitMap {
     let t = crate::theme::theme();
     crate::sanitize_widget_edges(f, area);
@@ -950,16 +941,6 @@ fn render_strip(f: &mut Frame, area: Rect, snapshots: &[TaskSnapshot]) -> TaskPa
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn truncate_short() {
-        assert_eq!(truncate_label("hi", 10), "hi");
-    }
-
-    #[test]
-    fn truncate_long() {
-        assert_eq!(truncate_label("abcdefghij", 5), "abcd…");
-    }
 
     #[test]
     fn node_kind_glyph_returns_tool_for_toolcall() {
