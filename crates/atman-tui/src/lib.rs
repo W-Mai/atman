@@ -2822,7 +2822,6 @@ fn ease_out(t: f32) -> f32 {
 // overlay's border. Call before each Clear + render pass on a modal.
 pub fn sanitize_widget_edges(f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
     use ratatui::buffer::CellDiffOption;
-    use unicode_width::UnicodeWidthStr;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -2846,7 +2845,7 @@ pub fn sanitize_widget_edges(f: &mut ratatui::Frame, area: ratatui::layout::Rect
         }
         if let Some(ox) = outside_left {
             let cell = &mut buf[(ox, y)];
-            if UnicodeWidthStr::width(cell.symbol()) > 1 {
+            if crate::width::width(cell.symbol()) > 1 {
                 clear_wide(cell);
             }
         }
@@ -2858,7 +2857,7 @@ pub fn sanitize_widget_edges(f: &mut ratatui::Frame, area: ratatui::layout::Rect
         }
         if inside_right != inside_left {
             let cell = &mut buf[(inside_right, y)];
-            if UnicodeWidthStr::width(cell.symbol()) > 1 {
+            if crate::width::width(cell.symbol()) > 1 {
                 clear_wide(cell);
             }
         }

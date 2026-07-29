@@ -189,7 +189,7 @@ fn render_capture_full(
             } else {
                 &cell.chars
             };
-            let cw = unicode_width::UnicodeWidthStr::width(chars);
+            let cw = crate::width::width(chars);
             row_w += cw;
             spans.push(Span::styled(chars.to_string(), cell_style));
         }

@@ -149,7 +149,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, app: &mut crate::app::AppState
         .map(|l| {
             l.spans
                 .iter()
-                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .map(|s| crate::width::width(s.content.as_ref()))
                 .sum::<usize>() as u16
         })
         .max()

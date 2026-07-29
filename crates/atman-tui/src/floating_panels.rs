@@ -289,7 +289,7 @@ pub fn render(
                 Style::default().fg(t.heading.into()).bg(panel_bg),
             ),
             Span::styled(
-                truncate(&panel.title, panel.rect.width as usize - 6),
+                crate::width::truncate(&panel.title, panel.rect.width as usize - 6),
                 Style::default().fg(t.tinted_fg.into()).bg(panel_bg),
             ),
         ]);
@@ -453,7 +453,6 @@ pub fn render(
 
 pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
     use ratatui::buffer::CellDiffOption;
-    use unicode_width::UnicodeWidthStr;
     let buf = f.buffer_mut();
     let area = *buf.area();
 
@@ -462,7 +461,7 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
             return;
         }
         let cell = &mut buf[(x, y)];
-        if UnicodeWidthStr::width(cell.symbol()) > 1 || cell.symbol().is_empty() {
+        if crate::width::width(cell.symbol()) > 1 || cell.symbol().is_empty() {
             cell.set_symbol(" ");
             cell.set_diff_option(CellDiffOption::None);
         }
@@ -892,12 +891,12 @@ fn render_history_content(
         let bar_str = format!("{bar} ");
         let kind_str = format!("{kind_icon} ");
         let icon_str = format!("{icon} ");
-        let prefix_w: u16 = unicode_width::UnicodeWidthStr::width(bar_str.as_str()) as u16
-            + unicode_width::UnicodeWidthStr::width(kind_str.as_str()) as u16
-            + unicode_width::UnicodeWidthStr::width(icon_str.as_str()) as u16;
-        let suffix_w: u16 = unicode_width::UnicodeWidthStr::width(started.as_str()) as u16
+        let prefix_w: u16 = crate::width::width(bar_str.as_str()) as u16
+            + crate::width::width(kind_str.as_str()) as u16
+            + crate::width::width(icon_str.as_str()) as u16;
+        let suffix_w: u16 = crate::width::width(started.as_str()) as u16
             + 1
-            + unicode_width::UnicodeWidthStr::width(elapsed.as_str()) as u16
+            + crate::width::width(elapsed.as_str()) as u16
             + 1;
         let content_max = area.width.saturating_sub(prefix_w + suffix_w + 1) as usize;
         let label_text = if summary.is_empty() {
@@ -905,8 +904,8 @@ fn render_history_content(
         } else {
             format!("{} · {}", snap.label, summary)
         };
-        let label = truncate(&label_text, content_max);
-        let label_w = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
+        let label = crate::width::truncate(&label_text, content_max);
+        let label_w = crate::width::width(label.as_str()) as u16;
         let pad = area
             .width
             .saturating_sub(prefix_w)
@@ -1196,45 +1195,12 @@ fn format_elapsed(ms: u64) -> String {
     format!("{:>5}", raw)
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-    let width = UnicodeWidthStr::width(s);
-    if width <= max {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    let mut used = 0usize;
-    for c in s.chars() {
-        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-        if used + cw > max.saturating_sub(1) {
-            break;
-        }
-        out.push(c);
-        used += cw;
-    }
-    format!("{out}…")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn canvas() -> Rect {
         Rect::new(0, 0, 100, 40)
-    }
-
-    #[test]
-    fn truncate_handles_cjk_wide_chars() {
-        // CJK chars are display width 2, not 1
-        assert_eq!(truncate("你好世界", 10), "你好世界");
-        assert_eq!(truncate("你好世界", 5), "你好…");
-        assert_eq!(truncate("你好ab", 6), "你好ab");
-        assert_eq!(truncate("你好ab", 5), "你好…");
-    }
-
-    #[test]
-    fn truncate_handles_zero_max() {
-        assert_eq!(truncate("hello", 0), "…");
     }
 
     #[test]

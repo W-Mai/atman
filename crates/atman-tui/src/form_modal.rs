@@ -425,10 +425,10 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
                     .bg(t.panel_bg.into())
             };
             let label = "  Yes  ";
-            let label_w = unicode_width::UnicodeWidthStr::width(label);
+            let label_w = crate::width::width(label);
             let gap = 3;
             let no_label = "  No  ";
-            let no_w = unicode_width::UnicodeWidthStr::width(no_label);
+            let no_w = crate::width::width(no_label);
             let total = label_w + gap + no_w;
             let left_pad = inner_w.saturating_sub(total) / 2;
             let mut spans: Vec<Span<'static>> = Vec::new();
@@ -578,7 +578,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
 }
 
 fn render_full_row<'a>(width: usize, text: &str, style: Style, fallback_bg: Color) -> Line<'a> {
-    let text_w = unicode_width::UnicodeWidthStr::width(text);
+    let text_w = crate::width::width(text);
     let pad = width.saturating_sub(text_w);
     let bg = style.bg.unwrap_or(fallback_bg);
     let mut spans: Vec<Span<'a>> = Vec::new();
