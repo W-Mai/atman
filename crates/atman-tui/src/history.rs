@@ -414,6 +414,21 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>, tool_map: &HashMap<
     }
 }
 
+fn strip_log_prefixes(raw: &str) -> String {
+    raw.lines()
+        .map(|line| {
+            if let Some(rest) = line.strip_prefix("[out] ") {
+                rest
+            } else if let Some(rest) = line.strip_prefix("[err] ") {
+                rest
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<OutputItem> {
     let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
     if tool_name.starts_with("bash.") {
@@ -428,11 +443,11 @@ fn restore_tool_item(tool_name: &str, content: &str, is_error: bool) -> Option<O
             .map(String::from)
             .or_else(|| {
                 parsed.get("log_path").and_then(|v| v.as_str()).map(|p| {
-                    if std::path::Path::new(p).exists() {
-                        std::fs::read_to_string(p).unwrap_or_default()
-                    } else {
-                        format!("[log file removed: {p}]\n\n{content}")
+                    if !std::path::Path::new(p).exists() {
+                        return format!("[log file removed: {p}]\n\n{content}");
                     }
+                    let raw = std::fs::read_to_string(p).unwrap_or_default();
+                    strip_log_prefixes(&raw)
                 })
             })
             .unwrap_or_default();
@@ -811,7 +826,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("atman_test_bash_log_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log_path = dir.join("bg_test1.log");
-        std::fs::write(&log_path, "line1\nline2\n").unwrap();
+        std::fs::write(&log_path, "[out] line1\n[out] line2\n").unwrap();
 
         let tool_use_id = "call_00_bash2";
         let content = format!(
@@ -849,7 +864,7 @@ mod tests {
             OutputItem::Bash { output, .. } => Some(output.clone()),
             _ => None,
         });
-        assert_eq!(bash.as_deref(), Some("line1\nline2\n"));
+        assert_eq!(bash.as_deref(), Some("line1\nline2"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
