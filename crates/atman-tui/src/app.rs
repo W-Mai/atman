@@ -331,7 +331,7 @@ impl AppState {
                     (atman_runtime::TaskKind::Terminal, label, pw, ph)
                 }
                 OutputItem::Bash { handle: h, .. } => {
-                    let (pw, ph) = self.panel_sizes.get(h).copied().unwrap_or((48, 20));
+                    let (pw, ph) = self.panel_sizes.get(h).copied().unwrap_or((0, 0));
                     let label = snap
                         .as_ref()
                         .map(|s| s.label.clone())
@@ -347,7 +347,7 @@ impl AppState {
                         .as_ref()
                         .map(|s| s.label.clone())
                         .unwrap_or_else(|| handle.to_string());
-                    (kind, label, 48, 20)
+                    (kind, label, 0, 0)
                 }
                 _ => unreachable!("handle() only returns Some for Terminal/Bash"),
             }
@@ -360,7 +360,7 @@ impl AppState {
                 .as_ref()
                 .map(|s| s.label.clone())
                 .unwrap_or_else(|| handle.to_string());
-            (kind, label, 48, 20)
+            (kind, label, 0, 0)
         };
 
         self.floating_panels.open_with_size(

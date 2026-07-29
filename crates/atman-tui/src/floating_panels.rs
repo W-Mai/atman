@@ -65,9 +65,12 @@ pub struct FloatingPanels {
     z_counter: u32,
 }
 
+const DEFAULT_PANEL_W: u16 = 80;
+const DEFAULT_PANEL_H: u16 = 24;
+
 impl FloatingPanels {
     pub fn open(&mut self, id: &str, kind: PanelKind, title: &str, canvas: Rect) {
-        self.open_with_size(id, kind, title, canvas, 48, 20, false);
+        self.open_with_size(id, kind, title, canvas, 0, 0, false);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -81,6 +84,11 @@ impl FloatingPanels {
         h: u16,
         maximized: bool,
     ) {
+        let (w, h) = if w == 0 || h == 0 {
+            (DEFAULT_PANEL_W, DEFAULT_PANEL_H)
+        } else {
+            (w, h)
+        };
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
             p.kind = kind;
             p.title = title.to_string();

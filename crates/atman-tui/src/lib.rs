@@ -736,7 +736,7 @@ async fn run_frames(
                                             .panel_sizes
                                             .get("__history__")
                                             .copied()
-                                            .unwrap_or((48, 20));
+                                            .unwrap_or((0, 0));
                                         app.floating_panels.open_with_size(
                                             "__history__",
                                             crate::floating_panels::PanelKind::History,
