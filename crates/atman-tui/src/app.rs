@@ -2464,6 +2464,49 @@ mod terminal_stream_tests {
             _ => panic!(),
         }
     }
+
+    #[test]
+    fn open_task_panel_different_handles_create_different_panels() {
+        use atman_runtime::tools::term::{TerminalCell, TerminalScreen};
+        let mut app = AppState::new("s".into(), None);
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
+        app.items.push(OutputItem::Terminal {
+            handle: "term_s_0".into(),
+            screen: TerminalScreen {
+                rows: 2,
+                cols: 5,
+                cells: vec![TerminalCell::default(); 10],
+                cursor: None,
+                alt_screen: false,
+            },
+            accumulated_bytes: b"hi".to_vec(),
+            mode: TerminalViewMode::Capture,
+            done: true,
+            expanded: false,
+            scroll_offset: None,
+        });
+        app.items.push(OutputItem::Terminal {
+            handle: "term_s_1".into(),
+            screen: TerminalScreen {
+                rows: 3,
+                cols: 7,
+                cells: vec![TerminalCell::default(); 21],
+                cursor: None,
+                alt_screen: false,
+            },
+            accumulated_bytes: b"bye".to_vec(),
+            mode: TerminalViewMode::Capture,
+            done: true,
+            expanded: false,
+            scroll_offset: None,
+        });
+        let canvas = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.open_task_panel("term_s_0", canvas);
+        app.open_task_panel("term_s_1", canvas);
+        assert_eq!(app.floating_panels.panels.len(), 2);
+        assert_eq!(app.floating_panels.panels[0].id, "term_s_0");
+        assert_eq!(app.floating_panels.panels[1].id, "term_s_1");
+    }
 }
 
 #[cfg(test)]

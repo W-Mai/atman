@@ -900,10 +900,22 @@ fn render_panel_content(
                     }
                 }
                 _ => {
-                    let wp_idx = items
-                        .iter()
-                        .rposition(|it| matches!(it, OutputItem::WorkflowPanel { .. }));
-                    if let Some(panel_idx) = wp_idx
+                    // Find the WorkflowPanel whose graph contains panel.id as a
+                    // root run_id — not just the last one in items.
+                    let wp_idx = items.iter().enumerate().rev().find(|(_, it)| {
+                        if let OutputItem::WorkflowPanel { graph, .. } = it {
+                            graph.root.iter().any(|node| {
+                                matches!(
+                                    &node.kind,
+                                    atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. }
+                                        if run_id == &panel.id
+                                )
+                            })
+                        } else {
+                            false
+                        }
+                    });
+                    if let Some((panel_idx, _)) = wp_idx
                         && let Some(OutputItem::WorkflowPanel {
                             graph,
                             expanded_nodes,
