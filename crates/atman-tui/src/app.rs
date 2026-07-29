@@ -301,22 +301,6 @@ impl AppState {
             Some(s) => s,
             None => return,
         };
-        if matches!(
-            snap.kind,
-            atman_runtime::TaskKind::Agent
-                | atman_runtime::TaskKind::Flow
-                | atman_runtime::TaskKind::Subflow
-                | atman_runtime::TaskKind::Dispatch
-        ) {
-            if let Some(idx) = self
-                .items
-                .iter()
-                .rposition(|it| matches!(it, crate::app::OutputItem::WorkflowPanel { .. }))
-            {
-                self.open_workflow_viewer(idx);
-                return;
-            }
-        }
         let (pw, ph) = if let Some((sw, sh)) = self.panel_sizes.get(handle) {
             (*sw, *sh)
         } else if snap.kind == atman_runtime::TaskKind::Terminal {
@@ -387,7 +371,24 @@ impl AppState {
         self.toggle_last_workflow_tool_node()
     }
 
-    fn maximized_canvas(&self) -> ratatui::layout::Rect {
+    pub fn workflow_panel_task_handle(&self, panel_idx: usize) -> Option<String> {
+        let item = self.items.get(panel_idx)?;
+        if let crate::app::OutputItem::WorkflowPanel { graph, .. } = item {
+            let node = graph.root.last()?;
+            return Some(node.id.clone());
+        }
+        None
+    }
+
+    pub fn terminal_item_handle(&self, idx: usize) -> Option<String> {
+        let item = self.items.get(idx)?;
+        if let crate::app::OutputItem::Terminal { handle, .. } = item {
+            return Some(handle.clone());
+        }
+        None
+    }
+
+    pub fn maximized_canvas(&self) -> ratatui::layout::Rect {
         let full = self.last_full_rect.unwrap_or_default();
         let transcript = self.last_transcript_rect.unwrap_or(full);
         let bottom_reserved = self
@@ -410,56 +411,6 @@ impl AppState {
             width: full.width,
             height: top.saturating_sub(y),
         }
-    }
-
-    pub fn open_workflow_viewer(&mut self, panel_item_index: usize) {
-        let id = format!("workflow_viewer:{panel_item_index}");
-        let title = self
-            .items
-            .get(panel_item_index)
-            .and_then(|it| match it {
-                crate::app::OutputItem::WorkflowPanel { .. } => Some("Workflow"),
-                _ => None,
-            })
-            .unwrap_or("Workflow");
-        let canvas = self.maximized_canvas();
-        self.floating_panels.open_maximized(
-            &id,
-            crate::floating_panels::PanelKind::WorkflowViewer,
-            title,
-            canvas,
-        );
-    }
-
-    pub fn close_workflow_viewer(&mut self) {
-        self.floating_panels
-            .panels
-            .retain(|p| p.kind != crate::floating_panels::PanelKind::WorkflowViewer);
-    }
-
-    pub fn open_terminal_viewer(&mut self, panel_item_index: usize) {
-        let id = format!("terminal_viewer:{panel_item_index}");
-        let (title, pw, ph) = match self.items.get(panel_item_index) {
-            Some(crate::app::OutputItem::Terminal { handle, screen, .. }) => {
-                (handle.clone(), screen.cols + 8, screen.rows + 5)
-            }
-            _ => ("terminal".to_string(), 80, 24),
-        };
-        let canvas = self.last_transcript_rect.unwrap_or_default();
-        self.floating_panels.open_with_size(
-            &id,
-            crate::floating_panels::PanelKind::TerminalViewer,
-            &title,
-            canvas,
-            pw,
-            ph,
-        );
-    }
-
-    pub fn close_terminal_viewer(&mut self) {
-        self.floating_panels
-            .panels
-            .retain(|p| p.kind != crate::floating_panels::PanelKind::TerminalViewer);
     }
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {

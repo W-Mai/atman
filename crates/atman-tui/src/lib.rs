@@ -538,7 +538,7 @@ async fn run_frames(
                                 } else if let Some(max_id) =
                                     app.floating_panels.hit_test_maximize(me.column, me.row)
                                 {
-                                    let canvas = app.last_transcript_rect.unwrap_or_default();
+                                    let canvas = app.maximized_canvas();
                                     app.floating_panels.toggle_maximize(&max_id, canvas);
                                     if let Some(p) = app.floating_panels.panels.iter().find(|p| p.id == max_id) {
                                         if p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal) {
@@ -796,11 +796,17 @@ async fn run_frames(
                                     if node_id
                                         == crate::output::COLLAPSED_CARD_FULLSCREEN_KEY
                                     {
-                                        app.open_workflow_viewer(panel_idx);
+                                        if let Some(handle) = app.workflow_panel_task_handle(panel_idx) {
+                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            app.open_task_panel(&handle, canvas);
+                                        }
                                     } else if node_id
                                         == crate::output::TERMINAL_FULLSCREEN_KEY
                                     {
-                                        app.open_terminal_viewer(panel_idx);
+                                        if let Some(handle) = app.terminal_item_handle(panel_idx) {
+                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            app.open_task_panel(&handle, canvas);
+                                        }
                                     } else if node_id.is_empty() {
                                         app.toggle_workflow_panel_expansion(panel_idx);
                                     } else {
@@ -816,20 +822,33 @@ async fn run_frames(
                                         app.items.get(idx)
                                 {
                                     if me.modifiers.contains(KeyModifiers::SHIFT) {
-                                        app.open_workflow_viewer(idx);
+                                        if let Some(handle) = app.workflow_panel_task_handle(idx) {
+                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            app.open_task_panel(&handle, canvas);
+                                        }
                                     } else {
                                         app.toggle_workflow_panel_expansion(idx);
                                     }
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
-                                    && let Some(crate::app::OutputItem::Terminal { .. }) =
-                                        app.items.get(idx)
                                 {
-                                    app.toggle_terminal_expand(idx);
+                                    let handle = app.items.get(idx).and_then(|it| match it {
+                                        crate::app::OutputItem::Terminal { handle, .. } => Some(handle.clone()),
+                                        _ => None,
+                                    });
+                                    if let Some(handle) = handle {
+                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        app.open_task_panel(&handle, canvas);
+                                    }
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
-                                    && let Some(crate::app::OutputItem::Bash { .. }) =
-                                        app.items.get(idx)
                                 {
-                                    app.toggle_bash_expand(idx);
+                                    let handle = app.items.get(idx).and_then(|it| match it {
+                                        crate::app::OutputItem::Bash { handle, .. } => Some(handle.clone()),
+                                        _ => None,
+                                    });
+                                    if let Some(handle) = handle {
+                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        app.open_task_panel(&handle, canvas);
+                                    }
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::DiffPreview { .. }) =
                                         app.items.get(idx)
