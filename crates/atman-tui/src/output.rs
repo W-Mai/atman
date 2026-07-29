@@ -5,7 +5,6 @@ use atman_runtime::stream::CompactionPhase;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
-use unicode_width::UnicodeWidthChar;
 
 use crate::app::{NoteLevel, OutputItem};
 
@@ -120,7 +119,6 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
         label,
         approval_hotkey,
     } = spec;
-    use unicode_width::UnicodeWidthStr;
     let min_outer: u16 = 6;
     if outer_width < min_outer {
         return BoxRect {
@@ -131,17 +129,17 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
         };
     }
     let approval_text = approval_hotkey.map(|n| format!("─[{n}]─"));
-    let approval_w = approval_text.as_deref().map_or(0, UnicodeWidthStr::width);
-    let status_w = UnicodeWidthStr::width(status_glyph);
-    let kind_w = UnicodeWidthStr::width(kind_glyph);
+    let approval_w = approval_text.as_deref().map_or(0, crate::width::width);
+    let status_w = crate::width::width(status_glyph);
+    let kind_w = crate::width::width(kind_glyph);
     let leading_w = 2usize + 1; // `╭─` + leading space
     let trailing_w = 2usize; // `─╮`
     let status_seg = if status_w > 0 { status_w + 1 } else { 0 };
     let kind_seg = if kind_w > 0 { kind_w + 1 } else { 0 };
     let fixed = leading_w + status_seg + kind_seg + approval_w + trailing_w;
     let label_budget = (outer_width as usize).saturating_sub(fixed).max(1);
-    let label_display = middle_truncate(label, label_budget);
-    let label_w = UnicodeWidthStr::width(label_display.as_str());
+    let label_display = crate::width::middle_truncate(label, label_budget);
+    let label_w = crate::width::width(label_display.as_str());
     let content_total = fixed.saturating_add(label_w);
     let fill_w = (outer_width as usize).saturating_sub(content_total);
     let inner_w = (outer_width as usize).saturating_sub(4);
@@ -177,7 +175,7 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
         let inner_used: usize = line
             .spans
             .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .map(|s| crate::width::width(s.content.as_ref()))
             .sum();
         for s in line.spans {
             spans.push(s);
@@ -197,53 +195,6 @@ pub fn append_box(out: &mut Vec<Line<'static>>, spec: BoxSpec<'_>) -> BoxRect {
         outer_width,
         rows: 2u16.saturating_add(inner_count),
     }
-}
-
-fn middle_truncate(s: &str, max_display: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    if UnicodeWidthStr::width(s) <= max_display {
-        return s.to_string();
-    }
-    if max_display <= 1 {
-        return "…".into();
-    }
-    let ell = 1;
-    let side_budget = max_display.saturating_sub(ell) / 2;
-    let (prefix, prefix_w) = take_display_prefix(s, side_budget);
-    let remaining = max_display.saturating_sub(prefix_w + ell);
-    let suffix = take_display_suffix(s, remaining);
-    format!("{prefix}…{suffix}")
-}
-
-fn take_display_prefix(s: &str, max_w: usize) -> (String, usize) {
-    use unicode_width::UnicodeWidthChar;
-    let mut out = String::new();
-    let mut used = 0usize;
-    for c in s.chars() {
-        let w = c.width().unwrap_or(0);
-        if used + w > max_w {
-            break;
-        }
-        out.push(c);
-        used += w;
-    }
-    (out, used)
-}
-
-fn take_display_suffix(s: &str, max_w: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    let mut chars: Vec<char> = Vec::new();
-    let mut used = 0usize;
-    for c in s.chars().rev() {
-        let w = c.width().unwrap_or(0);
-        if used + w > max_w {
-            break;
-        }
-        chars.push(c);
-        used += w;
-    }
-    chars.reverse();
-    chars.into_iter().collect()
 }
 
 pub fn build_lines_with_ranges(
@@ -828,12 +779,12 @@ pub fn wrap_with_prefix(
     cont_prefix: &str,
 ) -> Vec<PaddedRow> {
     use unicode_width::UnicodeWidthChar;
-    let prefix_w = unicode_width::UnicodeWidthStr::width(cont_prefix);
+    let prefix_w = crate::width::width(cont_prefix);
     let body_w = target
         .saturating_sub(prefix_w)
         .saturating_sub(RIGHT_PAD)
         .max(1);
-    let first_prefix_w = unicode_width::UnicodeWidthStr::width(first_prefix);
+    let first_prefix_w = crate::width::width(first_prefix);
     let first_body_w = target
         .saturating_sub(first_prefix_w)
         .saturating_sub(RIGHT_PAD)
@@ -891,8 +842,7 @@ pub fn line_with_right_pad(
     prefix_style: Style,
     body_style: Style,
 ) -> Line<'static> {
-    use unicode_width::UnicodeWidthStr;
-    let used = UnicodeWidthStr::width(prefix) + UnicodeWidthStr::width(body);
+    let used = crate::width::width(prefix) + crate::width::width(body);
     let fill = target.saturating_sub(used);
     let mut spans = vec![
         Span::styled(prefix.to_string(), prefix_style),
@@ -1210,7 +1160,6 @@ fn render_session_card(
     width: usize,
     dim: bool,
 ) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let bg = crate::markdown::block_bg();
     let mut extra = Modifier::empty();
@@ -1229,8 +1178,8 @@ fn render_session_card(
         .add_modifier(extra);
 
     let title_source = entry.goal.as_deref().unwrap_or(&entry.short_id);
-    let title = clamp_len(title_source, SESSION_CARD_TITLE_MAX);
-    let title_used = 4 + UnicodeWidthStr::width(title.as_str());
+    let title = crate::width::truncate(title_source, SESSION_CARD_TITLE_MAX);
+    let title_used = 4 + crate::width::width(title.as_str());
     let title_pad = width.saturating_sub(title_used);
     let title_line = Line::from(vec![
         Span::styled(" ".to_string(), bg_only),
@@ -1245,7 +1194,7 @@ fn render_session_card(
         "{}  ·  {}  ·  {} events",
         entry.age_label, project, entry.event_count
     );
-    let meta_used = 4 + UnicodeWidthStr::width(meta.as_str());
+    let meta_used = 4 + crate::width::width(meta.as_str());
     let meta_pad = width.saturating_sub(meta_used);
     let meta_line = Line::from(vec![
         Span::styled("    ".to_string(), bg_only),
@@ -1254,16 +1203,6 @@ fn render_session_card(
     ]);
 
     vec![title_line, meta_line]
-}
-
-fn clamp_len(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 fn make_dashed_divider(panel_width: u16) -> Vec<Line<'static>> {
@@ -1293,7 +1232,6 @@ fn render_thinking(
     animation_frame: u32,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let bg = if hovered {
         match t.mode {
@@ -1323,7 +1261,7 @@ fn render_thinking(
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(blank.clone());
     let header_prefix = format!("  {glyph} {label} ");
-    let header_used = UnicodeWidthStr::width(header_prefix.as_str());
+    let header_used = crate::width::width(header_prefix.as_str());
     let header_pad = target.saturating_sub(header_used);
     let mut header_spans = vec![Span::styled(header_prefix, header_style)];
     if header_pad > 0 {
@@ -1343,7 +1281,7 @@ fn render_thinking(
         let content_w: usize = md_line
             .spans
             .iter()
-            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .map(|s| crate::width::width(s.content.as_ref()))
             .sum();
         let used = content_w + 4;
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(md_line.spans.len() + 2);
@@ -1362,7 +1300,7 @@ fn render_thinking(
             "    ▼ {} more lines — click to expand",
             all_lines.len() - max_lines
         );
-        let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
             spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
@@ -1370,7 +1308,7 @@ fn render_thinking(
         lines.push(Line::from(spans));
     } else if expanded && all_lines.len() > 6 {
         let hint = "    ▲ click to collapse".to_string();
-        let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
             spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
@@ -1581,7 +1519,6 @@ fn render_diff_preview(
     expanded: bool,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let bg: Color = t.code_bg.into();
     let target = panel_width.max(20) as usize;
@@ -1597,7 +1534,7 @@ fn render_diff_preview(
     let blank = Line::from(Span::styled(" ".repeat(target), base_style));
     let mut lines = vec![blank.clone()];
     let header = format!("  ✎ {title}");
-    let header_w = UnicodeWidthStr::width(header.as_str());
+    let header_w = crate::width::width(header.as_str());
     let mut header_spans = vec![Span::styled(header, header_style)];
     if target > header_w {
         header_spans.push(Span::styled(" ".repeat(target - header_w), base_style));
@@ -1631,10 +1568,9 @@ fn push_diff_fold_hint(
     target: usize,
     style: Style,
 ) {
-    use unicode_width::UnicodeWidthStr;
     if !expanded && total > folded {
         let hint = format!("    ▼ {} more lines — click to expand", total - folded);
-        let pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, style)];
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), style));
@@ -1642,7 +1578,7 @@ fn push_diff_fold_hint(
         lines.push(Line::from(spans));
     } else if expanded && total > folded {
         let hint = "    ▲ click to collapse".to_string();
-        let pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, style)];
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), style));
@@ -2289,48 +2225,18 @@ fn add_ellipsis_to_row(row: &mut Vec<Span<'static>>, max_w: usize, bg: Color) {
         .last()
         .map(|span| span.style)
         .unwrap_or_else(|| Style::default().bg(bg));
-    let trimmed = truncate_spans_to_width(std::mem::take(row), max_w.saturating_sub(1), bg);
+    let trimmed =
+        crate::width::truncate_spans(std::mem::take(row), max_w.saturating_sub(1), Some(bg));
     *row = trimmed;
     let mut ellipsis_style = style;
     ellipsis_style.bg = ellipsis_style.bg.or(Some(bg));
     row.push(Span::styled("⋯", ellipsis_style));
 }
 
-fn truncate_spans_to_width(
-    spans: Vec<Span<'static>>,
-    max_w: usize,
-    bg: Color,
-) -> Vec<Span<'static>> {
-    use unicode_width::UnicodeWidthChar;
-    let mut out = Vec::new();
-    let mut used = 0usize;
-    for span in spans {
-        let mut text = String::new();
-        for ch in span.content.chars() {
-            let w = ch.width().unwrap_or(0);
-            if used + w > max_w {
-                break;
-            }
-            text.push(ch);
-            used += w;
-        }
-        if !text.is_empty() {
-            let mut style = span.style;
-            style.bg = style.bg.or(Some(bg));
-            out.push(Span::styled(text, style));
-        }
-        if used >= max_w {
-            break;
-        }
-    }
-    out
-}
-
 fn pad_spans_to_width(spans: &mut Vec<Span<'static>>, width: usize, style: Style) {
-    use unicode_width::UnicodeWidthStr;
     let used: usize = spans
         .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .map(|s| crate::width::width(s.content.as_ref()))
         .sum();
     if width > used {
         spans.push(Span::styled(" ".repeat(width - used), style));
@@ -2422,9 +2328,9 @@ fn format_workflow_stats_footer(
                 parts.push(format!("{:.0} tok/s", speed));
             }
             let body = parts.join(" · ");
-            let body_w = unicode_width::UnicodeWidthStr::width(body.as_str());
+            let body_w = crate::width::width(body.as_str());
             let inner_w = (outer_width as usize).saturating_sub(2);
-            let prefix_w = unicode_width::UnicodeWidthStr::width("╰─ ");
+            let prefix_w = crate::width::width("╰─ ");
             let suffix_w = 1; // ╯
             let dash_w = inner_w
                 .saturating_sub(prefix_w)
@@ -2434,7 +2340,7 @@ fn format_workflow_stats_footer(
         } else {
             format!("╰{}╯", "─".repeat((outer_width as usize).saturating_sub(2)))
         };
-    let fill = inner_w.saturating_sub(unicode_width::UnicodeWidthStr::width(bottom_text.as_str()));
+    let fill = inner_w.saturating_sub(crate::width::width(bottom_text.as_str()));
     let _ = fill;
     Line::from(Span::styled(bottom_text, border_style))
 }
@@ -2676,7 +2582,6 @@ fn render_collapsed_workflow_card(
     panel_width: u16,
     running: bool,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
-    use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let outer_width = panel_width.clamp(40, MAX_BOX_WIDTH);
     let border_style = Style::default().fg(t.accent.into());
@@ -2693,9 +2598,9 @@ fn render_collapsed_workflow_card(
         stats.nodes, stats.agents, stats.tools, stats.edits
     );
     let button_text = "─[⤢]─";
-    let button_w = UnicodeWidthStr::width(button_text) as u16;
-    let title_w = UnicodeWidthStr::width(title.as_str());
-    let stats_w = UnicodeWidthStr::width(stats_text.as_str());
+    let button_w = crate::width::width(button_text) as u16;
+    let title_w = crate::width::width(title.as_str());
+    let stats_w = crate::width::width(stats_text.as_str());
     let leading = 3usize;
     let trailing = 2usize;
     let separator_w = 3usize;
@@ -3134,7 +3039,7 @@ fn append_workflow_node_boxed(
         WorkflowNodeKind::ToolCall {
             tool, args_preview, ..
         } => {
-            let short_args = truncate_preview(args_preview, 30);
+            let short_args = crate::width::truncate(args_preview, 30);
             if short_args.is_empty() {
                 tool.to_string()
             } else {
@@ -3170,20 +3075,19 @@ fn append_workflow_node_boxed(
     if is_expanded {
         collect_boxed_details(node, &mut inner_lines);
     }
-    use unicode_width::UnicodeWidthStr;
     let approval_seg = if approval_hotkey.is_some() { 5 } else { 0 };
-    let status_seg = if UnicodeWidthStr::width(status_glyph) > 0 {
-        UnicodeWidthStr::width(status_glyph) + 1
+    let status_seg = if crate::width::width(status_glyph) > 0 {
+        crate::width::width(status_glyph) + 1
     } else {
         0
     };
-    let kind_seg = if UnicodeWidthStr::width(kind_glyph) > 0 {
-        UnicodeWidthStr::width(kind_glyph) + 1
+    let kind_seg = if crate::width::width(kind_glyph) > 0 {
+        crate::width::width(kind_glyph) + 1
     } else {
         0
     };
     let compact_content =
-        3 + status_seg + kind_seg + UnicodeWidthStr::width(label.as_str()) + approval_seg + 2;
+        3 + status_seg + kind_seg + crate::width::width(label.as_str()) + approval_seg + 2;
     let compact_w = compact_content.min(budget as usize) as u16;
     let outer_width = if is_expanded { budget } else { compact_w };
     let mut scratch: Vec<Line<'static>> = Vec::new();
@@ -3463,7 +3367,7 @@ fn append_workflow_node(
     let base_label = match &effective.kind {
         WorkflowNodeKind::ToolCall {
             tool, args_preview, ..
-        } => format!("{tool}({})", truncate_preview(args_preview, 60)),
+        } => format!("{tool}({})", crate::width::truncate(args_preview, 60)),
         WorkflowNodeKind::Stmt {
             node_kind: atman_runtime::nodegraph::NodeKind::When { condition_preview },
         } if !condition_preview.is_empty() && condition_preview != "when" => {
@@ -3661,18 +3565,6 @@ fn stmt_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static str, 
     }
 }
 
-fn truncate_preview(s: &str, max: usize) -> String {
-    let mut acc = String::new();
-    for (i, ch) in s.chars().enumerate() {
-        if i >= max {
-            acc.push('…');
-            return acc;
-        }
-        acc.push(ch);
-    }
-    acc
-}
-
 fn format_llm_stats_brief(stats: &atman_runtime::workflow::LlmStats) -> String {
     use atman_runtime::humanize::format_count;
     let mut parts = Vec::new();
@@ -3717,7 +3609,6 @@ fn render_bash(
     animation_frame: u32,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let bg: Color = t.code_bg.into();
     let header_style = Style::default()
@@ -3747,7 +3638,7 @@ fn render_bash(
     lines.push(blank.clone());
 
     let header_prefix = format!("  {glyph} {label} ");
-    let header_used = UnicodeWidthStr::width(header_prefix.as_str());
+    let header_used = crate::width::width(header_prefix.as_str());
     let header_pad = target.saturating_sub(header_used);
     let mut header_spans = vec![Span::styled(header_prefix, header_style)];
     if header_pad > 0 {
@@ -3777,7 +3668,7 @@ fn render_bash(
     }
     if !expanded && all_lines.len() > 8 {
         let hint = format!("    ▼ {} more lines — click to expand", all_lines.len() - 8);
-        let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
             spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
@@ -3785,7 +3676,7 @@ fn render_bash(
         lines.push(Line::from(spans));
     } else if expanded && all_lines.len() > 8 {
         let hint = "    ▲ click to collapse".to_string();
-        let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if hint_pad > 0 {
             spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
@@ -3807,7 +3698,6 @@ fn render_terminal(
     animation_frame: u32,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let bg: Color = t.code_bg.into();
     let header_style = Style::default()
@@ -3841,11 +3731,11 @@ fn render_terminal(
     lines.push(blank.clone());
 
     let header_prefix = format!("  {glyph} {label} ");
-    let header_used = UnicodeWidthStr::width(header_prefix.as_str());
+    let header_used = crate::width::width(header_prefix.as_str());
     let dims = format!("{}×{}", screen.cols, screen.rows);
-    let dims_used = UnicodeWidthStr::width(dims.as_str());
+    let dims_used = crate::width::width(dims.as_str());
     let fs_btn = "⤢";
-    let fs_btn_used = UnicodeWidthStr::width(fs_btn);
+    let fs_btn_used = crate::width::width(fs_btn);
     let gap = 1;
     let header_pad = target
         .saturating_sub(header_used)
@@ -3892,7 +3782,7 @@ fn render_terminal(
                     } else {
                         &cell.chars
                     };
-                    let cw = UnicodeWidthStr::width(chars);
+                    let cw = crate::width::width(chars);
                     row_width += cw;
                     spans.push(Span::styled(chars.to_string(), cs));
                 }
@@ -3907,7 +3797,7 @@ fn render_terminal(
             }
             if !expanded && screen.rows as usize > 12 {
                 let hint = "    ▼ click to expand";
-                let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint));
+                let hint_pad = target.saturating_sub(crate::width::width(hint));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
                     spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
@@ -3915,7 +3805,7 @@ fn render_terminal(
                 lines.push(Line::from(spans));
             } else if expanded && screen.rows as usize > 12 {
                 let hint = "    ▲ click to collapse";
-                let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint));
+                let hint_pad = target.saturating_sub(crate::width::width(hint));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
                     spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
@@ -3946,7 +3836,7 @@ fn render_terminal(
             }
             if !expanded && all_lines.len() > 6 {
                 let hint = format!("    ▼ {} more lines — click to expand", all_lines.len() - 6);
-                let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+                let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
                     spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
@@ -3954,7 +3844,7 @@ fn render_terminal(
                 lines.push(Line::from(spans));
             } else if expanded && all_lines.len() > 6 {
                 let hint = "    ▲ click to collapse".to_string();
-                let hint_pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+                let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
                 let mut spans = vec![Span::styled(hint, hint_style)];
                 if hint_pad > 0 {
                     spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
@@ -4152,7 +4042,7 @@ mod tests {
         let lines = render_user_turn(text, 30);
         assert!(lines.len() > 3, "should wrap into multiple rows");
         for (i, line) in lines.iter().enumerate() {
-            let w = unicode_width::UnicodeWidthStr::width(plain_line(line).as_str());
+            let w = crate::width::width(plain_line(line).as_str());
             assert!(
                 w <= 30,
                 "line {i} width {w} exceeds panel 30: {:?}",
@@ -4194,7 +4084,7 @@ mod tests {
         assert!(lines.len() > 1, "long side should wrap: {lines:?}");
         for line in &lines {
             let text = plain_line(line);
-            let width = unicode_width::UnicodeWidthStr::width(text.as_str());
+            let width = crate::width::width(text.as_str());
             // Width should match target (may be off by 1 due to wrap rounding)
             assert!(
                 (46..=47).contains(&width),
@@ -4383,7 +4273,7 @@ mod tests {
         let lines = render_user_turn(text, 30);
         assert!(lines.len() > 3, "CJK long line should wrap");
         for (i, line) in lines.iter().enumerate() {
-            let w = unicode_width::UnicodeWidthStr::width(plain_line(line).as_str());
+            let w = crate::width::width(plain_line(line).as_str());
             assert!(w <= 30, "CJK line {i} width {w} exceeds panel 30",);
         }
     }
@@ -4495,7 +4385,7 @@ mod tests {
         append_box(&mut out, spec(20, inner, "", "", "lbl", None));
         let mid = plain_line(&out[1]);
         assert_eq!(
-            unicode_width::UnicodeWidthStr::width(mid.as_str()),
+            crate::width::width(mid.as_str()),
             20,
             "middle line should fill outer_width: {mid:?}"
         );
@@ -4507,7 +4397,7 @@ mod tests {
         append_box(&mut out, spec(30, Vec::new(), "○", "🔧", "读取文件", None));
         let top = plain_line(&out[0]);
         assert!(top.contains("读取文件"), "CJK label missing: {top:?}");
-        let width = unicode_width::UnicodeWidthStr::width(top.as_str());
+        let width = crate::width::width(top.as_str());
         assert_eq!(width, 30, "top border must be exactly outer_width: {width}");
     }
 
@@ -4544,7 +4434,7 @@ mod tests {
             spec(24, Vec::new(), "○", "🔧", "read_文件_data_读取", None),
         );
         let top = plain_line(&out[0]);
-        let width = unicode_width::UnicodeWidthStr::width(top.as_str());
+        let width = crate::width::width(top.as_str());
         assert_eq!(
             width, 24,
             "mixed ASCII+CJK truncation should still hit exact outer_width: {top:?}"
@@ -4558,7 +4448,7 @@ mod tests {
         let long_cjk = "读取文件内容并做分析的一个非常长的中文标题名称";
         append_box(&mut out, spec(20, Vec::new(), "○", "🔧", long_cjk, None));
         let top = plain_line(&out[0]);
-        let width = unicode_width::UnicodeWidthStr::width(top.as_str());
+        let width = crate::width::width(top.as_str());
         assert_eq!(
             width, 20,
             "CJK truncation must respect display width: {top:?}"
@@ -4578,7 +4468,7 @@ mod tests {
             spec(24, Vec::new(), "○", "🔧", "🚀🚀🚀 launch 🚀🚀", None),
         );
         let top = plain_line(&out[0]);
-        let width = unicode_width::UnicodeWidthStr::width(top.as_str());
+        let width = crate::width::width(top.as_str());
         assert_eq!(
             width, 24,
             "emoji width accounting must land on outer_width: {top:?}"
@@ -4620,7 +4510,7 @@ mod tests {
         );
         for (i, line) in lines.iter().enumerate() {
             let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let w = unicode_width::UnicodeWidthStr::width(s.as_str());
+            let w = crate::width::width(s.as_str());
             assert!(w <= 30, "thinking line {i} width {w} > 30: {s:?}");
         }
     }
@@ -4633,7 +4523,7 @@ mod tests {
         assert!(lines.len() > 6, "CJK thinking should wrap: {}", lines.len());
         for (i, line) in lines.iter().enumerate() {
             let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let w = unicode_width::UnicodeWidthStr::width(s.as_str());
+            let w = crate::width::width(s.as_str());
             assert!(w <= 30, "CJK thinking line {i} width {w} > 30");
         }
     }
@@ -4672,7 +4562,7 @@ mod tests {
         assert!(lines.len() > 4, "should wrap: {}", lines.len());
         for (i, line) in lines.iter().enumerate() {
             let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let w = unicode_width::UnicodeWidthStr::width(s.as_str());
+            let w = crate::width::width(s.as_str());
             assert!(w <= 30, "note line {i} width {w} > 30: {s:?}");
         }
     }
@@ -4686,7 +4576,7 @@ mod tests {
             .find(|l| l.spans.iter().any(|s| s.content.as_ref().contains("short")))
             .expect("should find body line");
         let s: String = body_line.spans.iter().map(|s| s.content.as_ref()).collect();
-        let w = unicode_width::UnicodeWidthStr::width(s.as_str());
+        let w = crate::width::width(s.as_str());
         assert_eq!(w, 40, "line should fill to target 40: {s:?}");
         assert!(
             s.ends_with("  "),
@@ -4969,7 +4859,6 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
         animation_frame,
         panel_width,
     } = render;
-    use unicode_width::UnicodeWidthStr;
     let t = crate::theme::theme();
     let bg: Color = t.code_bg.into();
     let header_style = Style::default()
@@ -5001,7 +4890,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
             format!(" ✗ compaction failed · {summary} ")
         }
     };
-    let stats_used = UnicodeWidthStr::width(stats.as_str());
+    let stats_used = crate::width::width(stats.as_str());
     let stats_pad = target.saturating_sub(stats_used);
     let mut header_spans = vec![Span::styled(stats, header_style)];
     if stats_pad > 0 {
@@ -5045,7 +4934,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
     }
     if !expanded && total > visible {
         let hint = format!("  ▼ {} more lines — click to expand", total - visible);
-        let pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), hint_style));
@@ -5053,7 +4942,7 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
         lines.push(Line::from(spans));
     } else if expanded && total > 12 {
         let hint = "  ▲ click to collapse".to_string();
-        let pad = target.saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+        let pad = target.saturating_sub(crate::width::width(hint.as_str()));
         let mut spans = vec![Span::styled(hint, hint_style)];
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), hint_style));
@@ -5062,25 +4951,6 @@ fn render_compaction_summary(render: CompactionSummaryRender<'_>) -> Vec<Line<'s
     }
     lines.push(blank);
     lines
-}
-
-fn truncate_to_width(s: &str, max_w: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    if UnicodeWidthStr::width(s) <= max_w {
-        return s.to_string();
-    }
-    let mut acc = String::with_capacity(s.len());
-    let mut w = 0usize;
-    for ch in s.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if w + cw > max_w {
-            acc.push('…');
-            break;
-        }
-        acc.push(ch);
-        w += cw;
-    }
-    acc
 }
 
 pub fn render_injection_queue(
@@ -5127,7 +4997,7 @@ pub fn render_injection_queue(
             InjectionLevel::L3Redirect => "L3",
             InjectionLevel::L4HardStop => "L4",
         };
-        let text = truncate_to_width(&inj.text, max_w.saturating_sub(6));
+        let text = crate::width::truncate_plain(&inj.text, max_w.saturating_sub(6));
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(format!("[{level_label}]"), level_style),

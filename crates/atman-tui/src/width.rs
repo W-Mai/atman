@@ -49,6 +49,37 @@ pub fn spans_width<'a>(spans: impl IntoIterator<Item = &'a Span<'a>>) -> usize {
     spans.into_iter().map(|s| width(s.content.as_ref())).sum()
 }
 
+pub fn truncate_spans(
+    spans: Vec<Span<'static>>,
+    max_w: usize,
+    bg: Option<ratatui::style::Color>,
+) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let mut text = String::new();
+        for g in span.content.graphemes(true) {
+            let gw = width(g);
+            if used + gw > max_w {
+                break;
+            }
+            text.push_str(g);
+            used += gw;
+        }
+        if !text.is_empty() {
+            let mut style = span.style;
+            if let Some(bg) = bg {
+                style.bg = style.bg.or(Some(bg));
+            }
+            out.push(Span::styled(text, style));
+        }
+        if used >= max_w {
+            break;
+        }
+    }
+    out
+}
+
 fn grapheme_prefix(s: &str, max_w: usize) -> String {
     let mut out = String::new();
     let mut used = 0usize;
