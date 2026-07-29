@@ -586,8 +586,6 @@ async fn run_frames(
                                 } else if let Some(resize_id) =
                                     app.floating_panels.hit_test_resize(me.column, me.row)
                                 {
-                                    let canvas = app.last_transcript_rect.unwrap_or_default();
-                                    app.floating_panels.unmaximize(&resize_id, canvas);
                                     app.floating_panels.focus(&resize_id);
                                     app.resize_target = Some(resize_id);
                                     app.resize_offset = (me.column, me.row);
@@ -596,7 +594,6 @@ async fn run_frames(
                                     .hit_test_titlebar(me.column, me.row)
                                 {
                                     let id = fp.id.clone();
-                                    let canvas = app.last_transcript_rect.unwrap_or_default();
                                     let now = std::time::Instant::now();
                                     let is_double = app
                                         .last_titlebar_click
@@ -605,10 +602,10 @@ async fn run_frames(
                                             prev_id == &id && now.duration_since(*ts).as_millis() < 400
                                         });
                                     if is_double {
+                                        let canvas = app.last_transcript_rect.unwrap_or_default();
                                         app.floating_panels.toggle_maximize(&id, canvas);
                                         app.last_titlebar_click = None;
                                     } else {
-                                        app.floating_panels.unmaximize(&id, canvas);
                                         app.floating_panels.focus(&id);
                                         app.drag_target = Some(id.clone());
                                         app.drag_offset = (me.column, me.row);
@@ -881,28 +878,40 @@ async fn run_frames(
                                     let (ox, oy) = app.resize_offset;
                                     let dx = me.column as i32 - ox as i32;
                                     let dy = me.row as i32 - oy as i32;
-                                    if let Some(p) = app
-                                        .floating_panels
-                                        .panels
-                                        .iter()
-                                        .find(|p| &p.id == id)
-                                    {
-                                        let is_term = p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal);
-                                        let nw = (p.rect.width as i32 + dx).max(20) as u16;
-                                        let nh = (p.rect.height as i32 + dy).max(6) as u16;
-                                        let canvas = app.last_transcript_rect.unwrap_or_default();
-                                        app.floating_panels.resize_panel(id, nw, nh, canvas);
-                                        app.resize_offset = (me.column, me.row);
-                                        if is_term {
-                                            let inner_cols = nw.saturating_sub(8);
-                                            let inner_rows = nh.saturating_sub(5);
-                                            if inner_cols > 0 && inner_rows > 0 {
-                                                if let Some(tx) = &handle.control_tx {
-                                                    let _ = tx.send(TuiControl::TermResize {
-                                                        handle: id.clone(),
-                                                        rows: inner_rows,
-                                                        cols: inner_cols,
-                                                    });
+                                    if dx != 0 || dy != 0 {
+                                        let was_maximized = app
+                                            .floating_panels
+                                            .panels
+                                            .iter()
+                                            .find(|p| &p.id == id)
+                                            .is_some_and(|p| p.maximized);
+                                        if was_maximized {
+                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            app.floating_panels.unmaximize(id, canvas);
+                                        }
+                                        if let Some(p) = app
+                                            .floating_panels
+                                            .panels
+                                            .iter()
+                                            .find(|p| &p.id == id)
+                                        {
+                                            let is_term = p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal);
+                                            let nw = (p.rect.width as i32 + dx).max(20) as u16;
+                                            let nh = (p.rect.height as i32 + dy).max(6) as u16;
+                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            app.floating_panels.resize_panel(id, nw, nh, canvas);
+                                            app.resize_offset = (me.column, me.row);
+                                            if is_term {
+                                                let inner_cols = nw.saturating_sub(8);
+                                                let inner_rows = nh.saturating_sub(5);
+                                                if inner_cols > 0 && inner_rows > 0 {
+                                                    if let Some(tx) = &handle.control_tx {
+                                                        let _ = tx.send(TuiControl::TermResize {
+                                                            handle: id.clone(),
+                                                            rows: inner_rows,
+                                                            cols: inner_cols,
+                                                        });
+                                                    }
                                                 }
                                             }
                                         }
@@ -911,17 +920,29 @@ async fn run_frames(
                                     let (ox, oy) = app.drag_offset;
                                     let dx = me.column as i32 - ox as i32;
                                     let dy = me.row as i32 - oy as i32;
-                                    if let Some(p) = app
-                                        .floating_panels
-                                        .panels
-                                        .iter()
-                                        .find(|p| &p.id == id)
-                                    {
-                                        let nx = (p.rect.x as i32 + dx).max(0) as u16;
-                                        let ny = (p.rect.y as i32 + dy).max(0) as u16;
-                                        let canvas = app.last_transcript_rect.unwrap_or_default();
-                                        app.floating_panels.move_panel(id, nx, ny, canvas);
-                                        app.drag_offset = (me.column, me.row);
+                                    if dx != 0 || dy != 0 {
+                                        let was_maximized = app
+                                            .floating_panels
+                                            .panels
+                                            .iter()
+                                            .find(|p| &p.id == id)
+                                            .is_some_and(|p| p.maximized);
+                                        if was_maximized {
+                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            app.floating_panels.unmaximize(id, canvas);
+                                        }
+                                        if let Some(p) = app
+                                            .floating_panels
+                                            .panels
+                                            .iter()
+                                            .find(|p| &p.id == id)
+                                        {
+                                            let nx = (p.rect.x as i32 + dx).max(0) as u16;
+                                            let ny = (p.rect.y as i32 + dy).max(0) as u16;
+                                            let canvas = app.last_transcript_rect.unwrap_or_default();
+                                            app.floating_panels.move_panel(id, nx, ny, canvas);
+                                            app.drag_offset = (me.column, me.row);
+                                        }
                                     }
                                 }
                             } else if let MouseEventKind::Up(MouseButton::Left) = me.kind {
