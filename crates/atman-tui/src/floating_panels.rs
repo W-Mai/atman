@@ -19,6 +19,7 @@ pub struct FloatingPanel {
     pub maximized: bool,
     pub prev_rect: Option<Rect>,
     pub scroll: u16,
+    pub h_scroll: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,8 @@ pub enum PanelKind {
     Task(TaskKind),
     History,
     Activity,
+    WorkflowViewer,
+    TerminalViewer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +44,8 @@ impl PanelKind {
             PanelKind::Task(kind) => task_kind_icon(kind),
             PanelKind::History => "⊞",
             PanelKind::Activity => "▸",
+            PanelKind::WorkflowViewer => "⬡",
+            PanelKind::TerminalViewer => "▶",
         }
     }
 }
@@ -100,6 +105,7 @@ impl FloatingPanels {
             maximized: false,
             prev_rect: None,
             scroll: 0,
+            h_scroll: 0,
         };
         self.panels.push(panel);
         self.focused = Some(id.to_string());
@@ -115,6 +121,33 @@ impl FloatingPanels {
     pub fn focus(&mut self, id: &str) {
         self.focused = Some(id.to_string());
         self.bring_to_front(id);
+    }
+
+    pub fn open_maximized(&mut self, id: &str, kind: PanelKind, title: &str, canvas: Rect) {
+        if self.panels.iter().any(|p| p.id == id) {
+            self.focus(id);
+            return;
+        }
+        self.z_counter += 1;
+        let pad = 2u16;
+        let panel = FloatingPanel {
+            id: id.to_string(),
+            kind,
+            title: title.to_string(),
+            rect: Rect {
+                x: canvas.x + pad,
+                y: canvas.y,
+                width: canvas.width.saturating_sub(pad * 2),
+                height: canvas.height,
+            },
+            z: self.z_counter,
+            maximized: true,
+            prev_rect: None,
+            scroll: 0,
+            h_scroll: 0,
+        };
+        self.panels.push(panel);
+        self.focused = Some(id.to_string());
     }
 
     fn bring_to_front(&mut self, id: &str) {
@@ -243,19 +276,21 @@ impl FloatingPanels {
 pub fn render(
     f: &mut Frame,
     _canvas: Rect,
-    panels: &FloatingPanels,
+    panels: &mut FloatingPanels,
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
     hovered_btn: &Option<(String, PanelBtn)>,
     hovered_history_row: &Option<String>,
+    animation_frame: u32,
 ) -> FloatingPanelHitmap {
     let mut all_hitmap = FloatingPanelHitmap::default();
-    let mut sorted: Vec<&FloatingPanel> = panels.panels.iter().collect();
-    sorted.sort_by_key(|p| p.z);
+    let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
+    sorted.sort_by_key(|&i| panels.panels[i].z);
 
     let t = crate::theme::theme();
-    for panel in &sorted {
+    for &idx in &sorted {
+        let panel = &mut panels.panels[idx];
         let is_focused = panels.focused.as_deref() == Some(panel.id.as_str());
         let btn_hover = hovered_btn
             .as_ref()
@@ -438,10 +473,14 @@ pub fn render(
                 hovered_btn,
                 hovered_history_row,
                 &mut panel_hitmap,
+                animation_frame,
             );
             all_hitmap
                 .history_row_rects
                 .append(&mut panel_hitmap.history_row_rects);
+            all_hitmap
+                .workflow_node_rects
+                .append(&mut panel_hitmap.workflow_node_rects);
         }
 
         // shadow after panel+content render
@@ -696,13 +735,14 @@ pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
 fn render_panel_content(
     f: &mut Frame,
     area: Rect,
-    panel: &FloatingPanel,
+    panel: &mut FloatingPanel,
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
     hovered_btn: &Option<(String, PanelBtn)>,
     hovered_history_row: &Option<String>,
     hitmap_out: &mut FloatingPanelHitmap,
+    animation_frame: u32,
 ) {
     let _hovered_btn = hovered_btn;
     if area.height == 0 || area.width == 0 {
@@ -773,12 +813,99 @@ fn render_panel_content(
                 _ => render_task_meta(f, area, kind, snap),
             }
         }
+        PanelKind::WorkflowViewer => {
+            let idx: usize = panel
+                .id
+                .strip_prefix("workflow_viewer:")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            if let Some(OutputItem::WorkflowPanel {
+                graph,
+                expanded_nodes,
+                ..
+            }) = items.get(idx)
+            {
+                let render_width = area.width.max(300);
+                let (lines, regions) = crate::output::render_workflow_panel_with_regions(
+                    graph,
+                    expanded_nodes,
+                    true,
+                    false,
+                    animation_frame,
+                    render_width,
+                );
+                let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+                let content_w = lines
+                    .iter()
+                    .map(|l| crate::width::spans_width(&l.spans))
+                    .max()
+                    .unwrap_or(0) as u16;
+                let max_h_scroll = content_w.saturating_sub(area.width);
+                panel.scroll = panel.scroll.min(max_scroll);
+                panel.h_scroll = panel.h_scroll.min(max_h_scroll);
+                let scroll = panel.scroll;
+                let h_scroll = panel.h_scroll;
+                for r in &regions {
+                    let row0 = area.y as u32 + r.start_row.saturating_sub(scroll as u32);
+                    let row1 = area.y as u32 + r.end_row.saturating_sub(scroll as u32);
+                    let col0 = area.x + r.col_start.saturating_sub(h_scroll);
+                    let col1 = area.x + r.col_end.saturating_sub(h_scroll);
+                    if col1 > col0 && row1 > row0 {
+                        hitmap_out.workflow_node_rects.push((
+                            idx,
+                            r.path_key.clone(),
+                            Rect {
+                                x: col0,
+                                y: row0 as u16,
+                                width: col1.saturating_sub(col0),
+                                height: (row1.saturating_sub(row0)) as u16,
+                            },
+                        ));
+                    }
+                }
+                let p =
+                    ratatui::widgets::Paragraph::new(lines).scroll((panel.scroll, panel.h_scroll));
+                f.render_widget(p, area);
+            } else {
+                render_placeholder(f, area, &panel.title);
+            }
+        }
+        PanelKind::TerminalViewer => {
+            let idx: usize = panel
+                .id
+                .strip_prefix("terminal_viewer:")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            if let Some(OutputItem::Terminal {
+                screen,
+                accumulated_bytes,
+                mode,
+                done,
+                ..
+            }) = items.get(idx)
+            {
+                let max_scroll = screen.rows.saturating_sub(area.height);
+                panel.scroll = panel.scroll.min(max_scroll);
+                render_terminal_viewer_content(
+                    f,
+                    area,
+                    screen,
+                    accumulated_bytes,
+                    *mode,
+                    *done,
+                    panel.scroll,
+                );
+            } else {
+                render_placeholder(f, area, &panel.title);
+            }
+        }
     }
 }
 
 #[derive(Debug, Default)]
 pub struct FloatingPanelHitmap {
     pub history_row_rects: Vec<(String, Rect)>,
+    pub workflow_node_rects: Vec<(usize, String, Rect)>,
 }
 
 fn task_summary_line(snap: &TaskSnapshot, items: &[OutputItem]) -> String {
@@ -1193,6 +1320,116 @@ fn format_elapsed(ms: u64) -> String {
         format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
     };
     format!("{:>5}", raw)
+}
+
+fn render_terminal_viewer_content(
+    f: &mut Frame,
+    area: Rect,
+    screen: &atman_runtime::tools::term::TerminalScreen,
+    accumulated_bytes: &[u8],
+    mode: crate::app::TerminalViewMode,
+    _done: bool,
+    scroll: u16,
+) {
+    let t = crate::theme::theme();
+    let bg = t.code_bg.into();
+    let pad_style = Style::default().bg(bg);
+
+    let pty_cols = screen.cols.max(1);
+    let pty_rows = screen.rows.max(1);
+    let content_w = pty_cols.min(area.width);
+    let content_h = pty_rows.min(area.height);
+    let content_area = Rect {
+        x: area.x + (area.width.saturating_sub(content_w)) / 2,
+        y: area.y + (area.height.saturating_sub(content_h)) / 2,
+        width: content_w,
+        height: content_h,
+    };
+
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let inside = x >= content_area.x
+                && x < content_area.x.saturating_add(content_area.width)
+                && y >= content_area.y
+                && y < content_area.y.saturating_add(content_area.height);
+            if !inside {
+                let cell = &mut f.buffer_mut()[(x, y)];
+                cell.set_symbol(" ");
+                cell.set_style(pad_style);
+            }
+        }
+    }
+
+    if content_area.width == 0 || content_area.height == 0 {
+        return;
+    }
+
+    let lines = match mode {
+        crate::app::TerminalViewMode::Capture => {
+            let cols = screen.cols as usize;
+            let target = content_area.width as usize;
+            let mut lines = Vec::with_capacity(screen.rows as usize);
+            for row in 0..screen.rows as usize {
+                let mut spans: Vec<Span<'static>> = Vec::with_capacity(cols + 1);
+                let mut row_w = 0usize;
+                for col in 0..cols {
+                    let idx = row * cols + col;
+                    if idx >= screen.cells.len() {
+                        break;
+                    }
+                    let cell = &screen.cells[idx];
+                    if cell.wide_continuation {
+                        continue;
+                    }
+                    let cell_style = crate::output::cell_style_for_viewer(cell, bg);
+                    let chars = if cell.chars.is_empty() {
+                        " "
+                    } else {
+                        &cell.chars
+                    };
+                    let cw = crate::width::width(chars);
+                    if row_w + cw > target {
+                        break;
+                    }
+                    row_w += cw;
+                    spans.push(Span::styled(chars.to_string(), cell_style));
+                }
+                let pad = target.saturating_sub(row_w);
+                if pad > 0 {
+                    spans.push(Span::styled(" ".repeat(pad), pad_style));
+                }
+                lines.push(Line::from(spans));
+            }
+            if lines.is_empty() {
+                lines.push(Line::from(Span::styled(" ".repeat(target), pad_style)));
+            }
+            lines
+        }
+        crate::app::TerminalViewMode::Stream => {
+            let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
+            let text = String::from_utf8_lossy(accumulated_bytes).into_owned();
+            let target = content_area.width.max(20) as usize;
+            let mut lines = Vec::new();
+            for line in text.lines() {
+                let rows = crate::output::wrap_with_prefix(line, target, "  ", "  ");
+                for row in rows {
+                    lines.push(crate::output::line_with_right_pad(
+                        &row.prefix,
+                        &row.body,
+                        target,
+                        body_style,
+                        body_style,
+                    ));
+                }
+            }
+            if lines.is_empty() {
+                lines.push(Line::from(Span::styled(" ".repeat(target), body_style)));
+            }
+            lines
+        }
+    };
+    let p = ratatui::widgets::Paragraph::new(lines).scroll((scroll, 0));
+    f.render_widget(p, content_area);
 }
 
 #[cfg(test)]

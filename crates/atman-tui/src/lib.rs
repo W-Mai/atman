@@ -39,12 +39,10 @@ pub mod states;
 pub mod status;
 pub mod task_panel;
 pub mod terminal_guard;
-pub mod terminal_viewer_modal;
 pub mod theme;
 pub mod width;
-pub mod workflow_viewer_modal;
 
-use app::{AppState, NoteLevel, OutputItem};
+use app::{AppState, NoteLevel};
 use atman_runtime::stream::StreamFrame;
 use input::{InputEditor, cursor_from_wrapped, input_paragraph};
 use keys::{KeyAction, map as map_key};
@@ -377,25 +375,6 @@ async fn run_frames(
                 loop {
                     match current {
                         Some(Ok(CtEvent::Mouse(me)))
-                            if app.workflow_viewer.open =>
-                        {
-                            match me.kind {
-                                MouseEventKind::ScrollUp => app.workflow_viewer.scroll_up(3),
-                                MouseEventKind::ScrollDown => app.workflow_viewer.scroll_down(3),
-                                MouseEventKind::ScrollLeft => app.workflow_viewer.scroll_left(3),
-                                MouseEventKind::ScrollRight => app.workflow_viewer.scroll_right(3),
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    if let Some((panel_idx, path)) =
-                                        app.workflow_viewer_hit_test(me.column, me.row)
-                                    {
-                                        app.toggle_workflow_node(panel_idx, &path);
-                                    }
-                                }
-                                _ => {}
-                            }
-                            interrupt_prompt = None;
-                        }
-                        Some(Ok(CtEvent::Mouse(me)))
                             if app.history_search.open =>
                         {
                             match me.kind {
@@ -435,7 +414,13 @@ async fn run_frames(
                             interrupt_prompt = None;
                         }
                         Some(Ok(CtEvent::Mouse(me)))
-                            if matches!(me.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) =>
+                            if matches!(
+                                me.kind,
+                                MouseEventKind::ScrollUp
+                                    | MouseEventKind::ScrollDown
+                                    | MouseEventKind::ScrollLeft
+                                    | MouseEventKind::ScrollRight
+                            ) =>
                         {
                             let over_floating = app
                                 .floating_panels
@@ -449,10 +434,20 @@ async fn run_frames(
                                     .id
                                     .clone();
                                 if let Some(p) = app.floating_panels.panels.iter_mut().find(|p| p.id == id) {
-                                    if matches!(me.kind, MouseEventKind::ScrollUp) {
-                                        p.scroll = p.scroll.saturating_sub(3);
-                                    } else {
-                                        p.scroll = p.scroll.saturating_add(3);
+                                    match me.kind {
+                                        MouseEventKind::ScrollUp => {
+                                            p.scroll = p.scroll.saturating_sub(3);
+                                        }
+                                        MouseEventKind::ScrollDown => {
+                                            p.scroll = p.scroll.saturating_add(3);
+                                        }
+                                        MouseEventKind::ScrollLeft => {
+                                            p.h_scroll = p.h_scroll.saturating_sub(3);
+                                        }
+                                        MouseEventKind::ScrollRight => {
+                                            p.h_scroll = p.h_scroll.saturating_add(3);
+                                        }
+                                        _ => {}
                                     }
                                 }
                             } else {
@@ -496,7 +491,7 @@ async fn run_frames(
                                 }
                             } else if matches!(me.kind, MouseEventKind::ScrollUp) {
                                 scroll_delta = scroll_delta.saturating_sub(3);
-                            } else {
+                            } else if matches!(me.kind, MouseEventKind::ScrollDown) {
                                 scroll_delta = scroll_delta.saturating_add(3);
                             }
                             }
@@ -584,6 +579,18 @@ async fn run_frames(
                                 {
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
                                     app.open_task_panel(&handle, canvas);
+                                } else if let Some((panel_idx, path, _)) = app
+                                    .last_floating_hitmap
+                                    .workflow_node_rects
+                                    .iter()
+                                    .find(|(_, _, r)| rect_contains(*r, me.column, me.row))
+                                    .cloned()
+                                {
+                                    if path.is_empty() {
+                                        app.toggle_workflow_panel_expansion(panel_idx);
+                                    } else {
+                                        app.toggle_workflow_node(panel_idx, &path);
+                                    }
                                 } else if app
                                     .floating_panels
                                     .hit_test_panel(me.column, me.row)
@@ -1497,64 +1504,6 @@ fn count_message_events(path: &std::path::Path) -> (usize, usize) {
     (user, total)
 }
 
-fn handle_workflow_viewer_key(action: &KeyAction, app: &mut AppState) {
-    let step: u16 = 3;
-    let page: u16 = 20;
-    match action {
-        KeyAction::Escape | KeyAction::Quit => app.close_workflow_viewer(),
-        KeyAction::CursorLeft | KeyAction::Char('h') => app.workflow_viewer.scroll_left(step),
-        KeyAction::CursorRight | KeyAction::Char('l') => app.workflow_viewer.scroll_right(step),
-        KeyAction::HistoryUp | KeyAction::ScrollUp | KeyAction::Char('k') => {
-            app.workflow_viewer.scroll_up(step)
-        }
-        KeyAction::HistoryDown | KeyAction::ScrollDown | KeyAction::Char('j') => {
-            app.workflow_viewer.scroll_down(step)
-        }
-        KeyAction::PageUp => app.workflow_viewer.scroll_up(page),
-        KeyAction::PageDown => app.workflow_viewer.scroll_down(page),
-        KeyAction::CursorHome | KeyAction::Home => app.workflow_viewer.home(),
-        KeyAction::CursorEnd | KeyAction::End => app.workflow_viewer.end(),
-        _ => {}
-    }
-}
-
-fn handle_terminal_viewer_key(action: &KeyAction, app: &mut AppState) {
-    let step: u16 = 3;
-    let page: u16 = 20;
-    let max_h = app
-        .items
-        .get(app.terminal_viewer.panel_item_index)
-        .and_then(|item| {
-            if let OutputItem::Terminal { screen, .. } = item {
-                Some(screen.cols)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0);
-    let max_v = app
-        .terminal_viewer
-        .last_inner_rect
-        .map(|r| r.height)
-        .unwrap_or(0);
-    match action {
-        KeyAction::Escape | KeyAction::Quit => app.close_terminal_viewer(),
-        KeyAction::CursorLeft | KeyAction::Char('h') => app.terminal_viewer.scroll_left(step),
-        KeyAction::CursorRight | KeyAction::Char('l') => {
-            app.terminal_viewer.scroll_right(step, max_h)
-        }
-        KeyAction::HistoryUp | KeyAction::ScrollUp | KeyAction::Char('k') => {
-            app.terminal_viewer.scroll_up(step)
-        }
-        KeyAction::HistoryDown | KeyAction::ScrollDown | KeyAction::Char('j') => {
-            app.terminal_viewer.scroll_down(step, max_v)
-        }
-        KeyAction::PageUp => app.terminal_viewer.scroll_up(page),
-        KeyAction::PageDown => app.terminal_viewer.scroll_down(page, max_v),
-        _ => {}
-    }
-}
-
 fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
     use crate::history_search_modal::{HistoryHit, HistorySearchScope};
     match action {
@@ -2321,14 +2270,6 @@ fn handle_key(
     }
     if app.compact_review.is_some() {
         handle_compact_review_key(&action, app, control_tx);
-        return;
-    }
-    if app.workflow_viewer.open {
-        handle_workflow_viewer_key(&action, app);
-        return;
-    }
-    if app.terminal_viewer.open {
-        handle_terminal_viewer_key(&action, app);
         return;
     }
     if app.session_switcher.open {
@@ -3147,12 +3088,13 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_floating_hitmap = crate::floating_panels::render(
             f,
             l.transcript,
-            &app.floating_panels,
+            &mut app.floating_panels,
             &app.task_snapshots,
             &app.items,
             &app.activity_nodes,
             &app.hovered_panel_btn,
             &app.hovered_history_row,
+            app.animation_frame,
         );
     } else {
         app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();
@@ -3316,12 +3258,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.history_search.open {
         history_search_modal::render(f, area, &mut app.history_search);
-    }
-    if app.workflow_viewer.open {
-        workflow_viewer_modal::render(f, area, app);
-    }
-    if app.terminal_viewer.open {
-        terminal_viewer_modal::render(f, area, app);
     }
     if app.form_modal.open {
         form_modal::render(f, area, &app.form_modal);

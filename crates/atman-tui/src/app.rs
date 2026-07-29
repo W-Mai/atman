@@ -173,8 +173,6 @@ pub struct AppState {
     pub session_switcher: crate::session_switcher::SessionSwitcher,
     pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
     pub history_search: crate::history_search_modal::HistorySearchModal,
-    pub workflow_viewer: crate::workflow_viewer_modal::WorkflowViewerModal,
-    pub terminal_viewer: crate::terminal_viewer_modal::TerminalViewerModal,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub cheatsheet_open: bool,
@@ -300,6 +298,22 @@ impl AppState {
             Some(s) => s,
             None => return,
         };
+        if matches!(
+            snap.kind,
+            atman_runtime::TaskKind::Agent
+                | atman_runtime::TaskKind::Flow
+                | atman_runtime::TaskKind::Subflow
+                | atman_runtime::TaskKind::Dispatch
+        ) {
+            if let Some(idx) = self
+                .items
+                .iter()
+                .rposition(|it| matches!(it, crate::app::OutputItem::WorkflowPanel { .. }))
+            {
+                self.open_workflow_viewer(idx);
+                return;
+            }
+        }
         let (pw, ph) = if let Some((sw, sh)) = self.panel_sizes.get(handle) {
             (*sw, *sh)
         } else if snap.kind == atman_runtime::TaskKind::Terminal {
@@ -370,44 +384,74 @@ impl AppState {
         self.toggle_last_workflow_tool_node()
     }
 
+    fn maximized_canvas(&self) -> ratatui::layout::Rect {
+        let transcript = self.last_transcript_rect.unwrap_or_default();
+        let bottom_reserved = self
+            .input_rect
+            .map(|r| {
+                transcript
+                    .y
+                    .saturating_add(transcript.height)
+                    .saturating_sub(r.y)
+                    .saturating_add(1)
+            })
+            .unwrap_or(0);
+        ratatui::layout::Rect {
+            x: transcript.x,
+            y: transcript.y,
+            width: transcript.width,
+            height: transcript.height.saturating_sub(bottom_reserved),
+        }
+    }
+
     pub fn open_workflow_viewer(&mut self, panel_item_index: usize) {
-        self.workflow_viewer.open(panel_item_index);
+        let id = format!("workflow_viewer:{panel_item_index}");
+        let title = self
+            .items
+            .get(panel_item_index)
+            .and_then(|it| match it {
+                crate::app::OutputItem::WorkflowPanel { .. } => Some("Workflow"),
+                _ => None,
+            })
+            .unwrap_or("Workflow");
+        let canvas = self.maximized_canvas();
+        self.floating_panels.open_maximized(
+            &id,
+            crate::floating_panels::PanelKind::WorkflowViewer,
+            title,
+            canvas,
+        );
     }
 
     pub fn close_workflow_viewer(&mut self) {
-        self.workflow_viewer.close();
+        self.floating_panels
+            .panels
+            .retain(|p| p.kind != crate::floating_panels::PanelKind::WorkflowViewer);
     }
 
     pub fn open_terminal_viewer(&mut self, panel_item_index: usize) {
-        self.terminal_viewer.open(panel_item_index);
+        let id = format!("terminal_viewer:{panel_item_index}");
+        let (title, pw, ph) = match self.items.get(panel_item_index) {
+            Some(crate::app::OutputItem::Terminal { handle, screen, .. }) => {
+                (handle.clone(), screen.cols + 8, screen.rows + 5)
+            }
+            _ => ("terminal".to_string(), 80, 24),
+        };
+        let canvas = self.last_transcript_rect.unwrap_or_default();
+        self.floating_panels.open_with_size(
+            &id,
+            crate::floating_panels::PanelKind::TerminalViewer,
+            &title,
+            canvas,
+            pw,
+            ph,
+        );
     }
 
     pub fn close_terminal_viewer(&mut self) {
-        self.terminal_viewer.close();
-    }
-
-    pub fn workflow_viewer_hit_test(&self, col: u16, row: u16) -> Option<(usize, String)> {
-        let inner = self.workflow_viewer.last_inner_rect?;
-        if col < inner.x
-            || col >= inner.x.saturating_add(inner.width)
-            || row < inner.y
-            || row >= inner.y.saturating_add(inner.height)
-        {
-            return None;
-        }
-        let rel_col = col
-            .saturating_sub(inner.x)
-            .saturating_add(self.workflow_viewer.h_offset);
-        let rel_row = row
-            .saturating_sub(inner.y)
-            .saturating_add(self.workflow_viewer.v_offset);
-        self.workflow_viewer
-            .last_node_regions
-            .iter()
-            .filter(|r| u32::from(rel_row) >= r.start_row && u32::from(rel_row) < r.end_row)
-            .filter(|r| rel_col >= r.col_start && rel_col < r.col_end)
-            .max_by_key(|r| r.path_key.len())
-            .map(|r| (self.workflow_viewer.panel_item_index, r.path_key.clone()))
+        self.floating_panels
+            .panels
+            .retain(|p| p.kind != crate::floating_panels::PanelKind::TerminalViewer);
     }
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
