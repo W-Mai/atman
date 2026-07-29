@@ -6,6 +6,13 @@ pub fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
+pub fn graphemes(s: &str) -> impl Iterator<Item = (&str, usize)> {
+    s.graphemes(true).map(|g| {
+        let w = UnicodeWidthStr::width(g);
+        (g, w)
+    })
+}
+
 pub fn truncate(s: &str, max_w: usize) -> String {
     if width(s) <= max_w {
         return s.to_string();

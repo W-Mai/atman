@@ -778,7 +778,6 @@ pub fn wrap_with_prefix(
     first_prefix: &str,
     cont_prefix: &str,
 ) -> Vec<PaddedRow> {
-    use unicode_width::UnicodeWidthChar;
     let prefix_w = crate::width::width(cont_prefix);
     let body_w = target
         .saturating_sub(prefix_w)
@@ -805,9 +804,8 @@ pub fn wrap_with_prefix(
         }
         let mut cur = String::new();
         let mut cur_w = 0usize;
-        for ch in row.chars() {
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if cur_w + cw > limit && !cur.is_empty() {
+        for (g, gw) in crate::width::graphemes(row) {
+            if cur_w + gw > limit && !cur.is_empty() {
                 let prefix = if first_row { first_prefix } else { cont_prefix };
                 out.push(PaddedRow {
                     prefix: prefix.to_string(),
@@ -816,8 +814,8 @@ pub fn wrap_with_prefix(
                 first_row = false;
                 cur_w = 0;
             }
-            cur.push(ch);
-            cur_w += cw;
+            cur.push_str(g);
+            cur_w += gw;
         }
         let prefix = if first_row { first_prefix } else { cont_prefix };
         out.push(PaddedRow {
@@ -2170,7 +2168,6 @@ fn wrap_spans_with_bg(
     max_w: usize,
     bg: Color,
 ) -> Vec<Vec<Span<'static>>> {
-    use unicode_width::UnicodeWidthChar;
     if max_w == 0 {
         return vec![Vec::new()];
     }
@@ -2180,9 +2177,8 @@ fn wrap_spans_with_bg(
     let mut truncated = false;
     for span in spans {
         let mut text = String::new();
-        for ch in span.content.chars() {
-            let w = ch.width().unwrap_or(0);
-            if used + w > max_w {
+        for (g, gw) in crate::width::graphemes(span.content.as_ref()) {
+            if used + gw > max_w {
                 push_wrapped_span(&mut rows, &mut text, span.style, bg);
                 if rows.len() >= max_rows {
                     truncated = true;
@@ -2191,8 +2187,8 @@ fn wrap_spans_with_bg(
                 rows.push(Vec::new());
                 used = 0;
             }
-            text.push(ch);
-            used += w;
+            text.push_str(g);
+            used += gw;
         }
         push_wrapped_span(&mut rows, &mut text, span.style, bg);
         if truncated {
@@ -2883,14 +2879,17 @@ fn append_fanout_horizontal(
             let target = col_width;
             if let Some(line) = branch_lines.get(row_i) {
                 for span in line.spans.iter() {
-                    let take = span
-                        .content
-                        .chars()
-                        .take((target - written) as usize)
-                        .collect::<String>();
-                    let taken = take.chars().count() as u16;
-                    spans.push(Span::styled(take, span.style));
-                    written = written.saturating_add(taken);
+                    let mut take = String::new();
+                    for (g, gw) in crate::width::graphemes(span.content.as_ref()) {
+                        if written + gw as u16 > target {
+                            break;
+                        }
+                        take.push_str(g);
+                        written += gw as u16;
+                    }
+                    if !take.is_empty() {
+                        spans.push(Span::styled(take, span.style));
+                    }
                     if written >= target {
                         break;
                     }
@@ -3226,13 +3225,12 @@ fn append_fanout_horizontal_boxed(
                     let content = span.content.as_ref();
                     let mut used: u16 = 0;
                     let mut taken = String::new();
-                    for ch in content.chars() {
-                        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-                        if used + w > col_width.saturating_sub(written) {
+                    for (g, gw) in crate::width::graphemes(content) {
+                        if used + gw as u16 > col_width.saturating_sub(written) {
                             break;
                         }
-                        taken.push(ch);
-                        used += w;
+                        taken.push_str(g);
+                        used += gw as u16;
                     }
                     if !taken.is_empty() {
                         spans.push(Span::styled(taken, span.style));
