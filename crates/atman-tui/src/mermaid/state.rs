@@ -45,6 +45,16 @@ pub fn parse_state_diagram(source: &str) -> Flowchart {
                 register_state(&mut fc, &id, state_labels.get(&id));
                 continue;
             }
+            if rest.contains(' ') && !rest.starts_with('"') {
+                let id = rest.to_string();
+                register_state(&mut fc, &id, state_labels.get(&id));
+                continue;
+            }
+            let id = rest.to_string();
+            register_state(&mut fc, &id, state_labels.get(&id));
+            continue;
+        }
+        if line.starts_with("note ") {
             continue;
         }
         if let Some(pos) = line.find("-->") {

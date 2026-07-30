@@ -163,6 +163,12 @@ fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[La
 
 fn draw_edge_label(grid: &mut Grid, edge: &super::grid::LaidOutEdge) {
     if let (Some(label), Some((lx, ly))) = (&edge.label, edge.label_pos.as_ref()) {
+        let max_w = grid.width.saturating_sub(*lx);
+        let label = if crate::width::width(label) > max_w {
+            crate::width::truncate_plain(label, max_w)
+        } else {
+            label.clone()
+        };
         let graphemes: Vec<(&str, usize)> = crate::width::graphemes(label.as_str()).collect();
 
         let mut col = 0usize;

@@ -286,3 +286,110 @@ fn state_all_edge_labels_visible() {
         assert!(all.contains(label), "missing edge label: {}", label);
     }
 }
+
+#[test]
+fn flow_no_vertical_line_broken_by_corner() {
+    use atman_tui::mermaid::grid::layout;
+    use atman_tui::mermaid::parser::parse_flowchart;
+    let fc = parse_flowchart(FLOW);
+    let result = layout(&fc);
+    let lines = render_flowchart(FLOW, 120);
+
+    for edge in &result.edges {
+        if let atman_tui::mermaid::grid::EdgePath::Corner {
+            from_x,
+            to_x,
+            horizontal_y,
+            ..
+        } = &edge.path
+        {
+            for x in [*from_x, *to_x] {
+                let y = *horizontal_y;
+                if y >= lines.len() {
+                    continue;
+                }
+                let line = &lines[y];
+                let mut col = 0usize;
+                for (g, gw) in width::graphemes(line) {
+                    if col == x {
+                        let c = g.chars().next().unwrap_or(' ');
+                        assert!(
+                            c == '┌'
+                                || c == '┐'
+                                || c == '└'
+                                || c == '┘'
+                                || c == '├'
+                                || c == '┤'
+                                || c == '┬'
+                                || c == '┴'
+                                || c == '┼'
+                                || c == '│'
+                                || c == '─'
+                                || c == '↓'
+                                || c == '↑',
+                            "turn cell at ({},{}) is '{}' — expected corner/junction/line/arrow",
+                            x,
+                            y,
+                            c
+                        );
+                    }
+                    col += gw;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn flow_label_within_edge_bbox() {
+    use atman_tui::mermaid::grid::{EdgePath, layout};
+    use atman_tui::mermaid::parser::parse_flowchart;
+    let fc = parse_flowchart(FLOW);
+    let result = layout(&fc);
+    for edge in &result.edges {
+        if let (Some(label), Some((lx, ly))) = (&edge.label, edge.label_pos) {
+            let lw = width::width(label);
+            if lw == 0 {
+                continue;
+            }
+            let (min_y, max_y, min_x, max_x) = match &edge.path {
+                EdgePath::Corner {
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    horizontal_y,
+                } => {
+                    let min_y = (*from_y).min(*to_y).min(*horizontal_y);
+                    let max_y = (*from_y).max(*to_y).max(*horizontal_y);
+                    let min_x = (*from_x).min(*to_x);
+                    let max_x = (*from_x).max(*to_x);
+                    (min_y, max_y, min_x, max_x)
+                }
+                EdgePath::Direct { from_y, to_y, x } => {
+                    let min_y = (*from_y).min(*to_y);
+                    let max_y = (*from_y).max(*to_y);
+                    (min_y, max_y, *x, *x)
+                }
+                _ => continue,
+            };
+            assert!(
+                ly >= min_y.saturating_sub(4) && ly <= max_y + 4,
+                "label '{}' at y={} outside edge y range {}..{}",
+                label,
+                ly,
+                min_y,
+                max_y
+            );
+            assert!(
+                lx >= min_x.saturating_sub(10) && lx + lw <= max_x + 10,
+                "label '{}' at x={}..{} outside edge x range {}..{}",
+                label,
+                lx,
+                lx + lw,
+                min_x,
+                max_x
+            );
+        }
+    }
+}
