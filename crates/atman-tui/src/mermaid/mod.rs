@@ -1,3 +1,4 @@
+pub mod charts;
 pub mod grid;
 pub mod parser;
 pub mod render;
@@ -20,6 +21,15 @@ pub fn render_mermaid(body: &str, width: u16) -> Vec<Line<'static>> {
     } else if first_line == "sequenceDiagram" {
         let sd = sequence::parse_sequence(source);
         sequence::render_sequence(&sd)
+    } else if first_line == "pie" {
+        let chart = charts::parse_pie(source);
+        charts::render_pie(&chart)
+    } else if first_line == "gantt" {
+        let chart = charts::parse_gantt(source);
+        charts::render_gantt(&chart)
+    } else if first_line == "timeline" {
+        let tl = charts::parse_timeline(source);
+        charts::render_timeline(&tl)
     } else {
         source.lines().map(String::from).collect()
     };
