@@ -2358,6 +2358,16 @@ fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    if let KeyAction::Tab = action {
+        if let Some(id) = app.floating_panels.focused.clone()
+            && let Some(panel) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
+            && panel.kind == crate::floating_panels::PanelKind::Mermaid
+        {
+            panel.split = !panel.split;
+            app.mark_items_dirty();
+            return;
+        }
+    }
     if app.modal_notification.is_some() {
         if matches!(action, KeyAction::Escape) {
             app.modal_notification = None;
@@ -2631,14 +2641,6 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Tab => {
-            if let Some(id) = app.floating_panels.focused.clone()
-                && let Some(panel) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
-                && panel.kind == crate::floating_panels::PanelKind::Mermaid
-            {
-                panel.split = !panel.split;
-                app.mark_items_dirty();
-                return;
-            }
             if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
                 app.trust.outside = app.trust.outside.next();
                 app.mark_items_dirty();
