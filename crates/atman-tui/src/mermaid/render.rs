@@ -65,16 +65,12 @@ fn draw_edge(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOut
         EdgePath::Direct { from_y, to_y, x } => {
             if from_y < to_y {
                 for y in (*from_y + 1)..(*to_y - 1) {
-                    if grid.is_empty(*x, y) {
-                        grid.set(*x, y, v);
-                    }
+                    grid.merge_v(*x, y, v);
                 }
                 grid.set(*x, *to_y - 1, '↓');
             } else {
                 for y in (*to_y + 2)..*from_y {
-                    if grid.is_empty(*x, y) {
-                        grid.set(*x, y, v);
-                    }
+                    grid.merge_v(*x, y, v);
                 }
                 grid.set(*x, *to_y + 1, '↑');
             }
@@ -122,8 +118,6 @@ fn draw_edge(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOut
     }
 }
 
-/// Draw an L-shaped (or Z-shaped) edge with a horizontal segment at
-/// `bend`. Works for both downward and upward edges.
 struct EdgeDraw {
     from_x: usize,
     from_y: usize,
@@ -146,9 +140,7 @@ fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
     } = p;
     let (sy, ey) = ordered_range(from_y + 1, horizontal_y);
     for y in sy..ey {
-        if grid.is_empty(from_x, y) {
-            grid.set(from_x, y, v);
-        }
+        grid.merge_v(from_x, y, v);
     }
     let from_turn = if from_y < horizontal_y {
         Dir::Down
@@ -164,9 +156,7 @@ fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
         (to_x + 1, from_x)
     };
     for x in x0..x1 {
-        if grid.is_empty(x, horizontal_y) {
-            grid.set(x, horizontal_y, h);
-        }
+        grid.merge_h(x, horizontal_y, h);
     }
 
     let to_turn = if to_y < horizontal_y {
@@ -178,9 +168,7 @@ fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
 
     let (sy, ey) = ordered_range(horizontal_y + 1, to_y);
     for y in sy..ey {
-        if grid.is_empty(to_x, y) {
-            grid.set(to_x, y, v);
-        }
+        grid.merge_v(to_x, y, v);
     }
 
     let arrow = if to_y > from_y { '↓' } else { '↑' };
@@ -203,9 +191,7 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
 
     let (sy, ey) = ordered_range(from_y + 1, gap_y);
     for y in sy..ey {
-        if grid.is_empty(from_x, y) {
-            grid.set(from_x, y, v);
-        }
+        grid.merge_v(from_x, y, v);
     }
     grid.place_turn(
         from_x,
@@ -224,9 +210,7 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
         (channel_x + 1, from_x)
     };
     for x in x0..x1 {
-        if grid.is_empty(x, gap_y) {
-            grid.set(x, gap_y, h);
-        }
+        grid.merge_h(x, gap_y, h);
     }
 
     grid.place_turn(
@@ -241,9 +225,7 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
     );
     let (cy0, cy1) = ordered_range(gap_y + 1, to_y);
     for y in cy0..cy1 {
-        if grid.is_empty(channel_x, y) {
-            grid.set(channel_x, y, v);
-        }
+        grid.merge_v(channel_x, y, v);
     }
 
     grid.place_turn(
@@ -262,9 +244,7 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
         (to_x + 1, channel_x)
     };
     for x in tx0..tx1 {
-        if grid.is_empty(x, to_y) {
-            grid.set(x, to_y, h);
-        }
+        grid.merge_h(x, to_y, h);
     }
 
     let arrow = if to_y > from_y { '↓' } else { '↑' };
@@ -297,12 +277,10 @@ fn find_gap_row(
     None
 }
 
-/// Return (min, max) of two values so range loops always go forward.
 fn ordered_range(a: usize, b: usize) -> (usize, usize) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// Do two horizontal segments [ax1,ax2] and [bx1,bx2] overlap?
 fn horizontal_segments_overlap(ax1: usize, ax2: usize, bx1: usize, bx2: usize) -> bool {
     let (a_lo, a_hi) = if ax1 <= ax2 { (ax1, ax2) } else { (ax2, ax1) };
     let (b_lo, b_hi) = if bx1 <= bx2 { (bx1, bx2) } else { (bx2, bx1) };

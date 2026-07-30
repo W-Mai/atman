@@ -92,6 +92,18 @@ impl Grid {
         self.set(x, y, corner);
     }
 
+    /// Draw a vertical line segment, merging with any existing char.
+    pub fn merge_v(&mut self, x: usize, y: usize, v: char) {
+        let existing = self.get(x, y);
+        self.set(x, y, merge_chars(existing, v));
+    }
+
+    /// Draw a horizontal line segment, merging with any existing char.
+    pub fn merge_h(&mut self, x: usize, y: usize, h: char) {
+        let existing = self.get(x, y);
+        self.set(x, y, merge_chars(existing, h));
+    }
+
     #[allow(dead_code)]
     pub fn place_t_junction(&mut self, x: usize, y: usize, stem: Dir) {
         let existing = self.get(x, y);
@@ -202,26 +214,92 @@ fn t_junction_char(stem: Dir, existing: char) -> char {
     merge_chars(existing, c)
 }
 
+const MERGE_MASKS: [(char, u8); 12] = [
+    (' ', 0b0000),
+    ('│', 0b0011),
+    ('─', 0b1100),
+    ('┌', 0b1010),
+    ('┐', 0b0110),
+    ('└', 0b1001),
+    ('┘', 0b0101),
+    ('├', 0b1011),
+    ('┤', 0b0111),
+    ('┬', 0b1110),
+    ('┴', 0b1101),
+    ('┼', 0b1111),
+];
+
 fn merge_chars(existing: char, new: char) -> char {
-    match (existing, new) {
-        ('─', '│') | ('│', '─') => '┼',
-        ('─', '┌') | ('┌', '─') => '┴',
-        ('─', '┐') | ('┐', '─') => '┴',
-        ('─', '└') | ('└', '─') => '┬',
-        ('─', '┘') | ('┘', '─') => '┬',
-        ('│', '┌') | ('┌', '│') => '├',
-        ('│', '┐') | ('┐', '│') => '┤',
-        ('│', '└') | ('└', '│') => '├',
-        ('│', '┘') | ('┘', '│') => '┤',
-        ('├', '│') | ('│', '├') => '┼',
-        ('┤', '│') | ('│', '┤') => '┼',
-        ('┬', '─') | ('─', '┬') => '┼',
-        ('┴', '─') | ('─', '┴') => '┼',
-        ('├', '─') | ('─', '├') => '┼',
-        ('┤', '─') | ('─', '┤') => '┼',
-        ('├', '┤') | ('┤', '├') => '┼',
-        ('┬', '┴') | ('┴', '┬') => '┼',
+    let em = MERGE_MASKS
+        .iter()
+        .find(|&&(c, _)| c == existing)
+        .map(|&(_, m)| m)
+        .unwrap_or(0);
+    let nm = MERGE_MASKS
+        .iter()
+        .find(|&&(c, _)| c == new)
+        .map(|&(_, m)| m)
+        .unwrap_or(0);
+    let u = em | nm;
+    match u {
+        0b0000 => ' ',
+        0b0011 => '│',
+        0b0101 => '┘',
+        0b0110 => '┐',
+        0b0111 => '┤',
+        0b1001 => '└',
+        0b1010 => '┌',
+        0b1011 => '├',
+        0b1100 => '─',
+        0b1101 => '┴',
+        0b1110 => '┬',
+        0b1111 => '┼',
         _ => new,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_char_connects_correct_directions() {
+        assert_eq!(turn_char(Dir::Up, Dir::Right, ' '), '┌');
+        assert_eq!(turn_char(Dir::Left, Dir::Down, ' '), '┌');
+        assert_eq!(turn_char(Dir::Up, Dir::Left, ' '), '┐');
+        assert_eq!(turn_char(Dir::Right, Dir::Down, ' '), '┐');
+        assert_eq!(turn_char(Dir::Down, Dir::Right, ' '), '└');
+        assert_eq!(turn_char(Dir::Left, Dir::Up, ' '), '└');
+        assert_eq!(turn_char(Dir::Down, Dir::Left, ' '), '┘');
+        assert_eq!(turn_char(Dir::Right, Dir::Up, ' '), '┘');
+    }
+
+    #[test]
+    fn merge_chars_preserves_direction_union() {
+        let all = [' ', '│', '─', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
+        for &e in &all {
+            for &n in &all {
+                let got = merge_chars(e, n);
+                let em = MERGE_MASKS
+                    .iter()
+                    .find(|&&(c, _)| c == e)
+                    .map(|&(_, m)| m)
+                    .unwrap_or(0);
+                let nm = MERGE_MASKS
+                    .iter()
+                    .find(|&&(c, _)| c == n)
+                    .map(|&(_, m)| m)
+                    .unwrap_or(0);
+                let u = em | nm;
+                let exp = MERGE_MASKS.iter().find(|&&(_, m)| m == u).map(|&(c, _)| c);
+                if let Some(expected) = exp {
+                    assert_eq!(
+                        got, expected,
+                        "merge_chars('{e}', '{n}'): got '{got}', expected '{expected}'"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -481,10 +559,6 @@ fn route_vertical(
         })
     };
 
-    // Find the clear row closest to the midpoint. Searching from the
-    // midpoint outward (rather than from one end) spreads overlapping
-    // back-edges across different rows instead of piling them all on
-    // the first clear row near the source.
     let mid_y = (from_y + to_y) / 2;
     let mut horizontal_y = mid_y;
     if !is_clear(mid_y) {

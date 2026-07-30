@@ -288,8 +288,6 @@ pub fn render_sequence(sd: &SequenceDiagram) -> Vec<String> {
     lines
 }
 
-/// Breaks at spaces when possible; CJK (no spaces) hard-breaks at any grapheme
-/// boundary. Tokens longer than `max_w` are hard-broken.
 fn wrap_label(label: &str, max_w: usize) -> Vec<String> {
     if max_w == 0 {
         return vec![label.to_string()];
@@ -357,7 +355,6 @@ fn wrap_label(label: &str, max_w: usize) -> Vec<String> {
         }
     }
     if !line.is_empty() {
-        // Trim trailing space.
         while line.ends_with(' ') {
             line.pop();
         }
