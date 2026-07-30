@@ -376,13 +376,23 @@ pub fn render(
         );
 
         // title row
+        let title_text = if panel.kind == PanelKind::Mermaid {
+            let hint = if panel.split {
+                "Tab: diagram"
+            } else {
+                "Tab: split"
+            };
+            format!("{}  · {}", panel.title, hint)
+        } else {
+            panel.title.clone()
+        };
         let title_line = Line::from(vec![
             Span::styled(
                 format!(" {} ", panel.kind.icon()),
                 Style::default().fg(t.heading.into()).bg(panel_bg),
             ),
             Span::styled(
-                crate::width::truncate(&panel.title, panel.rect.width as usize - 6),
+                crate::width::truncate(&title_text, panel.rect.width as usize - 6),
                 Style::default().fg(t.tinted_fg.into()).bg(panel_bg),
             ),
         ]);
