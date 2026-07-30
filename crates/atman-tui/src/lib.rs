@@ -2631,6 +2631,14 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Tab => {
+            if let Some(id) = app.floating_panels.focused.clone()
+                && let Some(panel) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
+                && panel.kind == crate::floating_panels::PanelKind::Mermaid
+            {
+                panel.split = !panel.split;
+                app.mark_items_dirty();
+                return;
+            }
             if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
                 app.trust.outside = app.trust.outside.next();
                 app.mark_items_dirty();
