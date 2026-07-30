@@ -79,6 +79,13 @@ fn is_corner_char(c: char) -> bool {
     matches!(c, '┌' | '┐' | '└' | '┘')
 }
 
+fn is_structure_char(c: char) -> bool {
+    matches!(
+        c,
+        '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '│' | '─'
+    )
+}
+
 fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOutNode]) {
     let h = style_h(&edge.style);
     let v = style_v(&edge.style);
@@ -92,7 +99,7 @@ fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[La
                     }
                     grid.merge_v(*x, y, v);
                 }
-                if !is_corner_char(grid.get(*x, *to_y - 1)) {
+                if !is_structure_char(grid.get(*x, *to_y - 1)) {
                     grid.set(*x, *to_y - 1, '↓');
                 }
             } else {
@@ -102,7 +109,7 @@ fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[La
                     }
                     grid.merge_v(*x, y, v);
                 }
-                if !is_corner_char(grid.get(*x, *to_y + 1)) {
+                if !is_structure_char(grid.get(*x, *to_y + 1)) {
                     grid.set(*x, *to_y + 1, '↑');
                 }
             }
