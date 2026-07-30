@@ -461,7 +461,7 @@ pub fn layout(fc: &super::parser::Flowchart) -> LayoutResult {
     let layers = assign_layers(fc);
     let layers = reduce_crossings(fc, &layers);
 
-    const LAYER_GAP: usize = 4;
+    const LAYER_GAP: usize = 6;
     const NODE_GAP: usize = 2;
 
     let mut nodes = Vec::new();
@@ -664,8 +664,8 @@ fn resolve_label_positions(edges: &mut [LaidOutEdge], nodes: &[LaidOutNode], gri
         let max_x = grid_w.saturating_sub(label_w);
         let lx_clamped = lx_orig.min(max_x);
 
-        let max_y_delta = 4;
-        let max_x_delta = 5;
+        let max_y_delta = 8;
+        let max_x_delta = 8;
         let mut placed = (lx_clamped, ly_orig);
 
         'outer: for y_delta in 0..=max_y_delta {

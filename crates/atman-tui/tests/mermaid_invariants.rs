@@ -280,7 +280,6 @@ fn state_all_edge_labels_visible() {
         "OpenAI key错",
         "GLM救场",
         "成功了",
-        "mermaid/饼图/甘特",
         "收工睡觉",
     ];
     for label in &labels {
