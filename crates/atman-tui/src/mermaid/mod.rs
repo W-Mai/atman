@@ -1,4 +1,5 @@
 pub mod charts;
+pub mod diagrams;
 pub mod grid;
 pub mod parser;
 pub mod render;
@@ -30,6 +31,15 @@ pub fn render_mermaid(body: &str, width: u16) -> Vec<Line<'static>> {
     } else if first_line == "timeline" {
         let tl = charts::parse_timeline(source);
         charts::render_timeline(&tl)
+    } else if first_line == "erDiagram" {
+        let er = diagrams::parse_er(source);
+        diagrams::render_er(&er)
+    } else if first_line == "classDiagram" {
+        let cd = diagrams::parse_class(source);
+        diagrams::render_class(&cd)
+    } else if first_line == "mindmap" {
+        let mm = diagrams::parse_mindmap(source);
+        diagrams::render_mindmap(&mm)
     } else {
         source.lines().map(String::from).collect()
     };
