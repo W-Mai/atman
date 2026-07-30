@@ -52,9 +52,10 @@ pub fn parse_er(source: &str) -> ErDiagram {
 pub fn render_er(er: &ErDiagram) -> Vec<String> {
     let mut lines = Vec::new();
     for (i, entity) in er.entities.iter().enumerate() {
-        lines.push(format!("  ┌─{}─┐", "─".repeat(entity.name.len())));
+        let name_w = crate::width::width(entity.name.as_str());
+        lines.push(format!("  ┌─{}─┐", "─".repeat(name_w)));
         lines.push(format!("  │ {} │", entity.name));
-        lines.push(format!("  └─{}─┘", "─".repeat(entity.name.len())));
+        lines.push(format!("  └─{}─┘", "─".repeat(name_w)));
         if i + 1 < er.entities.len() {
             lines.push("      │".to_string());
             lines.push("      ▼".to_string());
@@ -177,10 +178,14 @@ pub fn parse_class(source: &str) -> ClassDiagram {
 pub fn render_class(cd: &ClassDiagram) -> Vec<String> {
     let mut lines = Vec::new();
     for cls in &cd.classes {
-        let max_w = cls.name.len().max(
+        let max_w = crate::width::width(cls.name.as_str()).max(
             cls.members
                 .iter()
-                .map(|m| m.name.len() + m.visibility.len() + 1)
+                .map(|m| {
+                    crate::width::width(m.name.as_str())
+                        + crate::width::width(m.visibility.as_str())
+                        + 1
+                })
                 .max()
                 .unwrap_or(0),
         );
@@ -197,7 +202,8 @@ pub fn render_class(cd: &ClassDiagram) -> Vec<String> {
                 } else {
                     format!("{} {}", m.visibility, m.name)
                 };
-                let pad = w - entry.len();
+                let entry_w = crate::width::width(entry.as_str());
+                let pad = w.saturating_sub(entry_w);
                 lines.push(format!("  │ {}{} │", entry, " ".repeat(pad)));
             }
         }

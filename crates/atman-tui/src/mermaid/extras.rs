@@ -386,7 +386,7 @@ pub fn parse_block(source: &str) -> BlockDiagram {
 pub fn render_block(bd: &BlockDiagram) -> Vec<String> {
     let mut lines = Vec::new();
     for block in &bd.blocks {
-        let w = block.label.len() + 2;
+        let w = crate::width::width(block.label.as_str()) + 2;
         lines.push(format!("  ┌─{}─┐", "─".repeat(w)));
         lines.push(format!("  │ {} │", block.label));
         lines.push(format!("  └─{}─┘", "─".repeat(w)));
@@ -431,9 +431,10 @@ pub fn render_packet(pkt: &Packet) -> Vec<String> {
     lines.push(format!("  Packet: {total_bits} bits ({total_bytes} bytes)"));
     lines.push(String::new());
     for field in &pkt.fields {
-        lines.push(format!("  ┌─{}─┐", "─".repeat(field.name.len() + 2)));
+        let name_w = crate::width::width(field.name.as_str());
+        lines.push(format!("  ┌─{}─┐", "─".repeat(name_w + 2)));
         lines.push(format!("  │ {} │ {} bits", field.name, field.bits));
-        lines.push(format!("  └─{}─┘", "─".repeat(field.name.len() + 2)));
+        lines.push(format!("  └─{}─┘", "─".repeat(name_w + 2)));
     }
     lines
 }
@@ -533,14 +534,11 @@ pub fn parse_requirement(source: &str) -> RequirementDiagram {
 pub fn render_requirement(rd: &RequirementDiagram) -> Vec<String> {
     let mut lines = Vec::new();
     for req in &rd.requirements {
-        lines.push(format!("  ┌─{}─┐", "─".repeat(req.label.len() + 2)));
+        let label_w = crate::width::width(req.label.as_str());
+        lines.push(format!("  ┌─{}─┐", "─".repeat(label_w + 2)));
         lines.push(format!("  │ {} │", req.label));
-        lines.push(format!("  │ {} │", " ".repeat(req.label.len() + 2)));
-        lines.push(format!(
-            "  └─{}─┘ [{}]",
-            "─".repeat(req.label.len() + 2),
-            req.id
-        ));
+        lines.push(format!("  │ {} │", " ".repeat(label_w + 2)));
+        lines.push(format!("  └─{}─┘ [{}]", "─".repeat(label_w + 2), req.id));
         lines.push(String::new());
     }
     lines
@@ -583,7 +581,7 @@ pub fn parse_architecture(source: &str) -> Architecture {
 pub fn render_architecture(arch: &Architecture) -> Vec<String> {
     let mut lines = Vec::new();
     for svc in &arch.services {
-        let w = svc.label.len() + 2;
+        let w = crate::width::width(svc.label.as_str()) + 2;
         lines.push(format!("  ╭─{}─╮", "─".repeat(w)));
         lines.push(format!("  │ {} │", svc.label));
         lines.push(format!("  ╰─{}─╯", "─".repeat(w)));

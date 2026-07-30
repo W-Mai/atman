@@ -31,8 +31,12 @@ impl Grid {
     }
 
     pub fn write_str(&mut self, x: usize, y: usize, s: &str) {
-        for (i, c) in s.chars().enumerate() {
-            self.set(x + i, y, c);
+        let mut i = 0usize;
+        for (g, gw) in crate::width::graphemes(s) {
+            for c in g.chars() {
+                self.set(x + i, y, c);
+            }
+            i += gw;
         }
     }
 
@@ -67,10 +71,8 @@ impl Grid {
         self.box_top(x, y, w);
         self.box_bottom(x, y + h + 1, w);
         self.box_sides(x, y + 1, w, h);
-        let label_chars: Vec<char> = label.chars().collect();
-        let max_label = w.saturating_sub(0);
-        let truncated: String = label_chars.iter().take(max_label).collect();
-        let label_w = truncated.chars().count();
+        let truncated = crate::width::truncate_plain(label, w);
+        let label_w = crate::width::width(&truncated);
         let pad = w.saturating_sub(label_w) / 2;
         self.write_str(x + 1 + pad, y + 1, &truncated);
     }
@@ -81,9 +83,8 @@ impl Grid {
         self.set(x, y + 1, '◇');
         self.set(x + w + 1, y + 1, '◇');
         self.set(cx, y + 2, '◇');
-        let label_chars: Vec<char> = label.chars().collect();
-        let truncated: String = label_chars.iter().take(w).collect();
-        let lw = truncated.chars().count();
+        let truncated = crate::width::truncate_plain(label, w);
+        let lw = crate::width::width(&truncated);
         let pad = w.saturating_sub(lw) / 2;
         self.write_str(x + 1 + pad, y + 1, &truncated);
     }
@@ -93,9 +94,8 @@ impl Grid {
         self.set(x, y + 1, '(');
         self.set(x + w + 1, y + 1, ')');
         self.set(x + w / 2 + 1, y + 2, '○');
-        let label_chars: Vec<char> = label.chars().collect();
-        let truncated: String = label_chars.iter().take(w).collect();
-        let lw = truncated.chars().count();
+        let truncated = crate::width::truncate_plain(label, w);
+        let lw = crate::width::width(&truncated);
         let pad = w.saturating_sub(lw) / 2;
         self.write_str(x + 1 + pad, y + 1, &truncated);
     }

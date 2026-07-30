@@ -104,11 +104,15 @@ fn draw_edge(
     }
 
     if let Some(label) = label {
-        let label_chars: Vec<char> = label.chars().collect();
-        let lx = (from_right + to_left) / 2 - label_chars.len() / 2;
+        let label_w = crate::width::width(label);
+        let lx = (from_right + to_left) / 2 - label_w / 2;
         let ly = from_center_y.saturating_sub(1);
-        for (i, c) in label_chars.iter().enumerate() {
-            grid.set(lx + i, ly, *c);
+        let mut i = 0usize;
+        for (g, gw) in crate::width::graphemes(label) {
+            for c in g.chars() {
+                grid.set(lx + i, ly, c);
+            }
+            i += gw;
         }
     }
 }
