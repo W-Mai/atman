@@ -42,37 +42,87 @@ impl Grid {
         }
     }
 
-    pub fn write_line(&mut self, x: usize, y: usize, s: &str) {
-        self.write_str(x, y, s);
+    pub fn is_empty(&self, x: usize, y: usize) -> bool {
+        let c = self.get(x, y);
+        c == ' ' || c == '\u{0}'
     }
 
-    pub fn box_top(&mut self, x: usize, y: usize, w: usize) {
-        self.set(x, y, '╭');
-        self.set(x + w + 1, y, '╮');
-        for i in 1..=w {
-            self.set(x + i, y, '─');
+    pub fn draw_h_segment(&mut self, x1: usize, x2: usize, y: usize, style: &str) {
+        let c = match style {
+            "dotted" => '┄',
+            "thick" => '═',
+            _ => '─',
+        };
+        for x in x1..x2 {
+            if self.is_empty(x, y) {
+                self.set(x, y, c);
+            }
         }
     }
 
-    pub fn box_bottom(&mut self, x: usize, y: usize, w: usize) {
-        self.set(x, y, '╰');
-        self.set(x + w + 1, y, '╯');
-        for i in 1..=w {
-            self.set(x + i, y, '─');
+    pub fn draw_v_segment(&mut self, x: usize, y1: usize, y2: usize, style: &str) {
+        let c = match style {
+            "dotted" => '┆',
+            "thick" => '║',
+            _ => '│',
+        };
+        for y in y1..y2 {
+            if self.is_empty(x, y) {
+                self.set(x, y, c);
+            }
         }
     }
 
-    pub fn box_sides(&mut self, x: usize, y: usize, w: usize, h: usize) {
-        for row in 0..h {
-            self.set(x, y + row, '│');
-            self.set(x + w + 1, y + row, '│');
+    #[allow(dead_code)]
+    fn place_corner(&mut self, x: usize, y: usize, style: &str) {
+        if !self.is_empty(x, y) {
+            return;
         }
+        let c = match style {
+            "dotted" => '┄',
+            "thick" => '═',
+            _ => '─',
+        };
+        self.set(x, y, c);
+    }
+
+    pub fn place_turn(&mut self, x: usize, y: usize, from_dir: Dir, to_dir: Dir) {
+        let existing = self.get(x, y);
+        let corner = turn_char(from_dir, to_dir, existing);
+        self.set(x, y, corner);
+    }
+
+    #[allow(dead_code)]
+    pub fn place_t_junction(&mut self, x: usize, y: usize, stem: Dir) {
+        let existing = self.get(x, y);
+        let c = t_junction_char(stem, existing);
+        self.set(x, y, c);
+    }
+
+    #[allow(dead_code)]
+    pub fn place_cross(&mut self, x: usize, y: usize) {
+        let existing = self.get(x, y);
+        let c = match existing {
+            '│' | '─' => '┼',
+            '├' | '┤' | '┬' | '┴' => '┼',
+            _ => existing,
+        };
+        self.set(x, y, c);
     }
 
     pub fn draw_box(&mut self, x: usize, y: usize, w: usize, h: usize, label: &str) {
-        self.box_top(x, y, w);
-        self.box_bottom(x, y + h + 1, w);
-        self.box_sides(x, y + 1, w, h);
+        self.set(x, y, '╭');
+        self.set(x + w + 1, y, '╮');
+        self.set(x, y + h + 1, '╰');
+        self.set(x + w + 1, y + h + 1, '╯');
+        for i in 1..=w {
+            self.set(x + i, y, '─');
+            self.set(x + i, y + h + 1, '─');
+        }
+        for row in 0..h {
+            self.set(x, y + 1 + row, '│');
+            self.set(x + w + 1, y + 1 + row, '│');
+        }
         let truncated = crate::width::truncate_plain(label, w);
         let label_w = crate::width::width(&truncated);
         let pad = w.saturating_sub(label_w) / 2;
@@ -103,31 +153,11 @@ impl Grid {
     }
 
     pub fn draw_h_line(&mut self, x1: usize, x2: usize, y: usize, style: &str) {
-        let c = match style {
-            "dotted" => '┄',
-            "thick" => '═',
-            _ => '─',
-        };
-        for x in x1..x2 {
-            let existing = self.get(x, y);
-            if existing == ' ' || existing == '\u{0}' {
-                self.set(x, y, c);
-            }
-        }
+        self.draw_h_segment(x1, x2, y, style);
     }
 
     pub fn draw_v_line(&mut self, x: usize, y1: usize, y2: usize, style: &str) {
-        let c = match style {
-            "dotted" => '┆',
-            "thick" => '║',
-            _ => '│',
-        };
-        for y in y1..y2 {
-            let existing = self.get(x, y);
-            if existing == ' ' || existing == '\u{0}' {
-                self.set(x, y, c);
-            }
-        }
+        self.draw_v_segment(x, y1, y2, style);
     }
 
     pub fn to_lines(&self) -> Vec<String> {
@@ -141,6 +171,64 @@ impl Grid {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+fn turn_char(from: Dir, to: Dir, existing: char) -> char {
+    let pair = (from, to);
+    let corner = match pair {
+        // ┌: up→right, left→down
+        (Dir::Up, Dir::Right) | (Dir::Left, Dir::Down) => '┌',
+        // ┐: up→left, right→down
+        (Dir::Up, Dir::Left) | (Dir::Right, Dir::Down) => '┐',
+        // └: down→right, left→up
+        (Dir::Down, Dir::Right) | (Dir::Left, Dir::Up) => '└',
+        // ┘: down→left, right→up
+        (Dir::Down, Dir::Left) | (Dir::Right, Dir::Up) => '┘',
+        _ => '─',
+    };
+    merge_chars(existing, corner)
+}
+
+#[allow(dead_code)]
+fn t_junction_char(stem: Dir, existing: char) -> char {
+    let c = match stem {
+        Dir::Down => '┬',
+        Dir::Up => '┴',
+        Dir::Right => '├',
+        Dir::Left => '┤',
+    };
+    merge_chars(existing, c)
+}
+
+fn merge_chars(existing: char, new: char) -> char {
+    match (existing, new) {
+        ('─', '│') | ('│', '─') => '┼',
+        ('─', '┌') | ('┌', '─') => '├',
+        ('─', '┐') | ('┐', '─') => '┤',
+        ('─', '└') | ('└', '─') => '├',
+        ('─', '┘') | ('┘', '─') => '┤',
+        ('│', '┌') | ('┌', '│') => '┬',
+        ('│', '┐') | ('┐', '│') => '┬',
+        ('│', '└') | ('└', '│') => '┴',
+        ('│', '┘') | ('┘', '│') => '┴',
+        ('├', '│') | ('│', '├') => '┼',
+        ('┤', '│') | ('│', '┤') => '┼',
+        ('┬', '─') | ('─', '┬') => '┼',
+        ('┴', '─') | ('─', '┴') => '┼',
+        ('├', '─') | ('─', '├') => '┼',
+        ('┤', '─') | ('─', '┤') => '┼',
+        ('├', '┤') | ('┤', '├') => '┼',
+        ('┬', '┴') | ('┴', '┬') => '┼',
+        _ => new,
+    }
+}
+
 pub struct PositionedNode {
     pub id: String,
     pub label: String,
@@ -149,6 +237,30 @@ pub struct PositionedNode {
     pub y: usize,
     pub w: usize,
     pub h: usize,
+}
+
+impl PositionedNode {
+    pub fn left(&self) -> usize {
+        self.x
+    }
+    pub fn right(&self) -> usize {
+        self.x + self.w + 1
+    }
+    pub fn top(&self) -> usize {
+        self.y
+    }
+    pub fn bottom(&self) -> usize {
+        self.y + self.h + 1
+    }
+    pub fn center_x(&self) -> usize {
+        self.x + self.w / 2 + 1
+    }
+    pub fn center_y(&self) -> usize {
+        self.y + 1
+    }
+    pub fn contains(&self, x: usize, y: usize) -> bool {
+        x >= self.left() && x <= self.right() && y >= self.top() && y <= self.bottom()
+    }
 }
 
 pub fn layout(fc: &super::parser::Flowchart) -> (Vec<PositionedNode>, usize, usize) {
