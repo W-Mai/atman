@@ -1105,6 +1105,17 @@ fn route_horizontal(
         );
     }
 
+    let from_y = if to_cy > from_cy {
+        from.bottom()
+    } else {
+        from.top()
+    };
+    let to_y = if to_cy > from_cy {
+        to.top()
+    } else {
+        to.bottom()
+    };
+
     let (lo, hi) = if from_x <= to_x {
         (from_x, to_x)
     } else {
@@ -1117,7 +1128,7 @@ fn route_horizontal(
                 && n.id != to.id
                 && n.left() <= x
                 && x <= n.right()
-                && horizontal_segments_overlap(from_cy, to_cy, n.top(), n.bottom())
+                && horizontal_segments_overlap(from_y, to_y, n.top(), n.bottom())
         })
     };
 
@@ -1146,23 +1157,23 @@ fn route_horizontal(
         return (
             EdgePath::SideChannel {
                 from_x,
-                from_y: from_cy,
+                from_y,
                 to_x,
-                to_y: to_cy,
+                to_y,
                 channel_x: vertical_x,
             },
             None,
         );
     }
 
-    let label_pos = label_at_vertical_bend(from_cy, to_cy, vertical_x);
+    let label_pos = label_at_vertical_bend(from_y, to_y, vertical_x);
 
     (
         EdgePath::SideChannel {
             from_x,
-            from_y: from_cy,
+            from_y,
             to_x,
-            to_y: to_cy,
+            to_y,
             channel_x: vertical_x,
         },
         label_pos,
