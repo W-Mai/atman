@@ -7,6 +7,9 @@ pub const E: u8 = 0b0100;
 pub const W: u8 = 0b1000;
 /// Flag indicating the cell is an arrowhead (direction stored in same bits).
 pub const ARROW: u8 = 0b10000;
+/// Flag indicating the cell is a locked turn corner. Lines passing through
+/// a locked cell do not accumulate extra directions, preserving the turn.
+pub const LOCKED: u8 = 0b100000;
 
 #[derive(Clone)]
 pub struct Grid {
@@ -37,9 +40,22 @@ impl Grid {
     }
 
     /// Add direction flags to the structure layer (additive, not overwrite).
+    /// Cells marked LOCKED are skipped to preserve turn corners.
     pub fn add_dir(&mut self, x: usize, y: usize, dirs: u8) {
         if let Some(i) = self.idx(x, y) {
+            if self.structure[i] & LOCKED != 0 {
+                return;
+            }
             self.structure[i] |= dirs;
+        }
+    }
+
+    /// Write a turn corner: merges the direction bits and marks the cell
+    /// LOCKED so passing lines (add_dir) don't accumulate extra directions.
+    /// Multiple turns at the same cell merge their directions.
+    pub fn add_turn(&mut self, x: usize, y: usize, dirs: u8) {
+        if let Some(i) = self.idx(x, y) {
+            self.structure[i] = LOCKED | (self.structure[i] & 0b1111) | (dirs & 0b1111);
         }
     }
 

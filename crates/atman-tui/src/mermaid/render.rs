@@ -17,7 +17,14 @@ pub fn render_flowchart_struct(fc: &Flowchart, fallback_source: &str) -> Vec<Str
     let mut grid = Grid::new(result.grid_width, result.grid_height);
 
     for edge in &result.edges {
-        draw_edge_line(&mut grid, edge, &result.nodes);
+        if !matches!(edge.path, EdgePath::Direct { .. }) {
+            draw_edge_line(&mut grid, edge, &result.nodes);
+        }
+    }
+    for edge in &result.edges {
+        if matches!(edge.path, EdgePath::Direct { .. }) {
+            draw_edge_line(&mut grid, edge, &result.nodes);
+        }
     }
     for edge in &result.edges {
         draw_edge_label(&mut grid, edge);
@@ -151,9 +158,10 @@ fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
         grid.add_dir(from_x, y, N | S);
     }
 
-    let from_turn_ns = if from_y < horizontal_y { S } else { N };
-    let to_horizontal_ew = if to_x > from_x { E } else { W };
-    grid.add_dir(from_x, horizontal_y, from_turn_ns | to_horizontal_ew);
+    let from_turn_ns = if from_y < horizontal_y { N } else { S };
+    let from_horizontal_ew = if to_x > from_x { E } else { W };
+    let to_horizontal_ew = if to_x > from_x { W } else { E };
+    grid.add_turn(from_x, horizontal_y, from_turn_ns | from_horizontal_ew);
 
     let (x0, x1) = if to_x > from_x {
         (from_x + 1, to_x)
@@ -165,7 +173,7 @@ fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
     }
 
     let to_turn_ns = if to_y < horizontal_y { N } else { S };
-    grid.add_dir(to_x, horizontal_y, to_horizontal_ew | to_turn_ns);
+    grid.add_turn(to_x, horizontal_y, to_horizontal_ew | to_turn_ns);
 
     let (sy, ey) = ordered_range(horizontal_y + 1, to_y);
     for y in sy..ey {
@@ -194,9 +202,10 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
         grid.add_dir(from_x, y, N | S);
     }
 
-    let from_turn_ns = if from_y < gap_y { S } else { N };
-    let to_channel_ew = if channel_x > from_x { E } else { W };
-    grid.add_dir(from_x, gap_y, from_turn_ns | to_channel_ew);
+    let from_turn_ns = if from_y < gap_y { N } else { S };
+    let from_to_channel_ew = if channel_x > from_x { E } else { W };
+    let channel_from_horizontal_ew = if channel_x > from_x { W } else { E };
+    grid.add_turn(from_x, gap_y, from_turn_ns | from_to_channel_ew);
 
     let (x0, x1) = if channel_x > from_x {
         (from_x + 1, channel_x)
@@ -208,7 +217,11 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
     }
 
     let channel_turn_ns = if to_y > gap_y { S } else { N };
-    grid.add_dir(channel_x, gap_y, to_channel_ew | channel_turn_ns);
+    grid.add_turn(
+        channel_x,
+        gap_y,
+        channel_from_horizontal_ew | channel_turn_ns,
+    );
 
     let (cy0, cy1) = ordered_range(gap_y + 1, to_y);
     for y in cy0..cy1 {
@@ -216,8 +229,9 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
     }
 
     let at_to_ns = if to_y > gap_y { N } else { S };
-    let to_ew = if to_x > channel_x { E } else { W };
-    grid.add_dir(channel_x, to_y, at_to_ns | to_ew);
+    let channel_to_to_ew = if to_x > channel_x { E } else { W };
+    let to_horizontal_ew = if to_x > channel_x { W } else { E };
+    grid.add_turn(channel_x, to_y, at_to_ns | channel_to_to_ew);
 
     let (tx0, tx1) = if to_x > channel_x {
         (channel_x + 1, to_x)
@@ -227,6 +241,7 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
     for x in tx0..tx1 {
         grid.add_dir(x, to_y, E | W);
     }
+    let _ = to_horizontal_ew;
 
     let arrow_dir = if to_y > from_y { Dir::Down } else { Dir::Up };
     let arrow_y = if to_y > from_y { to_y - 1 } else { to_y + 1 };
