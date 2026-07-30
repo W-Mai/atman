@@ -307,6 +307,8 @@ pub fn parse_gantt(source: &str) -> GanttChart {
                     }
                 }
                 if all_resolved { dep_end } else { None }
+            } else if rt.duration_days.is_some() || rt.end_date.is_some() {
+                Some(chart_start)
             } else {
                 None
             };
