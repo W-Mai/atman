@@ -238,6 +238,9 @@ fn assign_layers(fc: &super::parser::Flowchart) -> Vec<Vec<String>> {
             let from_layer = *node_layer.get(&edge.from).unwrap_or(&0);
             let to_layer = node_layer.get(&edge.to).copied();
             let new_layer = from_layer + 1;
+            if new_layer > fc.nodes.len() {
+                continue;
+            }
             match to_layer {
                 Some(tl) if tl < new_layer => {
                     node_layer.insert(edge.to.clone(), new_layer);
