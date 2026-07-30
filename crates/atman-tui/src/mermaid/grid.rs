@@ -518,10 +518,135 @@ pub fn layout(fc: &super::parser::Flowchart) -> LayoutResult {
 /// Minimum visual gap (in display columns) between two labels on the same row.
 const LABEL_GAP: usize = 3;
 
-/// Resolve label positions to avoid overlaps, node-box collisions, right-edge
-/// overflow, and insufficient gaps. Each label's x is clamped so it fits within
-/// the grid, and labels that would collide are shifted to a nearby free slot.
-/// Also avoids placing labels on top of edge line cells.
+fn resolve_turn_vline_conflicts(edges: &mut [LaidOutEdge], nodes: &[LaidOutNode]) {
+    let mut turn_cells: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    for e in edges.iter() {
+        if let EdgePath::Corner {
+            from_x,
+            to_x,
+            horizontal_y,
+            ..
+        } = &e.path
+        {
+            turn_cells.insert((*from_x, *horizontal_y));
+            turn_cells.insert((*to_x, *horizontal_y));
+        }
+    }
+
+    for ei in 0..edges.len() {
+        let path = edges[ei].path.clone();
+        let EdgePath::Corner {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            horizontal_y: mut hy,
+        } = path
+        else {
+            continue;
+        };
+
+        let v_conflict = vline_hits_any_turn(from_x, from_y, hy, &turn_cells, ei, edges)
+            || vline_hits_any_turn(to_x, hy, to_y, &turn_cells, ei, edges);
+        if !v_conflict {
+            continue;
+        }
+
+        let (lo, hi) = if from_y <= to_y {
+            (from_y, to_y)
+        } else {
+            (to_y, from_y)
+        };
+        let mut found = false;
+        for offset in 1..=(hi - lo).max(1) {
+            for &candidate in &[hy.saturating_sub(offset), hy + offset] {
+                if candidate <= lo || candidate >= hi {
+                    continue;
+                }
+                let h_blocked = nodes.iter().any(|n| {
+                    n.top() <= candidate
+                        && candidate <= n.bottom()
+                        && horizontal_segments_overlap(from_x, to_x, n.left(), n.right())
+                });
+                if h_blocked {
+                    continue;
+                }
+                let new_v_conflict =
+                    vline_hits_any_turn(from_x, from_y, candidate, &turn_cells, ei, edges)
+                        || vline_hits_any_turn(to_x, candidate, to_y, &turn_cells, ei, edges);
+                if new_v_conflict {
+                    continue;
+                }
+                hy = candidate;
+                found = true;
+                break;
+            }
+            if found {
+                break;
+            }
+        }
+
+        if found {
+            turn_cells.remove(&(from_x, edges[ei].path_corner_hy()));
+            turn_cells.remove(&(to_x, edges[ei].path_corner_hy()));
+            turn_cells.insert((from_x, hy));
+            turn_cells.insert((to_x, hy));
+            let new_label = label_at_horizontal_bend(from_x, to_x, hy);
+            edges[ei].path = EdgePath::Corner {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                horizontal_y: hy,
+            };
+            edges[ei].label_pos = new_label;
+        }
+    }
+}
+
+fn vline_hits_any_turn(
+    x: usize,
+    y1: usize,
+    y2: usize,
+    turn_cells: &std::collections::HashSet<(usize, usize)>,
+    self_ei: usize,
+    edges: &[LaidOutEdge],
+) -> bool {
+    let (lo, hi) = if y1 <= y2 { (y1, y2) } else { (y2, y1) };
+    for y in lo..=hi {
+        if !turn_cells.contains(&(x, y)) {
+            continue;
+        }
+        if let EdgePath::Corner {
+            from_x,
+            to_x,
+            horizontal_y,
+            ..
+        } = &edges[self_ei].path
+        {
+            if (*from_x == x || *to_x == x) && *horizontal_y == y {
+                continue;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+trait CornerHy {
+    fn path_corner_hy(&self) -> usize;
+}
+
+impl CornerHy for LaidOutEdge {
+    fn path_corner_hy(&self) -> usize {
+        match &self.path {
+            EdgePath::Corner { horizontal_y, .. } => *horizontal_y,
+            _ => 0,
+        }
+    }
+}
+
 fn resolve_label_positions(edges: &mut [LaidOutEdge], nodes: &[LaidOutNode], grid_w: usize) {
     let line_cells = compute_edge_line_cells(edges);
 
@@ -743,6 +868,7 @@ fn build_layout_result(
         });
     }
 
+    resolve_turn_vline_conflicts(&mut edges, &nodes);
     resolve_label_positions(&mut edges, &nodes, grid_w);
 
     let (grid_w, grid_h) = grow_grid_for_channels(&edges, grid_w, grid_h);

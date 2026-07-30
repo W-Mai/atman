@@ -129,7 +129,10 @@ fn parse_direction(s: &str) -> Direction {
 fn parse_edge_line(line: &str, fc: &mut Flowchart, current_subgraph: &mut Option<Subgraph>) {
     let (from_id, from_shape, rest) = match parse_node_start(line) {
         Some(v) => v,
-        None => return,
+        None => {
+            eprintln!("[mermaid] parse: cannot find node id in line: {line:?}");
+            return;
+        }
     };
 
     let (edge, rest) = match parse_edge(rest) {
@@ -142,7 +145,10 @@ fn parse_edge_line(line: &str, fc: &mut Flowchart, current_subgraph: &mut Option
 
     let (to_id, to_shape, _) = match parse_node_start(rest.trim()) {
         Some(v) => v,
-        None => return,
+        None => {
+            eprintln!("[mermaid] parse: found edge but cannot parse target node in line: {line:?}");
+            return;
+        }
     };
 
     register_node(fc, &from_id, from_shape, current_subgraph);
@@ -159,7 +165,15 @@ fn register_node(
     shape: Option<(String, NodeShape)>,
     current_subgraph: &mut Option<Subgraph>,
 ) {
-    if !fc.node_map.contains_key(id) {
+    if let Some(&idx) = fc.node_map.get(id) {
+        if let Some((label, node_shape)) = shape {
+            let node = &mut fc.nodes[idx];
+            if node.label == node.id {
+                node.label = label;
+            }
+            node.shape = node_shape;
+        }
+    } else {
         let (label, shape) = shape.unwrap_or_else(|| (id.to_string(), NodeShape::Rectangle));
         fc.node_map.insert(id.to_string(), fc.nodes.len());
         fc.nodes.push(Node {
@@ -342,5 +356,21 @@ mod tests {
         assert_eq!(fc.subgraphs.len(), 1);
         assert_eq!(fc.subgraphs[0].id, "SG");
         assert_eq!(fc.subgraphs[0].label, "Group");
+    }
+
+    #[test]
+    fn parse_node_redefinition() {
+        let fc = parse_flowchart("flowchart TB\nA --> B\nA[真实标签]");
+        let a = fc.nodes.iter().find(|n| n.id == "A").unwrap();
+        assert_eq!(a.label, "真实标签");
+    }
+
+    #[test]
+    fn parse_cjk_node_id() {
+        let fc = parse_flowchart("flowchart TB\n嘿嘿 --> 起top");
+        assert_eq!(fc.nodes.len(), 2);
+        assert!(fc.nodes.iter().any(|n| n.id == "嘿嘿"));
+        assert!(fc.nodes.iter().any(|n| n.id == "起top"));
+        assert_eq!(fc.edges.len(), 1);
     }
 }

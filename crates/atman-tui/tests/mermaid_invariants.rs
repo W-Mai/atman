@@ -204,3 +204,86 @@ fn flow_no_label_split_by_pipe() {
         }
     }
 }
+
+#[test]
+fn flow_all_corner_types_present() {
+    let lines = render_flowchart(FLOW, 120);
+    let all: String = lines.join("\n");
+    assert!(all.contains('└'), "should have └ corners");
+    assert!(all.contains('┘'), "should have ┘ corners");
+    assert!(all.contains('┌'), "should have ┌ corners");
+    assert!(all.contains('┐'), "should have ┐ corners");
+}
+
+#[test]
+fn flow_edges_dont_cross_node_interiors() {
+    use atman_tui::mermaid::grid::layout;
+    use atman_tui::mermaid::parser::parse_flowchart;
+    let fc = parse_flowchart(FLOW);
+    let result = layout(&fc);
+    let lines = render_flowchart(FLOW, 120);
+
+    for node in &result.nodes {
+        for y in node.top()..=node.bottom() {
+            if y >= lines.len() {
+                continue;
+            }
+            let line = &lines[y];
+            let mut col = 0usize;
+            for (g, gw) in width::graphemes(line) {
+                if col >= node.left() && col <= node.right() {
+                    let c = g.chars().next().unwrap_or(' ');
+                    if c == '─' || c == '│' || c == '┄' || c == '┆' {
+                        let is_border = col == node.left()
+                            || col == node.right()
+                            || y == node.top()
+                            || y == node.bottom();
+                        assert!(
+                            is_border,
+                            "edge char '{}' inside node '{}' at ({},{})",
+                            c, node.id, col, y
+                        );
+                    }
+                }
+                col += gw;
+            }
+        }
+    }
+}
+
+#[test]
+fn state_all_edge_labels_visible() {
+    let lines = render_state_diagram(STATE, 120);
+    let all: String = lines.join("\n");
+    let labels = [
+        "想看系统",
+        "情不自禁",
+        "想测面板",
+        "运气好",
+        "叉掉bug",
+        "不死心",
+        "手动操作",
+        "bug触发",
+        "想摸鱼",
+        "登录成功",
+        "遇怪",
+        "怪太强",
+        "读档重来",
+        "继续探索",
+        "重启循环",
+        "又来一遍",
+        "btop乱码",
+        "翻源码",
+        "逛GitHub",
+        "回来继续",
+        "想找人聊",
+        "OpenAI key错",
+        "GLM救场",
+        "成功了",
+        "mermaid/饼图/甘特",
+        "收工睡觉",
+    ];
+    for label in &labels {
+        assert!(all.contains(label), "missing edge label: {}", label);
+    }
+}
