@@ -25,15 +25,25 @@ pub enum ArrowType {
     Open,
 }
 
+#[derive(Debug, Clone)]
+pub struct SeqBlock {
+    pub kind: String,
+    pub label: String,
+    pub start_msg: usize,
+    pub end_msg: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SequenceDiagram {
     pub participants: Vec<Participant>,
     pub messages: Vec<Message>,
+    pub blocks: Vec<SeqBlock>,
 }
 
 pub fn parse_sequence(source: &str) -> SequenceDiagram {
     let mut sd = SequenceDiagram::default();
     let mut participant_order: Vec<String> = Vec::new();
+    let mut block_stack: Vec<SeqBlock> = Vec::new();
 
     for line in source.lines() {
         let line = line.trim();
@@ -42,6 +52,47 @@ pub fn parse_sequence(source: &str) -> SequenceDiagram {
         }
 
         if line == "sequenceDiagram" {
+            continue;
+        }
+
+        if line == "end" {
+            if let Some(mut block) = block_stack.pop() {
+                block.end_msg = sd.messages.len();
+                sd.blocks.push(block);
+            }
+            continue;
+        }
+
+        for kw in &["loop", "alt", "opt", "else"] {
+            if let Some(rest) = line.strip_prefix(&format!("{} ", kw)) {
+                if *kw == "else" {
+                    if let Some(block) = block_stack.last_mut() {
+                        block.end_msg = sd.messages.len();
+                    }
+                    let start = sd.messages.len();
+                    block_stack.push(SeqBlock {
+                        kind: kw.to_string(),
+                        label: rest.trim().to_string(),
+                        start_msg: start,
+                        end_msg: start,
+                    });
+                } else {
+                    block_stack.push(SeqBlock {
+                        kind: kw.to_string(),
+                        label: rest.trim().to_string(),
+                        start_msg: sd.messages.len(),
+                        end_msg: sd.messages.len(),
+                    });
+                }
+                continue;
+            }
+        }
+        if !block_stack.is_empty()
+            && (line.starts_with("loop ")
+                || line.starts_with("alt ")
+                || line.starts_with("opt ")
+                || line.starts_with("else "))
+        {
             continue;
         }
 
@@ -147,6 +198,11 @@ pub fn render_sequence(sd: &SequenceDiagram) -> Vec<String> {
             .position(|p| p.id == msg.to)
             .unwrap_or(0);
         if from_idx == to_idx {
+            let lw = crate::width::width(msg.label.as_str());
+            let need = lw.saturating_add(10).min(max_half);
+            if need > half_label_need[from_idx] {
+                half_label_need[from_idx] = need;
+            }
             continue;
         }
         let lw = crate::width::width(msg.label.as_str());
@@ -196,7 +252,12 @@ pub fn render_sequence(sd: &SequenceDiagram) -> Vec<String> {
     }
     lines.push(sep);
 
-    for msg in &sd.messages {
+    for (msg_idx, msg) in sd.messages.iter().enumerate() {
+        for block in &sd.blocks {
+            if block.start_msg == msg_idx {
+                lines.push(format!("  {} {}", block.kind, block.label));
+            }
+        }
         let from_idx = sd
             .participants
             .iter()
@@ -210,6 +271,60 @@ pub fn render_sequence(sd: &SequenceDiagram) -> Vec<String> {
 
         let from_x = col_x[from_idx];
         let to_x = col_x[to_idx];
+
+        if from_x == to_x {
+            let mut row: Vec<char> = vec![' '; total_w];
+            for &lx in col_x.iter().take(n) {
+                if lx < row.len() {
+                    row[lx] = '│';
+                }
+            }
+            let arc_x = from_x + 2;
+            if arc_x < row.len() {
+                row[arc_x] = '┐';
+            }
+            let row_str: String = row.iter().collect();
+            lines.push(row_str);
+
+            let mut row2: Vec<char> = vec![' '; total_w];
+            for &lx in col_x.iter().take(n) {
+                if lx < row2.len() {
+                    row2[lx] = '│';
+                }
+            }
+            if arc_x < row2.len() {
+                row2[arc_x] = '┘';
+            }
+            if from_x + 1 < row2.len() {
+                row2[from_x + 1] = '←';
+            }
+            let row2_str: String = row2.iter().collect();
+            lines.push(row2_str);
+
+            if !msg.label.is_empty() {
+                let label_w = crate::width::width(msg.label.as_str());
+                let label_start = arc_x + 1;
+                let mut label_row: Vec<char> = vec![' '; total_w];
+                let mut col = 0usize;
+                for (g, gw) in crate::width::graphemes(msg.label.as_str()) {
+                    let pos = label_start + col;
+                    let first_char = g.chars().next().unwrap_or(' ');
+                    if pos < label_row.len() {
+                        label_row[pos] = first_char;
+                    }
+                    for extra in 1..gw {
+                        if pos + extra < label_row.len() {
+                            label_row[pos + extra] = '\u{0}';
+                        }
+                    }
+                    col += gw;
+                }
+                let label_str: String = label_row.iter().filter(|c| **c != '\u{0}').collect();
+                lines.push(label_str);
+                let _ = label_w;
+            }
+            continue;
+        }
 
         let (x0, x1) = if from_x < to_x {
             (from_x, to_x)

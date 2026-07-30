@@ -210,11 +210,11 @@ pub fn parse_gantt(source: &str) -> GanttChart {
             if parts.is_empty() || parts[0].is_empty() {
                 continue;
             }
+            let mut is_milestone = label == "milestone";
             let mut idx = 0;
             let mut is_crit = false;
             let mut is_done = false;
             let mut is_active = false;
-            let mut is_milestone = false;
             while idx < parts.len() {
                 match parts[idx] {
                     "crit" => is_crit = true,
@@ -343,7 +343,11 @@ pub fn parse_gantt(source: &str) -> GanttChart {
             id: rt.id.clone(),
             label: rt.label.clone(),
             start_day,
-            duration_days: (end_day - start_day).max(1),
+            duration_days: if rt.is_milestone {
+                0
+            } else {
+                (end_day - start_day).max(1)
+            },
             is_crit: rt.is_crit,
             is_done: rt.is_done,
             is_active: rt.is_active,
@@ -447,34 +451,38 @@ pub fn render_gantt(chart: &GanttChart) -> Vec<String> {
 
     for section in &chart.sections {
         if !section.label.is_empty() {
-            lines.push(format!("  ▸ {}", section.label));
+            let header = format!("▸ {}", section.label);
+            let header_w = crate::width::width(header.as_str());
+            let pad = (label_col_w + 2 + bar_max).saturating_sub(header_w);
+            lines.push(format!("{}{}", header, " ".repeat(pad)));
         }
         for task in &section.tasks {
             let start_col = (task.start_day as usize) * bar_max / max_end_day;
-            let end_col = ((task.start_day + task.duration_days) as usize) * bar_max / max_end_day;
-            let end_col = end_col.max(start_col + 1).min(bar_max);
-
             let mut bar_row: Vec<char> = vec![' '; bar_max];
-            for (col, cell) in bar_row.iter_mut().enumerate() {
-                let day = (col * max_end_day / bar_max) as i64;
-                if is_weekend(day) && col >= start_col && col < end_col {
-                    *cell = '░';
-                }
-            }
-            let bar_char = if task.is_done {
-                '█'
-            } else if task.is_active {
-                '▓'
-            } else if task.is_crit {
-                '▒'
-            } else {
-                '█'
-            };
+
             if task.is_milestone {
                 if start_col < bar_max {
                     bar_row[start_col] = '◆';
                 }
             } else {
+                let end_col =
+                    ((task.start_day + task.duration_days) as usize) * bar_max / max_end_day;
+                let end_col = end_col.max(start_col + 1).min(bar_max);
+                for (col, cell) in bar_row.iter_mut().enumerate() {
+                    let day = (col * max_end_day / bar_max) as i64;
+                    if is_weekend(day) && col >= start_col && col < end_col {
+                        *cell = '░';
+                    }
+                }
+                let bar_char = if task.is_done {
+                    '█'
+                } else if task.is_active {
+                    '▓'
+                } else if task.is_crit {
+                    '▒'
+                } else {
+                    '█'
+                };
                 for cell in &mut bar_row[start_col..end_col] {
                     *cell = bar_char;
                 }
@@ -502,11 +510,14 @@ pub fn render_gantt(chart: &GanttChart) -> Vec<String> {
         lines.push(String::new());
     }
 
-    lines.push(format!(
-        "{:width$}  Legend: █ done  ▓ active  ▒ crit  ◆ milestone  ░ weekend",
-        "",
-        width = label_col_w
-    ));
+    let legend_text = "Legend: █ done  ▓ active  ▒ crit  ◆ milestone  ░ weekend";
+    let legend_w = crate::width::width(legend_text);
+    let legend = if legend_w > bar_max {
+        crate::width::truncate_plain(legend_text, bar_max)
+    } else {
+        legend_text.to_string()
+    };
+    lines.push(format!("{:width$}  {}", "", legend, width = label_col_w));
     lines
 }
 

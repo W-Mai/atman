@@ -207,10 +207,15 @@ fn parse_node_start(line: &str) -> Option<(String, Option<(String, NodeShape)>, 
             } else {
                 NodeShape::Rectangle
             };
+            let label = if shape == NodeShape::Stadium {
+                label[1..label.len() - 1].to_string()
+            } else {
+                label
+            };
             Some((id, Some((label, shape)), &rest[close + 1..]))
         }
         '(' => {
-            let close = rest.find(')')?;
+            let close = rest.rfind(')')?;
             let inner = &rest[1..close];
             if inner.starts_with('(') && inner.ends_with(')') {
                 let label = &inner[1..inner.len() - 1];
@@ -223,7 +228,7 @@ fn parse_node_start(line: &str) -> Option<(String, Option<(String, NodeShape)>, 
                 let label = &inner[1..inner.len() - 1];
                 Some((
                     id,
-                    Some((label.to_string(), NodeShape::Subroutine)),
+                    Some((label.to_string(), NodeShape::Stadium)),
                     &rest[close + 1..],
                 ))
             } else {

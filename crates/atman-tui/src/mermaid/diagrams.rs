@@ -6,6 +6,7 @@ pub struct ErRelationship {
     pub from: String,
     pub to: String,
     pub label: String,
+    pub symbol: String,
 }
 
 pub struct ErDiagram {
@@ -25,19 +26,25 @@ pub fn parse_er(source: &str) -> ErDiagram {
         }
         if let Some(pos) = line.find("||--") {
             let from = line[..pos].trim().to_string();
-            let rest = &line[pos + 4..];
+            let rest = &line[pos..];
             if let Some(colon) = rest.find(':') {
-                let to_part = rest[..colon].trim();
-                let parts: Vec<&str> = to_part.split_whitespace().collect();
-                let to = parts.last().unwrap_or(&"").to_string();
+                let rel_part = rest[..colon].trim();
                 let label = rest[colon + 1..].trim().trim_matches('"').to_string();
+                let parts: Vec<&str> = rel_part.split_whitespace().collect();
+                let to = parts.last().unwrap_or(&"").to_string();
+                let symbol = parts[..parts.len().saturating_sub(1)].join(" ");
                 if !er.entities.iter().any(|e| e.name == from) {
                     er.entities.push(ErEntity { name: from.clone() });
                 }
                 if !er.entities.iter().any(|e| e.name == to) {
                     er.entities.push(ErEntity { name: to.clone() });
                 }
-                er.relationships.push(ErRelationship { from, to, label });
+                er.relationships.push(ErRelationship {
+                    from,
+                    to,
+                    label,
+                    symbol,
+                });
             }
         } else if let Some(name) = line.strip_suffix(" {") {
             let name = name.trim().to_string();
@@ -66,8 +73,8 @@ pub fn render_er(er: &ErDiagram) -> Vec<String> {
         lines.push("  Relationships:".to_string());
         for rel in &er.relationships {
             lines.push(format!(
-                "    {} ──{}── {} {}",
-                rel.from, rel.label, rel.to, ""
+                "    {} {} {} {}",
+                rel.from, rel.symbol, rel.to, rel.label
             ));
         }
     }

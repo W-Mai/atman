@@ -153,6 +153,25 @@ impl Grid {
         self.write_str(x + 1 + pad, y + 1, &truncated);
     }
 
+    pub fn draw_stadium(&mut self, x: usize, y: usize, w: usize, h: usize, label: &str) {
+        self.set(x, y, '(');
+        self.set(x + w + 1, y, ')');
+        self.set(x, y + h + 1, '(');
+        self.set(x + w + 1, y + h + 1, ')');
+        for i in 1..=w {
+            self.set(x + i, y, '─');
+            self.set(x + i, y + h + 1, '─');
+        }
+        for row in 0..h {
+            self.set(x, y + 1 + row, '│');
+            self.set(x + w + 1, y + 1 + row, '│');
+        }
+        let truncated = crate::width::truncate_plain(label, w);
+        let label_w = crate::width::width(&truncated);
+        let pad = w.saturating_sub(label_w) / 2;
+        self.write_str(x + 1 + pad, y + 1, &truncated);
+    }
+
     pub fn draw_circle(&mut self, x: usize, y: usize, w: usize, label: &str) {
         self.set(x + w / 2 + 1, y, '○');
         self.set(x, y + 1, '(');
@@ -230,6 +249,12 @@ const MERGE_MASKS: [(char, u8); 12] = [
 ];
 
 fn merge_chars(existing: char, new: char) -> char {
+    if existing == ' ' || existing == '\u{0}' {
+        return new;
+    }
+    if new == ' ' || new == '\u{0}' {
+        return existing;
+    }
     let em = MERGE_MASKS
         .iter()
         .find(|&&(c, _)| c == existing)
@@ -240,6 +265,9 @@ fn merge_chars(existing: char, new: char) -> char {
         .find(|&&(c, _)| c == new)
         .map(|&(_, m)| m)
         .unwrap_or(0);
+    if em == 0 && nm == 0 {
+        return new;
+    }
     let u = em | nm;
     match u {
         0b0000 => ' ',
@@ -363,6 +391,10 @@ pub enum EdgePath {
         to_y: usize,
         x: usize,
     },
+    SelfLoop {
+        x: usize,
+        y: usize,
+    },
     Corner {
         from_x: usize,
         from_y: usize,
@@ -482,7 +514,15 @@ fn build_layout_result(
             continue;
         };
 
-        let (path, label_pos) = if is_horizontal {
+        let (path, label_pos) = if edge.from == edge.to {
+            (
+                EdgePath::SelfLoop {
+                    x: from.right() + 1,
+                    y: from.top(),
+                },
+                None,
+            )
+        } else if is_horizontal {
             route_horizontal(from, to, &nodes)
         } else {
             route_vertical(from, to, &nodes)
@@ -510,12 +550,23 @@ fn build_layout_result(
 
 fn grow_grid_for_channels(edges: &[LaidOutEdge], grid_w: usize, grid_h: usize) -> (usize, usize) {
     let mut w = grid_w;
-    let h = grid_h;
+    let mut h = grid_h;
     for e in edges {
-        if let EdgePath::SideChannel { channel_x, .. } = &e.path {
-            if *channel_x >= w {
-                w = *channel_x + 2;
+        match &e.path {
+            EdgePath::SideChannel { channel_x, .. } => {
+                if *channel_x >= w {
+                    w = *channel_x + 2;
+                }
             }
+            EdgePath::SelfLoop { x, y } => {
+                if *x + 1 >= w {
+                    w = *x + 2;
+                }
+                if *y + 3 >= h {
+                    h = *y + 4;
+                }
+            }
+            _ => {}
         }
     }
     (w, h)

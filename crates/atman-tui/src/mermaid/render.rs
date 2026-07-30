@@ -24,7 +24,13 @@ pub fn render_flowchart_struct(fc: &Flowchart, fallback_source: &str) -> Vec<Str
         draw_node(&mut grid, node);
     }
 
-    grid.to_lines()
+    let mut lines = grid.to_lines();
+    for sg in &fc.subgraphs {
+        if !sg.label.is_empty() {
+            lines.insert(0, format!("  subgraph {}", sg.label));
+        }
+    }
+    lines
 }
 
 fn draw_node(grid: &mut Grid, node: &LaidOutNode) {
@@ -34,6 +40,9 @@ fn draw_node(grid: &mut Grid, node: &LaidOutNode) {
         }
         NodeShape::Circle | NodeShape::DoubleCircle => {
             grid.draw_circle(node.x, node.y, node.w, &node.label);
+        }
+        NodeShape::Stadium => {
+            grid.draw_stadium(node.x, node.y, node.w, node.h, &node.label);
         }
         _ => {
             grid.draw_box(node.x, node.y, node.w, node.h, &node.label);
@@ -74,6 +83,14 @@ fn draw_edge(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOut
                 }
                 grid.set(*x, *to_y + 1, '↑');
             }
+        }
+        EdgePath::SelfLoop { x, y } => {
+            grid.set(*x, *y, '┐');
+            grid.set(*x, *y + 1, '│');
+            grid.set(*x, *y + 2, '┘');
+            grid.set(*x - 1, *y + 2, '─');
+            grid.set(*x - 2, *y + 2, '─');
+            grid.set(*x - 3, *y + 2, '←');
         }
         EdgePath::Corner {
             from_x,
