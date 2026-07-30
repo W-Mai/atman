@@ -462,7 +462,7 @@ pub fn layout(fc: &super::parser::Flowchart) -> LayoutResult {
     let layers = reduce_crossings(fc, &layers);
 
     const LAYER_GAP: usize = 6;
-    const NODE_GAP: usize = 2;
+    const NODE_GAP: usize = 4;
 
     let mut nodes = Vec::new();
 
@@ -836,7 +836,38 @@ fn build_layout_result(
 
     let mut edges = Vec::new();
     let mut h_lane_used: HashMap<(usize, usize), std::collections::HashSet<usize>> = HashMap::new();
-    for edge in &fc.edges {
+
+    let mut from_x_map: HashMap<String, Vec<(usize, i32)>> = HashMap::new();
+    for (i, edge) in fc.edges.iter().enumerate() {
+        if edge.from == edge.to {
+            continue;
+        }
+        let from = match node_by_id.get(edge.from.as_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let to = match node_by_id.get(edge.to.as_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let dir = if to.center_x() > from.center_x() {
+            1
+        } else if to.center_x() < from.center_x() {
+            -1
+        } else {
+            0
+        };
+        from_x_map
+            .entry(edge.from.clone())
+            .or_default()
+            .push((i, dir));
+    }
+    let from_x_map_ref: HashMap<&str, &[(usize, i32)]> = from_x_map
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_slice()))
+        .collect();
+
+    for (i, edge) in fc.edges.iter().enumerate() {
         let (Some(from), Some(to)) = (
             node_by_id.get(edge.from.as_str()),
             node_by_id.get(edge.to.as_str()),
@@ -855,7 +886,12 @@ fn build_layout_result(
         } else if is_horizontal {
             route_horizontal(from, to, &nodes)
         } else {
-            route_vertical_lane(from, to, &nodes, &mut h_lane_used)
+            let siblings = from_x_map_ref
+                .get(edge.from.as_str())
+                .copied()
+                .unwrap_or(&[]);
+            let from_x = compute_from_x(i, siblings, from, to);
+            route_vertical_lane_x(from, to, &nodes, &mut h_lane_used, from_x)
         };
 
         edges.push(LaidOutEdge {
@@ -905,91 +941,63 @@ fn grow_grid_for_channels(edges: &[LaidOutEdge], grid_w: usize, grid_h: usize) -
     (w, h)
 }
 
-fn route_vertical_lane(
+fn compute_from_x(
+    edge_idx: usize,
+    siblings: &[(usize, i32)],
+    from: &LaidOutNode,
+    to: &LaidOutNode,
+) -> usize {
+    if siblings.len() <= 1 {
+        return from.center_x();
+    }
+    let from_cx = from.center_x();
+    let to_cx = to.center_x();
+    if to_cx == from_cx {
+        return from_cx;
+    }
+
+    let my_dir: i32 = if to_cx > from_cx { 1 } else { -1 };
+
+    let same_dir: Vec<usize> = siblings
+        .iter()
+        .filter(|&&(_, d)| d == my_dir)
+        .map(|&(e, _)| e)
+        .collect();
+    if same_dir.len() <= 1 {
+        return from_cx;
+    }
+
+    let pos_in_dir = same_dir.iter().position(|&e| e == edge_idx).unwrap_or(0);
+    if pos_in_dir == 0 {
+        return from_cx;
+    }
+
+    let half_w = (from.w / 2) as i32;
+    let offset = my_dir * (pos_in_dir as i32 * 2).min(half_w);
+    let new_x = (from_cx as i32 + offset)
+        .max(from.left() as i32 + 1)
+        .min(from.right() as i32 - 1);
+    new_x as usize
+}
+
+fn route_vertical_lane_x(
     from: &LaidOutNode,
     to: &LaidOutNode,
     all_nodes: &[LaidOutNode],
     h_lane_used: &mut HashMap<(usize, usize), std::collections::HashSet<usize>>,
+    from_x: usize,
 ) -> (EdgePath, Option<(usize, usize)>) {
-    let (path, label_pos) = route_vertical(from, to, all_nodes);
-
-    if let EdgePath::Corner {
-        from_x,
-        from_y,
-        to_x,
-        to_y,
-        horizontal_y: mut hy,
-    } = path.clone()
-    {
-        let gap_key = (from_y.min(to_y), from_y.max(to_y));
-        let used = h_lane_used.entry(gap_key).or_default();
-
-        if used.contains(&hy) {
-            let (lo, hi) = gap_key;
-            for offset in 1..=(hi - lo).max(1) {
-                let above = hy.saturating_sub(offset);
-                let below = hy + offset;
-                if above > lo && !used.contains(&above) {
-                    let clear = !all_nodes.iter().any(|n| {
-                        n.id != from.id
-                            && n.id != to.id
-                            && n.top() <= above
-                            && above <= n.bottom()
-                            && horizontal_segments_overlap(from_x, to_x, n.left(), n.right())
-                    });
-                    if clear {
-                        hy = above;
-                        break;
-                    }
-                }
-                if below < hi && !used.contains(&below) {
-                    let clear = !all_nodes.iter().any(|n| {
-                        n.id != from.id
-                            && n.id != to.id
-                            && n.top() <= below
-                            && below <= n.bottom()
-                            && horizontal_segments_overlap(from_x, to_x, n.left(), n.right())
-                    });
-                    if clear {
-                        hy = below;
-                        break;
-                    }
-                }
-            }
-            let new_path = EdgePath::Corner {
-                from_x,
-                from_y,
-                to_x,
-                to_y,
-                horizontal_y: hy,
-            };
-            let new_label = label_at_horizontal_bend(from_x, to_x, hy);
-            used.insert(hy);
-            return (new_path, new_label);
-        }
-        used.insert(hy);
-    }
-
-    (path, label_pos)
-}
-
-fn route_vertical(
-    from: &LaidOutNode,
-    to: &LaidOutNode,
-    all_nodes: &[LaidOutNode],
-) -> (EdgePath, Option<(usize, usize)>) {
-    let from_cx = from.center_x();
     let to_cx = to.center_x();
 
-    if from_cx == to_cx {
+    if from_x == to_cx {
         let mid_y = (from.bottom() + to.top()) / 2;
         return (
             EdgePath::Direct {
                 from_y: from.bottom(),
                 to_y: to.top(),
-                x: from_cx,
+                x: from_x,
             },
-            Some((from_cx + 1, mid_y)),
+            Some((from_x + 1, mid_y)),
         );
     }
 
@@ -1007,7 +1015,7 @@ fn route_vertical(
                 && n.id != to.id
                 && n.top() <= y
                 && y <= n.bottom()
-                && horizontal_segments_overlap(from_cx, to_cx, n.left(), n.right())
+                && horizontal_segments_overlap(from_x, to_cx, n.left(), n.right())
         })
     };
 
@@ -1030,12 +1038,11 @@ fn route_vertical(
     }
 
     let mid_blocked = !is_clear(horizontal_y);
-
     if mid_blocked {
         let channel_x = side_channel_x(all_nodes, from, to);
         return (
             EdgePath::SideChannel {
-                from_x: from_cx,
+                from_x,
                 from_y,
                 to_x: to_cx,
                 to_y,
@@ -1045,11 +1052,28 @@ fn route_vertical(
         );
     }
 
-    let label_pos = label_at_horizontal_bend(from_cx, to_cx, horizontal_y);
+    let gap_key = (from_y.min(to_y), from_y.max(to_y));
+    let used = h_lane_used.entry(gap_key).or_default();
+    if used.contains(&horizontal_y) {
+        for offset in 1..=(hi - lo).max(1) {
+            let above = horizontal_y.saturating_sub(offset);
+            let below = horizontal_y + offset;
+            if above > lo && !used.contains(&above) && is_clear(above) {
+                horizontal_y = above;
+                break;
+            }
+            if below < hi && !used.contains(&below) && is_clear(below) {
+                horizontal_y = below;
+                break;
+            }
+        }
+    }
+    used.insert(horizontal_y);
 
+    let label_pos = label_at_horizontal_bend(from_x, to_cx, horizontal_y);
     (
         EdgePath::Corner {
-            from_x: from_cx,
+            from_x,
             from_y,
             to_x: to_cx,
             to_y,
