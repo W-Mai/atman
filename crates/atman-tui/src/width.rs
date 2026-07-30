@@ -37,27 +37,29 @@ pub fn truncate_plain(s: &str, max_w: usize) -> String {
 
 pub fn trim_display_offset(s: &str, offset: usize, max_w: usize) -> String {
     let mut skipped = 0usize;
-    let mut start_byte = 0usize;
-    for (g, gw) in graphemes(s) {
-        if skipped + gw <= offset {
-            skipped += gw;
-            start_byte += g.len();
-        } else {
-            break;
-        }
-    }
-    let remaining = &s[start_byte..];
     let mut result = String::new();
-    let mut current_w = 0usize;
-    for (g, gw) in graphemes(remaining) {
-        if current_w + gw > max_w {
+    let mut in_partial = false;
+    for (g, gw) in graphemes(s) {
+        if skipped < offset {
+            let take = (offset - skipped).min(gw);
+            if take < gw {
+                in_partial = true;
+            }
+            skipped += gw;
+            if skipped >= offset && in_partial {
+                let pad = skipped - offset;
+                result.push_str(&" ".repeat(pad));
+            }
+            continue;
+        }
+        if result.width() + gw > max_w {
             break;
         }
         result.push_str(g);
-        current_w += gw;
     }
-    if current_w < max_w {
-        result.push_str(&" ".repeat(max_w - current_w));
+    let dw = result.width();
+    if dw < max_w {
+        result.push_str(&" ".repeat(max_w - dw));
     }
     result
 }

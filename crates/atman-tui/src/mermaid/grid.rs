@@ -200,6 +200,26 @@ impl Grid {
             })
             .collect()
     }
+
+    pub fn to_lines_offset(&self, offset: usize, visible_w: usize) -> Vec<String> {
+        self.cells
+            .iter()
+            .map(|row| {
+                let mut result = String::new();
+                let end = (offset + visible_w).min(self.width);
+                for c in &row[offset..end] {
+                    if *c != '\u{0}' {
+                        result.push(*c);
+                    }
+                }
+                let dw = crate::width::width(&result);
+                if dw < visible_w {
+                    result.push_str(&" ".repeat(visible_w - dw));
+                }
+                result
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
