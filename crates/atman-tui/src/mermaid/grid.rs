@@ -1086,7 +1086,7 @@ fn route_vertical_lane_x(
 fn route_horizontal(
     from: &LaidOutNode,
     to: &LaidOutNode,
-    _all_nodes: &[LaidOutNode],
+    all_nodes: &[LaidOutNode],
 ) -> (EdgePath, Option<(usize, usize)>) {
     let from_x = from.right();
     let to_x = to.left();
@@ -1105,19 +1105,75 @@ fn route_horizontal(
         );
     }
 
-    let vertical_x = (from_x + to_x) / 2;
+    let (lo, hi) = if from_x <= to_x {
+        (from_x, to_x)
+    } else {
+        (to_x, from_x)
+    };
+
+    let is_clear = |x: usize| {
+        !all_nodes.iter().any(|n| {
+            n.id != from.id
+                && n.id != to.id
+                && n.left() <= x
+                && x <= n.right()
+                && horizontal_segments_overlap(from_cy, to_cy, n.top(), n.bottom())
+        })
+    };
+
+    let mid_x = (from_x + to_x) / 2;
+    let mut vertical_x = mid_x;
+    if !is_clear(mid_x) {
+        let max_offset = (hi - lo).max(1);
+        for offset in 1..=max_offset {
+            let left = mid_x.saturating_sub(offset);
+            let right = mid_x + offset;
+            if left > lo && is_clear(left) {
+                vertical_x = left;
+                break;
+            }
+            if right < hi && is_clear(right) {
+                vertical_x = right;
+                break;
+            }
+        }
+    }
+
+    let mid_blocked = !is_clear(vertical_x);
+
+    if mid_blocked {
+        let _channel_y = side_channel_y(all_nodes, from, to);
+        return (
+            EdgePath::SideChannel {
+                from_x,
+                from_y: from_cy,
+                to_x,
+                to_y: to_cy,
+                channel_x: vertical_x,
+            },
+            None,
+        );
+    }
+
     let label_pos = label_at_vertical_bend(from_cy, to_cy, vertical_x);
 
     (
-        EdgePath::Corner {
+        EdgePath::SideChannel {
             from_x,
             from_y: from_cy,
             to_x,
             to_y: to_cy,
-            horizontal_y: vertical_x,
+            channel_x: vertical_x,
         },
         label_pos,
     )
+}
+
+fn side_channel_y(all_nodes: &[LaidOutNode], from: &LaidOutNode, to: &LaidOutNode) -> usize {
+    let max_y = all_nodes.iter().map(|n| n.bottom()).max().unwrap_or(0);
+    let above = from.top().min(to.top()).saturating_sub(2);
+    let below = max_y + 2;
+    if above > 0 { above } else { below }
 }
 
 fn horizontal_segments_overlap(ax1: usize, ax2: usize, bx1: usize, bx2: usize) -> bool {
@@ -1144,8 +1200,9 @@ fn label_at_horizontal_bend(from_x: usize, to_x: usize, y: usize) -> Option<(usi
     Some((mid_x, y.saturating_sub(1)))
 }
 
-fn label_at_vertical_bend(_from_y: usize, _to_y: usize, _x: usize) -> Option<(usize, usize)> {
-    None
+fn label_at_vertical_bend(from_y: usize, to_y: usize, x: usize) -> Option<(usize, usize)> {
+    let mid_y = (from_y + to_y) / 2;
+    Some((x + 1, mid_y))
 }
 
 fn assign_layers(fc: &super::parser::Flowchart) -> Vec<Vec<String>> {
