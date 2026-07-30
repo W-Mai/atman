@@ -191,7 +191,9 @@ pub fn render_class(cd: &ClassDiagram) -> Vec<String> {
         );
         let w = max_w + 2;
         lines.push(format!("  ╭─{}─╮", "─".repeat(w)));
-        lines.push(format!("  │ {} │", cls.name));
+        let name_w = crate::width::width(cls.name.as_str());
+        let name_pad = w.saturating_sub(name_w);
+        lines.push(format!("  │ {}{} │", cls.name, " ".repeat(name_pad)));
         lines.push(format!("  ├─{}─┤", "─".repeat(w)));
         if cls.members.is_empty() {
             lines.push(format!("  │ {} │", " ".repeat(w)));
@@ -322,5 +324,57 @@ mod tests {
         assert!(mm.root.is_some());
         assert_eq!(mm.root.as_ref().unwrap().label, "root");
         assert_eq!(mm.root.as_ref().unwrap().children.len(), 2);
+    }
+
+    fn assert_box_aligned(name: &str, lines: &[String]) {
+        let is_top = |l: &str| l.contains('┌') || l.contains('╭');
+        let is_bottom = |l: &str| l.contains('└') || l.contains('╰');
+        let is_content = |l: &str| l.contains('│') && !is_top(l) && !is_bottom(l);
+
+        let mut i = 0;
+        while i < lines.len() {
+            if is_top(&lines[i]) {
+                let top_w = crate::width::width(&lines[i]);
+                let mut j = i + 1;
+                while j < lines.len() && is_content(&lines[j]) {
+                    let w = crate::width::width(&lines[j]);
+                    assert_eq!(
+                        w, top_w,
+                        "{name}: content row {} width {} != top border {}",
+                        j, w, top_w
+                    );
+                    j += 1;
+                }
+                if j < lines.len() && is_bottom(&lines[j]) {
+                    let bot_w = crate::width::width(&lines[j]);
+                    assert!(
+                        bot_w >= top_w,
+                        "{name}: bottom border row {} width {} < top {}",
+                        j,
+                        bot_w,
+                        top_w
+                    );
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn render_class_cjk_aligned() {
+        let cd = parse_class("classDiagram\nclass 动物\n动物 : +String 名字\n动物 : +吃东西()");
+        let lines = render_class(&cd);
+        assert!(lines.iter().any(|l| l.contains("动物")));
+        assert_box_aligned("class", &lines);
+    }
+
+    #[test]
+    fn render_er_cjk_aligned() {
+        let er = parse_er("erDiagram\n用户 ||--o{ 订单 : 创建");
+        let lines = render_er(&er);
+        assert!(lines.iter().any(|l| l.contains("用户")));
+        assert_box_aligned("er", &lines);
     }
 }

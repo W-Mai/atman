@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-// ── gitGraph ──
-
 pub struct Commit {
     pub id: String,
     pub message: String,
@@ -104,8 +102,6 @@ pub fn render_git_graph(gg: &GitGraph) -> Vec<String> {
     lines
 }
 
-// ── journey ──
-
 pub struct JourneyTask {
     pub label: String,
     pub score: u8,
@@ -190,8 +186,6 @@ pub fn render_journey(j: &Journey) -> Vec<String> {
     lines
 }
 
-// ── quadrantChart ──
-
 pub struct QuadrantPoint {
     pub label: String,
     pub x: f64,
@@ -271,8 +265,6 @@ pub fn render_quadrant(qc: &QuadrantChart) -> Vec<String> {
     lines
 }
 
-// ── xychart ──
-
 pub struct XyPoint {
     pub x: f64,
     pub y: f64,
@@ -348,8 +340,6 @@ pub fn render_xychart(chart: &XyChart) -> Vec<String> {
     lines
 }
 
-// ── block ──
-
 pub struct Block {
     pub id: String,
     pub label: String,
@@ -386,15 +376,15 @@ pub fn parse_block(source: &str) -> BlockDiagram {
 pub fn render_block(bd: &BlockDiagram) -> Vec<String> {
     let mut lines = Vec::new();
     for block in &bd.blocks {
-        let w = crate::width::width(block.label.as_str()) + 2;
+        let label_w = crate::width::width(block.label.as_str());
+        let w = label_w + 2;
         lines.push(format!("  ┌─{}─┐", "─".repeat(w)));
-        lines.push(format!("  │ {} │", block.label));
+        let pad = w.saturating_sub(label_w);
+        lines.push(format!("  │ {}{} │", block.label, " ".repeat(pad)));
         lines.push(format!("  └─{}─┘", "─".repeat(w)));
     }
     lines
 }
-
-// ── packet ──
 
 pub struct PacketField {
     pub name: String,
@@ -431,15 +421,19 @@ pub fn render_packet(pkt: &Packet) -> Vec<String> {
     lines.push(format!("  Packet: {total_bits} bits ({total_bytes} bytes)"));
     lines.push(String::new());
     for field in &pkt.fields {
-        let name_w = crate::width::width(field.name.as_str());
-        lines.push(format!("  ┌─{}─┐", "─".repeat(name_w + 2)));
-        lines.push(format!("  │ {} │ {} bits", field.name, field.bits));
-        lines.push(format!("  └─{}─┘", "─".repeat(name_w + 2)));
+        let bits_str = format!("{} bits", field.bits);
+        let content_w =
+            crate::width::width(field.name.as_str()) + 2 + crate::width::width(bits_str.as_str());
+        let w = content_w + 2;
+        lines.push(format!("  ┌─{}─┐", "─".repeat(w)));
+        let inner = format!("{} │ {}", field.name, bits_str);
+        let inner_w = crate::width::width(inner.as_str());
+        let pad = w.saturating_sub(inner_w);
+        lines.push(format!("  │ {}{} │", inner, " ".repeat(pad)));
+        lines.push(format!("  └─{}─┘", "─".repeat(w)));
     }
     lines
 }
-
-// ── sankey ──
 
 pub struct SankeyFlow {
     pub from: String,
@@ -492,8 +486,6 @@ pub fn render_sankey(sk: &Sankey) -> Vec<String> {
     lines
 }
 
-// ── requirement ──
-
 pub struct Requirement {
     pub id: String,
     pub label: String,
@@ -535,16 +527,16 @@ pub fn render_requirement(rd: &RequirementDiagram) -> Vec<String> {
     let mut lines = Vec::new();
     for req in &rd.requirements {
         let label_w = crate::width::width(req.label.as_str());
-        lines.push(format!("  ┌─{}─┐", "─".repeat(label_w + 2)));
-        lines.push(format!("  │ {} │", req.label));
-        lines.push(format!("  │ {} │", " ".repeat(label_w + 2)));
-        lines.push(format!("  └─{}─┘ [{}]", "─".repeat(label_w + 2), req.id));
+        let w = label_w + 2;
+        lines.push(format!("  ┌─{}─┐", "─".repeat(w)));
+        let pad = w.saturating_sub(label_w);
+        lines.push(format!("  │ {}{} │", req.label, " ".repeat(pad)));
+        lines.push(format!("  │ {} │", " ".repeat(w)));
+        lines.push(format!("  └─{}─┘ [{}]", "─".repeat(w), req.id));
         lines.push(String::new());
     }
     lines
 }
-
-// ── architecture ──
 
 pub struct ArchService {
     pub id: String,
@@ -581,9 +573,11 @@ pub fn parse_architecture(source: &str) -> Architecture {
 pub fn render_architecture(arch: &Architecture) -> Vec<String> {
     let mut lines = Vec::new();
     for svc in &arch.services {
-        let w = crate::width::width(svc.label.as_str()) + 2;
+        let label_w = crate::width::width(svc.label.as_str());
+        let w = label_w + 2;
         lines.push(format!("  ╭─{}─╮", "─".repeat(w)));
-        lines.push(format!("  │ {} │", svc.label));
+        let pad = w.saturating_sub(label_w);
+        lines.push(format!("  │ {}{} │", svc.label, " ".repeat(pad)));
         lines.push(format!("  ╰─{}─╯", "─".repeat(w)));
         lines.push(String::new());
     }
@@ -613,5 +607,73 @@ mod tests {
         assert_eq!(sk.flows.len(), 1);
         assert_eq!(sk.flows[0].from, "A");
         assert_eq!(sk.flows[0].value, 10.0);
+    }
+
+    fn assert_box_aligned(name: &str, lines: &[String]) {
+        let is_top = |l: &str| l.contains('┌') || l.contains('╭');
+        let is_bottom = |l: &str| l.contains('└') || l.contains('╰');
+        let is_content = |l: &str| l.contains('│') && !is_top(l) && !is_bottom(l);
+
+        let mut i = 0;
+        while i < lines.len() {
+            if is_top(&lines[i]) {
+                let top_w = crate::width::width(&lines[i]);
+                let mut j = i + 1;
+                while j < lines.len() && is_content(&lines[j]) {
+                    let w = crate::width::width(&lines[j]);
+                    assert_eq!(
+                        w, top_w,
+                        "{name}: content row {} width {} != top border {}",
+                        j, w, top_w
+                    );
+                    j += 1;
+                }
+                if j < lines.len() && is_bottom(&lines[j]) {
+                    let bot_w = crate::width::width(&lines[j]);
+                    assert!(
+                        bot_w >= top_w,
+                        "{name}: bottom border row {} width {} < top {}",
+                        j,
+                        bot_w,
+                        top_w
+                    );
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn render_block_cjk_aligned() {
+        let bd = parse_block("block-beta\n模块一[功能模块]");
+        let lines = render_block(&bd);
+        assert!(lines.iter().any(|l| l.contains("功能模块")));
+        assert_box_aligned("block", &lines);
+    }
+
+    #[test]
+    fn render_packet_cjk_aligned() {
+        let pkt = parse_packet("packet-beta\n源地址: 8\n目标地址: 8\n数据: 16");
+        let lines = render_packet(&pkt);
+        assert!(lines.iter().any(|l| l.contains("源地址")));
+        assert_box_aligned("packet", &lines);
+    }
+
+    #[test]
+    fn render_requirement_cjk_aligned() {
+        let rd = parse_requirement("requirementDiagram\nrequirement 需求一 : 系统需求");
+        let lines = render_requirement(&rd);
+        assert!(lines.iter().any(|l| l.contains("系统需求")));
+        assert_box_aligned("requirement", &lines);
+    }
+
+    #[test]
+    fn render_architecture_cjk_aligned() {
+        let arch = parse_architecture("architecture-beta\nservice 用户服务(用户管理)");
+        let lines = render_architecture(&arch);
+        assert!(lines.iter().any(|l| l.contains("用户管理")));
+        assert_box_aligned("architecture", &lines);
     }
 }

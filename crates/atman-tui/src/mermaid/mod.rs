@@ -5,6 +5,7 @@ pub mod grid;
 pub mod parser;
 pub mod render;
 pub mod sequence;
+pub mod state;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -23,7 +24,9 @@ pub fn render_mermaid(body: &str, width: u16) -> Vec<Line<'static>> {
     } else if first_line == "sequenceDiagram" {
         let sd = sequence::parse_sequence(source);
         sequence::render_sequence(&sd)
-    } else if first_line == "pie" {
+    } else if first_line == "stateDiagram-v2" || first_line == "stateDiagram" {
+        state::render_state_diagram(source, width)
+    } else if first_line == "pie" || first_line.starts_with("pie ") {
         let chart = charts::parse_pie(source);
         charts::render_pie(&chart)
     } else if first_line == "gantt" {

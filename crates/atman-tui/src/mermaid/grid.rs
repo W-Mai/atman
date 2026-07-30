@@ -182,13 +182,9 @@ pub enum Dir {
 fn turn_char(from: Dir, to: Dir, existing: char) -> char {
     let pair = (from, to);
     let corner = match pair {
-        // ┌: up→right, left→down
         (Dir::Up, Dir::Right) | (Dir::Left, Dir::Down) => '┌',
-        // ┐: up→left, right→down
         (Dir::Up, Dir::Left) | (Dir::Right, Dir::Down) => '┐',
-        // └: down→right, left→up
         (Dir::Down, Dir::Right) | (Dir::Left, Dir::Up) => '└',
-        // ┘: down→left, right→up
         (Dir::Down, Dir::Left) | (Dir::Right, Dir::Up) => '┘',
         _ => '─',
     };
@@ -209,14 +205,14 @@ fn t_junction_char(stem: Dir, existing: char) -> char {
 fn merge_chars(existing: char, new: char) -> char {
     match (existing, new) {
         ('─', '│') | ('│', '─') => '┼',
-        ('─', '┌') | ('┌', '─') => '├',
-        ('─', '┐') | ('┐', '─') => '┤',
-        ('─', '└') | ('└', '─') => '├',
-        ('─', '┘') | ('┘', '─') => '┤',
-        ('│', '┌') | ('┌', '│') => '┬',
-        ('│', '┐') | ('┐', '│') => '┬',
-        ('│', '└') | ('└', '│') => '┴',
-        ('│', '┘') | ('┘', '│') => '┴',
+        ('─', '┌') | ('┌', '─') => '┴',
+        ('─', '┐') | ('┐', '─') => '┴',
+        ('─', '└') | ('└', '─') => '┬',
+        ('─', '┘') | ('┘', '─') => '┬',
+        ('│', '┌') | ('┌', '│') => '├',
+        ('│', '┐') | ('┐', '│') => '┤',
+        ('│', '└') | ('└', '│') => '├',
+        ('│', '┘') | ('┘', '│') => '┤',
         ('├', '│') | ('│', '├') => '┼',
         ('┤', '│') | ('│', '┤') => '┼',
         ('┬', '─') | ('─', '┬') => '┼',
@@ -229,7 +225,16 @@ fn merge_chars(existing: char, new: char) -> char {
     }
 }
 
-pub struct PositionedNode {
+#[derive(Debug)]
+pub struct LayoutResult {
+    pub nodes: Vec<LaidOutNode>,
+    pub edges: Vec<LaidOutEdge>,
+    pub grid_width: usize,
+    pub grid_height: usize,
+}
+
+#[derive(Debug)]
+pub struct LaidOutNode {
     pub id: String,
     pub label: String,
     pub shape: super::parser::NodeShape,
@@ -239,7 +244,7 @@ pub struct PositionedNode {
     pub h: usize,
 }
 
-impl PositionedNode {
+impl LaidOutNode {
     pub fn left(&self) -> usize {
         self.x
     }
@@ -263,9 +268,47 @@ impl PositionedNode {
     }
 }
 
-pub fn layout(fc: &super::parser::Flowchart) -> (Vec<PositionedNode>, usize, usize) {
+#[derive(Debug)]
+pub struct LaidOutEdge {
+    pub from: String,
+    pub to: String,
+    pub style: super::parser::EdgeStyle,
+    pub label: Option<String>,
+    pub label_pos: Option<(usize, usize)>,
+    pub path: EdgePath,
+}
+
+#[derive(Debug)]
+pub enum EdgePath {
+    Direct {
+        from_y: usize,
+        to_y: usize,
+        x: usize,
+    },
+    Corner {
+        from_x: usize,
+        from_y: usize,
+        to_x: usize,
+        to_y: usize,
+        horizontal_y: usize,
+    },
+    SideChannel {
+        from_x: usize,
+        from_y: usize,
+        to_x: usize,
+        to_y: usize,
+        channel_x: usize,
+    },
+}
+
+pub fn layout(fc: &super::parser::Flowchart) -> LayoutResult {
     if fc.nodes.is_empty() {
-        return (Vec::new(), 0, 0);
+        return LayoutResult {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            grid_width: 0,
+            grid_height: 0,
+        };
     }
 
     let max_label_w = fc
@@ -288,66 +331,283 @@ pub fn layout(fc: &super::parser::Flowchart) -> (Vec<PositionedNode>, usize, usi
     let layers = assign_layers(fc);
     let layers = reduce_crossings(fc, &layers);
 
+    const LAYER_GAP: usize = 4;
+    const NODE_GAP: usize = 2;
+
     let mut nodes = Vec::new();
-    let gap = 4usize;
 
     if is_horizontal {
         let max_layer_height = layers.iter().map(|l| l.len()).max().unwrap_or(1);
-        let total_w = layers.len() * (box_total_w + gap);
-        let total_h = max_layer_height * (box_total_h + gap);
+        let total_w = layers.len() * (box_total_w + LAYER_GAP) + NODE_GAP;
+        let total_h = max_layer_height * (box_total_h + NODE_GAP);
 
         for (layer_idx, layer) in layers.iter().enumerate() {
             for (pos_in_layer, node_id) in layer.iter().enumerate() {
                 let node_idx = fc.node_map.get(node_id).copied().unwrap_or(0);
                 let node = &fc.nodes[node_idx];
-                let x = layer_idx * (box_total_w + gap);
-                let y = pos_in_layer * (box_total_h + gap);
-                nodes.push(PositionedNode {
+                let x = layer_idx * (box_total_w + LAYER_GAP) + 1;
+                let y = pos_in_layer * (box_total_h + NODE_GAP) + 1;
+                nodes.push(LaidOutNode {
                     id: node_id.clone(),
                     label: node.label.clone(),
                     shape: node.shape.clone(),
-                    x: x + 1,
-                    y: y + 1,
+                    x,
+                    y,
                     w: box_w,
                     h: box_h,
                 });
             }
         }
-        (nodes, total_w + 2, total_h + 2)
+        build_layout_result(fc, nodes, total_w, total_h, true)
     } else {
         let max_layer_width = layers.iter().map(|l| l.len()).max().unwrap_or(1);
-        let total_w = max_layer_width * (box_total_w + gap);
-        let total_h = layers.len() * (box_total_h + gap);
+        let total_w = max_layer_width * (box_total_w + NODE_GAP) + NODE_GAP;
+        let total_h = layers.len() * (box_total_h + LAYER_GAP);
 
         for (layer_idx, layer) in layers.iter().enumerate() {
             for (pos_in_layer, node_id) in layer.iter().enumerate() {
                 let node_idx = fc.node_map.get(node_id).copied().unwrap_or(0);
                 let node = &fc.nodes[node_idx];
-                let x = pos_in_layer * (box_total_w + gap);
-                let y = layer_idx * (box_total_h + gap);
-                nodes.push(PositionedNode {
+                let x = pos_in_layer * (box_total_w + NODE_GAP) + 1;
+                let y = layer_idx * (box_total_h + LAYER_GAP) + 1;
+                nodes.push(LaidOutNode {
                     id: node_id.clone(),
                     label: node.label.clone(),
                     shape: node.shape.clone(),
-                    x: x + 1,
-                    y: y + 1,
+                    x,
+                    y,
                     w: box_w,
                     h: box_h,
                 });
             }
         }
-        (nodes, total_w + 2, total_h + 2)
+        build_layout_result(fc, nodes, total_w, total_h, false)
     }
+}
+
+fn build_layout_result(
+    fc: &super::parser::Flowchart,
+    nodes: Vec<LaidOutNode>,
+    grid_w: usize,
+    grid_h: usize,
+    is_horizontal: bool,
+) -> LayoutResult {
+    let node_by_id: HashMap<&str, &LaidOutNode> =
+        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+
+    let mut edges = Vec::new();
+    for edge in &fc.edges {
+        let (Some(from), Some(to)) = (
+            node_by_id.get(edge.from.as_str()),
+            node_by_id.get(edge.to.as_str()),
+        ) else {
+            continue;
+        };
+
+        let (path, label_pos) = if is_horizontal {
+            route_horizontal(from, to, &nodes)
+        } else {
+            route_vertical(from, to, &nodes)
+        };
+
+        edges.push(LaidOutEdge {
+            from: edge.from.clone(),
+            to: edge.to.clone(),
+            style: edge.style.clone(),
+            label: edge.label.clone(),
+            label_pos,
+            path,
+        });
+    }
+
+    let (grid_w, grid_h) = grow_grid_for_channels(&edges, grid_w, grid_h);
+
+    LayoutResult {
+        nodes,
+        edges,
+        grid_width: grid_w,
+        grid_height: grid_h,
+    }
+}
+
+fn grow_grid_for_channels(edges: &[LaidOutEdge], grid_w: usize, grid_h: usize) -> (usize, usize) {
+    let mut w = grid_w;
+    let h = grid_h;
+    for e in edges {
+        if let EdgePath::SideChannel { channel_x, .. } = &e.path {
+            if *channel_x >= w {
+                w = *channel_x + 2;
+            }
+        }
+    }
+    (w, h)
+}
+
+fn route_vertical(
+    from: &LaidOutNode,
+    to: &LaidOutNode,
+    all_nodes: &[LaidOutNode],
+) -> (EdgePath, Option<(usize, usize)>) {
+    let from_cx = from.center_x();
+    let to_cx = to.center_x();
+
+    if from_cx == to_cx {
+        let mid_y = (from.bottom() + to.top()) / 2;
+        return (
+            EdgePath::Direct {
+                from_y: from.bottom(),
+                to_y: to.top(),
+                x: from_cx,
+            },
+            Some((from_cx + 1, mid_y)),
+        );
+    }
+
+    let from_y = from.bottom();
+    let to_y = to.top();
+    let (lo, hi) = if from_y <= to_y {
+        (from_y, to_y)
+    } else {
+        (to_y, from_y)
+    };
+
+    let is_clear = |y: usize| {
+        !all_nodes.iter().any(|n| {
+            n.id != from.id
+                && n.id != to.id
+                && n.top() <= y
+                && y <= n.bottom()
+                && horizontal_segments_overlap(from_cx, to_cx, n.left(), n.right())
+        })
+    };
+
+    // Find the clear row closest to the midpoint. Searching from the
+    // midpoint outward (rather than from one end) spreads overlapping
+    // back-edges across different rows instead of piling them all on
+    // the first clear row near the source.
+    let mid_y = (from_y + to_y) / 2;
+    let mut horizontal_y = mid_y;
+    if !is_clear(mid_y) {
+        let max_offset = (hi - lo).max(1);
+        for offset in 1..=max_offset {
+            let above = mid_y.saturating_sub(offset);
+            let below = mid_y + offset;
+            if above > lo && is_clear(above) {
+                horizontal_y = above;
+                break;
+            }
+            if below < hi && is_clear(below) {
+                horizontal_y = below;
+                break;
+            }
+        }
+    }
+
+    let mid_blocked = !is_clear(horizontal_y);
+
+    if mid_blocked {
+        let channel_x = side_channel_x(all_nodes, from, to);
+        return (
+            EdgePath::SideChannel {
+                from_x: from_cx,
+                from_y,
+                to_x: to_cx,
+                to_y,
+                channel_x,
+            },
+            None,
+        );
+    }
+
+    let label_pos = label_at_horizontal_bend(from_cx, to_cx, horizontal_y);
+
+    (
+        EdgePath::Corner {
+            from_x: from_cx,
+            from_y,
+            to_x: to_cx,
+            to_y,
+            horizontal_y,
+        },
+        label_pos,
+    )
+}
+
+fn route_horizontal(
+    from: &LaidOutNode,
+    to: &LaidOutNode,
+    _all_nodes: &[LaidOutNode],
+) -> (EdgePath, Option<(usize, usize)>) {
+    let from_x = from.right();
+    let to_x = to.left();
+    let from_cy = from.center_y();
+    let to_cy = to.center_y();
+
+    if from_cy == to_cy {
+        let mid_x = (from_x + to_x) / 2;
+        return (
+            EdgePath::Direct {
+                from_y: from_cy,
+                to_y: to_cy,
+                x: from_x,
+            },
+            Some((mid_x, from_cy + 1)),
+        );
+    }
+
+    let vertical_x = (from_x + to_x) / 2;
+    let label_pos = label_at_vertical_bend(from_cy, to_cy, vertical_x);
+
+    (
+        EdgePath::Corner {
+            from_x,
+            from_y: from_cy,
+            to_x,
+            to_y: to_cy,
+            horizontal_y: vertical_x,
+        },
+        label_pos,
+    )
+}
+
+fn horizontal_segments_overlap(ax1: usize, ax2: usize, bx1: usize, bx2: usize) -> bool {
+    let (a_lo, a_hi) = if ax1 <= ax2 { (ax1, ax2) } else { (ax2, ax1) };
+    let (b_lo, b_hi) = if bx1 <= bx2 { (bx1, bx2) } else { (bx2, bx1) };
+    a_lo <= b_hi && b_lo <= a_hi
+}
+
+fn side_channel_x(all_nodes: &[LaidOutNode], from: &LaidOutNode, to: &LaidOutNode) -> usize {
+    let min_x = all_nodes.iter().map(|n| n.left()).min().unwrap_or(0);
+    let max_x = all_nodes.iter().map(|n| n.right()).max().unwrap_or(0);
+    let mid_x = (from.center_x() + to.center_x()) / 2;
+    let left_channel = min_x.saturating_sub(2).max(1);
+    let right_channel = max_x + 2;
+    if mid_x.saturating_sub(left_channel) <= right_channel.saturating_sub(mid_x) {
+        left_channel
+    } else {
+        right_channel
+    }
+}
+
+fn label_at_horizontal_bend(from_x: usize, to_x: usize, y: usize) -> Option<(usize, usize)> {
+    let mid_x = (from_x + to_x) / 2;
+    Some((mid_x, y.saturating_sub(1)))
+}
+
+fn label_at_vertical_bend(from_y: usize, to_y: usize, x: usize) -> Option<(usize, usize)> {
+    let mid_y = (from_y + to_y) / 2;
+    Some((x + 1, mid_y))
 }
 
 fn assign_layers(fc: &super::parser::Flowchart) -> Vec<Vec<String>> {
     use std::collections::HashSet;
 
-    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut preds: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in &fc.edges {
-        adj.entry(edge.from.as_str())
+        preds
+            .entry(edge.to.as_str())
             .or_default()
-            .push(edge.to.as_str());
+            .push(edge.from.as_str());
     }
 
     let mut node_layer: HashMap<String, usize> = HashMap::new();
@@ -360,7 +620,7 @@ fn assign_layers(fc: &super::parser::Flowchart) -> Vec<Vec<String>> {
 
     fn dfs(
         node_id: &str,
-        adj: &HashMap<&str, Vec<&str>>,
+        preds: &HashMap<&str, Vec<&str>>,
         node_layer: &mut HashMap<String, usize>,
         visited: &mut HashSet<String>,
         on_stack: &mut HashSet<String>,
@@ -371,16 +631,16 @@ fn assign_layers(fc: &super::parser::Flowchart) -> Vec<Vec<String>> {
         visited.insert(node_id.to_string());
         on_stack.insert(node_id.to_string());
 
-        if let Some(neighbors) = adj.get(node_id) {
-            for &nxt in neighbors {
-                if on_stack.contains(nxt) {
+        if let Some(predecessors) = preds.get(node_id) {
+            for &prev in predecessors {
+                if on_stack.contains(prev) {
                     continue;
                 }
-                dfs(nxt, adj, node_layer, visited, on_stack);
-                let nxt_layer = *node_layer.get(nxt).unwrap_or(&0);
+                dfs(prev, preds, node_layer, visited, on_stack);
+                let prev_layer = *node_layer.get(prev).unwrap_or(&0);
                 let cur = *node_layer.get(node_id).unwrap_or(&0);
-                if nxt_layer + 1 > cur {
-                    node_layer.insert(node_id.to_string(), nxt_layer + 1);
+                if prev_layer + 1 > cur {
+                    node_layer.insert(node_id.to_string(), prev_layer + 1);
                 }
             }
         }
@@ -389,7 +649,13 @@ fn assign_layers(fc: &super::parser::Flowchart) -> Vec<Vec<String>> {
     }
 
     for node in &fc.nodes {
-        dfs(&node.id, &adj, &mut node_layer, &mut visited, &mut on_stack);
+        dfs(
+            &node.id,
+            &preds,
+            &mut node_layer,
+            &mut visited,
+            &mut on_stack,
+        );
     }
 
     let max_layer = *node_layer.values().max().unwrap_or(&0);

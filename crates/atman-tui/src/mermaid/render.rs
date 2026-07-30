@@ -1,39 +1,33 @@
-use super::grid::{Dir, Grid, PositionedNode, layout};
-use super::parser::{EdgeStyle, NodeShape, parse_flowchart};
-use std::collections::HashMap;
+use super::grid::{Dir, EdgePath, Grid, LaidOutNode, layout};
+use super::parser::{EdgeStyle, Flowchart, NodeShape, parse_flowchart};
 
 pub fn render_flowchart(source: &str, _width: u16) -> Vec<String> {
     let fc = parse_flowchart(source);
+    render_flowchart_struct(&fc, source)
+}
+
+/// Render a Flowchart struct directly (state.rs builds a Flowchart without
+/// going through source text).
+pub fn render_flowchart_struct(fc: &Flowchart, fallback_source: &str) -> Vec<String> {
     if fc.nodes.is_empty() {
-        return source.lines().map(String::from).collect();
+        return fallback_source.lines().map(String::from).collect();
     }
 
-    let (nodes, grid_w, grid_h) = layout(&fc);
-    let mut grid = Grid::new(grid_w, grid_h);
-    let node_pos: HashMap<String, &PositionedNode> =
-        nodes.iter().map(|n| (n.id.clone(), n)).collect();
+    let result = layout(fc);
+    let mut grid = Grid::new(result.grid_width, result.grid_height);
 
-    for edge in &fc.edges {
-        if let (Some(from), Some(to)) = (node_pos.get(&edge.from), node_pos.get(&edge.to)) {
-            draw_edge(
-                &mut grid,
-                from,
-                to,
-                &edge.style,
-                edge.label.as_deref(),
-                &nodes,
-            );
-        }
+    for edge in &result.edges {
+        draw_edge(&mut grid, edge, &result.nodes);
     }
 
-    for node in &nodes {
+    for node in &result.nodes {
         draw_node(&mut grid, node);
     }
 
     grid.to_lines()
 }
 
-fn draw_node(grid: &mut Grid, node: &PositionedNode) {
+fn draw_node(grid: &mut Grid, node: &LaidOutNode) {
     match node.shape {
         NodeShape::Diamond => {
             grid.draw_diamond(node.x, node.y, node.w, &node.label);
@@ -47,243 +41,272 @@ fn draw_node(grid: &mut Grid, node: &PositionedNode) {
     }
 }
 
-fn style_str(style: &EdgeStyle) -> &'static str {
+fn style_h(style: &EdgeStyle) -> char {
     match style {
-        EdgeStyle::Dotted => "dotted",
-        EdgeStyle::Thick => "thick",
-        EdgeStyle::Solid => "solid",
+        EdgeStyle::Dotted => '┄',
+        EdgeStyle::Thick => '═',
+        EdgeStyle::Solid => '─',
     }
 }
 
-fn is_blocked_by_node(x: usize, y: usize, nodes: &[PositionedNode], skip: &[&str]) -> bool {
-    nodes
-        .iter()
-        .filter(|n| !skip.contains(&n.id.as_str()))
-        .any(|n| n.contains(x, y))
+fn style_v(style: &EdgeStyle) -> char {
+    match style {
+        EdgeStyle::Dotted => '┆',
+        EdgeStyle::Thick => '║',
+        EdgeStyle::Solid => '│',
+    }
 }
 
-fn draw_edge(
-    grid: &mut Grid,
-    from: &PositionedNode,
-    to: &PositionedNode,
-    style: &EdgeStyle,
-    label: Option<&str>,
-    nodes: &[PositionedNode],
-) {
-    let s = style_str(style);
-    let skip = [from.id.as_str(), to.id.as_str()];
+fn draw_edge(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOutNode]) {
+    let h = style_h(&edge.style);
+    let v = style_v(&edge.style);
 
-    let from_cx = from.center_x();
-    let from_cy = from.center_y();
-    let to_cx = to.center_x();
-    let to_cy = to.center_y();
+    match &edge.path {
+        EdgePath::Direct { from_y, to_y, x } => {
+            if from_y < to_y {
+                for y in (*from_y + 1)..(*to_y - 1) {
+                    if grid.is_empty(*x, y) {
+                        grid.set(*x, y, v);
+                    }
+                }
+                grid.set(*x, *to_y - 1, '↓');
+            } else {
+                for y in (*to_y + 2)..*from_y {
+                    if grid.is_empty(*x, y) {
+                        grid.set(*x, y, v);
+                    }
+                }
+                grid.set(*x, *to_y + 1, '↑');
+            }
+        }
+        EdgePath::Corner {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            horizontal_y,
+        } => {
+            let p = EdgeDraw {
+                from_x: *from_x,
+                from_y: *from_y,
+                to_x: *to_x,
+                to_y: *to_y,
+                bend: *horizontal_y,
+                h,
+                v,
+            };
+            draw_corner_edge(grid, p);
+        }
+        EdgePath::SideChannel {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            channel_x,
+        } => {
+            let p = EdgeDraw {
+                from_x: *from_x,
+                from_y: *from_y,
+                to_x: *to_x,
+                to_y: *to_y,
+                bend: *channel_x,
+                h,
+                v,
+            };
+            draw_side_channel_edge(grid, p, _nodes);
+        }
+    }
 
-    if to.right() > from.right() && to.left() > from.right() {
-        // ──→ rightward
-        let start_x = from.right() + 1;
-        let end_x = to.left();
-        if from_cy == to_cy {
-            draw_h_safe(grid, start_x, end_x, from_cy, s, nodes, &skip);
-            grid.set(end_x, to_cy, '→');
-        } else {
-            let mid_x = (start_x + end_x) / 2;
-            draw_h_safe(grid, start_x, mid_x, from_cy, s, nodes, &skip);
-            grid.place_turn(
-                mid_x,
-                from_cy,
-                Dir::Right,
-                if to_cy > from_cy { Dir::Down } else { Dir::Up },
-            );
-            let (y0, y1) = if to_cy > from_cy {
-                (from_cy + 1, to_cy)
-            } else {
-                (to_cy + 1, from_cy)
-            };
-            draw_v_safe(grid, mid_x, y0, y1, s, nodes, &skip);
-            grid.place_turn(
-                mid_x,
-                to_cy,
-                if to_cy > from_cy { Dir::Up } else { Dir::Down },
-                Dir::Right,
-            );
-            draw_h_safe(grid, mid_x + 1, end_x, to_cy, s, nodes, &skip);
-            grid.set(end_x, to_cy, '→');
+    if let (Some(label), Some((lx, ly))) = (&edge.label, edge.label_pos.as_ref()) {
+        grid.write_str(*lx, *ly, label);
+    }
+}
+
+/// Draw an L-shaped (or Z-shaped) edge with a horizontal segment at
+/// `bend`. Works for both downward and upward edges.
+struct EdgeDraw {
+    from_x: usize,
+    from_y: usize,
+    to_x: usize,
+    to_y: usize,
+    bend: usize,
+    h: char,
+    v: char,
+}
+
+fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
+    let EdgeDraw {
+        from_x,
+        from_y,
+        to_x,
+        to_y,
+        bend: horizontal_y,
+        h,
+        v,
+    } = p;
+    let (sy, ey) = ordered_range(from_y + 1, horizontal_y);
+    for y in sy..ey {
+        if grid.is_empty(from_x, y) {
+            grid.set(from_x, y, v);
         }
-    } else if to.bottom() > from.bottom() && to.top() > from.bottom() {
-        // ↓ downward
-        let start_y = from.bottom() + 1;
-        let end_y = to.top();
-        if from_cx == to_cx {
-            draw_v_safe(grid, from_cx, start_y, end_y, s, nodes, &skip);
-            grid.set(from_cx, end_y, '↓');
-        } else {
-            let mid_y = (start_y + end_y) / 2;
-            draw_v_safe(grid, from_cx, start_y, mid_y, s, nodes, &skip);
-            grid.place_turn(
-                from_cx,
-                mid_y,
-                Dir::Down,
-                if to_cx > from_cx {
-                    Dir::Right
-                } else {
-                    Dir::Left
-                },
-            );
-            let (x0, x1) = if to_cx > from_cx {
-                (from_cx + 1, to_cx)
-            } else {
-                (to_cx + 1, from_cx)
-            };
-            draw_h_safe(grid, x0, x1, mid_y, s, nodes, &skip);
-            grid.place_turn(
-                to_cx,
-                mid_y,
-                if to_cx > from_cx {
-                    Dir::Right
-                } else {
-                    Dir::Left
-                },
-                Dir::Down,
-            );
-            draw_v_safe(grid, to_cx, mid_y + 1, end_y, s, nodes, &skip);
-            grid.set(to_cx, end_y, '↓');
-        }
-    } else if to.left() < from.left() && to.right() < from.left() {
-        // ← leftward
-        let start_x = from.left();
-        let end_x = to.right() + 1;
-        if from_cy == to_cy {
-            draw_h_safe(grid, end_x, start_x, from_cy, s, nodes, &skip);
-            grid.set(end_x - 1, to_cy, '←');
-        } else {
-            let mid_x = (start_x + end_x) / 2;
-            draw_h_safe(grid, mid_x, start_x, from_cy, s, nodes, &skip);
-            grid.place_turn(
-                mid_x,
-                from_cy,
-                Dir::Left,
-                if to_cy > from_cy { Dir::Down } else { Dir::Up },
-            );
-            let (y0, y1) = if to_cy > from_cy {
-                (from_cy + 1, to_cy)
-            } else {
-                (to_cy + 1, from_cy)
-            };
-            draw_v_safe(grid, mid_x, y0, y1, s, nodes, &skip);
-            grid.place_turn(
-                mid_x,
-                to_cy,
-                if to_cy > from_cy { Dir::Up } else { Dir::Down },
-                Dir::Left,
-            );
-            draw_h_safe(grid, end_x, mid_x, to_cy, s, nodes, &skip);
-            grid.set(end_x - 1, to_cy, '←');
-        }
+    }
+    let from_turn = if from_y < horizontal_y {
+        Dir::Down
     } else {
-        // fallback: go down from from.bottom(), then horizontal to to_cx, then down to to.top()
-        let start_y = from.bottom() + 1;
-        let mid_y = start_y + 1;
-        draw_v_safe(grid, from_cx, start_y, mid_y, s, nodes, &skip);
-        let (x0, x1) = if to_cx > from_cx {
-            (from_cx + 1, to_cx)
-        } else {
-            (to_cx + 1, from_cx)
-        };
-        if x0 < x1 {
-            grid.place_turn(
-                from_cx,
-                mid_y,
-                Dir::Down,
-                if to_cx > from_cx {
-                    Dir::Right
-                } else {
-                    Dir::Left
-                },
-            );
-            draw_h_safe(grid, x0, x1, mid_y, s, nodes, &skip);
-            grid.place_turn(
-                to_cx,
-                mid_y,
-                if to_cx > from_cx {
-                    Dir::Right
-                } else {
-                    Dir::Left
-                },
-                Dir::Down,
-            );
-            draw_v_safe(grid, to_cx, mid_y + 1, to.top(), s, nodes, &skip);
-        } else {
-            draw_v_safe(grid, from_cx, mid_y, to.top(), s, nodes, &skip);
+        Dir::Up
+    };
+    let to_horizontal = if to_x > from_x { Dir::Right } else { Dir::Left };
+    grid.place_turn(from_x, horizontal_y, from_turn, to_horizontal);
+
+    let (x0, x1) = if to_x > from_x {
+        (from_x + 1, to_x)
+    } else {
+        (to_x + 1, from_x)
+    };
+    for x in x0..x1 {
+        if grid.is_empty(x, horizontal_y) {
+            grid.set(x, horizontal_y, h);
         }
-        grid.set(to_cx, to.top(), '↓');
     }
 
-    if let Some(label) = label {
-        let label_w = crate::width::width(label);
-        let mid_x = if to.left() > from.right() {
-            (from.right() + to.left()) / 2
-        } else {
-            (from_cx + to_cx) / 2
-        };
-        let lx = mid_x.saturating_sub(label_w / 2);
-        let ly = from_cy.saturating_sub(1);
-        let mut i = 0usize;
-        for (g, gw) in crate::width::graphemes(label) {
-            let first_char = g.chars().next().unwrap_or(' ');
-            grid.set(lx + i, ly, first_char);
-            i += gw;
+    let to_turn = if to_y < horizontal_y {
+        Dir::Up
+    } else {
+        Dir::Down
+    };
+    grid.place_turn(to_x, horizontal_y, to_horizontal, to_turn);
+
+    let (sy, ey) = ordered_range(horizontal_y + 1, to_y);
+    for y in sy..ey {
+        if grid.is_empty(to_x, y) {
+            grid.set(to_x, y, v);
         }
     }
+
+    let arrow = if to_y > from_y { '↓' } else { '↑' };
+    let arrow_y = if to_y > from_y { to_y - 1 } else { to_y + 1 };
+    grid.set(to_x, arrow_y, arrow);
 }
 
-fn draw_h_safe(
-    grid: &mut Grid,
-    x1: usize,
-    x2: usize,
-    y: usize,
-    style: &str,
-    nodes: &[PositionedNode],
-    skip: &[&str],
-) {
-    let c = match style {
-        "dotted" => '┄',
-        "thick" => '═',
-        _ => '─',
-    };
-    for x in x1.min(x2)..x1.max(x2) {
-        if is_blocked_by_node(x, y, nodes, skip) {
-            continue;
-        }
-        let existing = grid.get(x, y);
-        if existing == ' ' || existing == '\u{0}' {
-            grid.set(x, y, c);
+fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
+    let EdgeDraw {
+        from_x,
+        from_y,
+        to_x,
+        to_y,
+        bend: channel_x,
+        h,
+        v,
+    } = p;
+    let gap_y = find_gap_row(from_y, to_y, from_x, to_x, channel_x, nodes)
+        .unwrap_or_else(|| (from_y + to_y) / 2);
+
+    let (sy, ey) = ordered_range(from_y + 1, gap_y);
+    for y in sy..ey {
+        if grid.is_empty(from_x, y) {
+            grid.set(from_x, y, v);
         }
     }
+    grid.place_turn(
+        from_x,
+        gap_y,
+        if from_y < gap_y { Dir::Down } else { Dir::Up },
+        if channel_x > from_x {
+            Dir::Right
+        } else {
+            Dir::Left
+        },
+    );
+
+    let (x0, x1) = if channel_x > from_x {
+        (from_x + 1, channel_x)
+    } else {
+        (channel_x + 1, from_x)
+    };
+    for x in x0..x1 {
+        if grid.is_empty(x, gap_y) {
+            grid.set(x, gap_y, h);
+        }
+    }
+
+    grid.place_turn(
+        channel_x,
+        gap_y,
+        if channel_x > from_x {
+            Dir::Right
+        } else {
+            Dir::Left
+        },
+        if to_y > gap_y { Dir::Down } else { Dir::Up },
+    );
+    let (cy0, cy1) = ordered_range(gap_y + 1, to_y);
+    for y in cy0..cy1 {
+        if grid.is_empty(channel_x, y) {
+            grid.set(channel_x, y, v);
+        }
+    }
+
+    grid.place_turn(
+        channel_x,
+        to_y,
+        if to_y > gap_y { Dir::Down } else { Dir::Up },
+        if to_x > channel_x {
+            Dir::Right
+        } else {
+            Dir::Left
+        },
+    );
+    let (tx0, tx1) = if to_x > channel_x {
+        (channel_x + 1, to_x)
+    } else {
+        (to_x + 1, channel_x)
+    };
+    for x in tx0..tx1 {
+        if grid.is_empty(x, to_y) {
+            grid.set(x, to_y, h);
+        }
+    }
+
+    let arrow = if to_y > from_y { '↓' } else { '↑' };
+    let arrow_y = if to_y > from_y { to_y - 1 } else { to_y + 1 };
+    grid.set(to_x, arrow_y, arrow);
 }
 
-fn draw_v_safe(
-    grid: &mut Grid,
-    x: usize,
-    y1: usize,
-    y2: usize,
-    style: &str,
-    nodes: &[PositionedNode],
-    skip: &[&str],
-) {
-    let c = match style {
-        "dotted" => '┆',
-        "thick" => '║',
-        _ => '│',
-    };
-    for y in y1.min(y2)..y1.max(y2) {
-        if is_blocked_by_node(x, y, nodes, skip) {
-            continue;
-        }
-        let existing = grid.get(x, y);
-        if existing == ' ' || existing == '\u{0}' {
-            grid.set(x, y, c);
+/// Find a row between `from_y` and `to_y` where a horizontal line from
+/// `from_x` to `channel_x` to `to_x` won't cross any node interior.
+fn find_gap_row(
+    from_y: usize,
+    to_y: usize,
+    from_x: usize,
+    to_x: usize,
+    channel_x: usize,
+    nodes: &[LaidOutNode],
+) -> Option<usize> {
+    let (lo, hi) = ordered_range(from_y, to_y);
+    for y in (lo + 1)..hi {
+        let blocked = nodes.iter().any(|n| {
+            n.top() <= y
+                && y <= n.bottom()
+                && (horizontal_segments_overlap(from_x, channel_x, n.left(), n.right())
+                    || horizontal_segments_overlap(channel_x, to_x, n.left(), n.right()))
+        });
+        if !blocked {
+            return Some(y);
         }
     }
+    None
+}
+
+/// Return (min, max) of two values so range loops always go forward.
+fn ordered_range(a: usize, b: usize) -> (usize, usize) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+/// Do two horizontal segments [ax1,ax2] and [bx1,bx2] overlap?
+fn horizontal_segments_overlap(ax1: usize, ax2: usize, bx1: usize, bx2: usize) -> bool {
+    let (a_lo, a_hi) = if ax1 <= ax2 { (ax1, ax2) } else { (ax2, ax1) };
+    let (b_lo, b_hi) = if bx1 <= bx2 { (bx1, bx2) } else { (bx2, bx1) };
+    a_lo <= b_hi && b_lo <= a_hi
 }
 
 #[cfg(test)]
@@ -307,10 +330,10 @@ mod tests {
     #[test]
     fn layout_all_nodes_same_box_width() {
         let fc = parse_flowchart(source());
-        let (nodes, _, _) = layout(&fc);
-        assert!(!nodes.is_empty());
-        let w0 = nodes[0].w;
-        for (i, n) in nodes.iter().enumerate() {
+        let result = layout(&fc);
+        assert!(!result.nodes.is_empty());
+        let w0 = result.nodes[0].w;
+        for (i, n) in result.nodes.iter().enumerate() {
             assert_eq!(n.w, w0, "node {} box width {} != {}", i, n.w, w0);
         }
     }
@@ -318,7 +341,7 @@ mod tests {
     #[test]
     fn layout_box_width_matches_max_label_display_width() {
         let fc = parse_flowchart(source());
-        let (nodes, _, _) = layout(&fc);
+        let result = layout(&fc);
         let max_label_w = fc
             .nodes
             .iter()
@@ -326,7 +349,7 @@ mod tests {
             .max()
             .unwrap_or(0);
         let expected_w = max_label_w + 2;
-        for (i, n) in nodes.iter().enumerate() {
+        for (i, n) in result.nodes.iter().enumerate() {
             assert_eq!(
                 n.w, expected_w,
                 "node {} box width {} != expected {}",
@@ -336,16 +359,91 @@ mod tests {
     }
 
     #[test]
-    fn layout_no_overlap_within_layer() {
+    fn layout_no_node_overlap() {
         let fc = parse_flowchart(source());
-        let (nodes, _, _) = layout(&fc);
-        for i in 0..nodes.len() {
-            for j in (i + 1)..nodes.len() {
-                let a = &nodes[i];
-                let b = &nodes[j];
+        let result = layout(&fc);
+        for i in 0..result.nodes.len() {
+            for j in (i + 1)..result.nodes.len() {
+                let a = &result.nodes[i];
+                let b = &result.nodes[j];
                 let x_overlap = a.left() < b.right() && b.left() < a.right();
                 let y_overlap = a.top() < b.bottom() && b.top() < a.bottom();
                 assert!(!(x_overlap && y_overlap), "nodes {} and {} overlap", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn layout_nodes_fit_grid_bounds() {
+        let fc = parse_flowchart(source());
+        let result = layout(&fc);
+        for n in &result.nodes {
+            assert!(
+                n.right() < result.grid_width,
+                "node {} right {} >= grid_width {}",
+                n.id,
+                n.right(),
+                result.grid_width
+            );
+            assert!(
+                n.bottom() < result.grid_height,
+                "node {} bottom {} >= grid_height {}",
+                n.id,
+                n.bottom(),
+                result.grid_height
+            );
+        }
+    }
+
+    #[test]
+    fn layout_cyclic_graph_no_infinite_loop() {
+        let fc = parse_flowchart("flowchart TB\nA --> B\nB --> A");
+        let result = layout(&fc);
+        assert_eq!(result.nodes.len(), 2);
+    }
+
+    #[test]
+    fn layout_layer_count_matches_dag_depth() {
+        let fc = parse_flowchart("flowchart TB\nA --> B\nB --> C");
+        let result = layout(&fc);
+        let ys: std::collections::HashSet<usize> = result.nodes.iter().map(|n| n.y).collect();
+        assert_eq!(ys.len(), 3, "expected 3 distinct layers, got {:?}", ys);
+    }
+
+    #[test]
+    fn layout_corner_horizontal_y_in_gap_between_layers() {
+        let fc = parse_flowchart("flowchart TB\nA --> B\nA --> C");
+        let result = layout(&fc);
+        for edge in &result.edges {
+            if let EdgePath::Corner {
+                from_y,
+                to_y,
+                horizontal_y,
+                ..
+            } = &edge.path
+            {
+                let (lo, hi) = if from_y < to_y {
+                    (*from_y, *to_y)
+                } else {
+                    (*to_y, *from_y)
+                };
+                assert!(
+                    lo < *horizontal_y && *horizontal_y < hi,
+                    "horizontal_y {} not between from_y {} and to_y {}",
+                    horizontal_y,
+                    from_y,
+                    to_y
+                );
+                for n in &result.nodes {
+                    assert!(
+                        !(n.top() <= *horizontal_y && *horizontal_y <= n.bottom()),
+                        "horizontal_y {} is inside node {} ({}..{})",
+                        horizontal_y,
+                        n.id,
+                        n.top(),
+                        n.bottom()
+                    );
+                }
             }
         }
     }
@@ -367,23 +465,16 @@ mod tests {
     #[test]
     fn render_cjk_flowchart_all_lines_fit_width() {
         let fc = parse_flowchart(source());
-        let (nodes, grid_w, grid_h) = layout(&fc);
-        let grid = {
-            let mut g = Grid::new(grid_w, grid_h);
-            for n in &nodes {
-                g.draw_box(n.x, n.y, n.w, n.h, &n.label);
-            }
-            g
-        };
-        let lines = grid.to_lines();
+        let result = layout(&fc);
+        let lines = render_flowchart(source(), 120);
         for (i, l) in lines.iter().enumerate() {
             let dw = crate::width::width(l);
             assert!(
-                dw <= grid_w,
+                dw <= result.grid_width,
                 "line {} display width {} > grid width {}",
                 i,
                 dw,
-                grid_w
+                result.grid_width
             );
         }
     }
@@ -400,10 +491,10 @@ mod tests {
     #[test]
     fn render_edges_dont_cross_nodes() {
         let fc = parse_flowchart(source());
-        let (nodes, _grid_w, _grid_h) = layout(&fc);
+        let result = layout(&fc);
         let lines = render_flowchart(source(), 120);
 
-        for node in &nodes {
+        for node in &result.nodes {
             for y in node.top()..=node.bottom() {
                 if y >= lines.len() {
                     continue;
@@ -414,7 +505,6 @@ mod tests {
                     if col >= node.left() && col <= node.right() {
                         let c = g.chars().next().unwrap_or(' ');
                         if c == '─' || c == '│' || c == '┄' || c == '┆' {
-                            // Lines inside node area are only OK if they're part of the node border
                             let is_border = col == node.left()
                                 || col == node.right()
                                 || y == node.top()
@@ -430,5 +520,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn render_direct_edge_uses_arrow() {
+        let lines = render_flowchart("flowchart TB\nA --> B", 80);
+        let all: String = lines.join("\n");
+        assert!(
+            all.contains('↓') || all.contains('↑'),
+            "direct edge should have an arrow, got:\n{all}"
+        );
+    }
+
+    #[test]
+    fn render_cjk_edge_label_aligned() {
+        let src = "flowchart TB\nA -->|分支二| C[右边]";
+        let lines = render_flowchart(src, 80);
+        let all: String = lines.join("\n");
+        assert!(all.contains("分支二"), "label should appear:\n{all}");
+
+        let fc = parse_flowchart(src);
+        let result = layout(&fc);
+        for (i, l) in lines.iter().enumerate() {
+            let dw = crate::width::width(l);
+            assert!(
+                dw <= result.grid_width,
+                "line {} display width {} > grid_width {} — CJK label misaligned\n|{}|",
+                i,
+                dw,
+                result.grid_width,
+                l
+            );
+        }
+    }
+
+    #[test]
+    fn render_cjk_node_label_in_box() {
+        let src = "flowchart TB\nA[开始结束]";
+        let lines = render_flowchart(src, 80);
+        let all: String = lines.join("\n");
+        assert!(all.contains("开始结束"), "node label should appear:\n{all}");
+
+        let label_row = lines
+            .iter()
+            .find(|l| l.contains("开始结束"))
+            .expect("label row should exist");
+        assert!(
+            label_row.contains('│'),
+            "label row should have border chars:\n{}",
+            label_row
+        );
     }
 }
