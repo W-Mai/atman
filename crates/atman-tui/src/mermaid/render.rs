@@ -131,7 +131,18 @@ fn draw_edge(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOut
     }
 
     if let (Some(label), Some((lx, ly))) = (&edge.label, edge.label_pos.as_ref()) {
-        grid.write_str(*lx, *ly, label);
+        let mut col = 0usize;
+        for (g, gw) in crate::width::graphemes(label.as_str()) {
+            let pos = *lx + col;
+            if grid.is_empty(pos, *ly) {
+                let first_char = g.chars().next().unwrap_or(' ');
+                grid.set(pos, *ly, first_char);
+                for extra in 1..gw {
+                    grid.set(pos + extra, *ly, '\u{0}');
+                }
+            }
+            col += gw;
+        }
     }
 }
 

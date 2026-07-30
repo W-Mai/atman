@@ -588,7 +588,7 @@ fn route_vertical(
                 to_y: to.top(),
                 x: from_cx,
             },
-            Some((from_cx + 1, mid_y)),
+            Some((from_cx + 2, mid_y)),
         );
     }
 
@@ -719,9 +719,8 @@ fn label_at_horizontal_bend(from_x: usize, to_x: usize, y: usize) -> Option<(usi
     Some((mid_x, y.saturating_sub(1)))
 }
 
-fn label_at_vertical_bend(from_y: usize, to_y: usize, x: usize) -> Option<(usize, usize)> {
-    let mid_y = (from_y + to_y) / 2;
-    Some((x + 1, mid_y))
+fn label_at_vertical_bend(_from_y: usize, _to_y: usize, _x: usize) -> Option<(usize, usize)> {
+    None
 }
 
 fn assign_layers(fc: &super::parser::Flowchart) -> Vec<Vec<String>> {
