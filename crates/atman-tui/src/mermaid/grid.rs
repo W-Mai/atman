@@ -1,244 +1,224 @@
 use std::collections::HashMap;
 
-pub const N: u8 = 0b0001;
-pub const S: u8 = 0b0010;
-pub const E: u8 = 0b0100;
-pub const W: u8 = 0b1000;
-pub const ARROW: u8 = 0b10000;
-pub const LOCKED: u8 = 0b100000;
-
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Grid {
+    pub cells: Vec<Vec<char>>,
     pub width: usize,
     pub height: usize,
-    structure: Vec<u8>,
-    text: Vec<Option<(String, usize)>>,
-    border: Vec<Option<char>>,
 }
 
 impl Grid {
     pub fn new(width: usize, height: usize) -> Self {
         Grid {
+            cells: vec![vec![' '; width]; height],
             width,
             height,
-            structure: vec![0; width * height],
-            text: vec![None; width * height],
-            border: vec![None; width * height],
         }
     }
 
-    fn idx(&self, x: usize, y: usize) -> Option<usize> {
+    pub fn get(&self, x: usize, y: usize) -> char {
         if y < self.height && x < self.width {
-            Some(y * self.width + x)
+            self.cells[y][x]
         } else {
-            None
+            ' '
         }
     }
 
-    pub fn add_dir(&mut self, x: usize, y: usize, dirs: u8) {
-        if let Some(i) = self.idx(x, y) {
-            if self.structure[i] & LOCKED != 0 {
-                return;
-            }
-            self.structure[i] |= dirs;
+    pub fn set(&mut self, x: usize, y: usize, c: char) {
+        if y < self.height && x < self.width {
+            self.cells[y][x] = c;
         }
     }
 
-    pub fn add_turn(&mut self, x: usize, y: usize, dirs: u8) {
-        if let Some(i) = self.idx(x, y) {
-            self.structure[i] = LOCKED | (self.structure[i] & 0b1111) | (dirs & 0b1111);
-        }
-    }
-
-    pub fn add_arrow(&mut self, x: usize, y: usize, dir: Dir) {
-        if let Some(i) = self.idx(x, y) {
-            if self.structure[i] & LOCKED != 0 {
-                return;
-            }
-            self.structure[i] |= ARROW | dir_to_bit(dir);
-        }
-    }
-
-    /// Write a border char (highest priority in rendering).
-    pub fn set_border(&mut self, x: usize, y: usize, c: char) {
-        if let Some(i) = self.idx(x, y) {
-            self.border[i] = Some(c);
-        }
-    }
-
-    /// Write text to the text layer. Each grapheme occupies cells according to
-    /// its display width; the first cell stores the grapheme, subsequent cells
-    /// are marked as continuation (width 0).
-    pub fn write_text(&mut self, x: usize, y: usize, s: &str) {
-        let mut col = 0usize;
+    pub fn write_str(&mut self, x: usize, y: usize, s: &str) {
+        let mut i = 0usize;
         for (g, gw) in crate::width::graphemes(s) {
-            let pos = x + col;
-            if let Some(i) = self.idx(pos, y) {
-                self.text[i] = Some((g.to_string(), gw));
-            }
+            let first_char = g.chars().next().unwrap_or(' ');
+            self.set(x + i, y, first_char);
             for extra in 1..gw {
-                if let Some(i) = self.idx(pos + extra, y) {
-                    self.text[i] = Some((String::new(), 0));
-                }
+                self.set(x + i + extra, y, '\u{0}');
             }
-            col += gw;
+            i += gw;
         }
     }
 
-    /// True if all three layers are empty at (x, y).
     pub fn is_empty(&self, x: usize, y: usize) -> bool {
-        self.idx(x, y)
-            .map(|i| self.structure[i] == 0 && self.text[i].is_none() && self.border[i].is_none())
-            .unwrap_or(true)
+        let c = self.get(x, y);
+        c == ' ' || c == '\u{0}'
     }
 
-    /// True if the structure layer has any direction at (x, y).
-    pub fn has_structure(&self, x: usize, y: usize) -> bool {
-        self.idx(x, y)
-            .map(|i| self.structure[i] != 0)
-            .unwrap_or(false)
+    pub fn draw_h_segment(&mut self, x1: usize, x2: usize, y: usize, style: &str) {
+        let c = match style {
+            "dotted" => '┄',
+            "thick" => '═',
+            _ => '─',
+        };
+        for x in x1..x2 {
+            if self.is_empty(x, y) {
+                self.set(x, y, c);
+            }
+        }
     }
 
-    /// True if the border layer is set at (x, y).
-    pub fn has_border(&self, x: usize, y: usize) -> bool {
-        self.idx(x, y)
-            .map(|i| self.border[i].is_some())
-            .unwrap_or(false)
+    pub fn draw_v_segment(&mut self, x: usize, y1: usize, y2: usize, style: &str) {
+        let c = match style {
+            "dotted" => '┆',
+            "thick" => '║',
+            _ => '│',
+        };
+        for y in y1..y2 {
+            if self.is_empty(x, y) {
+                self.set(x, y, c);
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn place_corner(&mut self, x: usize, y: usize, style: &str) {
+        if !self.is_empty(x, y) {
+            return;
+        }
+        let c = match style {
+            "dotted" => '┄',
+            "thick" => '═',
+            _ => '─',
+        };
+        self.set(x, y, c);
+    }
+
+    pub fn place_turn(&mut self, x: usize, y: usize, from_dir: Dir, to_dir: Dir) {
+        let existing = self.get(x, y);
+        let corner = turn_char(from_dir, to_dir, existing);
+        self.set(x, y, corner);
+    }
+
+    /// Draw a vertical line segment, merging with any existing char.
+    pub fn merge_v(&mut self, x: usize, y: usize, v: char) {
+        let existing = self.get(x, y);
+        self.set(x, y, merge_chars(existing, v));
+    }
+
+    /// Draw a horizontal line segment, merging with any existing char.
+    pub fn merge_h(&mut self, x: usize, y: usize, h: char) {
+        let existing = self.get(x, y);
+        self.set(x, y, merge_chars(existing, h));
+    }
+
+    #[allow(dead_code)]
+    pub fn place_t_junction(&mut self, x: usize, y: usize, stem: Dir) {
+        let existing = self.get(x, y);
+        let c = t_junction_char(stem, existing);
+        self.set(x, y, c);
+    }
+
+    #[allow(dead_code)]
+    pub fn place_cross(&mut self, x: usize, y: usize) {
+        let existing = self.get(x, y);
+        let c = match existing {
+            '│' | '─' => '┼',
+            '├' | '┤' | '┬' | '┴' => '┼',
+            _ => existing,
+        };
+        self.set(x, y, c);
     }
 
     pub fn draw_box(&mut self, x: usize, y: usize, w: usize, h: usize, label: &str) {
-        self.set_border(x, y, '╭');
-        self.set_border(x + w + 1, y, '╮');
-        self.set_border(x, y + h + 1, '╰');
-        self.set_border(x + w + 1, y + h + 1, '╯');
+        self.set(x, y, '╭');
+        self.set(x + w + 1, y, '╮');
+        self.set(x, y + h + 1, '╰');
+        self.set(x + w + 1, y + h + 1, '╯');
         for i in 1..=w {
-            self.set_border(x + i, y, '─');
-            self.set_border(x + i, y + h + 1, '─');
+            self.set(x + i, y, '─');
+            self.set(x + i, y + h + 1, '─');
         }
         for row in 0..h {
-            self.set_border(x, y + 1 + row, '│');
-            self.set_border(x + w + 1, y + 1 + row, '│');
+            self.set(x, y + 1 + row, '│');
+            self.set(x + w + 1, y + 1 + row, '│');
         }
         let truncated = crate::width::truncate_plain(label, w);
         let label_w = crate::width::width(&truncated);
         let pad = w.saturating_sub(label_w) / 2;
-        self.write_text(x + 1 + pad, y + 1, &truncated);
+        self.write_str(x + 1 + pad, y + 1, &truncated);
     }
 
     pub fn draw_diamond(&mut self, x: usize, y: usize, w: usize, label: &str) {
         let cx = x + w / 2 + 1;
-        self.set_border(cx, y, '◇');
-        self.set_border(x, y + 1, '◇');
-        self.set_border(x + w + 1, y + 1, '◇');
-        self.set_border(cx, y + 2, '◇');
+        self.set(cx, y, '◇');
+        self.set(x, y + 1, '◇');
+        self.set(x + w + 1, y + 1, '◇');
+        self.set(cx, y + 2, '◇');
         let truncated = crate::width::truncate_plain(label, w);
         let lw = crate::width::width(&truncated);
         let pad = w.saturating_sub(lw) / 2;
-        self.write_text(x + 1 + pad, y + 1, &truncated);
+        self.write_str(x + 1 + pad, y + 1, &truncated);
     }
 
     pub fn draw_stadium(&mut self, x: usize, y: usize, w: usize, h: usize, label: &str) {
-        self.set_border(x, y, '(');
-        self.set_border(x + w + 1, y, ')');
-        self.set_border(x, y + h + 1, '(');
-        self.set_border(x + w + 1, y + h + 1, ')');
+        self.set(x, y, '(');
+        self.set(x + w + 1, y, ')');
+        self.set(x, y + h + 1, '(');
+        self.set(x + w + 1, y + h + 1, ')');
         for i in 1..=w {
-            self.set_border(x + i, y, '─');
-            self.set_border(x + i, y + h + 1, '─');
+            self.set(x + i, y, '─');
+            self.set(x + i, y + h + 1, '─');
         }
         for row in 0..h {
-            self.set_border(x, y + 1 + row, '│');
-            self.set_border(x + w + 1, y + 1 + row, '│');
+            self.set(x, y + 1 + row, '│');
+            self.set(x + w + 1, y + 1 + row, '│');
         }
         let truncated = crate::width::truncate_plain(label, w);
         let label_w = crate::width::width(&truncated);
         let pad = w.saturating_sub(label_w) / 2;
-        self.write_text(x + 1 + pad, y + 1, &truncated);
+        self.write_str(x + 1 + pad, y + 1, &truncated);
     }
 
     pub fn draw_circle(&mut self, x: usize, y: usize, w: usize, label: &str) {
-        self.set_border(x + w / 2 + 1, y, '○');
-        self.set_border(x, y + 1, '(');
-        self.set_border(x + w + 1, y + 1, ')');
-        self.set_border(x + w / 2 + 1, y + 2, '○');
+        self.set(x + w / 2 + 1, y, '○');
+        self.set(x, y + 1, '(');
+        self.set(x + w + 1, y + 1, ')');
+        self.set(x + w / 2 + 1, y + 2, '○');
         let truncated = crate::width::truncate_plain(label, w);
         let lw = crate::width::width(&truncated);
         let pad = w.saturating_sub(lw) / 2;
-        self.write_text(x + 1 + pad, y + 1, &truncated);
+        self.write_str(x + 1 + pad, y + 1, &truncated);
     }
 
-    /// Render the grid to lines by compositing the three layers.
-    /// Priority: border > text > structure.
+    pub fn draw_h_line(&mut self, x1: usize, x2: usize, y: usize, style: &str) {
+        self.draw_h_segment(x1, x2, y, style);
+    }
+
+    pub fn draw_v_line(&mut self, x: usize, y1: usize, y2: usize, style: &str) {
+        self.draw_v_segment(x, y1, y2, style);
+    }
+
     pub fn to_lines(&self) -> Vec<String> {
-        (0..self.height)
-            .map(|y| {
-                let mut line = String::new();
-                for x in 0..self.width {
-                    line.push_str(&self.render_cell(x, y));
-                }
-                line.trim_end().to_string()
+        self.cells
+            .iter()
+            .map(|row| {
+                let s: String = row.iter().filter(|c| **c != '\u{0}').collect();
+                s.trim_end().to_string()
             })
             .collect()
     }
 
-    fn render_cell(&self, x: usize, y: usize) -> String {
-        let i = match self.idx(x, y) {
-            Some(i) => i,
-            None => return " ".to_string(),
-        };
-        if let Some(c) = self.border[i] {
-            return c.to_string();
-        }
-        if let Some((g, gw)) = &self.text[i] {
-            if *gw == 0 {
-                return String::new();
-            }
-            return g.clone();
-        }
-        let s = self.structure[i];
-        if s == 0 {
-            return " ".to_string();
-        }
-        if s & ARROW != 0 {
-            return match s & 0b1111 {
-                N => "↑".to_string(),
-                S => "↓".to_string(),
-                E => "→".to_string(),
-                W => "←".to_string(),
-                _ => "↓".to_string(),
-            };
-        }
-        dirs_to_char(s & 0b1111).to_string()
-    }
-}
-
-pub fn dir_to_bit(dir: Dir) -> u8 {
-    match dir {
-        Dir::Up => N,
-        Dir::Down => S,
-        Dir::Left => W,
-        Dir::Right => E,
-    }
-}
-
-/// Convert a direction bitmask to the corresponding box-drawing char.
-fn dirs_to_char(dirs: u8) -> char {
-    match dirs & 0b1111 {
-        0 => ' ',
-        1 | 2 => '│', // N or S
-        4 | 8 => '─', // E or W
-        3 => '│',     // N|S
-        12 => '─',    // E|W
-        6 => '┌',     // S|E
-        10 => '┐',    // S|W
-        5 => '└',     // N|E
-        9 => '┘',     // N|W
-        7 => '├',     // N|S|E
-        11 => '┤',    // N|S|W
-        14 => '┬',    // S|E|W
-        13 => '┴',    // N|E|W
-        15 => '┼',    // N|S|E|W
-        _ => '┼',
+    pub fn to_lines_offset(&self, offset: usize, visible_w: usize) -> Vec<String> {
+        self.cells
+            .iter()
+            .map(|row| {
+                let mut result = String::new();
+                let end = (offset + visible_w).min(self.width);
+                for c in &row[offset..end] {
+                    if *c != '\u{0}' {
+                        result.push(*c);
+                    }
+                }
+                let dw = crate::width::width(&result);
+                if dw < visible_w {
+                    result.push_str(&" ".repeat(visible_w - dw));
+                }
+                result
+            })
+            .collect()
     }
 }
 
@@ -250,54 +230,124 @@ pub enum Dir {
     Right,
 }
 
+fn turn_char(from: Dir, to: Dir, existing: char) -> char {
+    let pair = (from, to);
+    let corner = match pair {
+        (Dir::Up, Dir::Right) | (Dir::Left, Dir::Down) => '┌',
+        (Dir::Up, Dir::Left) | (Dir::Right, Dir::Down) => '┐',
+        (Dir::Down, Dir::Right) | (Dir::Left, Dir::Up) => '└',
+        (Dir::Down, Dir::Left) | (Dir::Right, Dir::Up) => '┘',
+        _ => '─',
+    };
+    merge_chars(existing, corner)
+}
+
+#[allow(dead_code)]
+fn t_junction_char(stem: Dir, existing: char) -> char {
+    let c = match stem {
+        Dir::Down => '┬',
+        Dir::Up => '┴',
+        Dir::Right => '├',
+        Dir::Left => '┤',
+    };
+    merge_chars(existing, c)
+}
+
+const MERGE_MASKS: [(char, u8); 12] = [
+    (' ', 0b0000),
+    ('│', 0b0011),
+    ('─', 0b1100),
+    ('┌', 0b1010),
+    ('┐', 0b0110),
+    ('└', 0b1001),
+    ('┘', 0b0101),
+    ('├', 0b1011),
+    ('┤', 0b0111),
+    ('┬', 0b1110),
+    ('┴', 0b1101),
+    ('┼', 0b1111),
+];
+
+fn merge_chars(existing: char, new: char) -> char {
+    if existing == ' ' || existing == '\u{0}' {
+        return new;
+    }
+    if new == ' ' || new == '\u{0}' {
+        return existing;
+    }
+    let em = MERGE_MASKS
+        .iter()
+        .find(|&&(c, _)| c == existing)
+        .map(|&(_, m)| m)
+        .unwrap_or(0);
+    let nm = MERGE_MASKS
+        .iter()
+        .find(|&&(c, _)| c == new)
+        .map(|&(_, m)| m)
+        .unwrap_or(0);
+    if em == 0 && nm == 0 {
+        return new;
+    }
+    let u = em | nm;
+    match u {
+        0b0000 => ' ',
+        0b0011 => '│',
+        0b0101 => '┘',
+        0b0110 => '┐',
+        0b0111 => '┤',
+        0b1001 => '└',
+        0b1010 => '┌',
+        0b1011 => '├',
+        0b1100 => '─',
+        0b1101 => '┴',
+        0b1110 => '┬',
+        0b1111 => '┼',
+        _ => new,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn dirs_to_char_basic() {
-        assert_eq!(dirs_to_char(N | S), '│');
-        assert_eq!(dirs_to_char(E | W), '─');
-        assert_eq!(dirs_to_char(S | E), '┌');
-        assert_eq!(dirs_to_char(N | W), '┘');
-        assert_eq!(dirs_to_char(N | S | E), '├');
-        assert_eq!(dirs_to_char(0), ' ');
+    fn turn_char_connects_correct_directions() {
+        assert_eq!(turn_char(Dir::Up, Dir::Right, ' '), '┌');
+        assert_eq!(turn_char(Dir::Left, Dir::Down, ' '), '┌');
+        assert_eq!(turn_char(Dir::Up, Dir::Left, ' '), '┐');
+        assert_eq!(turn_char(Dir::Right, Dir::Down, ' '), '┐');
+        assert_eq!(turn_char(Dir::Down, Dir::Right, ' '), '└');
+        assert_eq!(turn_char(Dir::Left, Dir::Up, ' '), '└');
+        assert_eq!(turn_char(Dir::Down, Dir::Left, ' '), '┘');
+        assert_eq!(turn_char(Dir::Right, Dir::Up, ' '), '┘');
     }
 
     #[test]
-    fn add_dir_is_additive() {
-        let mut g = Grid::new(4, 4);
-        g.add_dir(1, 1, N);
-        g.add_dir(1, 1, S);
-        let lines = g.to_lines();
-        assert_eq!(lines[1].chars().nth(1), Some('│'));
-    }
-
-    #[test]
-    fn border_overrides_text_and_structure() {
-        let mut g = Grid::new(4, 4);
-        g.add_dir(1, 1, N | S);
-        g.write_text(1, 1, "A");
-        g.set_border(1, 1, '╭');
-        let lines = g.to_lines();
-        assert_eq!(lines[1].chars().nth(1), Some('╭'));
-    }
-
-    #[test]
-    fn text_overrides_structure() {
-        let mut g = Grid::new(4, 4);
-        g.add_dir(1, 1, N | S);
-        g.write_text(1, 1, "中");
-        let lines = g.to_lines();
-        assert_eq!(lines[1].chars().nth(1), Some('中'));
-    }
-
-    #[test]
-    fn arrow_renders_arrowhead() {
-        let mut g = Grid::new(4, 4);
-        g.add_arrow(1, 1, Dir::Down);
-        let lines = g.to_lines();
-        assert_eq!(lines[1].chars().nth(1), Some('↓'));
+    fn merge_chars_preserves_direction_union() {
+        let all = [' ', '│', '─', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼'];
+        for &e in &all {
+            for &n in &all {
+                let got = merge_chars(e, n);
+                let em = MERGE_MASKS
+                    .iter()
+                    .find(|&&(c, _)| c == e)
+                    .map(|&(_, m)| m)
+                    .unwrap_or(0);
+                let nm = MERGE_MASKS
+                    .iter()
+                    .find(|&&(c, _)| c == n)
+                    .map(|&(_, m)| m)
+                    .unwrap_or(0);
+                let u = em | nm;
+                let exp = MERGE_MASKS.iter().find(|&&(_, m)| m == u).map(|&(c, _)| c);
+                if let Some(expected) = exp {
+                    assert_eq!(
+                        got, expected,
+                        "merge_chars('{e}', '{n}'): got '{got}', expected '{expected}'"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -354,7 +404,7 @@ pub struct LaidOutEdge {
     pub path: EdgePath,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum EdgePath {
     Direct {
         from_y: usize,
@@ -472,135 +522,6 @@ const LABEL_GAP: usize = 3;
 /// overflow, and insufficient gaps. Each label's x is clamped so it fits within
 /// the grid, and labels that would collide are shifted to a nearby free slot.
 /// Also avoids placing labels on top of edge line cells.
-fn resolve_turn_conflicts(edges: &mut [LaidOutEdge], nodes: &[LaidOutNode]) {
-    let mut turn_cells: std::collections::HashSet<(usize, usize)> =
-        std::collections::HashSet::new();
-    for e in edges.iter() {
-        if let EdgePath::Corner {
-            from_x,
-            to_x,
-            horizontal_y,
-            ..
-        } = &e.path
-        {
-            turn_cells.insert((*from_x, *horizontal_y));
-            turn_cells.insert((*to_x, *horizontal_y));
-        }
-    }
-
-    let mut occupied: std::collections::HashMap<(usize, usize), usize> =
-        std::collections::HashMap::new();
-
-    for ei in 0..edges.len() {
-        if let EdgePath::Corner {
-            from_x,
-            from_y,
-            to_x,
-            to_y,
-            horizontal_y: mut hy,
-        } = edges[ei].path.clone()
-        {
-            let from_cell = (from_x, hy);
-            let to_cell = (to_x, hy);
-
-            let v_conflict = vline_hits_turn(from_x, from_y, hy, &turn_cells, ei, edges)
-                || vline_hits_turn(to_x, hy, to_y, &turn_cells, ei, edges);
-            let t_conflict = occupied.contains_key(&from_cell) || occupied.contains_key(&to_cell);
-
-            if v_conflict || t_conflict {
-                let (lo, hi) = if from_y <= to_y {
-                    (from_y, to_y)
-                } else {
-                    (to_y, from_y)
-                };
-                let mut found = false;
-                for offset in 1..=(hi - lo).max(1) {
-                    let above = hy.saturating_sub(offset);
-                    let below = hy + offset;
-                    let try_y = |y: usize| -> bool {
-                        if !(y > lo && y < hi) {
-                            return false;
-                        }
-                        if !is_h_clear(from_x, to_x, y, nodes) {
-                            return false;
-                        }
-                        if occupied.contains_key(&(from_x, y)) || occupied.contains_key(&(to_x, y))
-                        {
-                            return false;
-                        }
-                        let new_from_cell = (from_x, y);
-                        let new_to_cell = (to_x, y);
-                        let _ = (new_from_cell, new_to_cell);
-                        true
-                    };
-                    if try_y(above) {
-                        hy = above;
-                        found = true;
-                        break;
-                    }
-                    if try_y(below) {
-                        hy = below;
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    turn_cells.insert((from_x, hy));
-                    turn_cells.insert((to_x, hy));
-                    edges[ei].path = EdgePath::Corner {
-                        from_x,
-                        from_y,
-                        to_x,
-                        to_y,
-                        horizontal_y: hy,
-                    };
-                }
-            }
-
-            occupied.insert((from_x, hy), ei);
-            occupied.insert((to_x, hy), ei);
-            turn_cells.insert((from_x, hy));
-            turn_cells.insert((to_x, hy));
-        }
-    }
-}
-
-fn vline_hits_turn(
-    x: usize,
-    y1: usize,
-    y2: usize,
-    turn_cells: &std::collections::HashSet<(usize, usize)>,
-    self_ei: usize,
-    edges: &[LaidOutEdge],
-) -> bool {
-    let (lo, hi) = if y1 <= y2 { (y1, y2) } else { (y2, y1) };
-    for y in lo..=hi {
-        if turn_cells.contains(&(x, y)) {
-            if let EdgePath::Corner {
-                from_x,
-                to_x,
-                horizontal_y,
-                ..
-            } = &edges[self_ei].path
-            {
-                if (*to_x == x || *from_x == x) && *horizontal_y == y {
-                    continue;
-                }
-            }
-            return true;
-        }
-    }
-    false
-}
-
-fn is_h_clear(from_x: usize, to_x: usize, y: usize, nodes: &[LaidOutNode]) -> bool {
-    !nodes.iter().any(|n| {
-        n.top() <= y
-            && y <= n.bottom()
-            && horizontal_segments_overlap(from_x, to_x, n.left(), n.right())
-    })
-}
-
 fn resolve_label_positions(edges: &mut [LaidOutEdge], nodes: &[LaidOutNode], grid_w: usize) {
     let line_cells = compute_edge_line_cells(edges);
 
@@ -821,7 +742,6 @@ fn build_layout_result(
         });
     }
 
-    resolve_turn_conflicts(&mut edges, &nodes);
     resolve_label_positions(&mut edges, &nodes, grid_w);
 
     let (grid_w, grid_h) = grow_grid_for_channels(&edges, grid_w, grid_h);
