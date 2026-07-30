@@ -4,6 +4,98 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [1.4.0] — 2026-08-01
+
+Diagram rendering, code quality, and CJK correctness. Mermaid diagrams are now a first-class output type with 18 diagram types, a floating panel with split view, and scroll/pan support. ANSI code blocks, math formulas, and character-level diffs ship. A workspace-wide `width` module fixes CJK/emoji alignment across the entire TUI.
+
+---
+
+### 🎯 Highlights
+
+- **Mermaid diagrams** — 18 diagram types: flowchart, sequence, stateDiagram, pie, gantt, timeline, erDiagram, classDiagram, mindmap, gitGraph, journey, quadrantChart, xychart, block, packet, sankey, requirement, architecture. Diagrams are first-class `OutputItem`s with a dedicated floating panel, Tab split view (source ↔ diagram), and horizontal/vertical scroll.
+- **ANSI code blocks** — ` ```ansi ` and ` ```terminal ` fenced blocks parse VT100 escape codes and render with full color.
+- **Math formulas** — `$...$` inline and `$$...$$` display math render via `txm` to ANSI-styled Unicode art.
+- **Code diff beautification** — centered line numbers, character-level diff highlighting within changed lines, and same-row pairing for side-by-side diffs.
+- **CJK/emoji correctness** — a new `width` module provides grapheme-aware display width, truncation, and padding. All TUI rendering paths (markdown, input, sidebar, task panel, output, mermaid) consolidated onto this module, fixing ZWJ emoji splitting, CJK column overflow, and cursor misalignment.
+
+---
+
+### ✨ Features
+
+#### Mermaid Diagrams
+
+- **18 diagram types** — flowchart (`graph`/`flowchart` TD/LR/RL/BT), `sequenceDiagram`, `stateDiagram-v2`, `pie`, `gantt`, `timeline`, `erDiagram`, `classDiagram`, `mindmap`, `gitGraph`, `journey`, `quadrantChart`, `xychart-beta`, `block-beta`, `packet-beta`, `sankey-beta`, `requirementDiagram`, `architecture-beta`.
+- **First-class output type** — `OutputItem::MermaidDiagram { source }` flows through `StreamFrame` → `Event` → `TranscriptEntry` → restore. Mermaid source is intercepted before reaching the markdown renderer, so diagrams render as interactive panels, not raw text.
+- **Floating panel** — clicking the `⤢` button on a mermaid preview opens a floating panel with the full diagram. Panel supports vertical/horizontal scroll and Tab toggle between source and diagram split view.
+- **Layout engine** — Sugiyama layered layout with predecessor-based layer assignment (sources at top), barycenter crossing reduction, and edge routing through layer gaps. Edges never cross node interiors.
+- **CJK/emoji-aware grid** — the grid canvas uses display-width-aware cell allocation so wide characters (Chinese, Japanese, Korean, emoji) align correctly in node labels and edge labels.
+
+#### Code Rendering
+
+- **ANSI code blocks** — `parse_ansi_to_screen` converts VT100 escape sequences to a `TerminalScreen`, then `highlight_ansi` renders colored `Line`s. Markdown dispatches `lang == "ansi" || "terminal"` to this path.
+- **Math formulas** — `pulldown-cmark` `ENABLE_MATH` option emits `InlineMath`/`DisplayMath` events. `render_math(tex)` calls `txm::render` → ANSI string → `highlight_ansi` → centered block. Both inline and display math render as centered blocks with blank-line padding.
+- **Diff beautification** — line numbers are centered with a single-space gap (no separators). Character-level diff highlights changed characters within modified lines. Same-row pairing aligns delete/insert lines side-by-side.
+
+#### Search
+
+- **Search UX polish** — `Ctrl+K` opens the history search modal with a simplified title (`Search History · {scope}`), a fixed bottom help bar (`Enter=search  ↑↓/jk=navigate  Tab=scope  Esc=close  regex supported`), and an enhanced empty state with usage examples (`error`, `role:user`, `/regex/`).
+- **Cheatsheet section** — the F1 cheatsheet now includes a "Search History (Ctrl+K)" section listing in-modal shortcuts.
+
+#### Panels
+
+- **Cheatsheet as floating panel** — F1 opens a `PanelKind::Cheatsheet` floating panel instead of a fixed-height modal. The panel is scrollable, draggable, and maximizable, so the full keybinding list is always visible regardless of terminal size.
+- **Panel data source unification** — a single `Task(TaskKind)` variant replaces per-kind panel kinds. All panels (terminal, bash, workflow, agent) share one data path, eliminating the cache-key collision that made different panels show the same content.
+- **Panel button redesign** — macOS traffic-light style buttons (close/minimize/maximize) with hover effects. Buttons have consistent padding in all modes.
+- **Panel interactions** — ESC minimizes the focused panel. Double-click the titlebar to toggle maximize. Maximized panels restore to their previous size on unmaximize.
+
+#### Terminal/Bash
+
+- **Bash log restore** — bash task output restores from `log_path` when the `output` field is absent. `bash.status` and `bash.output` return `log_path` for reconstruction.
+- **UUID handles** — bash/terminal handles use UUIDs instead of an incrementing counter, preventing ID collisions across restarts.
+- **`[out]`/`[err]` prefix stripping** — restored bash output strips log prefixes for clean display.
+
+---
+
+### 🐛 Bug Fixes
+
+#### CJK/Emoji
+
+- **Grapheme-aware wrapping** — `wrap_text` in markdown and input editor now uses `width::graphemes` instead of `chars()`, fixing ZWJ emoji splitting and CJK column overflow.
+- **Cursor misalignment** — input editor cursor positioning with wide characters fixed via grapheme-aware width calculation.
+- **Sidebar/status truncation** — local `truncate` functions deleted; all paths use `width::truncate`.
+- **Mermaid grid alignment** — wide characters in node labels and edge labels get padding cells so box-drawing characters align.
+
+#### Mermaid
+
+- **Layer assignment** — replaced `while changed` loop with DFS cycle detection + predecessor-based layer assignment. Sources are at layer 0 (top), sinks at the bottom. Cyclic graphs no longer infinite-loop.
+- **Edge routing** — edges route through layer gaps, never through node interiors. Corner direction inversion fixed. Direct edge arrows no longer overwrite Corner turn characters. LR (left-right) edges use `SideChannel` path with branch edges from node top/bottom.
+- **Box-drawing merge** — `merge_chars` uses a bitmask covering all 144 box-drawing character combinations, preventing garbled junctions.
+- **Horizontal scroll** — CJK characters in scrolled mermaid views no longer corrupt. Scroll lines are padded to visible width.
+
+#### Panels
+
+- **Cache-key collision** — opening different panels from History all showed the same content. Fixed by matching `WorkflowPanel` by `run_id` instead of `rposition`.
+- **`⤢` button region** — hardcoded `panel_item_index=0` replaced with the actual item index.
+- **Maximize state** — maximized panels now exit maximize on drag/resize start, preventing jump glitches. `unmaximize` is delayed until drag/resize actually moves.
+- **Panel size restore** — maximized panels restore to default size (88×29 → 80×24 content) on unmaximize, not to the maximized size.
+- **Workflow panel** — renders the graph even when `task_snapshots` is empty. `workflow_panel_task_handle` returns the Flow `run_id`, not the last child node id.
+- **Orphan panels** — session restore no longer creates orphan workflow panels that caused 100% CPU.
+
+#### Markdown
+
+- **Inline code wrapping** — backticks stripped from inline code; long inline code wraps at content width.
+- **`&&` → `&` regression** — `clippy --fix` had corrupted boolean ops in `wrap_text` trailing-space trim. Fixed.
+
+---
+
+### ♻️ Refactors
+
+- **`width` module** — new `crates/atman-tui/src/width.rs` providing `width(s)`, `graphemes(s)`, `truncate_plain(s, max_w)`, `truncate(s, max_w)`, `pad_right(s, target_w)`. All local `truncate`/`clamp_len`/`take_display_*`/`truncate_spans_to_width` functions deleted across `output.rs`, `sidebar.rs`, `status.rs`, `task_panel.rs`, `approval_bar.rs`, `floating_panels.rs`, `markdown.rs`, `input.rs`.
+- **Mermaid Grid** — Grid rewritten to separate structure/text/border layers with `merge_chars` bitmask. `LayoutResult`/`LaidOutNode`/`LaidOutEdge`/`EdgePath` enums replaced `PositionedNode`.
+- **Panel system** — `workflow_viewer_modal` and `terminal_viewer_modal` deleted. Fullscreen viewers are now maximized floating panels. `PanelKind` enum extended with `Mermaid` and `Cheatsheet` variants.
+
+---
+
 ## [1.3.0] — 2026-07-30
 
 A major TUI overhaul: floating panels with drag/resize/scroll, a redesigned task panel with completed-task history, terminal emulator rendering fixes, shadow rendering with multiply blend, and full theme color migration.
