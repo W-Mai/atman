@@ -515,6 +515,190 @@ pub fn layout(fc: &super::parser::Flowchart) -> LayoutResult {
     }
 }
 
+/// Minimum visual gap (in display columns) between two labels on the same row.
+const LABEL_GAP: usize = 3;
+
+/// Resolve label positions to avoid overlaps, node-box collisions, right-edge
+/// overflow, and insufficient gaps. Each label's x is clamped so it fits within
+/// the grid, and labels that would collide are shifted to a nearby free slot.
+/// Also avoids placing labels on top of edge line cells.
+fn resolve_label_positions(edges: &mut [LaidOutEdge], nodes: &[LaidOutNode], grid_w: usize) {
+    let line_cells = compute_edge_line_cells(edges);
+
+    let mut occupied: Vec<(usize, usize, usize)> = Vec::new();
+
+    for edge in edges.iter_mut() {
+        let (label_w, lx_orig, ly_orig) = match edge.label.as_ref().zip(edge.label_pos) {
+            Some((label, pos)) => (crate::width::width(label), pos.0, pos.1),
+            None => continue,
+        };
+        if label_w == 0 {
+            continue;
+        }
+
+        let max_x = grid_w.saturating_sub(label_w);
+        let lx_clamped = lx_orig.min(max_x);
+
+        let max_y_delta = 4;
+        let max_x_delta = 5;
+        let mut placed = (lx_clamped, ly_orig);
+
+        'outer: for y_delta in 0..=max_y_delta {
+            for y in y_offsets(ly_orig, y_delta).into_iter() {
+                for x_delta in 0..=max_x_delta {
+                    for x in x_offsets(lx_clamped, x_delta, max_x).into_iter() {
+                        if !collides_label(&occupied, x, y, label_w)
+                            && !collides_node(nodes, x, y, label_w)
+                            && !collides_edge_line(&line_cells, x, y, label_w)
+                        {
+                            placed = (x, y);
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        occupied.push((placed.1, placed.0, placed.0 + label_w));
+        edge.label_pos = Some(placed);
+    }
+}
+
+/// Compute the set of (x, y) cells that will be occupied by edge lines.
+fn compute_edge_line_cells(edges: &[LaidOutEdge]) -> std::collections::HashSet<(usize, usize)> {
+    let mut cells = std::collections::HashSet::new();
+    for edge in edges {
+        match &edge.path {
+            EdgePath::Direct { from_y, to_y, x } => {
+                if from_y < to_y {
+                    for y in (*from_y + 1)..(*to_y - 1) {
+                        cells.insert((*x, y));
+                    }
+                    cells.insert((*x, *to_y - 1));
+                } else {
+                    for y in (*to_y + 2)..*from_y {
+                        cells.insert((*x, y));
+                    }
+                    cells.insert((*x, *to_y + 1));
+                }
+            }
+            EdgePath::SelfLoop { x, y } => {
+                cells.insert((*x, *y));
+                cells.insert((*x, *y + 1));
+                cells.insert((*x, *y + 2));
+                cells.insert((*x - 1, *y + 2));
+                cells.insert((*x - 2, *y + 2));
+                cells.insert((*x - 3, *y + 2));
+            }
+            EdgePath::Corner {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                horizontal_y,
+            } => {
+                let (sy, ey) = if *from_y < *horizontal_y {
+                    (*from_y + 1, *horizontal_y)
+                } else {
+                    (*horizontal_y, *from_y)
+                };
+                for y in sy..ey {
+                    cells.insert((*from_x, y));
+                }
+                let (x0, x1) = if to_x > from_x {
+                    (*from_x + 1, *to_x)
+                } else {
+                    (*to_x + 1, *from_x)
+                };
+                for x in x0..x1 {
+                    cells.insert((x, *horizontal_y));
+                }
+                let (sy2, ey2) = if *to_y < *horizontal_y {
+                    (*to_y, *horizontal_y)
+                } else {
+                    (*horizontal_y + 1, *to_y)
+                };
+                for y in sy2..ey2 {
+                    cells.insert((*to_x, y));
+                }
+            }
+            EdgePath::SideChannel {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                channel_x,
+            } => {
+                let lo = (*from_x).min(*channel_x);
+                let hi = (*from_x).max(*channel_x);
+                for x in lo..=hi {
+                    cells.insert((x, *from_y));
+                }
+                let lo2 = (*to_x).min(*channel_x);
+                let hi2 = (*to_x).max(*channel_x);
+                for x in lo2..=hi2 {
+                    cells.insert((x, *to_y));
+                }
+                let (ylo, yhi) = if from_y < to_y {
+                    (*from_y, *to_y)
+                } else {
+                    (*to_y, *from_y)
+                };
+                for y in ylo..=yhi {
+                    cells.insert((*channel_x, y));
+                }
+            }
+        }
+    }
+    cells
+}
+
+fn collides_edge_line(
+    cells: &std::collections::HashSet<(usize, usize)>,
+    x: usize,
+    y: usize,
+    lw: usize,
+) -> bool {
+    for dx in 0..lw {
+        if cells.contains(&(x + dx, y)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn y_offsets(center: usize, delta: usize) -> [usize; 2] {
+    if delta == 0 {
+        [center, center]
+    } else {
+        [center + delta, center.saturating_sub(delta)]
+    }
+}
+
+fn x_offsets(center: usize, delta: usize, max_x: usize) -> [usize; 2] {
+    if delta == 0 {
+        [center.min(max_x), center.min(max_x)]
+    } else {
+        let hi = center + delta;
+        let lo = center.saturating_sub(delta);
+        [hi.min(max_x), lo]
+    }
+}
+
+fn collides_label(occupied: &[(usize, usize, usize)], x: usize, y: usize, lw: usize) -> bool {
+    let x_end = x + lw;
+    occupied.iter().any(|&(oy, os, oe)| {
+        oy == y && !(x_end + LABEL_GAP <= os || x.saturating_sub(LABEL_GAP) >= oe)
+    })
+}
+
+fn collides_node(nodes: &[LaidOutNode], x: usize, y: usize, lw: usize) -> bool {
+    let x_end = x + lw;
+    nodes
+        .iter()
+        .any(|n| y >= n.top() && y <= n.bottom() && x_end > n.left() && x < n.right())
+}
+
 fn build_layout_result(
     fc: &super::parser::Flowchart,
     nodes: Vec<LaidOutNode>,
@@ -557,6 +741,8 @@ fn build_layout_result(
             path,
         });
     }
+
+    resolve_label_positions(&mut edges, &nodes, grid_w);
 
     let (grid_w, grid_h) = grow_grid_for_channels(&edges, grid_w, grid_h);
 
@@ -608,7 +794,7 @@ fn route_vertical(
                 to_y: to.top(),
                 x: from_cx,
             },
-            Some((from_cx + 2, mid_y)),
+            Some((from_cx + 1, mid_y)),
         );
     }
 

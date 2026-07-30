@@ -17,9 +17,18 @@ pub fn render_flowchart_struct(fc: &Flowchart, fallback_source: &str) -> Vec<Str
     let mut grid = Grid::new(result.grid_width, result.grid_height);
 
     for edge in &result.edges {
-        draw_edge(&mut grid, edge, &result.nodes);
+        if !matches!(edge.path, EdgePath::Direct { .. }) {
+            draw_edge_line(&mut grid, edge, &result.nodes);
+        }
     }
-
+    for edge in &result.edges {
+        if matches!(edge.path, EdgePath::Direct { .. }) {
+            draw_edge_line(&mut grid, edge, &result.nodes);
+        }
+    }
+    for edge in &result.edges {
+        draw_edge_label(&mut grid, edge);
+    }
     for node in &result.nodes {
         draw_node(&mut grid, node);
     }
@@ -66,7 +75,11 @@ fn style_v(style: &EdgeStyle) -> char {
     }
 }
 
-fn draw_edge(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOutNode]) {
+fn is_corner_char(c: char) -> bool {
+    matches!(c, '┌' | '┐' | '└' | '┘')
+}
+
+fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOutNode]) {
     let h = style_h(&edge.style);
     let v = style_v(&edge.style);
 
@@ -74,14 +87,24 @@ fn draw_edge(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOut
         EdgePath::Direct { from_y, to_y, x } => {
             if from_y < to_y {
                 for y in (*from_y + 1)..(*to_y - 1) {
+                    if is_corner_char(grid.get(*x, y)) {
+                        continue;
+                    }
                     grid.merge_v(*x, y, v);
                 }
-                grid.set(*x, *to_y - 1, '↓');
+                if !is_corner_char(grid.get(*x, *to_y - 1)) {
+                    grid.set(*x, *to_y - 1, '↓');
+                }
             } else {
                 for y in (*to_y + 2)..*from_y {
+                    if is_corner_char(grid.get(*x, y)) {
+                        continue;
+                    }
                     grid.merge_v(*x, y, v);
                 }
-                grid.set(*x, *to_y + 1, '↑');
+                if !is_corner_char(grid.get(*x, *to_y + 1)) {
+                    grid.set(*x, *to_y + 1, '↑');
+                }
             }
         }
         EdgePath::SelfLoop { x, y } => {
@@ -129,17 +152,28 @@ fn draw_edge(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOut
             draw_side_channel_edge(grid, p, _nodes);
         }
     }
+}
 
+fn draw_edge_label(grid: &mut Grid, edge: &super::grid::LaidOutEdge) {
     if let (Some(label), Some((lx, ly))) = (&edge.label, edge.label_pos.as_ref()) {
+        let graphemes: Vec<(&str, usize)> = crate::width::graphemes(label.as_str()).collect();
+
         let mut col = 0usize;
-        for (g, gw) in crate::width::graphemes(label.as_str()) {
+        for (_g, gw) in &graphemes {
             let pos = *lx + col;
-            if grid.is_empty(pos, *ly) {
-                let first_char = g.chars().next().unwrap_or(' ');
-                grid.set(pos, *ly, first_char);
-                for extra in 1..gw {
-                    grid.set(pos + extra, *ly, '\u{0}');
-                }
+            if !grid.is_empty(pos, *ly) {
+                return;
+            }
+            col += gw;
+        }
+
+        let mut col = 0usize;
+        for (g, gw) in &graphemes {
+            let pos = *lx + col;
+            let first_char = g.chars().next().unwrap_or(' ');
+            grid.set(pos, *ly, first_char);
+            for extra in 1..*gw {
+                grid.set(pos + extra, *ly, '\u{0}');
             }
             col += gw;
         }
@@ -168,6 +202,9 @@ fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
     } = p;
     let (sy, ey) = ordered_range(from_y + 1, horizontal_y);
     for y in sy..ey {
+        if is_corner_char(grid.get(from_x, y)) {
+            continue;
+        }
         grid.merge_v(from_x, y, v);
     }
     let from_turn = if from_y < horizontal_y {
@@ -196,6 +233,9 @@ fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
 
     let (sy, ey) = ordered_range(horizontal_y + 1, to_y);
     for y in sy..ey {
+        if is_corner_char(grid.get(to_x, y)) {
+            continue;
+        }
         grid.merge_v(to_x, y, v);
     }
 
@@ -536,6 +576,64 @@ mod tests {
             all.contains('↓') || all.contains('↑'),
             "direct edge should have an arrow, got:\n{all}"
         );
+    }
+
+    #[test]
+    fn render_all_lines_fit_grid_width() {
+        let cases = [
+            ("flowchart TB\nA --> B", "simple flowchart"),
+            ("flowchart TB\nA -->|分支二| C[右边]", "CJK edge label"),
+            (
+                "flowchart TB\nA[开始结束] --> B[连灰桥村]",
+                "CJK node labels",
+            ),
+            ("flowchart TB\nA --> B\nB --> C\nC --> A", "cyclic graph"),
+        ];
+        for (src, desc) in &cases {
+            let fc = parse_flowchart(src);
+            let result = layout(&fc);
+            let lines = render_flowchart_struct(&fc, src);
+            for (i, l) in lines.iter().enumerate() {
+                let dw = crate::width::width(l);
+                assert!(
+                    dw <= result.grid_width,
+                    "{} line {} dw={} > grid_width={} — overflow/misalignment\n|{}|",
+                    desc,
+                    i,
+                    dw,
+                    result.grid_width,
+                    l
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_no_label_split_by_edge_line() {
+        let src = "flowchart TB\n\
+             A -->|开 始| B\n\
+             B -->|战 斗| C\n\
+             C -->|胜 利| D";
+        let lines = render_flowchart(src, 80);
+        let all: String = lines.join("\n");
+        for (i, l) in lines.iter().enumerate() {
+            let chars: Vec<char> = l.chars().collect();
+            for j in 0..chars.len().saturating_sub(1) {
+                if chars[j] == '│' {
+                    let next = chars[j + 1];
+                    if (next as u32) >= 0x4E00 && (next as u32) <= 0x9FFF {
+                        let after = chars.get(j + 2).copied().unwrap_or(' ');
+                        if after != '│' && after != ' ' {
+                            eprintln!(
+                                "warn: line {} has │ followed by CJK {:?} then {:?}: |{}|",
+                                i, next, after, l
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let _ = all;
     }
 
     #[test]
