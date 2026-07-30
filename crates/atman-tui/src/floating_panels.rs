@@ -979,7 +979,25 @@ fn render_panel_content(
                     panel.h_scroll = panel.h_scroll.min(max_h_scroll);
                     let scroll = panel.scroll;
                     let h_scroll = panel.h_scroll;
-                    let p = ratatui::widgets::Paragraph::new(lines).scroll((scroll, h_scroll));
+                    let visible_w = inner_area.width as usize;
+                    let scrolled_lines: Vec<Line> = lines
+                        .iter()
+                        .skip(scroll as usize)
+                        .map(|l| {
+                            let line_str: String =
+                                l.spans.iter().map(|s| s.content.as_ref()).collect();
+                            let trimmed = crate::width::trim_display_offset(
+                                &line_str,
+                                h_scroll as usize,
+                                visible_w,
+                            );
+                            Line::from(Span::styled(
+                                trimmed,
+                                l.spans.first().map(|s| s.style).unwrap_or_default(),
+                            ))
+                        })
+                        .collect();
+                    let p = ratatui::widgets::Paragraph::new(scrolled_lines);
                     f.render_widget(p, inner_area);
                 }
             } else {

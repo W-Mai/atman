@@ -35,6 +35,30 @@ pub fn truncate_plain(s: &str, max_w: usize) -> String {
     grapheme_prefix(s, max_w)
 }
 
+pub fn trim_display_offset(s: &str, offset: usize, max_w: usize) -> String {
+    let mut skipped = 0usize;
+    let mut start_byte = 0usize;
+    for (g, gw) in graphemes(s) {
+        if skipped + gw <= offset {
+            skipped += gw;
+            start_byte += g.len();
+        } else {
+            break;
+        }
+    }
+    let remaining = &s[start_byte..];
+    let mut result = String::new();
+    let mut current_w = 0usize;
+    for (g, gw) in graphemes(remaining) {
+        if current_w + gw > max_w {
+            break;
+        }
+        result.push_str(g);
+        current_w += gw;
+    }
+    result
+}
+
 pub fn middle_truncate(s: &str, max_w: usize) -> String {
     if width(s) <= max_w {
         return s.to_string();
