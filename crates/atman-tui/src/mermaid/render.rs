@@ -267,23 +267,6 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
         h,
         v,
     } = p;
-    let gap_y = find_gap_row(from_y, to_y, from_x, to_x, channel_x, nodes)
-        .unwrap_or_else(|| (from_y + to_y) / 2);
-
-    let (sy, ey) = ordered_range(from_y + 1, gap_y);
-    for y in sy..ey {
-        grid.merge_v(from_x, y, v);
-    }
-    grid.place_turn(
-        from_x,
-        gap_y,
-        if from_y < gap_y { Dir::Down } else { Dir::Up },
-        if channel_x > from_x {
-            Dir::Right
-        } else {
-            Dir::Left
-        },
-    );
 
     let (x0, x1) = if channel_x > from_x {
         (from_x + 1, channel_x)
@@ -291,34 +274,40 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
         (channel_x + 1, from_x)
     };
     for x in x0..x1 {
-        grid.merge_h(x, gap_y, h);
+        grid.merge_h(x, from_y, h);
     }
 
     grid.place_turn(
         channel_x,
-        gap_y,
+        from_y,
         if channel_x > from_x {
             Dir::Right
         } else {
             Dir::Left
         },
-        if to_y > gap_y { Dir::Down } else { Dir::Up },
+        if to_y > from_y { Dir::Down } else { Dir::Up },
     );
-    let (cy0, cy1) = ordered_range(gap_y + 1, to_y);
-    for y in cy0..cy1 {
+
+    let (sy, ey) = ordered_range(from_y, to_y);
+    let (sy, ey) = (sy + 1, ey);
+    for y in sy..ey {
+        if is_corner_char(grid.get(channel_x, y)) {
+            continue;
+        }
         grid.merge_v(channel_x, y, v);
     }
 
     grid.place_turn(
         channel_x,
         to_y,
-        if to_y > gap_y { Dir::Down } else { Dir::Up },
+        if to_y > from_y { Dir::Down } else { Dir::Up },
         if to_x > channel_x {
             Dir::Right
         } else {
             Dir::Left
         },
     );
+
     let (tx0, tx1) = if to_x > channel_x {
         (channel_x + 1, to_x)
     } else {
@@ -328,44 +317,14 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
         grid.merge_h(x, to_y, h);
     }
 
-    let arrow = if to_y > from_y { '↓' } else { '↑' };
-    let arrow_y = if to_y > from_y { to_y - 1 } else { to_y + 1 };
-    grid.set(to_x, arrow_y, arrow);
-}
+    let arrow = if to_x > from_x { '→' } else { '←' };
+    grid.set(to_x - 1, to_y, arrow);
 
-/// Find a row between `from_y` and `to_y` where a horizontal line from
-/// `from_x` to `channel_x` to `to_x` won't cross any node interior.
-fn find_gap_row(
-    from_y: usize,
-    to_y: usize,
-    from_x: usize,
-    to_x: usize,
-    channel_x: usize,
-    nodes: &[LaidOutNode],
-) -> Option<usize> {
-    let (lo, hi) = ordered_range(from_y, to_y);
-    for y in (lo + 1)..hi {
-        let blocked = nodes.iter().any(|n| {
-            n.top() <= y
-                && y <= n.bottom()
-                && (horizontal_segments_overlap(from_x, channel_x, n.left(), n.right())
-                    || horizontal_segments_overlap(channel_x, to_x, n.left(), n.right()))
-        });
-        if !blocked {
-            return Some(y);
-        }
-    }
-    None
+    let _ = nodes;
 }
 
 fn ordered_range(a: usize, b: usize) -> (usize, usize) {
     if a <= b { (a, b) } else { (b, a) }
-}
-
-fn horizontal_segments_overlap(ax1: usize, ax2: usize, bx1: usize, bx2: usize) -> bool {
-    let (a_lo, a_hi) = if ax1 <= ax2 { (ax1, ax2) } else { (ax2, ax1) };
-    let (b_lo, b_hi) = if bx1 <= bx2 { (bx1, bx2) } else { (bx2, bx1) };
-    a_lo <= b_hi && b_lo <= a_hi
 }
 
 #[cfg(test)]
