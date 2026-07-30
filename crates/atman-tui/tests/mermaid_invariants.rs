@@ -341,6 +341,59 @@ fn flow_no_vertical_line_broken_by_corner() {
 }
 
 #[test]
+fn flow_all_junctions_are_structural() {
+    use atman_tui::mermaid::grid::layout;
+    use atman_tui::mermaid::parser::parse_flowchart;
+    let fc = parse_flowchart(FLOW);
+    let result = layout(&fc);
+    let lines = render_flowchart(FLOW, 120);
+
+    let junction_chars = ['├', '┤', '┬', '┴'];
+    for (y, line) in lines.iter().enumerate() {
+        let mut col = 0usize;
+        for (g, gw) in width::graphemes(line) {
+            let c = g.chars().next().unwrap_or(' ');
+            if junction_chars.contains(&c) {
+                let on_node_border = result.nodes.iter().any(|n| {
+                    (col == n.left() || col == n.right()) && y >= n.top() && y <= n.bottom()
+                });
+                let on_edge_line = result.edges.iter().any(|e| match &e.path {
+                    atman_tui::mermaid::grid::EdgePath::Direct { from_y, to_y, x } => {
+                        col == *x && y > *from_y && y < *to_y
+                    }
+                    atman_tui::mermaid::grid::EdgePath::Corner {
+                        from_x,
+                        to_x,
+                        horizontal_y,
+                        ..
+                    } => (col == *from_x || col == *to_x) && y == *horizontal_y,
+                    atman_tui::mermaid::grid::EdgePath::SideChannel {
+                        from_x,
+                        to_x,
+                        channel_x,
+                        from_y,
+                        to_y,
+                    } => {
+                        (col == *from_x && y == *from_y)
+                            || (col == *to_x && y == *to_y)
+                            || (col == *channel_x && y >= *from_y && y <= *to_y)
+                    }
+                    _ => false,
+                });
+                assert!(
+                    on_node_border || on_edge_line,
+                    "junction '{}' at ({},{}) is not on any edge or node border",
+                    c,
+                    col,
+                    y
+                );
+            }
+            col += gw;
+        }
+    }
+}
+
+#[test]
 fn flow_label_within_edge_bbox() {
     use atman_tui::mermaid::grid::{EdgePath, layout};
     use atman_tui::mermaid::parser::parse_flowchart;
