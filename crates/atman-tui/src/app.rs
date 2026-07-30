@@ -178,7 +178,6 @@ pub struct AppState {
     pub history_search: crate::history_search_modal::HistorySearchModal,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
-    pub cheatsheet_open: bool,
     pub flow_names: Vec<(String, String)>,
     pub expanded_tools: HashSet<String>,
     /// Toast notifications (top-right corner, auto-dismiss).

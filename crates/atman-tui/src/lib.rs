@@ -1970,7 +1970,13 @@ fn dispatch_palette_entry(
             app.alias_manager.toggle();
         }
         PaletteEntryId::ShowHelp => {
-            app.cheatsheet_open = true;
+            let canvas = app.last_transcript_rect.unwrap_or_default();
+            app.floating_panels.open(
+                "cheatsheet",
+                crate::floating_panels::PanelKind::Cheatsheet,
+                "Keybindings",
+                canvas,
+            );
         }
         PaletteEntryId::SetTrustMode => {
             app.trust_mode_picker_open = true;
@@ -2456,14 +2462,6 @@ fn handle_key(
             });
         }
     }
-    if app.cheatsheet_open {
-        match action {
-            KeyAction::Escape | KeyAction::HelpModal => app.cheatsheet_open = false,
-            KeyAction::Quit => app.should_quit = true,
-            _ => {}
-        }
-        return;
-    }
     if app.trust_mode_picker_open {
         let modes = atman_runtime::trust::TrustMode::all();
         let max = modes.len();
@@ -2763,7 +2761,13 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::HelpModal => {
-            app.cheatsheet_open = true;
+            let canvas = app.last_transcript_rect.unwrap_or_default();
+            app.floating_panels.open(
+                "cheatsheet",
+                crate::floating_panels::PanelKind::Cheatsheet,
+                "Keybindings",
+                canvas,
+            );
             *interrupt_prompt = None;
         }
         KeyAction::Interrupt => {
@@ -3357,9 +3361,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         border_color,
     );
 
-    if app.cheatsheet_open {
-        completion::render_cheatsheet(f, area);
-    }
     if app.trust_mode_picker_open {
         render_trust_mode_picker(f, area, app);
     }

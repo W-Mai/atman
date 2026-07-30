@@ -29,6 +29,7 @@ pub enum PanelKind {
     History,
     Activity,
     Mermaid,
+    Cheatsheet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,7 @@ impl PanelKind {
             PanelKind::History => "⊞",
             PanelKind::Activity => "▸",
             PanelKind::Mermaid => "◇",
+            PanelKind::Cheatsheet => "?",
         }
     }
 }
@@ -1003,6 +1005,15 @@ fn render_panel_content(
             } else {
                 render_placeholder(f, area, &panel.title);
             }
+        }
+        PanelKind::Cheatsheet => {
+            let lines = crate::completion::cheatsheet_lines();
+            let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+            panel.scroll = panel.scroll.min(max_scroll);
+            let scroll = panel.scroll;
+            let visible: Vec<Line> = lines.into_iter().skip(scroll as usize).collect();
+            let p = ratatui::widgets::Paragraph::new(visible);
+            f.render_widget(p, area);
         }
         PanelKind::Task(kind) => {
             let snap = snapshots.iter().find(|s| s.source_handle == panel.id);

@@ -1,7 +1,7 @@
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 pub const POPUP_MAX_ROWS: u16 = 8;
 pub const POPUP_MAX_WIDTH: u16 = 60;
@@ -273,23 +273,7 @@ pub fn render_hint_strip(
     f.render_widget(p, rect);
 }
 
-pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
-    let w = area.width.saturating_sub(4).min(80);
-    let h = area.height.saturating_sub(4).min(34);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().accent.into()))
-        .title(" atman keybindings — Esc / F1 to close ");
+pub fn cheatsheet_lines() -> Vec<Line<'static>> {
     let mut body = vec![
         Line::from(section("Editing")),
         kv("← / →", "move cursor"),
@@ -345,11 +329,7 @@ pub fn render_cheatsheet(f: &mut ratatui::Frame, area: Rect) {
     for cmd in atman_runtime::meta_commands::META_COMMANDS {
         body.push(kv(cmd.usage, cmd.desc));
     }
-    let p = Paragraph::new(body)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .alignment(Alignment::Left);
-    f.render_widget(p, rect);
+    body
 }
 
 fn section(text: &str) -> Span<'_> {
