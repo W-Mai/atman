@@ -1,14 +1,10 @@
 use std::collections::HashMap;
 
-/// Direction bitmask flags for the structure layer.
 pub const N: u8 = 0b0001;
 pub const S: u8 = 0b0010;
 pub const E: u8 = 0b0100;
 pub const W: u8 = 0b1000;
-/// Flag indicating the cell is an arrowhead (direction stored in same bits).
 pub const ARROW: u8 = 0b10000;
-/// Flag indicating the cell is a locked turn corner. Lines passing through
-/// a locked cell do not accumulate extra directions, preserving the turn.
 pub const LOCKED: u8 = 0b100000;
 
 #[derive(Clone)]
@@ -39,8 +35,6 @@ impl Grid {
         }
     }
 
-    /// Add direction flags to the structure layer (additive, not overwrite).
-    /// Cells marked LOCKED are skipped to preserve turn corners.
     pub fn add_dir(&mut self, x: usize, y: usize, dirs: u8) {
         if let Some(i) = self.idx(x, y) {
             if self.structure[i] & LOCKED != 0 {
@@ -50,18 +44,17 @@ impl Grid {
         }
     }
 
-    /// Write a turn corner: merges the direction bits and marks the cell
-    /// LOCKED so passing lines (add_dir) don't accumulate extra directions.
-    /// Multiple turns at the same cell merge their directions.
     pub fn add_turn(&mut self, x: usize, y: usize, dirs: u8) {
         if let Some(i) = self.idx(x, y) {
             self.structure[i] = LOCKED | (self.structure[i] & 0b1111) | (dirs & 0b1111);
         }
     }
 
-    /// Mark a cell as an arrowhead pointing in `dir`.
     pub fn add_arrow(&mut self, x: usize, y: usize, dir: Dir) {
         if let Some(i) = self.idx(x, y) {
+            if self.structure[i] & LOCKED != 0 {
+                return;
+            }
             self.structure[i] |= ARROW | dir_to_bit(dir);
         }
     }
@@ -361,7 +354,7 @@ pub struct LaidOutEdge {
     pub path: EdgePath,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EdgePath {
     Direct {
         from_y: usize,
@@ -479,6 +472,135 @@ const LABEL_GAP: usize = 3;
 /// overflow, and insufficient gaps. Each label's x is clamped so it fits within
 /// the grid, and labels that would collide are shifted to a nearby free slot.
 /// Also avoids placing labels on top of edge line cells.
+fn resolve_turn_conflicts(edges: &mut [LaidOutEdge], nodes: &[LaidOutNode]) {
+    let mut turn_cells: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    for e in edges.iter() {
+        if let EdgePath::Corner {
+            from_x,
+            to_x,
+            horizontal_y,
+            ..
+        } = &e.path
+        {
+            turn_cells.insert((*from_x, *horizontal_y));
+            turn_cells.insert((*to_x, *horizontal_y));
+        }
+    }
+
+    let mut occupied: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+
+    for ei in 0..edges.len() {
+        if let EdgePath::Corner {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            horizontal_y: mut hy,
+        } = edges[ei].path.clone()
+        {
+            let from_cell = (from_x, hy);
+            let to_cell = (to_x, hy);
+
+            let v_conflict = vline_hits_turn(from_x, from_y, hy, &turn_cells, ei, edges)
+                || vline_hits_turn(to_x, hy, to_y, &turn_cells, ei, edges);
+            let t_conflict = occupied.contains_key(&from_cell) || occupied.contains_key(&to_cell);
+
+            if v_conflict || t_conflict {
+                let (lo, hi) = if from_y <= to_y {
+                    (from_y, to_y)
+                } else {
+                    (to_y, from_y)
+                };
+                let mut found = false;
+                for offset in 1..=(hi - lo).max(1) {
+                    let above = hy.saturating_sub(offset);
+                    let below = hy + offset;
+                    let try_y = |y: usize| -> bool {
+                        if !(y > lo && y < hi) {
+                            return false;
+                        }
+                        if !is_h_clear(from_x, to_x, y, nodes) {
+                            return false;
+                        }
+                        if occupied.contains_key(&(from_x, y)) || occupied.contains_key(&(to_x, y))
+                        {
+                            return false;
+                        }
+                        let new_from_cell = (from_x, y);
+                        let new_to_cell = (to_x, y);
+                        let _ = (new_from_cell, new_to_cell);
+                        true
+                    };
+                    if try_y(above) {
+                        hy = above;
+                        found = true;
+                        break;
+                    }
+                    if try_y(below) {
+                        hy = below;
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    turn_cells.insert((from_x, hy));
+                    turn_cells.insert((to_x, hy));
+                    edges[ei].path = EdgePath::Corner {
+                        from_x,
+                        from_y,
+                        to_x,
+                        to_y,
+                        horizontal_y: hy,
+                    };
+                }
+            }
+
+            occupied.insert((from_x, hy), ei);
+            occupied.insert((to_x, hy), ei);
+            turn_cells.insert((from_x, hy));
+            turn_cells.insert((to_x, hy));
+        }
+    }
+}
+
+fn vline_hits_turn(
+    x: usize,
+    y1: usize,
+    y2: usize,
+    turn_cells: &std::collections::HashSet<(usize, usize)>,
+    self_ei: usize,
+    edges: &[LaidOutEdge],
+) -> bool {
+    let (lo, hi) = if y1 <= y2 { (y1, y2) } else { (y2, y1) };
+    for y in lo..=hi {
+        if turn_cells.contains(&(x, y)) {
+            if let EdgePath::Corner {
+                from_x,
+                to_x,
+                horizontal_y,
+                ..
+            } = &edges[self_ei].path
+            {
+                if (*to_x == x || *from_x == x) && *horizontal_y == y {
+                    continue;
+                }
+            }
+            return true;
+        }
+    }
+    false
+}
+
+fn is_h_clear(from_x: usize, to_x: usize, y: usize, nodes: &[LaidOutNode]) -> bool {
+    !nodes.iter().any(|n| {
+        n.top() <= y
+            && y <= n.bottom()
+            && horizontal_segments_overlap(from_x, to_x, n.left(), n.right())
+    })
+}
+
 fn resolve_label_positions(edges: &mut [LaidOutEdge], nodes: &[LaidOutNode], grid_w: usize) {
     let line_cells = compute_edge_line_cells(edges);
 
@@ -699,6 +821,7 @@ fn build_layout_result(
         });
     }
 
+    resolve_turn_conflicts(&mut edges, &nodes);
     resolve_label_positions(&mut edges, &nodes, grid_w);
 
     let (grid_w, grid_h) = grow_grid_for_channels(&edges, grid_w, grid_h);

@@ -229,9 +229,8 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
     }
 
     let at_to_ns = if to_y > gap_y { N } else { S };
-    let channel_to_to_ew = if to_x > channel_x { E } else { W };
     let to_horizontal_ew = if to_x > channel_x { W } else { E };
-    grid.add_turn(channel_x, to_y, at_to_ns | channel_to_to_ew);
+    grid.add_turn(channel_x, to_y, at_to_ns | to_horizontal_ew);
 
     let (tx0, tx1) = if to_x > channel_x {
         (channel_x + 1, to_x)
@@ -241,7 +240,6 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
     for x in tx0..tx1 {
         grid.add_dir(x, to_y, E | W);
     }
-    let _ = to_horizontal_ew;
 
     let arrow_dir = if to_y > from_y { Dir::Down } else { Dir::Up };
     let arrow_y = if to_y > from_y { to_y - 1 } else { to_y + 1 };
