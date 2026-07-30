@@ -427,6 +427,10 @@ fn item_content_hash(
             unified_diff.as_deref().map(str_fp).hash(&mut h);
             expanded.hash(&mut h);
         }
+        OutputItem::MermaidDiagram { source } => {
+            11u8.hash(&mut h);
+            str_fp(source).hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -444,6 +448,7 @@ enum ItemKind {
     Bash,
     CompactionSummary,
     DiffPreview,
+    MermaidDiagram,
 }
 
 impl ItemKind {
@@ -460,6 +465,7 @@ impl ItemKind {
             OutputItem::Bash { .. } => Self::Bash,
             OutputItem::CompactionSummary { .. } => Self::CompactionSummary,
             OutputItem::DiffPreview { .. } => Self::DiffPreview,
+            OutputItem::MermaidDiagram { .. } => Self::MermaidDiagram,
         }
     }
 
@@ -530,6 +536,17 @@ pub fn render_item_with_regions(
                 vec![NodeRegion {
                     panel_item_index: item_index,
                     path_key: BASH_FULLSCREEN_KEY.to_string(),
+                    start_row: 1,
+                    end_row: 2,
+                    col_start: panel_width.saturating_sub(6) as u16,
+                    col_end: panel_width as u16,
+                }]
+            }
+            OutputItem::MermaidDiagram { .. } if lines.len() >= 2 => {
+                let panel_width = ctx.panel_width as usize;
+                vec![NodeRegion {
+                    panel_item_index: item_index,
+                    path_key: MERMAID_FULLSCREEN_KEY.to_string(),
                     start_row: 1,
                     end_row: 2,
                     col_start: panel_width.saturating_sub(6) as u16,
@@ -1515,8 +1532,84 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             *expanded,
             ctx.panel_width,
         ),
+        OutputItem::MermaidDiagram { source } => {
+            render_mermaid_preview(source, ctx.panel_width, ctx.animation_frame)
+        }
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
+    lines
+}
+
+fn render_mermaid_preview(
+    source: &str,
+    panel_width: u16,
+    _animation_frame: u32,
+) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let bg: Color = t.code_bg.into();
+    let target = panel_width.max(20) as usize;
+    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
+    let header_style = Style::default()
+        .fg(t.subtle_fg.into())
+        .bg(bg)
+        .add_modifier(Modifier::DIM);
+    let hint_style = Style::default()
+        .fg(t.meta_fg.into())
+        .bg(bg)
+        .add_modifier(Modifier::DIM);
+    let fs_btn = "⤢";
+    let fs_btn_used = crate::width::width(fs_btn);
+    let gap = 1;
+
+    let blank = Line::from(Span::styled(" ".repeat(target), body_style));
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(blank.clone());
+
+    let header_prefix = "  ◇ mermaid ";
+    let header_used = crate::width::width(header_prefix);
+    let header_pad = target
+        .saturating_sub(header_used)
+        .saturating_sub(fs_btn_used)
+        .saturating_sub(gap * 2);
+    let mut header_spans = vec![Span::styled(header_prefix, header_style)];
+    if header_pad > 0 {
+        header_spans.push(Span::styled(" ".repeat(header_pad), header_style));
+    }
+    header_spans.push(Span::styled(" ".repeat(gap), header_style));
+    header_spans.push(Span::styled(
+        fs_btn.to_string(),
+        hint_style.add_modifier(Modifier::BOLD),
+    ));
+    header_spans.push(Span::styled(" ".repeat(gap), header_style));
+    lines.push(Line::from(header_spans));
+    lines.push(blank.clone());
+
+    let mermaid_lines = crate::mermaid::render_mermaid(source, panel_width.saturating_sub(4));
+    let max_preview = 12usize;
+    let total = mermaid_lines.len();
+    let visible = total.min(max_preview);
+    for ml in mermaid_lines.iter().take(visible) {
+        let line_w = crate::width::spans_width(&ml.spans);
+        let pad = target.saturating_sub(line_w + 2);
+        let mut spans = vec![Span::styled("  ", body_style)];
+        spans.extend(ml.spans.iter().cloned());
+        spans.push(Span::styled(" ".repeat(pad), body_style));
+        lines.push(Line::from(spans));
+    }
+
+    if total > max_preview {
+        let hint = format!(
+            "    ▼ {} more rows — click ⤢ to expand",
+            total - max_preview
+        );
+        let hint_pad = target.saturating_sub(crate::width::width(hint.as_str()));
+        let mut spans = vec![Span::styled(hint, hint_style)];
+        if hint_pad > 0 {
+            spans.push(Span::styled(" ".repeat(hint_pad), hint_style));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(blank);
     lines
 }
 
@@ -2526,6 +2619,7 @@ fn collect_stats(nodes: &[atman_runtime::workflow::WorkflowNode], acc: &mut Work
 pub const COLLAPSED_CARD_FULLSCREEN_KEY: &str = "__collapsed_card_fullscreen__";
 pub const TERMINAL_FULLSCREEN_KEY: &str = "__terminal_fullscreen__";
 pub const BASH_FULLSCREEN_KEY: &str = "__bash_fullscreen__";
+pub const MERMAID_FULLSCREEN_KEY: &str = "__mermaid_fullscreen__";
 
 fn collect_all_leaves(
     nodes: &[atman_runtime::workflow::WorkflowNode],

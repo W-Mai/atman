@@ -78,6 +78,9 @@ pub enum OutputItem {
         compacted_count: usize,
         expanded: bool,
     },
+    MermaidDiagram {
+        source: String,
+    },
 }
 
 impl OutputItem {
@@ -448,6 +451,36 @@ impl AppState {
             return Some(handle.clone());
         }
         None
+    }
+
+    pub fn mermaid_item_source(&self, idx: usize) -> Option<String> {
+        let item = self.items.get(idx)?;
+        if let crate::app::OutputItem::MermaidDiagram { source } = item {
+            return Some(source.clone());
+        }
+        None
+    }
+
+    pub fn open_mermaid_panel(&mut self, item_idx: usize, canvas: ratatui::layout::Rect) {
+        let id = format!("mermaid:{item_idx}");
+        let source = self.mermaid_item_source(item_idx).unwrap_or_default();
+        let lines = crate::mermaid::render_mermaid(&source, canvas.width.saturating_sub(8));
+        let pw = lines
+            .iter()
+            .map(|l| crate::width::spans_width(&l.spans))
+            .max()
+            .unwrap_or(80)
+            .max(80) as u16;
+        let ph = lines.len() as u16 + 5;
+        self.floating_panels.open_with_size(
+            &id,
+            crate::floating_panels::PanelKind::Mermaid,
+            "Mermaid Diagram",
+            canvas,
+            pw,
+            ph,
+            false,
+        );
     }
 
     pub fn maximized_canvas(&self) -> ratatui::layout::Rect {
@@ -1300,6 +1333,10 @@ impl AppState {
                         expanded: false,
                     });
                 }
+            }
+            StreamFrame::MermaidDiagram { source } => {
+                self.push_item(OutputItem::MermaidDiagram { source });
+                self.reset_lag_state();
             }
             StreamFrame::Unknown => {}
         }

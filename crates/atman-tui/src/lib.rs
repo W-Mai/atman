@@ -832,6 +832,11 @@ async fn run_frames(
                                                 app.last_transcript_rect.unwrap_or_default();
                                             app.open_task_panel(&handle, canvas);
                                         }
+                                    } else if node_id == crate::output::MERMAID_FULLSCREEN_KEY
+                                    {
+                                        let canvas =
+                                            app.last_transcript_rect.unwrap_or_default();
+                                        app.open_mermaid_panel(panel_idx, canvas);
                                     } else if node_id.is_empty() {
                                         app.toggle_workflow_panel_expansion(panel_idx);
                                     } else {

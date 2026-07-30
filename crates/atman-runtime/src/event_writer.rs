@@ -285,6 +285,7 @@ pub(crate) fn event_kind(event: &Event) -> &'static str {
         Event::ToolApproved { .. } => "tool_approved",
         Event::ToolDenied { .. } => "tool_denied",
         Event::TerminalFinalState { .. } => "terminal_final_state",
+        Event::MermaidDiagram { .. } => "mermaid_diagram",
     }
 }
 
@@ -367,7 +368,8 @@ pub(crate) fn extract_anchors(event: &Event) -> (Option<String>, Option<String>)
         | Event::Checkpoint { .. }
         | Event::PendingPrompt { .. }
         | Event::PromptResolved { .. }
-        | Event::TerminalFinalState { .. } => (None, None),
+        | Event::TerminalFinalState { .. }
+        | Event::MermaidDiagram { .. } => (None, None),
     }
 }
 

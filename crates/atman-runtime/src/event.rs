@@ -269,6 +269,9 @@ pub enum Event {
         screen: crate::tools::term::TerminalScreen,
         state: crate::tools::term::TermStateSnapshot,
     },
+    MermaidDiagram {
+        source: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

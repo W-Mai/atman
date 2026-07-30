@@ -86,6 +86,9 @@ pub enum TranscriptEntry {
         handle: String,
         screen: crate::tools::term::TerminalScreen,
     },
+    MermaidDiagram {
+        source: String,
+    },
 }
 
 pub fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenError> {
@@ -401,6 +404,13 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                         serde_json::from_value::<crate::tools::term::TerminalScreen>(screen.clone())
                 {
                     out.push(TranscriptEntry::TerminalFinalState { handle, screen });
+                }
+            }
+            "mermaid_diagram" => {
+                if let Some(source) = v.get("source").and_then(|s| s.as_str()) {
+                    out.push(TranscriptEntry::MermaidDiagram {
+                        source: source.to_string(),
+                    });
                 }
             }
             _ => {}

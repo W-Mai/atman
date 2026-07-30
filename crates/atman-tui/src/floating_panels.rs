@@ -27,6 +27,7 @@ pub enum PanelKind {
     Task(TaskKind),
     History,
     Activity,
+    Mermaid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,7 @@ impl PanelKind {
             PanelKind::Task(kind) => task_kind_icon(kind),
             PanelKind::History => "⊞",
             PanelKind::Activity => "▸",
+            PanelKind::Mermaid => "◇",
         }
     }
 }
@@ -875,6 +877,32 @@ fn render_panel_content(
                 }
             }
             render_placeholder(f, area, &panel.title);
+        }
+        PanelKind::Mermaid => {
+            let item_idx: Option<usize> = panel
+                .id
+                .strip_prefix("mermaid:")
+                .and_then(|s| s.parse().ok());
+            if let Some(idx) = item_idx
+                && let Some(OutputItem::MermaidDiagram { source }) = items.get(idx)
+            {
+                let lines = crate::mermaid::render_mermaid(source, area.width);
+                let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+                panel.scroll = panel.scroll.min(max_scroll);
+                let content_w = lines
+                    .iter()
+                    .map(|l| crate::width::spans_width(&l.spans))
+                    .max()
+                    .unwrap_or(0) as u16;
+                let max_h_scroll = content_w.saturating_sub(area.width);
+                panel.h_scroll = panel.h_scroll.min(max_h_scroll);
+                let scroll = panel.scroll;
+                let h_scroll = panel.h_scroll;
+                let p = ratatui::widgets::Paragraph::new(lines).scroll((scroll, h_scroll));
+                f.render_widget(p, area);
+            } else {
+                render_placeholder(f, area, &panel.title);
+            }
         }
         PanelKind::Task(kind) => {
             let snap = snapshots.iter().find(|s| s.source_handle == panel.id);

@@ -171,6 +171,9 @@ pub enum StreamFrame {
         after_tokens: u64,
         compacted_count: usize,
     },
+    MermaidDiagram {
+        source: String,
+    },
     #[serde(other)]
     Unknown,
 }

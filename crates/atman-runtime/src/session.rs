@@ -1513,6 +1513,18 @@ impl AppendMessageCommand {
                         flow_run_id: flow_run_id_str.clone(),
                         message: msg.clone(),
                     });
+                for source in extract_mermaid_blocks(&msg) {
+                    let _ =
+                        session
+                            .watch
+                            .stream_tx
+                            .send(crate::stream::StreamFrame::MermaidDiagram {
+                                source: source.clone(),
+                            });
+                    session
+                        .sink
+                        .emit(crate::event::Event::MermaidDiagram { source });
+                }
                 Event::AssistantMsg {
                     turn_id: msg.turn_id.clone(),
                     flow_run_id: self.flow_run_id.clone(),
@@ -1590,6 +1602,40 @@ impl BeginTurnCommand {
         .execute(session);
         turn_id
     }
+}
+
+fn extract_mermaid_blocks(msg: &crate::message::Message) -> Vec<String> {
+    let text = msg.text_concat();
+    let mut blocks = Vec::new();
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            let lang = trimmed.trim_start_matches("```").trim();
+            if lang == "mermaid" {
+                let mut source = String::new();
+                for inner in lines.by_ref() {
+                    if inner.trim() == "```" {
+                        break;
+                    }
+                    if !source.is_empty() {
+                        source.push('\n');
+                    }
+                    source.push_str(inner);
+                }
+                if !source.is_empty() {
+                    blocks.push(source);
+                }
+            } else {
+                for inner in lines.by_ref() {
+                    if inner.trim() == "```" {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    blocks
 }
 
 #[cfg(test)]

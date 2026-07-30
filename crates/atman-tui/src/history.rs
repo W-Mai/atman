@@ -291,7 +291,6 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 );
             }
             TranscriptEntry::TerminalFinalState { handle, screen } => {
-                // Overwrite the Terminal item's screen with the final state.
                 for item in out.iter_mut() {
                     if let OutputItem::Terminal {
                         handle: h,
@@ -304,6 +303,11 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         }
                     }
                 }
+            }
+            TranscriptEntry::MermaidDiagram { source } => {
+                out.push(OutputItem::MermaidDiagram {
+                    source: source.clone(),
+                });
             }
         }
     }

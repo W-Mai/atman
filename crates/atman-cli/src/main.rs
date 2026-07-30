@@ -2428,6 +2428,7 @@ fn render_stream_frame(
         | StreamFrame::BashExited { .. }
         | StreamFrame::DiffPreview { .. }
         | StreamFrame::CompactionSummary { .. }
+        | StreamFrame::MermaidDiagram { .. }
         | StreamFrame::Unknown => {}
     }
 }
