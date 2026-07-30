@@ -898,16 +898,26 @@ fn render_panel_content(
             if let Some(idx) = item_idx
                 && let Some(OutputItem::MermaidDiagram { source }) = items.get(idx)
             {
+                let pad = 2u16;
+                let inner_area = Rect {
+                    x: area.x + pad,
+                    y: area.y + 1,
+                    width: area.width.saturating_sub(pad * 2),
+                    height: area.height.saturating_sub(2),
+                };
+                if inner_area.width == 0 || inner_area.height == 0 {
+                    return;
+                }
                 if panel.split {
-                    let half_w = area.width / 2;
+                    let half_w = inner_area.width / 2;
                     let left_area = Rect {
                         width: half_w,
-                        ..area
+                        ..inner_area
                     };
                     let right_area = Rect {
-                        x: area.x + half_w,
-                        width: area.width.saturating_sub(half_w),
-                        ..area
+                        x: inner_area.x + half_w,
+                        width: inner_area.width.saturating_sub(half_w),
+                        ..inner_area
                     };
 
                     let t = crate::theme::theme();
@@ -947,8 +957,8 @@ fn render_panel_content(
                         right_area,
                     );
 
-                    let divider_x = area.x + half_w;
-                    for y in area.y..area.y + area.height {
+                    let divider_x = inner_area.x + half_w;
+                    for y in inner_area.y..inner_area.y + inner_area.height {
                         if let Some(cell) = f
                             .buffer_mut()
                             .cell_mut(ratatui::layout::Position { x: divider_x, y })
@@ -957,20 +967,20 @@ fn render_panel_content(
                         }
                     }
                 } else {
-                    let lines = crate::mermaid::render_mermaid(source, area.width);
-                    let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+                    let lines = crate::mermaid::render_mermaid(source, inner_area.width);
+                    let max_scroll = (lines.len() as u16).saturating_sub(inner_area.height);
                     panel.scroll = panel.scroll.min(max_scroll);
                     let content_w = lines
                         .iter()
                         .map(|l| crate::width::spans_width(&l.spans))
                         .max()
                         .unwrap_or(0) as u16;
-                    let max_h_scroll = content_w.saturating_sub(area.width);
+                    let max_h_scroll = content_w.saturating_sub(inner_area.width);
                     panel.h_scroll = panel.h_scroll.min(max_h_scroll);
                     let scroll = panel.scroll;
                     let h_scroll = panel.h_scroll;
                     let p = ratatui::widgets::Paragraph::new(lines).scroll((scroll, h_scroll));
-                    f.render_widget(p, area);
+                    f.render_widget(p, inner_area);
                 }
             } else {
                 render_placeholder(f, area, &panel.title);
