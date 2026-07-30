@@ -1096,10 +1096,12 @@ fn route_horizontal(
     if from_cy == to_cy {
         let mid_x = (from_x + to_x) / 2;
         return (
-            EdgePath::Direct {
+            EdgePath::SideChannel {
+                from_x,
                 from_y: from_cy,
+                to_x,
                 to_y: to_cy,
-                x: from_x,
+                channel_x: mid_x,
             },
             Some((mid_x, from_cy + 1)),
         );

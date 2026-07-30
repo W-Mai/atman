@@ -92,7 +92,11 @@ fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[La
 
     match &edge.path {
         EdgePath::Direct { from_y, to_y, x } => {
-            if from_y < to_y {
+            if from_y == to_y {
+                if !is_structure_char(grid.get(*x, *from_y)) {
+                    grid.set(*x, *from_y, '→');
+                }
+            } else if from_y < to_y {
                 for y in (*from_y + 1)..(*to_y - 1) {
                     if is_corner_char(grid.get(*x, y)) {
                         continue;
@@ -267,6 +271,22 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
         h,
         v,
     } = p;
+
+    if from_y == to_y {
+        let (x0, x1) = if to_x > from_x {
+            (from_x + 1, to_x)
+        } else {
+            (to_x + 1, from_x)
+        };
+        for x in x0..x1 {
+            grid.merge_h(x, from_y, h);
+        }
+        let arrow = if to_x > from_x { '→' } else { '←' };
+        if !is_structure_char(grid.get(to_x.saturating_sub(1), to_y)) {
+            grid.set(to_x.saturating_sub(1), to_y, arrow);
+        }
+        return;
+    }
 
     let (x0, x1) = if channel_x > from_x {
         (from_x + 1, channel_x)
