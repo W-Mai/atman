@@ -1592,7 +1592,12 @@ fn render_mermaid_preview(
         let line_w = crate::width::spans_width(&ml.spans);
         let pad = target.saturating_sub(line_w + 2);
         let mut spans = vec![Span::styled("  ", body_style)];
-        spans.extend(ml.spans.iter().cloned());
+        for s in &ml.spans {
+            spans.push(Span::styled(
+                s.content.clone(),
+                s.style.patch(Style::default().bg(bg)),
+            ));
+        }
         spans.push(Span::styled(" ".repeat(pad), body_style));
         lines.push(Line::from(spans));
     }
