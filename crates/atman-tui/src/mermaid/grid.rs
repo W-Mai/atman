@@ -33,8 +33,10 @@ impl Grid {
     pub fn write_str(&mut self, x: usize, y: usize, s: &str) {
         let mut i = 0usize;
         for (g, gw) in crate::width::graphemes(s) {
-            for c in g.chars() {
-                self.set(x + i, y, c);
+            let first_char = g.chars().next().unwrap_or(' ');
+            self.set(x + i, y, first_char);
+            for extra in 1..gw {
+                self.set(x + i + extra, y, '\u{0}');
             }
             i += gw;
         }
@@ -107,7 +109,8 @@ impl Grid {
             _ => '─',
         };
         for x in x1..x2 {
-            if self.get(x, y) == ' ' {
+            let existing = self.get(x, y);
+            if existing == ' ' || existing == '\u{0}' {
                 self.set(x, y, c);
             }
         }
@@ -120,7 +123,8 @@ impl Grid {
             _ => '│',
         };
         for y in y1..y2 {
-            if self.get(x, y) == ' ' {
+            let existing = self.get(x, y);
+            if existing == ' ' || existing == '\u{0}' {
                 self.set(x, y, c);
             }
         }
@@ -130,7 +134,7 @@ impl Grid {
         self.cells
             .iter()
             .map(|row| {
-                let s: String = row.iter().collect();
+                let s: String = row.iter().filter(|c| **c != '\u{0}').collect();
                 s.trim_end().to_string()
             })
             .collect()
