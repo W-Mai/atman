@@ -225,34 +225,55 @@ pub fn layout(fc: &super::parser::Flowchart) -> (Vec<PositionedNode>, usize, usi
 }
 
 fn assign_layers(fc: &super::parser::Flowchart) -> Vec<Vec<String>> {
-    let mut node_layer: HashMap<String, usize> = HashMap::new();
-    let mut changed = true;
+    use std::collections::HashSet;
 
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in &fc.edges {
+        adj.entry(edge.from.as_str())
+            .or_default()
+            .push(edge.to.as_str());
+    }
+
+    let mut node_layer: HashMap<String, usize> = HashMap::new();
     for node in &fc.nodes {
         node_layer.insert(node.id.clone(), 0);
     }
 
-    while changed {
-        changed = false;
-        for edge in &fc.edges {
-            let from_layer = *node_layer.get(&edge.from).unwrap_or(&0);
-            let to_layer = node_layer.get(&edge.to).copied();
-            let new_layer = from_layer + 1;
-            if new_layer > fc.nodes.len() {
-                continue;
-            }
-            match to_layer {
-                Some(tl) if tl < new_layer => {
-                    node_layer.insert(edge.to.clone(), new_layer);
-                    changed = true;
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut on_stack: HashSet<String> = HashSet::new();
+
+    fn dfs(
+        node_id: &str,
+        adj: &HashMap<&str, Vec<&str>>,
+        node_layer: &mut HashMap<String, usize>,
+        visited: &mut HashSet<String>,
+        on_stack: &mut HashSet<String>,
+    ) {
+        if visited.contains(node_id) {
+            return;
+        }
+        visited.insert(node_id.to_string());
+        on_stack.insert(node_id.to_string());
+
+        if let Some(neighbors) = adj.get(node_id) {
+            for &nxt in neighbors {
+                if on_stack.contains(nxt) {
+                    continue;
                 }
-                None => {
-                    node_layer.insert(edge.to.clone(), new_layer);
-                    changed = true;
+                dfs(nxt, adj, node_layer, visited, on_stack);
+                let nxt_layer = *node_layer.get(nxt).unwrap_or(&0);
+                let cur = *node_layer.get(node_id).unwrap_or(&0);
+                if nxt_layer + 1 > cur {
+                    node_layer.insert(node_id.to_string(), nxt_layer + 1);
                 }
-                _ => {}
             }
         }
+
+        on_stack.remove(node_id);
+    }
+
+    for node in &fc.nodes {
+        dfs(&node.id, &adj, &mut node_layer, &mut visited, &mut on_stack);
     }
 
     let max_layer = *node_layer.values().max().unwrap_or(&0);
