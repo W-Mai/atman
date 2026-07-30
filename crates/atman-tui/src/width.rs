@@ -56,6 +56,9 @@ pub fn trim_display_offset(s: &str, offset: usize, max_w: usize) -> String {
         result.push_str(g);
         current_w += gw;
     }
+    if current_w < max_w {
+        result.push_str(&" ".repeat(max_w - current_w));
+    }
     result
 }
 
