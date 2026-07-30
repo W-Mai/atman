@@ -547,6 +547,9 @@ impl Renderer {
     }
 
     fn render_code_block(&mut self, lang: &str, body: &str) {
+        if lang == "mermaid" {
+            return;
+        }
         let t = crate::theme::theme();
         self.blank_line();
         let bg = block_bg();
@@ -568,14 +571,6 @@ impl Renderer {
         self.lines.push(blank_bg_line(target, bg));
         let highlighted = if lang == "ansi" || lang == "terminal" {
             crate::highlight::highlight_ansi(body)
-        } else if lang == "mermaid" {
-            let mermaid_lines = crate::mermaid::render_mermaid(body, self.rule_width);
-            for ml in &mermaid_lines {
-                self.lines.push(ml.clone());
-            }
-            self.blank_line();
-            self.fresh_line = true;
-            return;
         } else {
             crate::highlight::highlight_code(lang, body)
         };
