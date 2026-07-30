@@ -1,5 +1,5 @@
 use super::grid::{Dir, EdgePath, Grid, LaidOutNode, layout};
-use super::parser::{EdgeStyle, Flowchart, NodeShape, parse_flowchart};
+use super::parser::{Flowchart, NodeShape, parse_flowchart};
 
 pub fn render_flowchart(source: &str, _width: u16) -> Vec<String> {
     let fc = parse_flowchart(source);
@@ -17,14 +17,7 @@ pub fn render_flowchart_struct(fc: &Flowchart, fallback_source: &str) -> Vec<Str
     let mut grid = Grid::new(result.grid_width, result.grid_height);
 
     for edge in &result.edges {
-        if !matches!(edge.path, EdgePath::Direct { .. }) {
-            draw_edge_line(&mut grid, edge, &result.nodes);
-        }
-    }
-    for edge in &result.edges {
-        if matches!(edge.path, EdgePath::Direct { .. }) {
-            draw_edge_line(&mut grid, edge, &result.nodes);
-        }
+        draw_edge_line(&mut grid, edge, &result.nodes);
     }
     for edge in &result.edges {
         draw_edge_label(&mut grid, edge);
@@ -59,61 +52,29 @@ fn draw_node(grid: &mut Grid, node: &LaidOutNode) {
     }
 }
 
-fn style_h(style: &EdgeStyle) -> char {
-    match style {
-        EdgeStyle::Dotted => '┄',
-        EdgeStyle::Thick => '═',
-        EdgeStyle::Solid => '─',
-    }
-}
-
-fn style_v(style: &EdgeStyle) -> char {
-    match style {
-        EdgeStyle::Dotted => '┆',
-        EdgeStyle::Thick => '║',
-        EdgeStyle::Solid => '│',
-    }
-}
-
-fn is_corner_char(c: char) -> bool {
-    matches!(c, '┌' | '┐' | '└' | '┘')
-}
-
 fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[LaidOutNode]) {
-    let h = style_h(&edge.style);
-    let v = style_v(&edge.style);
-
+    use super::grid::{E, N, S, W};
     match &edge.path {
         EdgePath::Direct { from_y, to_y, x } => {
             if from_y < to_y {
                 for y in (*from_y + 1)..(*to_y - 1) {
-                    if is_corner_char(grid.get(*x, y)) {
-                        continue;
-                    }
-                    grid.merge_v(*x, y, v);
+                    grid.add_dir(*x, y, N | S);
                 }
-                if !is_corner_char(grid.get(*x, *to_y - 1)) {
-                    grid.set(*x, *to_y - 1, '↓');
-                }
+                grid.add_arrow(*x, *to_y - 1, Dir::Down);
             } else {
                 for y in (*to_y + 2)..*from_y {
-                    if is_corner_char(grid.get(*x, y)) {
-                        continue;
-                    }
-                    grid.merge_v(*x, y, v);
+                    grid.add_dir(*x, y, N | S);
                 }
-                if !is_corner_char(grid.get(*x, *to_y + 1)) {
-                    grid.set(*x, *to_y + 1, '↑');
-                }
+                grid.add_arrow(*x, *to_y + 1, Dir::Up);
             }
         }
         EdgePath::SelfLoop { x, y } => {
-            grid.set(*x, *y, '┐');
-            grid.set(*x, *y + 1, '│');
-            grid.set(*x, *y + 2, '┘');
-            grid.set(*x - 1, *y + 2, '─');
-            grid.set(*x - 2, *y + 2, '─');
-            grid.set(*x - 3, *y + 2, '←');
+            grid.add_dir(*x, *y, S | E);
+            grid.add_dir(*x, *y + 1, N | S);
+            grid.add_dir(*x, *y + 2, N | W);
+            grid.add_dir(*x - 1, *y + 2, E | W);
+            grid.add_dir(*x - 2, *y + 2, E | W);
+            grid.add_arrow(*x - 3, *y + 2, Dir::Left);
         }
         EdgePath::Corner {
             from_x,
@@ -128,8 +89,6 @@ fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[La
                 to_x: *to_x,
                 to_y: *to_y,
                 bend: *horizontal_y,
-                h,
-                v,
             };
             draw_corner_edge(grid, p);
         }
@@ -146,8 +105,6 @@ fn draw_edge_line(grid: &mut Grid, edge: &super::grid::LaidOutEdge, _nodes: &[La
                 to_x: *to_x,
                 to_y: *to_y,
                 bend: *channel_x,
-                h,
-                v,
             };
             draw_side_channel_edge(grid, p, _nodes);
         }
@@ -167,16 +124,7 @@ fn draw_edge_label(grid: &mut Grid, edge: &super::grid::LaidOutEdge) {
             col += gw;
         }
 
-        let mut col = 0usize;
-        for (g, gw) in &graphemes {
-            let pos = *lx + col;
-            let first_char = g.chars().next().unwrap_or(' ');
-            grid.set(pos, *ly, first_char);
-            for extra in 1..*gw {
-                grid.set(pos + extra, *ly, '\u{0}');
-            }
-            col += gw;
-        }
+        grid.write_text(*lx, *ly, label);
     }
 }
 
@@ -186,34 +134,26 @@ struct EdgeDraw {
     to_x: usize,
     to_y: usize,
     bend: usize,
-    h: char,
-    v: char,
 }
 
 fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
+    use super::grid::{E, N, S, W};
     let EdgeDraw {
         from_x,
         from_y,
         to_x,
         to_y,
         bend: horizontal_y,
-        h,
-        v,
     } = p;
+
     let (sy, ey) = ordered_range(from_y + 1, horizontal_y);
     for y in sy..ey {
-        if is_corner_char(grid.get(from_x, y)) {
-            continue;
-        }
-        grid.merge_v(from_x, y, v);
+        grid.add_dir(from_x, y, N | S);
     }
-    let from_turn = if from_y < horizontal_y {
-        Dir::Down
-    } else {
-        Dir::Up
-    };
-    let to_horizontal = if to_x > from_x { Dir::Right } else { Dir::Left };
-    grid.place_turn(from_x, horizontal_y, from_turn, to_horizontal);
+
+    let from_turn_ns = if from_y < horizontal_y { S } else { N };
+    let to_horizontal_ew = if to_x > from_x { E } else { W };
+    grid.add_dir(from_x, horizontal_y, from_turn_ns | to_horizontal_ew);
 
     let (x0, x1) = if to_x > from_x {
         (from_x + 1, to_x)
@@ -221,56 +161,42 @@ fn draw_corner_edge(grid: &mut Grid, p: EdgeDraw) {
         (to_x + 1, from_x)
     };
     for x in x0..x1 {
-        grid.merge_h(x, horizontal_y, h);
+        grid.add_dir(x, horizontal_y, E | W);
     }
 
-    let to_turn = if to_y < horizontal_y {
-        Dir::Up
-    } else {
-        Dir::Down
-    };
-    grid.place_turn(to_x, horizontal_y, to_horizontal, to_turn);
+    let to_turn_ns = if to_y < horizontal_y { N } else { S };
+    grid.add_dir(to_x, horizontal_y, to_horizontal_ew | to_turn_ns);
 
     let (sy, ey) = ordered_range(horizontal_y + 1, to_y);
     for y in sy..ey {
-        if is_corner_char(grid.get(to_x, y)) {
-            continue;
-        }
-        grid.merge_v(to_x, y, v);
+        grid.add_dir(to_x, y, N | S);
     }
 
-    let arrow = if to_y > from_y { '↓' } else { '↑' };
+    let arrow_dir = if to_y > from_y { Dir::Down } else { Dir::Up };
     let arrow_y = if to_y > from_y { to_y - 1 } else { to_y + 1 };
-    grid.set(to_x, arrow_y, arrow);
+    grid.add_arrow(to_x, arrow_y, arrow_dir);
 }
 
 fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
+    use super::grid::{E, N, S, W};
     let EdgeDraw {
         from_x,
         from_y,
         to_x,
         to_y,
         bend: channel_x,
-        h,
-        v,
     } = p;
     let gap_y = find_gap_row(from_y, to_y, from_x, to_x, channel_x, nodes)
         .unwrap_or_else(|| (from_y + to_y) / 2);
 
     let (sy, ey) = ordered_range(from_y + 1, gap_y);
     for y in sy..ey {
-        grid.merge_v(from_x, y, v);
+        grid.add_dir(from_x, y, N | S);
     }
-    grid.place_turn(
-        from_x,
-        gap_y,
-        if from_y < gap_y { Dir::Down } else { Dir::Up },
-        if channel_x > from_x {
-            Dir::Right
-        } else {
-            Dir::Left
-        },
-    );
+
+    let from_turn_ns = if from_y < gap_y { S } else { N };
+    let to_channel_ew = if channel_x > from_x { E } else { W };
+    grid.add_dir(from_x, gap_y, from_turn_ns | to_channel_ew);
 
     let (x0, x1) = if channel_x > from_x {
         (from_x + 1, channel_x)
@@ -278,46 +204,33 @@ fn draw_side_channel_edge(grid: &mut Grid, p: EdgeDraw, nodes: &[LaidOutNode]) {
         (channel_x + 1, from_x)
     };
     for x in x0..x1 {
-        grid.merge_h(x, gap_y, h);
+        grid.add_dir(x, gap_y, E | W);
     }
 
-    grid.place_turn(
-        channel_x,
-        gap_y,
-        if channel_x > from_x {
-            Dir::Right
-        } else {
-            Dir::Left
-        },
-        if to_y > gap_y { Dir::Down } else { Dir::Up },
-    );
+    let channel_turn_ns = if to_y > gap_y { S } else { N };
+    grid.add_dir(channel_x, gap_y, to_channel_ew | channel_turn_ns);
+
     let (cy0, cy1) = ordered_range(gap_y + 1, to_y);
     for y in cy0..cy1 {
-        grid.merge_v(channel_x, y, v);
+        grid.add_dir(channel_x, y, N | S);
     }
 
-    grid.place_turn(
-        channel_x,
-        to_y,
-        if to_y > gap_y { Dir::Down } else { Dir::Up },
-        if to_x > channel_x {
-            Dir::Right
-        } else {
-            Dir::Left
-        },
-    );
+    let at_to_ns = if to_y > gap_y { N } else { S };
+    let to_ew = if to_x > channel_x { E } else { W };
+    grid.add_dir(channel_x, to_y, at_to_ns | to_ew);
+
     let (tx0, tx1) = if to_x > channel_x {
         (channel_x + 1, to_x)
     } else {
         (to_x + 1, channel_x)
     };
     for x in tx0..tx1 {
-        grid.merge_h(x, to_y, h);
+        grid.add_dir(x, to_y, E | W);
     }
 
-    let arrow = if to_y > from_y { '↓' } else { '↑' };
+    let arrow_dir = if to_y > from_y { Dir::Down } else { Dir::Up };
     let arrow_y = if to_y > from_y { to_y - 1 } else { to_y + 1 };
-    grid.set(to_x, arrow_y, arrow);
+    grid.add_arrow(to_x, arrow_y, arrow_dir);
 }
 
 /// Find a row between `from_y` and `to_y` where a horizontal line from
