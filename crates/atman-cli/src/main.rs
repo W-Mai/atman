@@ -1949,6 +1949,35 @@ async fn cmd_repl_once(
                             }
                         }
                     }
+                    atman_tui::TuiControl::McpTest { name } => {
+                        let tx = cmd_tx_for_models.clone();
+                        let name = name.clone();
+                        tokio::spawn(async move {
+                            let configs = atman_daemon::bootstrap::load_mcp_configs(
+                                crate::config_dir().ok().as_deref(),
+                            );
+                            let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
+                                let _ = tx.send(atman_tui::TuiCommand::McpTestResult {
+                                    name,
+                                    message: "not found in config".into(),
+                                    ok: false,
+                                });
+                                return;
+                            };
+                            let mut probe = atman_runtime::ToolRegistry::new();
+                            let results =
+                                atman_runtime::mcp::register_from_configs(&mut probe, &[cfg]).await;
+                            let (msg, ok) = match &results[0] {
+                                Ok(s) => (format!("{} tools discovered", s.tool_count), true),
+                                Err(e) => (e.error.to_string(), false),
+                            };
+                            let _ = tx.send(atman_tui::TuiCommand::McpTestResult {
+                                name,
+                                message: msg,
+                                ok,
+                            });
+                        });
+                    }
                 }
             }
         });

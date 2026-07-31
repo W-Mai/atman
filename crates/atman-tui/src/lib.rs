@@ -183,6 +183,9 @@ pub enum TuiControl {
         rows: u16,
         cols: u16,
     },
+    McpTest {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +205,11 @@ pub enum TuiCommand {
     CycleOutside,
     ProviderModelsUpdated,
     ProviderTestResult((String, bool)),
+    McpTestResult {
+        name: String,
+        message: String,
+        ok: bool,
+    },
 }
 
 pub struct TuiHandle {
@@ -1334,6 +1342,19 @@ async fn run_frames(
                                 app::ToastPosition::TopRight,
                             );
                         }
+                        TuiCommand::McpTestResult { name, message, ok } => {
+                            let level = if ok {
+                                app::NoteLevel::Success
+                            } else {
+                                app::NoteLevel::Error
+                            };
+                            app.push_toast(
+                                format!("{name}: {message}"),
+                                level,
+                                std::time::Duration::from_secs(5),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
                     }
                 }
             }
@@ -2455,22 +2476,112 @@ fn handle_key(
         let server_count = app.context.mcp_servers.len();
         match action {
             KeyAction::HistoryUp | KeyAction::Char('k') => {
+                app.mcp_remove_armed = None;
                 if app.mcp_selected > 0 {
                     app.mcp_selected -= 1;
                 }
                 return;
             }
             KeyAction::HistoryDown | KeyAction::Char('j') => {
+                app.mcp_remove_armed = None;
                 if app.mcp_selected + 1 < server_count {
                     app.mcp_selected += 1;
                 }
                 return;
             }
             KeyAction::Submit => {
+                app.mcp_remove_armed = None;
                 if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
                     let name = s.name.clone();
                     if !app.expanded_mcp_servers.remove(&name) {
                         app.expanded_mcp_servers.insert(name);
+                    }
+                }
+                return;
+            }
+            KeyAction::Char('d') => {
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    match atman_runtime::mcp_config::toggle_disabled(&name) {
+                        Ok(disabled) => {
+                            let msg = if disabled {
+                                format!("disabled {name} — restart to apply")
+                            } else {
+                                format!("enabled {name} — restart to apply")
+                            };
+                            app.push_toast(
+                                msg,
+                                app::NoteLevel::Success,
+                                std::time::Duration::from_secs(4),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                        Err(e) => {
+                            app.push_toast(
+                                format!("toggle failed: {e}"),
+                                app::NoteLevel::Error,
+                                std::time::Duration::from_secs(5),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+            KeyAction::Char('r') => {
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    if app.mcp_remove_armed.as_deref() == Some(&name) {
+                        // Second click — actually remove
+                        app.mcp_remove_armed = None;
+                        match atman_runtime::mcp_config::remove(&name) {
+                            Ok(()) => {
+                                app.push_toast(
+                                    format!("removed {name} — restart to apply"),
+                                    app::NoteLevel::Success,
+                                    std::time::Duration::from_secs(4),
+                                    app::ToastPosition::TopRight,
+                                );
+                            }
+                            Err(e) => {
+                                app.push_toast(
+                                    format!("remove failed: {e}"),
+                                    app::NoteLevel::Error,
+                                    std::time::Duration::from_secs(5),
+                                    app::ToastPosition::TopRight,
+                                );
+                            }
+                        }
+                    } else {
+                        app.mcp_remove_armed = Some(name.clone());
+                        app.push_toast(
+                            format!("press r again to remove {name}"),
+                            app::NoteLevel::Warn,
+                            std::time::Duration::from_secs(4),
+                            app::ToastPosition::TopRight,
+                        );
+                    }
+                }
+                return;
+            }
+            KeyAction::Char('t') => {
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::McpTest { name: name.clone() });
+                        app.push_toast(
+                            format!("testing {name}…"),
+                            app::NoteLevel::Info,
+                            std::time::Duration::from_secs(10),
+                            app::ToastPosition::TopRight,
+                        );
+                    } else {
+                        app.push_toast(
+                            "test not available (no control channel)",
+                            app::NoteLevel::Warn,
+                            std::time::Duration::from_secs(3),
+                            app::ToastPosition::TopRight,
+                        );
                     }
                 }
                 return;
