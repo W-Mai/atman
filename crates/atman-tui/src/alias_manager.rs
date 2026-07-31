@@ -246,7 +246,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
 
 fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     let w = area.width.saturating_sub(4).clamp(40, 60);
-    let h = area.height.saturating_sub(2).clamp(6, 18);
+    let h = area.height.saturating_sub(2).clamp(8, 20);
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
     let rect = Rect {
@@ -272,6 +272,13 @@ fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     let inner = outer.inner(rect);
     f.render_widget(outer, rect);
 
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    let list_area = rows[0];
+    let footer_area = rows[1];
+
     let items: Vec<ListItem> = mgr
         .aliases
         .iter()
@@ -288,7 +295,19 @@ fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
         })
         .collect();
     let mut state = ListState::default().with_selected(Some(mgr.selected));
-    f.render_stateful_widget(List::new(items), inner, &mut state);
+    f.render_stateful_widget(List::new(items), list_area, &mut state);
+
+    let help = if mgr.aliases.is_empty() {
+        "a:add alias · e:edit · d:delete · Esc:close  (no aliases yet)"
+    } else {
+        "a:add  e:edit  d:delete  ↑↓:navigate  Esc:close"
+    };
+    let footer = Paragraph::new(Line::from(Span::styled(
+        help,
+        Style::default().fg(theme.meta_fg.into()),
+    )))
+    .alignment(ratatui::layout::Alignment::Right);
+    f.render_widget(footer, footer_area);
 }
 
 fn render_alias_form(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
@@ -344,8 +363,8 @@ fn render_alias_form(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
 
     // Footer help
     let help = match mgr.focus {
-        Focus::NameInput => "Tab: model tree  |  Enter: save  |  Esc: cancel",
-        Focus::Tree => "Tab: name input  |  ↑↓/jk: navigate  |  Enter: save  |  Esc: cancel",
+        Focus::NameInput => "Tab:model tree  Enter:save  Esc:cancel",
+        Focus::Tree => "Tab:name input  ↑↓/jk:navigate  Enter:save  Esc:cancel",
     };
     let footer = Paragraph::new(Line::from(Span::styled(
         help,
