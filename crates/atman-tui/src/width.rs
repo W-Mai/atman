@@ -152,6 +152,83 @@ fn grapheme_suffix(s: &str, max_w: usize) -> String {
     out.concat()
 }
 
+/// Word-wrap `text` to fit `max_w` display columns.
+///
+/// - ASCII: breaks on spaces (word-boundary), collapses leading spaces on new line
+/// - CJK/emoji: breaks anywhere (no spaces in CJK)
+/// - Existing `\n` preserved as hard line breaks
+/// - Single grapheme wider than `max_w` stays on its own line (overflow allowed)
+/// - Empty input returns `vec![String::new()]` (one empty line)
+pub fn word_wrap(text: &str, max_w: usize) -> Vec<String> {
+    if max_w == 0 {
+        return vec![text.to_string()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+
+    for hard_line in text.split('\n') {
+        let mut cur = String::new();
+        let mut cur_w = 0usize;
+        let mut pending_space = false;
+        let mut flushed_overflow = false;
+
+        for (g, gw) in graphemes(hard_line) {
+            if g == " " {
+                if !cur.is_empty() {
+                    pending_space = true;
+                }
+                continue;
+            }
+
+            // A single grapheme wider than max_w overflows on its own line.
+            if gw > max_w {
+                if !cur.is_empty() {
+                    lines.push(std::mem::take(&mut cur));
+                    cur_w = 0;
+                }
+                pending_space = false;
+                lines.push(g.to_string());
+                flushed_overflow = true;
+                continue;
+            }
+
+            flushed_overflow = false;
+
+            // Determine if we can fit the space (if pending) + this grapheme.
+            let space_w = if pending_space { 1 } else { 0 };
+            if cur_w + space_w + gw > max_w && !cur.is_empty() {
+                // Wrap here; drop the pending space on the new line.
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+                pending_space = false;
+            }
+
+            // Consume pending space if we didn't wrap (or just wrapped to empty).
+            if pending_space && !cur.is_empty() {
+                cur.push(' ');
+                cur_w += 1;
+                pending_space = false;
+            }
+
+            cur.push_str(g);
+            cur_w += gw;
+        }
+
+        if !flushed_overflow || !cur.is_empty() {
+            lines.push(cur);
+        }
+    }
+
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +320,63 @@ mod tests {
         assert_eq!(grapheme_prefix("👨‍👩‍👧‍👦ab", 4), "👨‍👩‍👧‍👦ab");
         assert_eq!(grapheme_prefix("👨‍👩‍👧‍👦ab", 3), "👨‍👩‍👧‍👦a");
         assert_eq!(grapheme_prefix("👨‍👩‍👧‍👦ab", 2), "👨‍👩‍👧‍👦");
+    }
+
+    #[test]
+    fn word_wrap_empty() {
+        assert_eq!(word_wrap("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn word_wrap_short() {
+        assert_eq!(word_wrap("hello", 10), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn word_wrap_ascii_word_boundary() {
+        // width=5: each word is exactly 5, spaces force wrap
+        assert_eq!(
+            word_wrap("hello world foo", 5),
+            vec!["hello".to_string(), "world".to_string(), "foo".to_string()]
+        );
+        // width=8: "hello wo" (8) then "rld foo" (7)
+        assert_eq!(
+            word_wrap("hello world foo", 8),
+            vec!["hello wo".to_string(), "rld foo".to_string()]
+        );
+    }
+
+    #[test]
+    fn word_wrap_cjk() {
+        assert_eq!(
+            word_wrap("你好世界测试", 4),
+            vec!["你好".to_string(), "世界".to_string(), "测试".to_string()]
+        );
+    }
+
+    #[test]
+    fn word_wrap_preserves_newlines() {
+        assert_eq!(
+            word_wrap("a\nb", 10),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn word_wrap_mixed() {
+        // width=5: "hello" (5), "你好" (4), "world" (5) — each fits exactly
+        assert_eq!(
+            word_wrap("hello 你好 world", 5),
+            vec!["hello".to_string(), "你好".to_string(), "world".to_string()]
+        );
+    }
+
+    #[test]
+    fn word_wrap_overflow() {
+        // emoji width=2, max_w=1: overflow on its own line, no trailing empty
+        let emoji = "🙂";
+        assert_eq!(word_wrap(emoji, 1), vec![emoji.to_string()]);
+        // text after overflow continues on new line
+        assert_eq!(word_wrap("🙂x", 1), vec!["🙂".to_string(), "x".to_string()]);
     }
 }

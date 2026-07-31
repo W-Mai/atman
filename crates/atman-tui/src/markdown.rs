@@ -496,6 +496,29 @@ impl Renderer {
             for (i, w) in widths.iter_mut().enumerate() {
                 *w += per_col + if i < remainder { 1 } else { 0 };
             }
+        } else if cells_total > available {
+            // Shrink columns proportionally to fit available width.
+            let mut total = widths.iter().sum::<usize>();
+            while total > available {
+                let excess = total - available;
+                let mut shrunk = 0usize;
+                for w in widths.iter_mut() {
+                    if *w > col_min {
+                        let s = (*w * excess / total.max(1)).min(*w - col_min);
+                        *w -= s;
+                        shrunk += s;
+                    }
+                }
+                if shrunk == 0 {
+                    // Integer division stalled — shave 1 from the widest shrinkable col.
+                    if let Some(w) = widths.iter_mut().rev().find(|w| **w > col_min) {
+                        *w -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                total = widths.iter().sum::<usize>();
+            }
         }
         let bg = block_bg();
         let head_style = Style::default()
@@ -507,15 +530,22 @@ impl Renderer {
 
         self.lines.push(blank_bg_line(target, bg));
         if !self.table_header.is_empty() {
-            self.lines.push(table_row(
-                &self.table_header,
-                &widths,
-                inner_pad,
-                target,
-                head_style,
-                bg,
-                sep,
-            ));
+            let wrapped: Vec<Vec<String>> = self
+                .table_header
+                .iter()
+                .enumerate()
+                .map(|(i, cell)| crate::width::word_wrap(cell, widths[i]))
+                .collect();
+            let height = wrapped.iter().map(|c| c.len()).max().unwrap_or(1);
+            for line_idx in 0..height {
+                let cells: Vec<String> = wrapped
+                    .iter()
+                    .map(|c| c.get(line_idx).cloned().unwrap_or_default())
+                    .collect();
+                self.lines.push(table_row(
+                    &cells, &widths, inner_pad, target, head_style, bg, sep,
+                ));
+            }
             let rule: String = (0..col_count)
                 .map(|i| "─".repeat(widths[i]))
                 .collect::<Vec<_>>()
@@ -536,9 +566,21 @@ impl Renderer {
                 self.lines
                     .push(table_line(&sep_rule, inner_pad, target, sep_style, bg));
             }
-            self.lines.push(table_row(
-                row, &widths, inner_pad, target, cell_style, bg, sep,
-            ));
+            let wrapped: Vec<Vec<String>> = row
+                .iter()
+                .enumerate()
+                .map(|(col_i, cell)| crate::width::word_wrap(cell, widths[col_i]))
+                .collect();
+            let height = wrapped.iter().map(|c| c.len()).max().unwrap_or(1);
+            for line_idx in 0..height {
+                let cells: Vec<String> = wrapped
+                    .iter()
+                    .map(|c| c.get(line_idx).cloned().unwrap_or_default())
+                    .collect();
+                self.lines.push(table_row(
+                    &cells, &widths, inner_pad, target, cell_style, bg, sep,
+                ));
+            }
         }
         self.lines.push(blank_bg_line(target, bg));
         self.table_header.clear();
