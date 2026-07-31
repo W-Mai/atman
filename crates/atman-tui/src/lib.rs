@@ -143,6 +143,13 @@ pub enum TuiControl {
         kind: atman_runtime::auth_store::ProviderKind,
         name: String,
     },
+    AddConfigProvider {
+        name: String,
+        provider_type: String,
+        api_key: String,
+        base_url: String,
+        models: Vec<String>,
+    },
     AuthLogout {
         id: String,
     },

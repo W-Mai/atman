@@ -66,6 +66,10 @@ pub struct ProviderManager {
     kind_selected: usize,
     name_editor: InputEditor,
     name_focused: bool,
+    api_key_editor: InputEditor,
+    base_url_editor: InputEditor,
+    in_form: bool,
+    form_field: usize,
     /// Confirmation dialog state.
     show_confirm: bool,
     confirm_kind: Option<ConfirmKind>,
@@ -337,7 +341,44 @@ impl ProviderManager {
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
-        if self.name_focused {
+        if self.in_form {
+            let editor = match self.form_field {
+                0 => &mut self.name_editor,
+                1 => &mut self.api_key_editor,
+                _ => &mut self.base_url_editor,
+            };
+            match action {
+                KeyAction::Escape => {
+                    self.in_form = false;
+                }
+                KeyAction::Submit | KeyAction::Tab => {
+                    if self.form_field < 2 {
+                        self.form_field += 1;
+                    } else {
+                        self.commit_form(control_tx);
+                    }
+                }
+                KeyAction::Backspace => {
+                    editor.backspace();
+                }
+                KeyAction::CursorLeft => {
+                    editor.move_left();
+                }
+                KeyAction::CursorRight => {
+                    editor.move_right();
+                }
+                KeyAction::CursorHome => {
+                    editor.move_home();
+                }
+                KeyAction::CursorEnd => {
+                    editor.move_end();
+                }
+                KeyAction::Char(c) => {
+                    editor.insert_char(*c);
+                }
+                _ => {}
+            }
+        } else if self.name_focused {
             match action {
                 KeyAction::Escape => self.name_focused = false,
                 KeyAction::Submit => self.commit_add(control_tx),
@@ -367,11 +408,20 @@ impl ProviderManager {
                     self.show_add = false;
                 }
                 KeyAction::Submit => {
-                    let (label, _, _) = self.kinds[self.kind_selected];
-                    let mut ed = InputEditor::default();
-                    ed.insert_str(label);
-                    self.name_editor = ed;
-                    self.name_focused = true;
+                    let kind = self.kinds[self.kind_selected].2.clone();
+                    if kind == atman_runtime::auth_store::ProviderKind::Custom {
+                        self.in_form = true;
+                        self.form_field = 0;
+                        self.name_editor = InputEditor::default();
+                        self.api_key_editor = InputEditor::default();
+                        self.base_url_editor = InputEditor::default();
+                    } else {
+                        let (label, _, _) = self.kinds[self.kind_selected];
+                        let mut ed = InputEditor::default();
+                        ed.insert_str(label);
+                        self.name_editor = ed;
+                        self.name_focused = true;
+                    }
                 }
                 KeyAction::HistoryUp | KeyAction::Char('k') => {
                     if self.kind_selected > 0 {
@@ -386,6 +436,29 @@ impl ProviderManager {
                 _ => {}
             }
         }
+    }
+
+    fn commit_form(
+        &mut self,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        let name = self.name_editor.buf().trim().to_string();
+        let api_key = self.api_key_editor.buf().trim().to_string();
+        let base_url = self.base_url_editor.buf().trim().to_string();
+        if name.is_empty() || api_key.is_empty() || base_url.is_empty() {
+            return;
+        }
+        if let Some(tx) = control_tx {
+            let _ = tx.send(crate::TuiControl::AddConfigProvider {
+                name,
+                provider_type: "openai-compat".into(),
+                api_key,
+                base_url,
+                models: Vec::new(),
+            });
+        }
+        self.show_add = false;
+        self.in_form = false;
     }
 
     fn commit_add(
@@ -597,9 +670,33 @@ fn render_add_dialog(
         .title(" Add Provider ");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    // Simplified add dialog rendering — keeping existing logic
     let mut lines = vec![];
-    if mgr.name_focused {
+    if mgr.in_form {
+        let fields = [
+            ("Name", mgr.name_editor.buf()),
+            ("API Key", mgr.api_key_editor.buf()),
+            ("Base URL", mgr.base_url_editor.buf()),
+        ];
+        for (i, (label, val)) in fields.iter().enumerate() {
+            let style = if i == mgr.form_field {
+                Style::default()
+                    .fg(theme.accent.into())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.tinted_fg.into())
+            };
+            lines.push(Line::from(Span::styled(format!(" {label}:"), style)));
+            lines.push(Line::from(Span::styled(
+                format!("  {val}"),
+                Style::default().fg(theme.tinted_fg.into()),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Tab/Enter next field · Enter on last to save · Esc cancel",
+            Style::default().fg(theme.subtle_fg.into()),
+        )));
+    } else if mgr.name_focused {
         lines.push(Line::from("Name:"));
         lines.push(Line::from(Span::styled(
             format!("  {}", mgr.name_editor.buf()),

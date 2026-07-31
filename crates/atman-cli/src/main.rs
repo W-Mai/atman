@@ -1825,6 +1825,38 @@ async fn cmd_repl_once(
                             let _ = store.save();
                         }
                     }
+                    atman_tui::TuiControl::AddConfigProvider {
+                        name,
+                        provider_type,
+                        api_key,
+                        base_url,
+                        models,
+                    } => {
+                        let dir = config_dir().ok();
+                        if let Some(dir) = dir {
+                            let path = dir.join("config.toml");
+                            let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+                            if !text.ends_with('\n') && !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(&format!("[models.{name}]\n"));
+                            text.push_str(&format!("provider = \"{provider_type}\"\n"));
+                            text.push_str(&format!("api_key = \"{api_key}\"\n"));
+                            text.push_str(&format!("base_url = \"{base_url}\"\n"));
+                            if !models.is_empty() {
+                                let quoted: Vec<String> =
+                                    models.iter().map(|m| format!("\"{m}\"")).collect();
+                                text.push_str(&format!("models = [{}]\n", quoted.join(", ")));
+                            }
+                            text.push_str("context_budget = 128000\nmax_tokens = 16384\n");
+                            if std::fs::write(&path, &text).is_ok() {
+                                atman_runtime::notify!(
+                                    success,
+                                    "Provider \"{name}\" added to config.toml — restart to apply"
+                                );
+                            }
+                        }
+                    }
                     atman_tui::TuiControl::OpenAliasManager { .. } => {
                         // handled internally in the TUI — no-op here
                     }
