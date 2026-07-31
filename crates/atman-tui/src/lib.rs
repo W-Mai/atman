@@ -649,6 +649,16 @@ async fn run_frames(
                                 {
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
                                     app.open_task_panel(&handle, canvas);
+                                } else if let Some((name, _)) = app
+                                    .last_floating_hitmap
+                                    .mcp_row_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
+                                    .cloned()
+                                {
+                                    if !app.expanded_mcp_servers.remove(&name) {
+                                        app.expanded_mcp_servers.insert(name);
+                                    }
                                 } else if let Some((panel_idx, path, _)) = app
                                     .last_floating_hitmap
                                     .workflow_node_rects
@@ -1011,6 +1021,16 @@ async fn run_frames(
                                 if app.hovered_history_row != history_hover {
                                     app.hovered_history_row = history_hover;
                                     app.items_version = app.items_version.wrapping_add(1);
+                                }
+
+                                let mcp_hover = app
+                                    .last_floating_hitmap
+                                    .mcp_row_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
+                                    .map(|(n, _)| n.clone());
+                                if app.hovered_mcp_row != mcp_hover {
+                                    app.hovered_mcp_row = mcp_hover;
                                 }
 
                                 if let Some(idx) = app.hit_test(me.column, me.row)
@@ -2422,6 +2442,44 @@ fn handle_key(
             panel.split = !panel.split;
             app.mark_items_dirty();
             return;
+        }
+    }
+
+    if let Some(id) = app.floating_panels.focused.clone()
+        && app
+            .floating_panels
+            .panels
+            .iter()
+            .any(|p| p.id == id && p.kind == crate::floating_panels::PanelKind::Mcp)
+    {
+        let server_count = app.context.mcp_servers.len();
+        match action {
+            KeyAction::HistoryUp | KeyAction::Char('k') => {
+                if app.mcp_selected > 0 {
+                    app.mcp_selected -= 1;
+                }
+                return;
+            }
+            KeyAction::HistoryDown | KeyAction::Char('j') => {
+                if app.mcp_selected + 1 < server_count {
+                    app.mcp_selected += 1;
+                }
+                return;
+            }
+            KeyAction::Submit => {
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    if !app.expanded_mcp_servers.remove(&name) {
+                        app.expanded_mcp_servers.insert(name);
+                    }
+                }
+                return;
+            }
+            KeyAction::Char('q') => {
+                app.floating_panels.close(&id);
+                return;
+            }
+            _ => {}
         }
     }
     if app.modal_notification.is_some() {
