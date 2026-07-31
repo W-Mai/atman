@@ -25,6 +25,7 @@ pub mod injection;
 pub mod injection_classifier;
 pub mod lifecycle;
 pub mod mcp;
+pub mod mcp_config;
 pub mod memory;
 pub mod message;
 pub mod message_stream;
