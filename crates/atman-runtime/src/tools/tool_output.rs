@@ -16,7 +16,11 @@ pub fn truncate_tool_result_content(
     }
 
     let total = content.len();
-    let head = &content[..MAX_TOOL_RESULT_CHARS];
+    let mut cut = MAX_TOOL_RESULT_CHARS.min(content.len());
+    while cut > 0 && !content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &content[..cut];
 
     let spill_path = session_dir.map(|dir| {
         let out_dir = dir.join("tool_outputs");
