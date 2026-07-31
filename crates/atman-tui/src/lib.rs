@@ -186,6 +186,7 @@ pub enum TuiControl {
     McpTest {
         name: String,
     },
+    McpReload,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +211,7 @@ pub enum TuiCommand {
         message: String,
         ok: bool,
     },
+    McpReloaded,
 }
 
 pub struct TuiHandle {
@@ -1352,6 +1354,14 @@ async fn run_frames(
                                 format!("{name}: {message}"),
                                 level,
                                 std::time::Duration::from_secs(5),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                        TuiCommand::McpReloaded => {
+                            app.push_toast(
+                                "MCP servers reloaded",
+                                app::NoteLevel::Success,
+                                std::time::Duration::from_secs(3),
                                 app::ToastPosition::TopRight,
                             );
                         }
@@ -2505,16 +2515,19 @@ fn handle_key(
                     match atman_runtime::mcp_config::toggle_disabled(&name) {
                         Ok(disabled) => {
                             let msg = if disabled {
-                                format!("disabled {name} — restart to apply")
+                                format!("disabled {name} — reloading…")
                             } else {
-                                format!("enabled {name} — restart to apply")
+                                format!("enabled {name} — reloading…")
                             };
                             app.push_toast(
                                 msg,
-                                app::NoteLevel::Success,
-                                std::time::Duration::from_secs(4),
+                                app::NoteLevel::Info,
+                                std::time::Duration::from_secs(3),
                                 app::ToastPosition::TopRight,
                             );
+                            if let Some(tx) = control_tx {
+                                let _ = tx.send(TuiControl::McpReload);
+                            }
                         }
                         Err(e) => {
                             app.push_toast(
@@ -2576,11 +2589,14 @@ fn handle_key(
                     match atman_runtime::mcp_config::remove(&name) {
                         Ok(()) => {
                             app.push_toast(
-                                format!("removed {name} — restart to apply"),
-                                app::NoteLevel::Success,
-                                std::time::Duration::from_secs(4),
+                                format!("removed {name} — reloading…"),
+                                app::NoteLevel::Info,
+                                std::time::Duration::from_secs(3),
                                 app::ToastPosition::TopRight,
                             );
+                            if let Some(tx) = control_tx {
+                                let _ = tx.send(TuiControl::McpReload);
+                            }
                         }
                         Err(e) => {
                             app.push_toast(

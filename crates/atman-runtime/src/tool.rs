@@ -384,6 +384,14 @@ impl ToolRegistry {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+
+    /// Remove all tools whose name starts with `prefix` (e.g. `"mcp."`).
+    pub fn unregister_prefix(&self, prefix: &str) {
+        self.tools
+            .write()
+            .unwrap()
+            .retain(|k, _| !k.starts_with(prefix));
+    }
 }
 
 #[cfg(test)]

@@ -603,7 +603,7 @@ async fn cmd_run(
         atman_daemon::bootstrap::build_executor(bootstrap_opts(session.sink().clone(), mock)?)
             .await?;
     executor.source_dir = file.parent().map(|p| p.to_path_buf());
-    atman_daemon::bootstrap::spawn_mcp_boot(
+    let _mcp_shutdown = atman_daemon::bootstrap::spawn_mcp_boot(
         executor.clone(),
         session.clone(),
         config_dir().ok().as_deref(),
@@ -1411,6 +1411,7 @@ struct PrebuiltSession {
     intro: Option<atman_tui::app::StartupIntro>,
     /// Notifications collected during boot, for seamless toast continuity.
     boot_notifications: Vec<atman_runtime::notify::Notification>,
+    mcp_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 async fn prebuild_session(
@@ -1464,7 +1465,7 @@ async fn prebuild_session(
     emit(BootStepId::RegisterProviders, false, true);
 
     emit(BootStepId::AttachMcp, true, false);
-    atman_daemon::bootstrap::spawn_mcp_boot(
+    let mcp_shutdown_tx = atman_daemon::bootstrap::spawn_mcp_boot(
         executor.clone(),
         session.clone(),
         config_dir().ok().as_deref(),
@@ -1490,6 +1491,7 @@ async fn prebuild_session(
         root,
         intro,
         boot_notifications: Vec::new(),
+        mcp_shutdown_tx,
     })
 }
 
@@ -1589,6 +1591,7 @@ async fn cmd_repl_once(
         root,
         intro,
         boot_notifications,
+        mcp_shutdown_tx,
     } = prebuilt;
 
     let lifecycles = match config_dir() {
@@ -1645,6 +1648,9 @@ async fn cmd_repl_once(
         let switch_target_for_ctrl = switch_target.clone();
         let providers_for_ctrl = executor.providers.clone();
         let data_root_for_ctrl = root.clone();
+        let executor_for_ctrl = executor.clone();
+        let tools_for_ctrl = executor.tools.clone();
+        let mut mcp_shutdown_tx = mcp_shutdown_tx;
         let ctrl_task = tokio::spawn(async move {
             while let Some(msg) = ctrl_rx.recv().await {
                 match msg {
@@ -1977,6 +1983,18 @@ async fn cmd_repl_once(
                                 ok,
                             });
                         });
+                    }
+                    atman_tui::TuiControl::McpReload => {
+                        if let Some(tx) = mcp_shutdown_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        tools_for_ctrl.unregister_prefix("mcp.");
+                        mcp_shutdown_tx = atman_daemon::bootstrap::spawn_mcp_boot(
+                            executor_for_ctrl.clone(),
+                            session_for_ctrl.clone(),
+                            crate::config_dir().ok().as_deref(),
+                        );
+                        let _ = cmd_tx_for_models.send(atman_tui::TuiCommand::McpReloaded);
                     }
                 }
             }

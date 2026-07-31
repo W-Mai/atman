@@ -131,10 +131,10 @@ pub fn spawn_mcp_boot(
     executor: atman_runtime::Executor,
     session: std::sync::Arc<atman_runtime::Session>,
     config_dir: Option<&std::path::Path>,
-) {
+) -> Option<tokio::sync::oneshot::Sender<()>> {
     let configs = atman_runtime::mcp_config::load(config_dir);
     if configs.is_empty() {
-        return;
+        return None;
     }
     // Initialise all servers: disabled → Disabled, rest → Pending.
     for cfg in &configs {
@@ -149,6 +149,7 @@ pub fn spawn_mcp_boot(
             state,
         });
     }
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -311,10 +312,11 @@ pub fn spawn_mcp_boot(
             for t in tasks {
                 let _ = t.await;
             }
-            // Keep runtime alive so transports survive.
-            std::future::pending::<()>().await;
+            // Keep runtime alive until shutdown signal (for hot-reload).
+            let _ = shutdown_rx.await;
         });
     });
+    Some(shutdown_tx)
 }
 
 pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> {
