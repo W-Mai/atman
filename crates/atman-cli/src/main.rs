@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod init;
+mod mcp_templates;
 mod oauth_login;
 // meta_commands now in atman_runtime
 mod migrate_source;
@@ -81,6 +82,11 @@ enum Cmd {
         #[command(subcommand)]
         action: MigrateAction,
     },
+    /// Manage MCP (Model Context Protocol) servers.
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -102,6 +108,29 @@ enum MigrateAction {
         #[arg(long, conflicts_with = "out", value_parser = ["new"])]
         into: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum McpAction {
+    /// List all configured MCP servers.
+    List,
+    /// Add a new MCP server interactively.
+    Add {
+        #[arg(long)]
+        template: Option<String>,
+    },
+    /// Remove an MCP server.
+    Remove { name: String },
+    /// Test connection to an MCP server.
+    Test { name: String },
+    /// List tools provided by an MCP server.
+    Tools { name: String },
+    /// List resources provided by an MCP server.
+    Resources { name: String },
+    /// List prompts provided by an MCP server.
+    Prompts { name: String },
+    /// Import MCP servers from a JSON file (Claude Desktop / Cursor / Cline format).
+    Import { file: PathBuf },
 }
 
 #[derive(Subcommand, Debug)]
@@ -349,6 +378,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Flow { action }) => cmd_flow(action).await,
         Some(Cmd::Sync { action }) => cmd_sync(action).await,
         Some(Cmd::Migrate { action }) => cmd_migrate(action).await,
+        Some(Cmd::Mcp { action }) => cmd_mcp(action).await,
         Some(Cmd::Daemon {
             action: DaemonAction::Run { file, follow, port },
         }) => cmd_daemon_run(file, follow, port).await,
@@ -5195,6 +5225,9 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
                 atman_runtime::mcp::TransportKind::Http => {
                     format!("http: {}", cfg.url.as_deref().unwrap_or("<missing url>"))
                 }
+                atman_runtime::mcp::TransportKind::Sse => {
+                    format!("sse: {}", cfg.url.as_deref().unwrap_or("<missing url>"))
+                }
             };
             match status {
                 Ok(s) => println!("  [✓] {:<20} {} tools · {source}", cfg.name, s.tool_count),
@@ -6082,4 +6115,438 @@ fn render_value(v: &Value) -> String {
         Value::Unit => String::new(),
         other => format!("{other:?}"),
     }
+}
+
+async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
+    use atman_daemon::bootstrap;
+    use std::io::Write as _;
+    match action {
+        McpAction::List => {
+            let configs = load_mcp_configs();
+            if configs.is_empty() {
+                println!("  (no MCP servers configured)");
+                println!();
+                println!("  Add servers with:");
+                println!("    atman mcp add");
+                println!("    atman mcp add --template filesystem");
+                return Ok(());
+            }
+            println!(
+                "  {:<20} {:<8} {:<30} tier",
+                "name", "transport", "command / url"
+            );
+            println!("  {}", "─".repeat(70));
+            for cfg in &configs {
+                let transport = match cfg.transport {
+                    atman_runtime::mcp::TransportKind::Stdio => "stdio",
+                    atman_runtime::mcp::TransportKind::Http => "http",
+                    atman_runtime::mcp::TransportKind::Sse => "sse",
+                };
+                let source = if cfg.command.is_empty() {
+                    cfg.url.as_deref().unwrap_or("<missing url>").to_string()
+                } else {
+                    let mut s = format!("{} {}", cfg.command, cfg.args.join(" "));
+                    if !cfg.env.is_empty() {
+                        s.push_str(&format!(" (env: {} keys)", cfg.env.len()));
+                    }
+                    s
+                };
+                let tier = match cfg.tier {
+                    atman_runtime::Tier::Zero => 0,
+                    atman_runtime::Tier::One => 1,
+                    atman_runtime::Tier::Two => 2,
+                    atman_runtime::Tier::Three => 3,
+                    atman_runtime::Tier::Four => 4,
+                };
+                println!(
+                    "  {:<20} {:<8} {:<30} {}{}",
+                    cfg.name,
+                    transport,
+                    source.chars().take(30).collect::<String>(),
+                    tier,
+                    if cfg.disabled { " (disabled)" } else { "" }
+                );
+            }
+        }
+        McpAction::Add { template } => {
+            if let Some(tmpl_name) = template {
+                let Some(tmpl) = mcp_templates::find(&tmpl_name) else {
+                    anyhow::bail!(
+                        "unknown template '{}'; available: {}",
+                        tmpl_name,
+                        mcp_templates::TEMPLATES
+                            .iter()
+                            .map(|t| t.name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                };
+                println!("Template: {} — {}", tmpl.name, tmpl.description);
+                let mut args: Vec<String> = tmpl.args.iter().map(|s| s.to_string()).collect();
+                if let Some(placeholder) = tmpl.path_placeholder {
+                    print!("Path for {}: ", placeholder);
+                    std::io::stdout().flush()?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    let path = input.trim();
+                    if !path.is_empty() {
+                        args.push(path.to_string());
+                    }
+                }
+                let mut env: Vec<(String, String)> = Vec::new();
+                for key in tmpl.env_keys {
+                    print!("Enter value for {key} (required): ");
+                    std::io::stdout().flush()?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    let val = input.trim();
+                    if val.is_empty() {
+                        anyhow::bail!("{key} is required");
+                    }
+                    env.push((key.to_string(), val.to_string()));
+                }
+                let name = tmpl.name.to_string();
+                write_mcp_json_server(
+                    &name,
+                    &McpJsonServer {
+                        command: Some(tmpl.command.to_string()),
+                        args,
+                        env: env.into_iter().collect(),
+                        ..Default::default()
+                    },
+                )?;
+                println!("✓ Added MCP server \"{}\" to mcp_servers.json", name);
+            } else {
+                cmd_mcp_add_interactive()?;
+            }
+        }
+        McpAction::Remove { name } => {
+            remove_mcp_server(&name)?;
+            println!("✓ Removed MCP server \"{}\"", name);
+        }
+        McpAction::Test { name } => {
+            let configs = load_mcp_configs();
+            let Some(cfg) = configs.iter().find(|c| c.name == name) else {
+                anyhow::bail!("MCP server \"{}\" not found", name);
+            };
+            print!("Connecting to {}... ", name);
+            std::io::stdout().flush()?;
+            let mut probe_registry = atman_runtime::ToolRegistry::new();
+            let statuses = atman_runtime::mcp::register_from_configs(
+                &mut probe_registry,
+                std::slice::from_ref(cfg),
+            )
+            .await;
+            match &statuses[0] {
+                Ok(s) => {
+                    println!("✓ {} tools discovered", s.tool_count);
+                    let names = probe_registry.names();
+                    for name in &names {
+                        println!("  - {}", name);
+                    }
+                }
+                Err(e) => {
+                    println!("✗ {}", e.error);
+                }
+            }
+        }
+        McpAction::Tools { name } => {
+            let configs = load_mcp_configs();
+            let Some(cfg) = configs.iter().find(|c| c.name == name) else {
+                anyhow::bail!("MCP server \"{}\" not found", name);
+            };
+            let client = connect_mcp_client(cfg).await?;
+            println!("Tools from {} ({}):", name, client.tools.len());
+            for t in &client.tools {
+                println!(
+                    "  - {} — {}",
+                    t.name,
+                    t.description.as_deref().unwrap_or("(no description)")
+                );
+            }
+        }
+        McpAction::Resources { name } => {
+            let configs = load_mcp_configs();
+            let Some(cfg) = configs.iter().find(|c| c.name == name) else {
+                anyhow::bail!("MCP server \"{}\" not found", name);
+            };
+            let client = connect_mcp_client(cfg).await?;
+            match client.list_resources().await {
+                Ok(resources) => {
+                    println!("Resources from {} ({}):", name, resources.len());
+                    for r in &resources {
+                        println!("  - {} ({})", r.uri, r.name);
+                        if let Some(desc) = &r.description {
+                            println!("      {}", desc);
+                        }
+                    }
+                }
+                Err(e) => println!("  (resources not supported: {e})"),
+            }
+        }
+        McpAction::Prompts { name } => {
+            let configs = load_mcp_configs();
+            let Some(cfg) = configs.iter().find(|c| c.name == name) else {
+                anyhow::bail!("MCP server \"{}\" not found", name);
+            };
+            let client = connect_mcp_client(cfg).await?;
+            match client.list_prompts().await {
+                Ok(prompts) => {
+                    println!("Prompts from {} ({}):", name, prompts.len());
+                    for p in &prompts {
+                        println!(
+                            "  - {} — {}",
+                            p.name,
+                            p.description.as_deref().unwrap_or("(no description)")
+                        );
+                        for arg in &p.arguments {
+                            println!(
+                                "      arg: {}{} — {}",
+                                arg.name,
+                                if arg.required { " (required)" } else { "" },
+                                arg.description.as_deref().unwrap_or("")
+                            );
+                        }
+                    }
+                }
+                Err(e) => println!("  (prompts not supported: {e})"),
+            }
+        }
+        McpAction::Import { file } => {
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| anyhow::anyhow!("read {}: {e}", file.display()))?;
+            let servers = bootstrap::parse_mcp_json(&text);
+            if servers.is_empty() {
+                println!("No MCP servers found in {}", file.display());
+                return Ok(());
+            }
+            for s in &servers {
+                write_mcp_json_server(&s.name, &McpJsonServer::from_config(s))?;
+                println!("✓ Imported \"{}\"", s.name);
+            }
+            println!("Imported {} servers", servers.len());
+        }
+    }
+    Ok(())
+}
+
+async fn connect_mcp_client(
+    cfg: &atman_runtime::mcp::McpServerConfig,
+) -> anyhow::Result<std::sync::Arc<atman_runtime::mcp::McpClient>> {
+    let client = match cfg.transport {
+        atman_runtime::mcp::TransportKind::Stdio => {
+            atman_runtime::mcp::McpClient::connect_stdio(
+                &cfg.name,
+                &cfg.command,
+                &cfg.args,
+                &cfg.env,
+                cfg.timeout_ms,
+            )
+            .await
+        }
+        atman_runtime::mcp::TransportKind::Http | atman_runtime::mcp::TransportKind::Sse => {
+            let url = cfg
+                .url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("missing url"))?;
+            atman_runtime::mcp::McpClient::connect_http(
+                &cfg.name,
+                url,
+                cfg.auth_token.clone(),
+                cfg.timeout_ms,
+            )
+            .await
+        }
+    };
+    client
+        .map(std::sync::Arc::new)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct McpJsonServer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    r#type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    args: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    env: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "authToken")]
+    auth_token: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    headers: std::collections::HashMap<String, String>,
+}
+
+impl McpJsonServer {
+    fn from_config(cfg: &atman_runtime::mcp::McpServerConfig) -> Self {
+        let r#type = match cfg.transport {
+            atman_runtime::mcp::TransportKind::Sse => Some("sse".to_string()),
+            atman_runtime::mcp::TransportKind::Http => Some("http".to_string()),
+            atman_runtime::mcp::TransportKind::Stdio => None,
+        };
+        let command = if cfg.command.is_empty() {
+            None
+        } else {
+            Some(cfg.command.clone())
+        };
+        let url = cfg.url.clone();
+        Self {
+            r#type,
+            command,
+            args: cfg.args.clone(),
+            env: cfg.env.iter().cloned().collect(),
+            url,
+            auth_token: cfg.auth_token.clone(),
+            headers: cfg.headers.iter().cloned().collect(),
+        }
+    }
+}
+
+fn mcp_servers_json_path() -> anyhow::Result<std::path::PathBuf> {
+    let dir = config_dir().context("config dir")?;
+    Ok(dir.join("mcp_servers.json"))
+}
+
+fn read_mcp_servers_json() -> serde_json::Value {
+    let path = match mcp_servers_json_path() {
+        Ok(p) => p,
+        Err(_) => return serde_json::json!({"mcpServers": {}}),
+    };
+    if !path.exists() {
+        return serde_json::json!({"mcpServers": {}});
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return serde_json::json!({"mcpServers": {}}),
+    };
+    serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"mcpServers": {}}))
+}
+
+fn write_mcp_json_server(name: &str, server: &McpJsonServer) -> anyhow::Result<()> {
+    let path = mcp_servers_json_path()?;
+    let mut root = read_mcp_servers_json();
+    let servers = root
+        .as_object_mut()
+        .and_then(|o| o.get_mut("mcpServers"))
+        .and_then(|s| s.as_object_mut());
+    if let Some(servers) = servers {
+        let val = serde_json::to_value(server)?;
+        servers.insert(name.to_string(), val);
+    } else {
+        let mut map = serde_json::Map::new();
+        let val = serde_json::to_value(server)?;
+        map.insert(name.to_string(), val);
+        root["mcpServers"] = serde_json::Value::Object(map);
+    }
+    let json = serde_json::to_string_pretty(&root)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, json + "\n")?;
+    Ok(())
+}
+
+fn remove_mcp_server(name: &str) -> anyhow::Result<()> {
+    let path = mcp_servers_json_path()?;
+    let mut root = read_mcp_servers_json();
+    let removed = root
+        .as_object_mut()
+        .and_then(|o| o.get_mut("mcpServers"))
+        .and_then(|s| s.as_object_mut())
+        .is_some_and(|s| s.remove(name).is_some());
+    if !removed {
+        anyhow::bail!("MCP server \"{}\" not found in mcp_servers.json", name);
+    }
+    let json = serde_json::to_string_pretty(&root)?;
+    std::fs::write(&path, json + "\n")?;
+    Ok(())
+}
+
+fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
+    use std::io::Write;
+    print!("Server name: ");
+    std::io::stdout().flush()?;
+    let mut name = String::new();
+    std::io::stdin().read_line(&mut name)?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        anyhow::bail!("name is required");
+    }
+
+    print!("Transport (stdio/http/sse) [stdio]: ");
+    std::io::stdout().flush()?;
+    let mut transport = String::new();
+    std::io::stdin().read_line(&mut transport)?;
+    let transport = transport.trim();
+    let transport = if transport.is_empty() {
+        "stdio"
+    } else {
+        transport
+    };
+
+    let mut server = McpJsonServer::default();
+
+    match transport {
+        "stdio" => {
+            print!("Command: ");
+            std::io::stdout().flush()?;
+            let mut command = String::new();
+            std::io::stdin().read_line(&mut command)?;
+            let command = command.trim().to_string();
+            if command.is_empty() {
+                anyhow::bail!("command is required");
+            }
+            server.command = Some(command);
+
+            print!("Args (space-separated): ");
+            std::io::stdout().flush()?;
+            let mut args = String::new();
+            std::io::stdin().read_line(&mut args)?;
+            server.args = args.split_whitespace().map(String::from).collect();
+
+            print!("Env vars (KEY=value, comma-separated, optional): ");
+            std::io::stdout().flush()?;
+            let mut env_input = String::new();
+            std::io::stdin().read_line(&mut env_input)?;
+            for pair in env_input.split(',') {
+                let pair = pair.trim();
+                if let Some((k, v)) = pair.split_once('=') {
+                    server
+                        .env
+                        .insert(k.trim().to_string(), v.trim().to_string());
+                }
+            }
+        }
+        "http" | "sse" => {
+            print!("URL: ");
+            std::io::stdout().flush()?;
+            let mut url = String::new();
+            std::io::stdin().read_line(&mut url)?;
+            let url = url.trim().to_string();
+            if url.is_empty() {
+                anyhow::bail!("url is required");
+            }
+            server.url = Some(url);
+            server.r#type = Some(transport.to_string());
+
+            print!("Auth token (optional): ");
+            std::io::stdout().flush()?;
+            let mut token = String::new();
+            std::io::stdin().read_line(&mut token)?;
+            let token = token.trim();
+            if !token.is_empty() {
+                server.auth_token = Some(token.to_string());
+            }
+        }
+        other => anyhow::bail!("unknown transport '{}'; use stdio/http/sse", other),
+    }
+
+    write_mcp_json_server(&name, &server)?;
+    println!("✓ Added MCP server \"{}\" to mcp_servers.json", name);
+    println!("  Restart atman to apply.");
+    Ok(())
 }
