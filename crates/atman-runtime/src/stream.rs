@@ -42,6 +42,8 @@ pub enum StreamFrame {
     LlmDone {
         total_tokens: u64,
     },
+    /// Discard streaming output from the previous attempt before retrying.
+    LlmRetry,
     LlmCallStats {
         model: String,
         input_tokens: u64,

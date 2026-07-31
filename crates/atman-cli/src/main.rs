@@ -2459,6 +2459,7 @@ fn render_stream_frame(
         | StreamFrame::DiffPreview { .. }
         | StreamFrame::CompactionSummary { .. }
         | StreamFrame::MermaidDiagram { .. }
+        | StreamFrame::LlmRetry
         | StreamFrame::Unknown => {}
     }
 }

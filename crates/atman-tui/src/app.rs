@@ -1013,6 +1013,21 @@ impl AppState {
                     self.items_version = self.items_version.wrapping_add(1);
                 }
             }
+            StreamFrame::LlmRetry => {
+                while let Some(item) = self.items.last() {
+                    let is_llm_output = matches!(
+                        item,
+                        OutputItem::Thinking { .. } | OutputItem::AssistantMd { .. }
+                    );
+                    if is_llm_output {
+                        self.items.pop();
+                        self.items_version = self.items_version.wrapping_add(1);
+                    } else {
+                        break;
+                    }
+                }
+                self.waiting_for_llm = true;
+            }
             StreamFrame::LlmDone { .. } => {
                 let mut changed = false;
                 for item in self.items.iter_mut().rev() {
@@ -1729,6 +1744,53 @@ mod tests {
         assert!(
             app.items.is_empty(),
             "tool traffic flows through workflow panel now"
+        );
+    }
+
+    #[test]
+    fn llm_retry_discards_streaming_assistant() {
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(StreamFrame::ThinkingChunk {
+            text: "let me think".into(),
+        });
+        app.apply_stream_frame(StreamFrame::LlmChunk {
+            text: "hello".into(),
+            model: "m".into(),
+        });
+        assert_eq!(app.items.len(), 2);
+        app.apply_stream_frame(StreamFrame::LlmRetry);
+        assert_eq!(
+            app.items.len(),
+            0,
+            "LlmRetry discards all trailing LLM output items"
+        );
+        assert!(app.waiting_for_llm);
+    }
+
+    #[test]
+    fn llm_retry_preserves_non_llm_items() {
+        let mut app = AppState::new("s".into(), None);
+        app.push_item(OutputItem::Bash {
+            handle: "h".into(),
+            output: "done".into(),
+            done: true,
+            expanded: false,
+        });
+        app.apply_stream_frame(StreamFrame::ThinkingChunk {
+            text: "done thinking".into(),
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 5 });
+        app.apply_stream_frame(StreamFrame::LlmChunk {
+            text: "final answer".into(),
+            model: "m".into(),
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 10 });
+        assert_eq!(app.items.len(), 3);
+        app.apply_stream_frame(StreamFrame::LlmRetry);
+        assert_eq!(
+            app.items.len(),
+            1,
+            "LlmRetry preserves non-LLM items (Bash) but removes Thinking + AssistantMd"
         );
     }
 

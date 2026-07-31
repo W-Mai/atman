@@ -1275,6 +1275,11 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             if matches!(e, RuntimeError::ThinkingSignatureMissing) {
                                 signature_retries += 1;
                                 if signature_retries < 3 {
+                                    if let Some(tx) =
+                                        ctx.session_runtime.as_ref().map(|s| s.stream_tx())
+                                    {
+                                        let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
+                                    }
                                     crate::notify!(
                                         info,
                                         location = Inline,
@@ -1285,6 +1290,11 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 }
                                 // Exhausted — disable thinking
                                 thinking_enabled = false;
+                                if let Some(tx) =
+                                    ctx.session_runtime.as_ref().map(|s| s.stream_tx())
+                                {
+                                    let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
+                                }
                                 crate::notify!(
                                     warn,
                                     location = Inline,
@@ -1297,6 +1307,11 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 && matches!(e.kind(), crate::error::ErrorKind::InvalidRequest)
                             {
                                 thinking_enabled = false;
+                                if let Some(tx) =
+                                    ctx.session_runtime.as_ref().map(|s| s.stream_tx())
+                                {
+                                    let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
+                                }
                                 crate::notify!(
                                     warn,
                                     location = Inline,
