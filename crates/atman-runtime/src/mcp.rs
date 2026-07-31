@@ -497,6 +497,33 @@ pub struct McpClient {
     transport: std::sync::Mutex<Arc<dyn McpTransport>>,
     pub tools: Vec<McpToolSchema>,
     reconnect: Option<ReconnectConfig>,
+    #[allow(dead_code)]
+    notification_tx: tokio::sync::mpsc::UnboundedSender<McpNotification>,
+}
+
+#[derive(Debug, Clone)]
+pub enum McpNotification {
+    ToolsListChanged,
+    ResourcesListChanged,
+    PromptsListChanged,
+    Progress {
+        progress_token: String,
+        progress: Option<f64>,
+        total: Option<f64>,
+        message: Option<String>,
+    },
+    Log {
+        level: String,
+        data: serde_json::Value,
+    },
+    Cancelled {
+        request_id: String,
+        reason: Option<String>,
+    },
+    Other {
+        method: String,
+        params: serde_json::Value,
+    },
 }
 
 /// Config needed to re-create the transport on disconnect.
@@ -579,11 +606,13 @@ impl McpClient {
             .await?;
         let list = transport.call("tools/list", serde_json::json!({})).await?;
         let tools = parse_tools_list(&list)?;
+        let (notification_tx, _notification_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             name,
             transport: std::sync::Mutex::new(transport),
             tools,
             reconnect: None,
+            notification_tx,
         })
     }
 
