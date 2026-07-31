@@ -498,26 +498,33 @@ impl Renderer {
             }
         } else if cells_total > available {
             // Shrink columns proportionally to fit available width.
-            let mut total = widths.iter().sum::<usize>();
-            while total > available {
-                let excess = total - available;
+            // available already excludes inner_pad; cells_total includes sep gaps.
+            // If col_min * col_count + seps still exceeds available, reduce col_min
+            // and sep further rather than overflowing.
+            let seps = sep * col_count.saturating_sub(1);
+            let target_sum = available.saturating_sub(seps);
+            let effective_min = (target_sum / col_count).max(1);
+            loop {
+                let total: usize = widths.iter().sum();
+                if total <= target_sum {
+                    break;
+                }
+                let excess = total - target_sum;
                 let mut shrunk = 0usize;
                 for w in widths.iter_mut() {
-                    if *w > col_min {
-                        let s = (*w * excess / total.max(1)).min(*w - col_min);
+                    if *w > effective_min {
+                        let s = (*w * excess / total.max(1)).min(*w - effective_min);
                         *w -= s;
                         shrunk += s;
                     }
                 }
                 if shrunk == 0 {
-                    // Integer division stalled — shave 1 from the widest shrinkable col.
-                    if let Some(w) = widths.iter_mut().rev().find(|w| **w > col_min) {
+                    if let Some(w) = widths.iter_mut().rev().find(|w| **w > effective_min) {
                         *w -= 1;
                     } else {
                         break;
                     }
                 }
-                total = widths.iter().sum::<usize>();
             }
         }
         let bg = block_bg();
@@ -1136,5 +1143,45 @@ mod tests {
         let joined = flat.join("");
         assert!(joined.contains("é"), "combining char lost: {joined:?}");
         assert!(joined.contains("ä"), "combining char lost: {joined:?}");
+    }
+}
+
+#[cfg(test)]
+mod table_wrap_tests {
+    use super::*;
+
+    fn table_widths(md: &str, rule_width: u16) -> usize {
+        let lines = render_markdown_with_width(md, rule_width);
+        let bg = block_bg();
+        let mut max_w = 0usize;
+        for line in &lines {
+            let w = crate::width::spans_width(&line.spans);
+            if w > max_w {
+                max_w = w;
+            }
+        }
+        let _ = bg;
+        max_w
+    }
+
+    #[test]
+    fn table_long_cell_does_not_exceed_rule_width() {
+        let md = "| name | description |\n|---|---|\n| A | this is a very long description that should wrap instead of overflowing the table width |\n";
+        let w = table_widths(md, 40);
+        assert!(w <= 40, "table width {w} exceeds rule_width 40");
+    }
+
+    #[test]
+    fn table_cjk_cell_does_not_exceed_rule_width() {
+        let md = "| 名字 | 描述 |\n|---|---|\n| 测试 | 这是一段很长的中文描述内容用于测试表格换行是否正常工作不会超出宽度限制 |\n";
+        let w = table_widths(md, 30);
+        assert!(w <= 30, "table width {w} exceeds rule_width 30");
+    }
+
+    #[test]
+    fn table_many_columns_shrink_to_fit() {
+        let md = "| a | b | c | d | e |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |\n";
+        let w = table_widths(md, 20);
+        assert!(w <= 20, "table width {w} exceeds rule_width 20");
     }
 }
