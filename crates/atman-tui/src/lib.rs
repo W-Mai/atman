@@ -151,6 +151,7 @@ pub enum TuiControl {
         context_budget: Option<u64>,
         max_tokens: Option<u32>,
         thinking: bool,
+        enabled: bool,
     },
     UpdateConfigProvider {
         name: String,
@@ -160,6 +161,7 @@ pub enum TuiControl {
         context_budget: Option<u64>,
         max_tokens: Option<u32>,
         thinking: bool,
+        enabled: bool,
     },
     AuthLogout {
         id: String,
@@ -2858,6 +2860,7 @@ fn handle_key(
         KeyAction::Ignore => {
             *interrupt_prompt = None;
         }
+        KeyAction::BackTab => {}
     }
     if edited {
         app.refresh_popup(editor.buf());

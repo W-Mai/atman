@@ -72,6 +72,7 @@ pub struct ProviderManager {
     context_budget_editor: InputEditor,
     max_tokens_editor: InputEditor,
     thinking_editor: InputEditor,
+    enabled_editor: InputEditor,
     in_form: bool,
     form_field: usize,
     editing_provider: Option<String>,
@@ -149,11 +150,16 @@ impl ProviderManager {
                     .unwrap_or("")
                     .replace("https://", "")
                     .replace("http://", "");
+                let status = if entry.enabled == Some(false) {
+                    ProviderStatus::Disabled
+                } else {
+                    ProviderStatus::Active
+                };
                 self.providers.push(ProviderEntry {
                     source: ProviderSource::Config,
                     name,
                     kind: kind.into(),
-                    status: ProviderStatus::EnvKey,
+                    status,
                     detail,
                 });
             }
@@ -238,6 +244,13 @@ impl ProviderManager {
             "false"
         });
         self.thinking_editor = th_ed;
+        let mut en_ed = InputEditor::default();
+        en_ed.insert_str(if entry.enabled.unwrap_or(true) {
+            "true"
+        } else {
+            "false"
+        });
+        self.enabled_editor = en_ed;
     }
 
     pub fn handle_key(
@@ -287,14 +300,24 @@ impl ProviderManager {
                     let p = self.providers.get(self.selected).cloned();
                     if let Some(p) = p {
                         match p.source {
-                            ProviderSource::Config => self.open_edit(&p.name),
-                            ProviderSource::AuthStore { .. } => self.toggle_enabled(),
                             ProviderSource::Env => {}
+                            _ => self.toggle_enabled(control_tx),
                         }
                     }
                 }
                 KeyAction::Char('d') => self.request_confirm(ConfirmKind::Delete),
-                KeyAction::Submit => self.request_confirm(ConfirmKind::Logout),
+                KeyAction::Submit => {
+                    let p = self.providers.get(self.selected).cloned();
+                    if let Some(p) = p {
+                        match p.source {
+                            ProviderSource::Env => {}
+                            ProviderSource::AuthStore { .. } => {
+                                self.request_confirm(ConfirmKind::Logout);
+                            }
+                            ProviderSource::Config => self.open_edit(&p.name),
+                        }
+                    }
+                }
                 KeyAction::Char('r') => {
                     self.refresh_selected(control_tx);
                 }
@@ -335,20 +358,44 @@ impl ProviderManager {
         }
     }
 
-    fn toggle_enabled(&mut self) {
-        if let Some(ProviderEntry {
-            source: ProviderSource::AuthStore { id },
-            status,
-            ..
-        }) = self.providers.get_mut(self.selected)
-        {
-            let new_enabled = !matches!(status, ProviderStatus::Active | ProviderStatus::Cached);
-            if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
-                if let Some(p) = store.providers.iter_mut().find(|p| p.id == *id) {
-                    p.enabled = new_enabled;
-                    let _ = store.save();
-                    self.refresh_list();
+    fn toggle_enabled(
+        &mut self,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        let p = self.providers.get(self.selected).cloned();
+        if let Some(p) = p {
+            match p.source {
+                ProviderSource::AuthStore { id } => {
+                    let new_enabled =
+                        !matches!(p.status, ProviderStatus::Active | ProviderStatus::Cached);
+                    if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
+                        if let Some(stored) = store.providers.iter_mut().find(|x| x.id == id) {
+                            stored.enabled = new_enabled;
+                            let _ = store.save();
+                            self.refresh_list();
+                        }
+                    }
                 }
+                ProviderSource::Config => {
+                    if let Some(entry) = atman_runtime::model_registry::model_entry(&p.name) {
+                        let current_enabled = entry.enabled.unwrap_or(true);
+                        if let Some(tx) = control_tx {
+                            let _ = tx.send(crate::TuiControl::UpdateConfigProvider {
+                                name: p.name.clone(),
+                                provider_type: entry
+                                    .provider
+                                    .unwrap_or_else(|| "openai-compat".into()),
+                                api_key: entry.api_key.unwrap_or_default(),
+                                base_url: entry.base_url.unwrap_or_default(),
+                                context_budget: entry.context_budget,
+                                max_tokens: entry.max_tokens,
+                                thinking: entry.thinking.unwrap_or(false),
+                                enabled: !current_enabled,
+                            });
+                        }
+                    }
+                }
+                ProviderSource::Env => {}
             }
         }
     }
@@ -476,7 +523,8 @@ impl ProviderManager {
                 3 => &mut self.base_url_editor,
                 4 => &mut self.context_budget_editor,
                 5 => &mut self.max_tokens_editor,
-                _ => &mut self.thinking_editor,
+                6 => &mut self.thinking_editor,
+                _ => &mut self.enabled_editor,
             };
             match action {
                 KeyAction::Escape => {
@@ -491,12 +539,18 @@ impl ProviderManager {
                 KeyAction::Char('t') => {
                     self.test_form(control_tx);
                 }
-                KeyAction::Submit | KeyAction::Tab => {
-                    if self.form_field < 6 {
-                        self.form_field += 1;
+                KeyAction::Submit => {
+                    self.commit_form(control_tx);
+                }
+                KeyAction::Tab => {
+                    self.form_field = (self.form_field + 1) % 8;
+                }
+                KeyAction::BackTab => {
+                    self.form_field = if self.form_field == 0 {
+                        7
                     } else {
-                        self.commit_form(control_tx);
-                    }
+                        self.form_field - 1
+                    };
                 }
                 KeyAction::Backspace => {
                     editor.backspace();
@@ -563,6 +617,9 @@ impl ProviderManager {
                         let mut th_ed = InputEditor::default();
                         th_ed.insert_str("false");
                         self.thinking_editor = th_ed;
+                        let mut en_ed = InputEditor::default();
+                        en_ed.insert_str("true");
+                        self.enabled_editor = en_ed;
                     } else {
                         let (label, _, _) = self.kinds[self.kind_selected];
                         let mut ed = InputEditor::default();
@@ -600,6 +657,10 @@ impl ProviderManager {
             self.thinking_editor.buf().trim().to_lowercase().as_str(),
             "true" | "1" | "yes" | "on"
         );
+        let enabled = matches!(
+            self.enabled_editor.buf().trim().to_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        );
         if name.is_empty() || api_key.is_empty() || base_url.is_empty() {
             return;
         }
@@ -618,6 +679,7 @@ impl ProviderManager {
                     context_budget,
                     max_tokens,
                     thinking,
+                    enabled,
                 });
             } else {
                 let _ = tx.send(crate::TuiControl::AddConfigProvider {
@@ -628,6 +690,7 @@ impl ProviderManager {
                     context_budget,
                     max_tokens,
                     thinking,
+                    enabled,
                 });
             }
         }
@@ -712,7 +775,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
     // Footer help
     let help = match mgr.focus {
         ProviderFocus::ProviderList => {
-            "a:add  e:edit  d:delete  r:refresh  t:test  Tab:models  Esc:close"
+            "a:add  e:enable/disable  d:delete  r:refresh  t:test  Enter:edit/logout  Tab:models  Esc:close"
         }
         ProviderFocus::ModelList => "Tab:providers  a:alias  Esc:back",
     };
@@ -913,7 +976,7 @@ fn render_add_dialog(
     let mut lines = vec![];
     let mut cursor_pos: Option<(u16, u16)> = None;
     if mgr.in_form {
-        let fields: [(&str, &str); 7] = [
+        let fields: [(&str, &str); 8] = [
             ("Name", mgr.name_editor.buf()),
             ("Type", mgr.provider_type_editor.buf()),
             ("API Key", mgr.api_key_editor.buf()),
@@ -921,6 +984,7 @@ fn render_add_dialog(
             ("Context Budget", mgr.context_budget_editor.buf()),
             ("Max Output", mgr.max_tokens_editor.buf()),
             ("Thinking", mgr.thinking_editor.buf()),
+            ("Enabled", mgr.enabled_editor.buf()),
         ];
         for (i, (label, val)) in fields.iter().enumerate() {
             let active = i == mgr.form_field;
@@ -949,7 +1013,8 @@ fn render_add_dialog(
                     3 => mgr.base_url_editor.buf(),
                     4 => mgr.context_budget_editor.buf(),
                     5 => mgr.max_tokens_editor.buf(),
-                    _ => mgr.thinking_editor.buf(),
+                    6 => mgr.thinking_editor.buf(),
+                    _ => mgr.enabled_editor.buf(),
                 };
                 let y = inner.y + (lines.len() as u16);
                 let x = inner.x + 2 + cur_buf.len() as u16;
@@ -959,7 +1024,7 @@ fn render_add_dialog(
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Tab/Enter next · t:test · Enter on last to save · Esc cancel",
+            "Tab/Shift+Tab cycle · t:test · Enter:save · Esc:cancel",
             Style::default().fg(theme.subtle_fg.into()),
         )));
     } else if mgr.name_focused {
