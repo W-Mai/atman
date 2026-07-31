@@ -212,6 +212,62 @@ pub fn spawn_mcp_boot(
                     match outcome {
                         Ok(client) => {
                             let tool_count = client.tools.len();
+                            let providers = executor.providers.clone();
+                            client.set_sampling_handler(std::sync::Arc::new(
+                                move |req: atman_runtime::mcp::SamplingRequest| {
+                                    let providers = providers.clone();
+                                    Box::pin(async move {
+                                        let model = req.model.unwrap_or_default();
+                                        let provider =
+                                            providers.resolve(&model).ok_or_else(|| {
+                                                atman_runtime::RuntimeError::ToolFailed(format!(
+                                                    "no provider for model `{model}`"
+                                                ))
+                                            })?;
+                                        let messages: Vec<atman_runtime::Message> = req
+                                            .messages
+                                            .into_iter()
+                                            .map(|m| {
+                                                let text = match &m.content {
+                                                    serde_json::Value::String(s) => s.clone(),
+                                                    other => other.to_string(),
+                                                };
+                                                let role = match m.role.as_str() {
+                                                    "assistant" => {
+                                                        atman_runtime::MessageRole::Assistant
+                                                    }
+                                                    "system" => atman_runtime::MessageRole::System,
+                                                    _ => atman_runtime::MessageRole::User,
+                                                };
+                                                atman_runtime::Message {
+                                                    role,
+                                                    parts: vec![atman_runtime::MessagePart::Text {
+                                                        text,
+                                                    }],
+                                                    turn_id: atman_runtime::TurnId::now(),
+                                                }
+                                            })
+                                            .collect();
+                                        let llm_req = atman_runtime::provider::LlmRequest {
+                                            model: model.clone(),
+                                            messages,
+                                            system: req.system_prompt,
+                                            input: atman_runtime::Value::Unit,
+                                            schema: None,
+                                            cache_prompt: false,
+                                            tools: Vec::new(),
+                                            thinking_enabled: false,
+                                            stall_timeout_secs: 0,
+                                        };
+                                        let am = provider.call(llm_req).await?;
+                                        Ok(atman_runtime::mcp::SamplingResponse {
+                                            role: "assistant".into(),
+                                            content: serde_json::json!(am.text_concat()),
+                                            model: Some(model),
+                                        })
+                                    })
+                                },
+                            ));
                             let arc_client = std::sync::Arc::new(client);
                             for tool in &arc_client.tools {
                                 let adapter = atman_runtime::mcp::McpToolAdapter::new(

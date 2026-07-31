@@ -139,6 +139,17 @@ pub struct SamplingResponse {
     pub model: Option<String>,
 }
 
+pub type SamplingHandler = Arc<
+    dyn Fn(
+            SamplingRequest,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<SamplingResponse, RuntimeError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+pub type SharedSamplingHandler = Arc<std::sync::Mutex<Option<SamplingHandler>>>;
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum McpError {
     #[error("mcp io: {0}")]
@@ -168,6 +179,8 @@ pub struct McpStdioTransport {
     #[allow(dead_code)]
     reader_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     timeout_ms: u64,
+    #[allow(dead_code)]
+    sampling_handler: SharedSamplingHandler,
 }
 
 impl McpTransport for McpStdioTransport {
@@ -199,6 +212,7 @@ impl McpStdioTransport {
         env: &[(String, String)],
         timeout_ms: u64,
         notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
+        sampling_handler: SharedSamplingHandler,
     ) -> Result<Self, McpError> {
         let mut command = Command::new(cmd);
         command
@@ -221,20 +235,31 @@ impl McpStdioTransport {
             .take()
             .ok_or_else(|| McpError::Io("no stdout".into()))?;
 
+        let stdin_arc = Arc::new(tokio::sync::Mutex::new(stdin));
+        let stdin_for_reader = stdin_arc.clone();
         let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
         let pending_for_reader = pending.clone();
         let notif_for_reader = notification_tx.clone();
+        let sampling_for_reader = sampling_handler.clone();
         let reader_task = tokio::spawn(async move {
-            reader_loop(stdout, pending_for_reader, notif_for_reader).await;
+            reader_loop(
+                stdout,
+                pending_for_reader,
+                notif_for_reader,
+                stdin_for_reader,
+                sampling_for_reader,
+            )
+            .await;
         });
 
         Ok(Self {
-            stdin: Arc::new(Mutex::new(stdin)),
+            stdin: stdin_arc,
             pending,
             next_id: Arc::new(Mutex::new(1)),
             child: Arc::new(Mutex::new(child)),
             reader_task: Arc::new(Mutex::new(Some(reader_task))),
             timeout_ms,
+            sampling_handler,
         })
     }
 
@@ -321,6 +346,8 @@ async fn reader_loop(
     stdout: ChildStdout,
     pending: PendingCalls,
     notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
+    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    sampling_handler: SharedSamplingHandler,
 ) {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
@@ -337,8 +364,58 @@ async fn reader_loop(
 
                 if let Some(method) = parsed.get("method").and_then(|v| v.as_str()) {
                     if parsed.get("id").is_some() {
-                        // Server → client request (e.g. sampling/createMessage).
-                        // TODO: wire sampling handler.
+                        if method == "sampling/createMessage" {
+                            let id = parsed.get("id").cloned();
+                            let params = parsed
+                                .get("params")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let handler_arc = sampling_handler.clone();
+                            let stdin_arc = stdin.clone();
+                            tokio::spawn(async move {
+                                let handler = handler_arc.lock().unwrap().clone();
+                                let result = if let Some(h) = handler {
+                                    match serde_json::from_value::<SamplingRequest>(params.clone())
+                                    {
+                                        Ok(req) => match h(req).await {
+                                            Ok(resp) => Ok(serde_json::to_value(resp)
+                                                .unwrap_or(serde_json::Value::Null)),
+                                            Err(e) => Err(serde_json::json!({
+                                                "code": -1,
+                                                "message": e.to_string()
+                                            })),
+                                        },
+                                        Err(e) => Err(serde_json::json!({
+                                            "code": -1,
+                                            "message": format!("parse error: {e}")
+                                        })),
+                                    }
+                                } else {
+                                    Err(serde_json::json!({
+                                        "code": -1,
+                                        "message": "sampling not supported"
+                                    }))
+                                };
+                                let response = match result {
+                                    Ok(r) => serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": r
+                                    }),
+                                    Err(e) => serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "error": e
+                                    }),
+                                };
+                                let line = serde_json::to_string(&response)
+                                    .unwrap_or_else(|_| "{}".into());
+                                let mut s = stdin_arc.lock().await;
+                                let _ = s.write_all(line.as_bytes()).await;
+                                let _ = s.write_all(b"\n").await;
+                                let _ = s.flush().await;
+                            });
+                        }
                     } else {
                         let notif = parse_notification(method, &parsed);
                         let _ = notification_tx.send(notif);
@@ -574,6 +651,7 @@ pub struct McpClient {
     pub tools: Vec<McpToolSchema>,
     reconnect: Option<ReconnectConfig>,
     notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
+    sampling_handler: SharedSamplingHandler,
 }
 
 #[derive(Debug, Clone)]
@@ -625,12 +703,22 @@ impl McpClient {
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
         let (notification_tx, _) = tokio::sync::broadcast::channel(256);
+        let sampling_handler: SharedSamplingHandler = Arc::new(std::sync::Mutex::new(None));
         let transport: Arc<dyn McpTransport> = Arc::new(
-            McpStdioTransport::spawn(cmd, args, env, timeout_ms, notification_tx.clone()).await?,
+            McpStdioTransport::spawn(
+                cmd,
+                args,
+                env,
+                timeout_ms,
+                notification_tx.clone(),
+                sampling_handler.clone(),
+            )
+            .await?,
         );
         let name = name.into();
         let mut client = Self::finish_connect(name.clone(), transport).await?;
         client.notification_tx = notification_tx;
+        client.sampling_handler = sampling_handler;
         client.reconnect = Some(ReconnectConfig::Stdio {
             cmd: cmd.to_string(),
             args: args.to_vec(),
@@ -691,7 +779,12 @@ impl McpClient {
             tools,
             reconnect: None,
             notification_tx,
+            sampling_handler: Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    pub fn set_sampling_handler(&self, handler: SamplingHandler) {
+        *self.sampling_handler.lock().unwrap() = Some(handler);
     }
 
     pub fn transport_kind(&self) -> &'static str {
@@ -712,8 +805,15 @@ impl McpClient {
                 env,
                 timeout_ms,
             } => Arc::new(
-                McpStdioTransport::spawn(cmd, args, env, *timeout_ms, self.notification_tx.clone())
-                    .await?,
+                McpStdioTransport::spawn(
+                    cmd,
+                    args,
+                    env,
+                    *timeout_ms,
+                    self.notification_tx.clone(),
+                    self.sampling_handler.clone(),
+                )
+                .await?,
             ),
             ReconnectConfig::Http {
                 url,
@@ -1232,6 +1332,7 @@ for line in sys.stdin:
             &[],
             5000,
             tokio::sync::broadcast::channel(256).0,
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await
         .unwrap();
@@ -1262,6 +1363,7 @@ for line in sys.stdin:
             &[],
             5000,
             tokio::sync::broadcast::channel(256).0,
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await
         .unwrap();
@@ -1289,6 +1391,7 @@ for line in sys.stdin:
             &[],
             200,
             tokio::sync::broadcast::channel(256).0,
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await
         .unwrap();
