@@ -69,6 +69,76 @@ pub struct McpToolSchema {
     pub input_schema: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct McpResource {
+    pub uri: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct McpResourceContent {
+    pub uri: String,
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub blob: Option<String>, // base64-encoded
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub arguments: Vec<McpPromptArg>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct McpPromptArg {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct McpPromptMessage {
+    pub role: String,
+    pub content: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct McpPromptContent {
+    #[serde(default)]
+    pub messages: Vec<McpPromptMessage>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct SamplingRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub messages: Vec<McpPromptMessage>,
+    #[serde(default)]
+    pub max_tokens: u32,
+    #[serde(default, rename = "systemPrompt")]
+    pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct SamplingResponse {
+    pub role: String,
+    pub content: serde_json::Value,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum McpError {
     #[error("mcp io: {0}")]
@@ -123,12 +193,22 @@ impl McpTransport for McpStdioTransport {
 }
 
 impl McpStdioTransport {
-    pub async fn spawn(cmd: &str, args: &[String], timeout_ms: u64) -> Result<Self, McpError> {
-        let mut child = Command::new(cmd)
+    pub async fn spawn(
+        cmd: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout_ms: u64,
+    ) -> Result<Self, McpError> {
+        let mut command = Command::new(cmd);
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in env {
+            command.env(k, v);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| McpError::Io(format!("spawn {cmd}: {e}")))?;
         let stdin = child
@@ -424,6 +504,7 @@ enum ReconnectConfig {
     Stdio {
         cmd: String,
         args: Vec<String>,
+        env: Vec<(String, String)>,
         timeout_ms: u64,
     },
     Http {
@@ -438,15 +519,17 @@ impl McpClient {
         name: impl Into<String>,
         cmd: &str,
         args: &[String],
+        env: &[(String, String)],
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
         let transport: Arc<dyn McpTransport> =
-            Arc::new(McpStdioTransport::spawn(cmd, args, timeout_ms).await?);
+            Arc::new(McpStdioTransport::spawn(cmd, args, env, timeout_ms).await?);
         let name = name.into();
         let mut client = Self::finish_connect(name.clone(), transport).await?;
         client.reconnect = Some(ReconnectConfig::Stdio {
             cmd: cmd.to_string(),
             args: args.to_vec(),
+            env: env.to_vec(),
             timeout_ms,
         });
         Ok(client)
@@ -515,8 +598,9 @@ impl McpClient {
             ReconnectConfig::Stdio {
                 cmd,
                 args,
+                env,
                 timeout_ms,
-            } => Arc::new(McpStdioTransport::spawn(cmd, args, *timeout_ms).await?),
+            } => Arc::new(McpStdioTransport::spawn(cmd, args, env, *timeout_ms).await?),
             ReconnectConfig::Http {
                 url,
                 auth_token,
@@ -557,6 +641,66 @@ impl McpClient {
             }
             other => Ok(mcp_result_to_value(other?)),
         }
+    }
+
+    pub async fn list_resources(&self) -> Result<Vec<McpResource>, McpError> {
+        let transport = { self.transport.lock().unwrap().clone() };
+        let v = transport
+            .call("resources/list", serde_json::json!({}))
+            .await?;
+        v.get("resources")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| serde_json::from_value(r.clone()).ok())
+                    .collect()
+            })
+            .ok_or_else(|| {
+                McpError::Protocol(format!("resources/list missing `resources` array: {v}"))
+            })
+    }
+
+    pub async fn read_resource(&self, uri: &str) -> Result<Vec<McpResourceContent>, McpError> {
+        let params = serde_json::json!({ "uri": uri });
+        let transport = { self.transport.lock().unwrap().clone() };
+        let v = transport.call("resources/read", params).await?;
+        v.get("contents")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                    .collect()
+            })
+            .ok_or_else(|| {
+                McpError::Protocol(format!("resources/read missing `contents` array: {v}"))
+            })
+    }
+
+    pub async fn list_prompts(&self) -> Result<Vec<McpPrompt>, McpError> {
+        let transport = { self.transport.lock().unwrap().clone() };
+        let v = transport
+            .call("prompts/list", serde_json::json!({}))
+            .await?;
+        v.get("prompts")
+            .and_then(|p| p.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| serde_json::from_value(p.clone()).ok())
+                    .collect()
+            })
+            .ok_or_else(|| McpError::Protocol(format!("prompts/list missing `prompts` array: {v}")))
+    }
+
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<McpPromptContent, McpError> {
+        let params = serde_json::json!({ "name": name, "arguments": arguments });
+        let transport = { self.transport.lock().unwrap().clone() };
+        let v = transport.call("prompts/get", params).await?;
+        serde_json::from_value(v)
+            .map_err(|e| McpError::Protocol(format!("prompts/get parse error: {e}")))
     }
 }
 
@@ -684,6 +828,8 @@ pub struct McpToolAdapter {
     tier: crate::tool::Tier,
     client: Arc<McpClient>,
     reconcile: Option<ReconcilePlan>,
+    schema: serde_json::Value,
+    description: Option<String>,
 }
 
 impl McpToolAdapter {
@@ -692,16 +838,22 @@ impl McpToolAdapter {
         tool_name: impl Into<String>,
         tier: crate::tool::Tier,
         schema: Option<&serde_json::Value>,
+        description: Option<&str>,
     ) -> Self {
         let tool_name = tool_name.into();
         let qualified_name = format!("mcp.{}.{}", client.name, tool_name);
         let reconcile = schema.and_then(build_reconcile_plan);
+        let schema = schema
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"type": "object"}));
         Self {
             qualified_name,
             tool_name,
             tier,
             client,
             reconcile,
+            schema,
+            description: description.map(str::to_string),
         }
     }
 }
@@ -713,6 +865,14 @@ impl crate::tool::Tool for McpToolAdapter {
 
     fn tier(&self) -> crate::tool::Tier {
         self.tier
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        self.schema.clone()
+    }
+
+    fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     fn call<'a>(
@@ -773,6 +933,7 @@ pub enum TransportKind {
     #[default]
     Stdio,
     Http,
+    Sse,
 }
 
 pub struct McpServerConfig {
@@ -781,8 +942,10 @@ pub struct McpServerConfig {
     pub transport: TransportKind,
     pub command: String,
     pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
     pub url: Option<String>,
     pub auth_token: Option<String>,
+    pub headers: Vec<(String, String)>,
     pub tier: crate::tool::Tier,
     pub timeout_ms: u64,
     pub disabled: bool,
@@ -801,8 +964,10 @@ impl McpServerConfig {
             transport: TransportKind::Stdio,
             command: command.into(),
             args,
+            env: Vec::new(),
             url: None,
             auth_token: None,
+            headers: Vec::new(),
             tier,
             timeout_ms,
             disabled: false,
@@ -821,8 +986,32 @@ impl McpServerConfig {
             transport: TransportKind::Http,
             command: String::new(),
             args: Vec::new(),
+            env: Vec::new(),
             url: Some(url.into()),
             auth_token,
+            headers: Vec::new(),
+            tier,
+            timeout_ms,
+            disabled: false,
+        }
+    }
+
+    pub fn sse(
+        name: impl Into<String>,
+        url: impl Into<String>,
+        auth_token: Option<String>,
+        tier: crate::tool::Tier,
+        timeout_ms: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            transport: TransportKind::Sse,
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: Some(url.into()),
+            auth_token,
+            headers: Vec::new(),
             tier,
             timeout_ms,
             disabled: false,
@@ -838,7 +1027,14 @@ pub async fn register_from_configs(
     for cfg in configs {
         let outcome = match cfg.transport {
             TransportKind::Stdio => {
-                McpClient::connect_stdio(&cfg.name, &cfg.command, &cfg.args, cfg.timeout_ms).await
+                McpClient::connect_stdio(
+                    &cfg.name,
+                    &cfg.command,
+                    &cfg.args,
+                    &cfg.env,
+                    cfg.timeout_ms,
+                )
+                .await
             }
             TransportKind::Http => match cfg.url.as_deref() {
                 Some(url) => {
@@ -846,6 +1042,13 @@ pub async fn register_from_configs(
                         .await
                 }
                 None => Err(McpError::Protocol("http transport requires `url`".into())),
+            },
+            TransportKind::Sse => match cfg.url.as_deref() {
+                Some(url) => {
+                    McpClient::connect_http(&cfg.name, url, cfg.auth_token.clone(), cfg.timeout_ms)
+                        .await
+                }
+                None => Err(McpError::Protocol("sse transport requires `url`".into())),
             },
         };
         match outcome {
@@ -859,6 +1062,7 @@ pub async fn register_from_configs(
                         &tool.name,
                         cfg.tier,
                         tool.input_schema.as_ref(),
+                        tool.description.as_deref(),
                     );
                     reg.register(Arc::new(adapter));
                 }
@@ -909,7 +1113,7 @@ for line in sys.stdin:
         std::fs::write(&script_path, script).unwrap();
 
         let transport =
-            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], 5000)
+            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], &[], 5000)
                 .await
                 .unwrap();
 
@@ -934,7 +1138,7 @@ for line in sys.stdin:
         std::fs::write(&script_path, script).unwrap();
 
         let transport =
-            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], 5000)
+            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], &[], 5000)
                 .await
                 .unwrap();
         let err = transport
@@ -956,7 +1160,7 @@ for line in sys.stdin:
         std::fs::write(&script_path, script).unwrap();
 
         let transport =
-            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], 200)
+            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], &[], 200)
                 .await
                 .unwrap();
         let err = transport

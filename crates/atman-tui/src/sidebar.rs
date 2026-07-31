@@ -597,6 +597,7 @@ fn mcp_server_status_line<'a>(s: &atman_runtime::mcp::McpServerStatus) -> Line<'
     let transport = match s.transport {
         atman_runtime::mcp::TransportKind::Stdio => "stdio",
         atman_runtime::mcp::TransportKind::Http => "http",
+        atman_runtime::mcp::TransportKind::Sse => "sse",
     };
     let (glyph, color, detail) = match &s.state {
         atman_runtime::mcp::McpServerState::Disabled => ("◌", t.subtle_fg, String::new()),

@@ -166,6 +166,7 @@ pub fn spawn_mcp_boot(
                 let name = cfg.name.clone();
                 let command = cfg.command.clone();
                 let args = cfg.args.clone();
+                let env = cfg.env.clone();
                 let url = cfg.url.clone();
                 let auth_token = cfg.auth_token.clone();
                 let timeout_ms = cfg.timeout_ms;
@@ -181,7 +182,7 @@ pub fn spawn_mcp_boot(
                     let outcome = match transport {
                         atman_runtime::mcp::TransportKind::Stdio => {
                             atman_runtime::mcp::McpClient::connect_stdio(
-                                &name, &command, &args, timeout_ms,
+                                &name, &command, &args, &env, timeout_ms,
                             )
                             .await
                         }
@@ -196,6 +197,17 @@ pub fn spawn_mcp_boot(
                                 "http transport requires `url`".into(),
                             )),
                         },
+                        atman_runtime::mcp::TransportKind::Sse => match url.as_deref() {
+                            Some(url) => {
+                                atman_runtime::mcp::McpClient::connect_http(
+                                    &name, url, auth_token, timeout_ms,
+                                )
+                                .await
+                            }
+                            None => Err(atman_runtime::mcp::McpError::Protocol(
+                                "sse transport requires `url`".into(),
+                            )),
+                        },
                     };
                     match outcome {
                         Ok(client) => {
@@ -207,6 +219,7 @@ pub fn spawn_mcp_boot(
                                     &tool.name,
                                     tier,
                                     tool.input_schema.as_ref(),
+                                    tool.description.as_deref(),
                                 );
                                 executor.tools.register(std::sync::Arc::new(adapter));
                             }
@@ -553,7 +566,7 @@ fn register_providers_from_config(executor: &mut Executor) {
                 }
                 executor.providers.register(Arc::new(p));
             }
-            "openai" => {
+            "openai" | "openai-compat" => {
                 let mut p = OpenAiProvider::new(&provider_name, key);
                 if let Some(url) = &entry.base_url {
                     p = p.with_base_url(url);
@@ -586,17 +599,114 @@ pub fn load_preview_config(
 }
 
 pub fn load_mcp_configs(config_dir: Option<&Path>) -> Vec<atman_runtime::mcp::McpServerConfig> {
-    let Some(dir) = config_dir else {
-        return Vec::new();
-    };
-    let path = dir.join("config.toml");
-    if !path.exists() {
-        return Vec::new();
+    let mut configs = Vec::new();
+
+    // 1. TOML config.toml [[mcp]] blocks (legacy, still supported)
+    if let Some(dir) = config_dir {
+        let path = dir.join("config.toml");
+        if path.exists() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                configs.extend(parse_mcp_configs(&text));
+            }
+        }
     }
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+
+    // 2. JSON mcp_servers.json (canonical, Claude Desktop compatible)
+    if let Some(dir) = config_dir {
+        let path = dir.join("mcp_servers.json");
+        if path.exists() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                configs.extend(parse_mcp_json(&text));
+            }
+        }
+    }
+
+    // 3. Claude Desktop auto-discover (read-only)
+    if let Ok(home) = std::env::var("HOME") {
+        let claude_path = std::path::PathBuf::from(home)
+            .join("Library/Application Support/Claude/claude_desktop_config.json");
+        if claude_path.exists() {
+            if let Ok(text) = std::fs::read_to_string(&claude_path) {
+                configs.extend(parse_mcp_json(&text));
+            }
+        }
+    }
+
+    // Dedup by name — later entries override earlier ones.
+    let mut seen = std::collections::HashSet::new();
+    configs.retain(|c| seen.insert(c.name.clone()));
+    configs
+}
+
+/// Parse standard `mcpServers` JSON format (Claude Desktop / Cursor / Cline compatible).
+///
+/// ```json
+/// { "mcpServers": { "name": { "command": "...", "args": [...], "env": {...} } } }
+/// ```
+pub fn parse_mcp_json(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig> {
+    #[derive(serde::Deserialize)]
+    struct JsonConfigFile {
+        #[serde(default, rename = "mcpServers")]
+        mcp_servers: std::collections::HashMap<String, JsonServerConfig>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct JsonServerConfig {
+        #[serde(default)]
+        r#type: Option<String>,
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default, rename = "authToken")]
+        auth_token: Option<String>,
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+    }
+
+    let file: JsonConfigFile = match serde_json::from_str(text) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
     };
-    parse_mcp_configs(&text)
+    file.mcp_servers
+        .into_iter()
+        .map(|(name, raw)| {
+            let (transport, command, url) = match raw.r#type.as_deref() {
+                Some("sse") => (
+                    atman_runtime::mcp::TransportKind::Sse,
+                    String::new(),
+                    raw.url,
+                ),
+                Some("http") => (
+                    atman_runtime::mcp::TransportKind::Http,
+                    String::new(),
+                    raw.url,
+                ),
+                _ => (
+                    atman_runtime::mcp::TransportKind::Stdio,
+                    raw.command.unwrap_or_default(),
+                    None,
+                ),
+            };
+            atman_runtime::mcp::McpServerConfig {
+                name,
+                transport,
+                command,
+                args: raw.args,
+                env: raw.env.into_iter().collect(),
+                url,
+                auth_token: raw.auth_token,
+                headers: raw.headers.into_iter().collect(),
+                tier: atman_runtime::Tier::Three,
+                timeout_ms: 30_000,
+                disabled: false,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -615,9 +725,13 @@ struct RawMcpConfig {
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
+    env: std::collections::HashMap<String, String>,
+    #[serde(default)]
     url: Option<String>,
     #[serde(default)]
     auth_token: Option<String>,
+    #[serde(default)]
+    headers: std::collections::HashMap<String, String>,
     #[serde(default)]
     tier: Option<u8>,
     #[serde(default)]
@@ -636,6 +750,7 @@ pub fn parse_mcp_configs(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig>
         .map(|raw| {
             let transport = match raw.transport.as_deref() {
                 Some("http") => atman_runtime::mcp::TransportKind::Http,
+                Some("sse") => atman_runtime::mcp::TransportKind::Sse,
                 _ => atman_runtime::mcp::TransportKind::Stdio,
             };
             atman_runtime::mcp::McpServerConfig {
@@ -643,8 +758,10 @@ pub fn parse_mcp_configs(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig>
                 transport,
                 command: raw.command.unwrap_or_default(),
                 args: raw.args,
+                env: raw.env.into_iter().collect(),
                 url: raw.url,
                 auth_token: raw.auth_token,
+                headers: raw.headers.into_iter().collect(),
                 tier: tier_from_int(raw.tier.unwrap_or(3)),
                 timeout_ms: raw.timeout_ms.unwrap_or(30_000),
                 disabled: raw.disabled,
