@@ -315,18 +315,29 @@ impl Provider for AnthropicProvider {
                             }
                         }
                         "content_block_start" => {
-                            if let Some(block) = parsed.get("content_block")
-                                && block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-                                && let (Some(id), Some(name)) = (
-                                    block.get("id").and_then(|v| v.as_str()),
-                                    block.get("name").and_then(|v| v.as_str()),
-                                )
-                            {
-                                tool_use_partial.push(PartialToolUse {
-                                    id: id.to_string(),
-                                    name: name.to_string(),
-                                    input_json: String::new(),
-                                });
+                            if let Some(block) = parsed.get("content_block") {
+                                match block.get("type").and_then(|v| v.as_str()) {
+                                    Some("tool_use") => {
+                                        if let (Some(id), Some(name)) = (
+                                            block.get("id").and_then(|v| v.as_str()),
+                                            block.get("name").and_then(|v| v.as_str()),
+                                        ) {
+                                            tool_use_partial.push(PartialToolUse {
+                                                id: id.to_string(),
+                                                name: name.to_string(),
+                                                input_json: String::new(),
+                                            });
+                                        }
+                                    }
+                                    Some("thinking") => {
+                                        if let Some(sig) =
+                                            block.get("signature").and_then(|v| v.as_str())
+                                        {
+                                            acc_signature = Some(sig.to_string());
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         "content_block_delta" => {
