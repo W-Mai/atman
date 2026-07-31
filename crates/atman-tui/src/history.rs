@@ -400,6 +400,7 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>, tool_map: &HashMap<
                                 text: thinking.clone(),
                                 done: true,
                                 expanded: false,
+                                retried: false,
                             });
                         }
                     }
@@ -407,6 +408,7 @@ fn flatten_message(msg: &Message, out: &mut Vec<OutputItem>, tool_map: &HashMap<
                         out.push(OutputItem::AssistantMd {
                             md: text.clone(),
                             streaming: false,
+                            retried: false,
                         });
                     }
                     _ => {}

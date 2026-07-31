@@ -306,20 +306,27 @@ fn item_content_hash(
             text,
             done,
             expanded,
+            retried,
         } => {
             1u8.hash(&mut h);
             str_fp(text).hash(&mut h);
             done.hash(&mut h);
             expanded.hash(&mut h);
+            retried.hash(&mut h);
             hovered.hash(&mut h);
             if !done {
                 animation_frame.hash(&mut h);
             }
         }
-        OutputItem::AssistantMd { md, streaming } => {
+        OutputItem::AssistantMd {
+            md,
+            streaming,
+            retried,
+        } => {
             2u8.hash(&mut h);
             str_fp(md).hash(&mut h);
             streaming.hash(&mut h);
+            retried.hash(&mut h);
         }
         OutputItem::SystemNote { text, level } => {
             3u8.hash(&mut h);
@@ -1257,6 +1264,7 @@ fn render_thinking(
     hovered: bool,
     animation_frame: u32,
     panel_width: u16,
+    retried: bool,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
     let bg = if hovered {
@@ -1277,11 +1285,19 @@ fn render_thinking(
         .bg(bg)
         .add_modifier(Modifier::DIM);
     let glyph = if done {
-        "✓"
+        if retried { "↻" } else { "✓" }
     } else {
         spinner_char(animation_frame)
     };
-    let label = if done { "thinking" } else { "thinking…" };
+    let label = if done {
+        if retried {
+            "thinking (retry)"
+        } else {
+            "thinking"
+        }
+    } else {
+        "thinking…"
+    };
     let target = panel_width.max(20) as usize;
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1345,8 +1361,26 @@ fn render_thinking(
     lines
 }
 
-fn render_assistant(md: &str, streaming: bool, panel_width: u16) -> Vec<Line<'static>> {
+fn render_assistant(
+    md: &str,
+    streaming: bool,
+    retried: bool,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
     let mut lines = crate::markdown::render_markdown_with_width(md, panel_width);
+    if retried {
+        let t = crate::theme::theme();
+        let retry_style = Style::default()
+            .fg(t.warn.into())
+            .add_modifier(Modifier::DIM);
+        let mut header = vec![Span::styled(" ↻ retry".to_string(), retry_style)];
+        let w = crate::width::width(" ↻ retry");
+        let pad = (panel_width as usize).saturating_sub(w);
+        if pad > 0 {
+            header.push(Span::styled(" ".repeat(pad), retry_style));
+        }
+        lines.insert(0, Line::from(header));
+    }
     if streaming {
         let cursor = Span::styled(
             "▏".to_string(),
@@ -1431,6 +1465,7 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
             text,
             done,
             expanded,
+            retried,
         } => {
             let hovered = ctx.hovered_thinking_idx.is_some();
             render_thinking(
@@ -1440,12 +1475,15 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
                 hovered,
                 ctx.animation_frame,
                 ctx.panel_width,
+                *retried,
             )
         }
         OutputItem::StartupCard { .. } => Vec::new(),
-        OutputItem::AssistantMd { md, streaming } => {
-            render_assistant(md, *streaming, ctx.panel_width)
-        }
+        OutputItem::AssistantMd {
+            md,
+            streaming,
+            retried,
+        } => render_assistant(md, *streaming, *retried, ctx.panel_width),
         OutputItem::SystemNote { text, level } => render_system_note(text, *level, ctx.panel_width),
         OutputItem::Divider => make_dashed_divider(ctx.panel_width),
         OutputItem::WorkflowPanel {
@@ -4603,6 +4641,7 @@ mod tests {
             OutputItem::AssistantMd {
                 md: "one line".into(),
                 streaming: false,
+                retried: false,
             },
             OutputItem::SystemNote {
                 text: "note".into(),
@@ -4623,7 +4662,7 @@ mod tests {
     #[test]
     fn thinking_wraps_long_line() {
         let text = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh iiiii jjjjj kkkkk lllll";
-        let lines = render_thinking(text, true, true, false, 0, 30);
+        let lines = render_thinking(text, true, true, false, 0, 30, false);
         assert!(
             lines.len() > 6,
             "should wrap into many rows: {}",
@@ -4640,7 +4679,7 @@ mod tests {
     fn thinking_wraps_cjk_long_line() {
         let text =
             "读取文件内容并做分析的一个非常长的中文标题名称这样会超过宽度必须换行才行测试一下看看";
-        let lines = render_thinking(text, true, true, false, 0, 30);
+        let lines = render_thinking(text, true, true, false, 0, 30, false);
         assert!(lines.len() > 6, "CJK thinking should wrap: {}", lines.len());
         for (i, line) in lines.iter().enumerate() {
             let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -4652,7 +4691,7 @@ mod tests {
     #[test]
     fn thinking_renders_markdown_bold() {
         // **bold** in thinking text should produce a BOLD span, not literal asterisks
-        let lines = render_thinking("this is **bold** text", true, true, false, 0, 60);
+        let lines = render_thinking("this is **bold** text", true, true, false, 0, 60, false);
         let has_bold = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -4663,7 +4702,7 @@ mod tests {
     #[test]
     fn thinking_collapsed_limits_to_six_lines() {
         let text = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10";
-        let lines = render_thinking(text, true, false, false, 0, 60);
+        let lines = render_thinking(text, true, false, false, 0, 60, false);
         // header(3) + 6 body lines + hint(1) + blank(1) = 11
         // (blank + header + blank + 6 body + hint + blank)
         let body_count = lines

@@ -23,10 +23,12 @@ pub enum OutputItem {
         text: String,
         done: bool,
         expanded: bool,
+        retried: bool,
     },
     AssistantMd {
         md: String,
         streaming: bool,
+        retried: bool,
     },
     SystemNote {
         text: String,
@@ -984,6 +986,7 @@ impl AppState {
                         text,
                         done: false,
                         expanded: false,
+                        retried: false,
                     });
                     self.streaming = true;
                 }
@@ -996,7 +999,7 @@ impl AppState {
                     *done = true;
                     self.items_version = self.items_version.wrapping_add(1);
                 }
-                if let Some(OutputItem::AssistantMd { md, streaming }) = self.items.last_mut()
+                if let Some(OutputItem::AssistantMd { md, streaming, .. }) = self.items.last_mut()
                     && *streaming
                 {
                     md.push_str(&text);
@@ -1007,6 +1010,7 @@ impl AppState {
                     self.push_item(OutputItem::AssistantMd {
                         md: text,
                         streaming: true,
+                        retried: false,
                     });
                     self.streaming = true;
                     self.terminal_throttle = Some(Instant::now());
@@ -1014,18 +1018,22 @@ impl AppState {
                 }
             }
             StreamFrame::LlmRetry => {
-                while let Some(item) = self.items.last() {
-                    let is_llm_output = matches!(
-                        item,
-                        OutputItem::Thinking { .. } | OutputItem::AssistantMd { .. }
-                    );
-                    if is_llm_output {
-                        self.items.pop();
-                        self.items_version = self.items_version.wrapping_add(1);
-                    } else {
-                        break;
+                for item in self.items.iter_mut().rev() {
+                    match item {
+                        OutputItem::Thinking { done, retried, .. } => {
+                            *done = true;
+                            *retried = true;
+                        }
+                        OutputItem::AssistantMd {
+                            streaming, retried, ..
+                        } => {
+                            *streaming = false;
+                            *retried = true;
+                        }
+                        _ => break,
                     }
                 }
+                self.items_version = self.items_version.wrapping_add(1);
                 self.waiting_for_llm = true;
             }
             StreamFrame::LlmDone { .. } => {
@@ -1611,7 +1619,7 @@ mod tests {
         });
         assert_eq!(app.items.len(), 1);
         match &app.items[0] {
-            OutputItem::AssistantMd { md, streaming } => {
+            OutputItem::AssistantMd { md, streaming, .. } => {
                 assert_eq!(md, "hello world");
                 assert!(*streaming);
             }
@@ -1630,7 +1638,7 @@ mod tests {
         app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 3 });
         assert_eq!(app.items.len(), 1, "no extra markdown item after done");
         match &app.items[0] {
-            OutputItem::AssistantMd { md, streaming } => {
+            OutputItem::AssistantMd { md, streaming, .. } => {
                 assert_eq!(md, "hi");
                 assert!(!streaming);
             }
@@ -1684,7 +1692,7 @@ mod tests {
         });
         app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 9 });
         match &app.items[0] {
-            OutputItem::AssistantMd { streaming, md } => {
+            OutputItem::AssistantMd { streaming, md, .. } => {
                 assert!(!*streaming, "AssistantMd must be finalized");
                 assert_eq!(md, "partial");
             }
@@ -1712,7 +1720,7 @@ mod tests {
         });
         app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 2 });
         match &app.items[0] {
-            OutputItem::AssistantMd { md, streaming } => {
+            OutputItem::AssistantMd { md, streaming, .. } => {
                 assert_eq!(md, "prev");
                 assert!(!*streaming, "prev must stay finalized");
             }
@@ -1748,7 +1756,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_retry_discards_streaming_assistant() {
+    fn llm_retry_marks_items_as_retried() {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::ThinkingChunk {
             text: "let me think".into(),
@@ -1759,11 +1767,23 @@ mod tests {
         });
         assert_eq!(app.items.len(), 2);
         app.apply_stream_frame(StreamFrame::LlmRetry);
-        assert_eq!(
-            app.items.len(),
-            0,
-            "LlmRetry discards all trailing LLM output items"
-        );
+        assert_eq!(app.items.len(), 2, "LlmRetry keeps items but marks them");
+        match &app.items[0] {
+            OutputItem::Thinking { retried, done, .. } => {
+                assert!(*retried, "Thinking should be marked retried");
+                assert!(*done, "Thinking should be done");
+            }
+            _ => panic!("expected Thinking"),
+        }
+        match &app.items[1] {
+            OutputItem::AssistantMd {
+                retried, streaming, ..
+            } => {
+                assert!(*retried, "AssistantMd should be marked retried");
+                assert!(!streaming, "AssistantMd should not be streaming");
+            }
+            _ => panic!("expected AssistantMd"),
+        }
         assert!(app.waiting_for_llm);
     }
 
@@ -1789,9 +1809,21 @@ mod tests {
         app.apply_stream_frame(StreamFrame::LlmRetry);
         assert_eq!(
             app.items.len(),
-            1,
-            "LlmRetry preserves non-LLM items (Bash) but removes Thinking + AssistantMd"
+            3,
+            "LlmRetry keeps all items, only marks LLM items as retried"
         );
+        match &app.items[0] {
+            OutputItem::Bash { .. } => {}
+            _ => panic!("expected Bash item preserved"),
+        }
+        match &app.items[1] {
+            OutputItem::Thinking { retried, .. } => assert!(*retried),
+            _ => panic!("expected Thinking"),
+        }
+        match &app.items[2] {
+            OutputItem::AssistantMd { retried, .. } => assert!(*retried),
+            _ => panic!("expected AssistantMd"),
+        }
     }
 
     #[test]
