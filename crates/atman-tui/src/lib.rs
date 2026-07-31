@@ -3285,6 +3285,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             close_armed.as_ref().map(|(id, exp)| (id.as_str(), *exp)),
             max_canvas,
             &app.context.mcp_servers,
+            &app.expanded_mcp_servers,
+            app.mcp_selected,
+            &app.hovered_mcp_row,
         );
     } else {
         app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();

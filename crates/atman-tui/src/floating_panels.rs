@@ -339,6 +339,9 @@ pub fn render(
     panel_close_armed: Option<(&str, bool)>,
     max_canvas: Rect,
     mcp_servers: &[atman_runtime::mcp::McpServerStatus],
+    expanded_mcp_servers: &std::collections::HashSet<String>,
+    mcp_selected: usize,
+    hovered_mcp_row: &Option<String>,
 ) -> FloatingPanelHitmap {
     let mut all_hitmap = FloatingPanelHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
@@ -596,6 +599,9 @@ pub fn render(
                 &mut panel_hitmap,
                 animation_frame,
                 mcp_servers,
+                expanded_mcp_servers,
+                mcp_selected,
+                hovered_mcp_row,
             );
             all_hitmap
                 .history_row_rects
@@ -603,6 +609,9 @@ pub fn render(
             all_hitmap
                 .workflow_node_rects
                 .append(&mut panel_hitmap.workflow_node_rects);
+            all_hitmap
+                .mcp_row_rects
+                .append(&mut panel_hitmap.mcp_row_rects);
         }
 
         // shadow after panel+content render
@@ -866,6 +875,9 @@ fn render_panel_content(
     hitmap_out: &mut FloatingPanelHitmap,
     animation_frame: u32,
     mcp_servers: &[atman_runtime::mcp::McpServerStatus],
+    expanded_mcp_servers: &std::collections::HashSet<String>,
+    mcp_selected: usize,
+    hovered_mcp_row: &Option<String>,
 ) {
     let _hovered_btn = hovered_btn;
     if area.height == 0 || area.width == 0 {
@@ -1021,7 +1033,16 @@ fn render_panel_content(
             f.render_widget(p, area);
         }
         PanelKind::Mcp => {
-            crate::mcp_manager::render_panel(f, area, panel.scroll, mcp_servers);
+            crate::mcp_manager::render_panel(
+                f,
+                area,
+                panel.scroll,
+                mcp_servers,
+                expanded_mcp_servers,
+                mcp_selected,
+                hovered_mcp_row,
+                hitmap_out,
+            );
         }
         PanelKind::Task(kind) => {
             let snap = snapshots.iter().find(|s| s.source_handle == panel.id);
@@ -1148,6 +1169,7 @@ fn render_panel_content(
 pub struct FloatingPanelHitmap {
     pub history_row_rects: Vec<(String, Rect)>,
     pub workflow_node_rects: Vec<(usize, String, Rect)>,
+    pub mcp_row_rects: Vec<(String, Rect)>,
 }
 
 fn task_summary_line(snap: &TaskSnapshot, items: &[OutputItem]) -> String {
