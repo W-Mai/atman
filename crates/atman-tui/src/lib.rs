@@ -148,7 +148,18 @@ pub enum TuiControl {
         provider_type: String,
         api_key: String,
         base_url: String,
-        models: Vec<String>,
+        context_budget: Option<u64>,
+        max_tokens: Option<u32>,
+        thinking: bool,
+    },
+    UpdateConfigProvider {
+        name: String,
+        provider_type: String,
+        api_key: String,
+        base_url: String,
+        context_budget: Option<u64>,
+        max_tokens: Option<u32>,
+        thinking: bool,
     },
     AuthLogout {
         id: String,
@@ -158,6 +169,12 @@ pub enum TuiControl {
     },
     RefreshProviderModels {
         provider_id: String,
+    },
+    TestProvider {
+        name: String,
+        provider_type: String,
+        api_key: String,
+        base_url: String,
     },
     TermResize {
         handle: String,
@@ -182,6 +199,7 @@ pub enum TuiCommand {
     OpenThemePicker,
     CycleOutside,
     ProviderModelsUpdated,
+    ProviderTestResult((String, bool)),
 }
 
 pub struct TuiHandle {
@@ -1278,6 +1296,19 @@ async fn run_frames(
                                 "models refreshed",
                                 app::NoteLevel::Success,
                                 std::time::Duration::from_secs(3),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                        TuiCommand::ProviderTestResult((msg, ok)) => {
+                            let level = if ok {
+                                app::NoteLevel::Success
+                            } else {
+                                app::NoteLevel::Error
+                            };
+                            app.push_toast(
+                                msg,
+                                level,
+                                std::time::Duration::from_secs(5),
                                 app::ToastPosition::TopRight,
                             );
                         }
@@ -2424,6 +2455,15 @@ fn handle_key(
                 "refreshing models…",
                 app::NoteLevel::Info,
                 std::time::Duration::from_secs(2),
+                app::ToastPosition::TopRight,
+            );
+        }
+        if app.provider_manager.test_just_triggered {
+            app.provider_manager.test_just_triggered = false;
+            app.push_toast(
+                "testing endpoint…",
+                app::NoteLevel::Info,
+                std::time::Duration::from_secs(5),
                 app::ToastPosition::TopRight,
             );
         }

@@ -54,8 +54,8 @@ pub struct ProviderManager {
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
     model_selected: usize,
     pub open_alias_model: Option<String>,
-    /// Set to true when r was pressed; caller should push a toast and clear.
     pub refresh_just_triggered: bool,
+    pub test_just_triggered: bool,
     show_add: bool,
     focus: ProviderFocus,
     kinds: Vec<(
@@ -68,8 +68,13 @@ pub struct ProviderManager {
     name_focused: bool,
     api_key_editor: InputEditor,
     base_url_editor: InputEditor,
+    provider_type_editor: InputEditor,
+    context_budget_editor: InputEditor,
+    max_tokens_editor: InputEditor,
+    thinking_editor: InputEditor,
     in_form: bool,
     form_field: usize,
+    editing_provider: Option<String>,
     /// Confirmation dialog state.
     show_confirm: bool,
     confirm_kind: Option<ConfirmKind>,
@@ -137,12 +142,19 @@ impl ProviderManager {
         }
         for (name, entry) in atman_runtime::model_registry::all_model_entries() {
             if entry.api_key.is_some() {
+                let kind = entry.provider.as_deref().unwrap_or("unknown");
+                let detail = entry
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("")
+                    .replace("https://", "")
+                    .replace("http://", "");
                 self.providers.push(ProviderEntry {
                     source: ProviderSource::Config,
-                    name: format!("config:{}", name),
-                    kind: "config".into(),
+                    name,
+                    kind: kind.into(),
                     status: ProviderStatus::EnvKey,
-                    detail: "config.toml".into(),
+                    detail,
                 });
             }
         }
@@ -151,6 +163,7 @@ impl ProviderManager {
 
     fn open_add(&mut self) {
         self.show_add = true;
+        self.editing_provider = None;
         self.kinds = vec![
             (
                 "Codex",
@@ -176,6 +189,55 @@ impl ProviderManager {
         self.kind_selected = 0;
         self.name_editor = InputEditor::default();
         self.name_focused = false;
+    }
+
+    fn open_edit(&mut self, name: &str) {
+        let entry = atman_runtime::model_registry::model_entry(name);
+        if entry.is_none() || entry.as_ref().and_then(|e| e.api_key.as_ref()).is_none() {
+            return;
+        }
+        let entry = entry.unwrap();
+        self.show_add = true;
+        self.editing_provider = Some(name.to_string());
+        self.in_form = true;
+        self.form_field = 0;
+        let mut name_ed = InputEditor::default();
+        name_ed.insert_str(name);
+        self.name_editor = name_ed;
+        let mut key_ed = InputEditor::default();
+        if let Some(k) = &entry.api_key {
+            key_ed.insert_str(k);
+        }
+        self.api_key_editor = key_ed;
+        let mut url_ed = InputEditor::default();
+        if let Some(u) = &entry.base_url {
+            url_ed.insert_str(u);
+        }
+        self.base_url_editor = url_ed;
+        let mut pt_ed = InputEditor::default();
+        if let Some(p) = &entry.provider {
+            pt_ed.insert_str(p);
+        } else {
+            pt_ed.insert_str("openai-compat");
+        }
+        self.provider_type_editor = pt_ed;
+        let mut ctx_ed = InputEditor::default();
+        if let Some(c) = entry.context_budget {
+            ctx_ed.insert_str(&c.to_string());
+        }
+        self.context_budget_editor = ctx_ed;
+        let mut mt_ed = InputEditor::default();
+        if let Some(m) = entry.max_tokens {
+            mt_ed.insert_str(&m.to_string());
+        }
+        self.max_tokens_editor = mt_ed;
+        let mut th_ed = InputEditor::default();
+        th_ed.insert_str(if entry.thinking.unwrap_or(false) {
+            "true"
+        } else {
+            "false"
+        });
+        self.thinking_editor = th_ed;
     }
 
     pub fn handle_key(
@@ -221,11 +283,23 @@ impl ProviderManager {
                     }
                 }
                 KeyAction::Char('a') => self.open_add(),
-                KeyAction::Char('e') => self.toggle_enabled(),
+                KeyAction::Char('e') => {
+                    let p = self.providers.get(self.selected).cloned();
+                    if let Some(p) = p {
+                        match p.source {
+                            ProviderSource::Config => self.open_edit(&p.name),
+                            ProviderSource::AuthStore { .. } => self.toggle_enabled(),
+                            ProviderSource::Env => {}
+                        }
+                    }
+                }
                 KeyAction::Char('d') => self.request_confirm(ConfirmKind::Delete),
                 KeyAction::Submit => self.request_confirm(ConfirmKind::Logout),
                 KeyAction::Char('r') => {
                     self.refresh_selected(control_tx);
+                }
+                KeyAction::Char('t') => {
+                    self.test_selected(control_tx);
                 }
                 _ => {}
             },
@@ -336,6 +410,59 @@ impl ProviderManager {
         }
     }
 
+    fn test_selected(
+        &mut self,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        let p = self.providers.get(self.selected).cloned();
+        if let Some(p) = p {
+            if matches!(p.source, ProviderSource::Config) {
+                if let Some(entry) = atman_runtime::model_registry::model_entry(&p.name) {
+                    if let (Some(api_key), Some(base_url)) = (entry.api_key, entry.base_url) {
+                        let provider_type =
+                            entry.provider.unwrap_or_else(|| "openai-compat".into());
+                        if let Some(tx) = control_tx {
+                            let _ = tx.send(crate::TuiControl::TestProvider {
+                                name: p.name,
+                                provider_type,
+                                api_key,
+                                base_url,
+                            });
+                            self.test_just_triggered = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn test_form(
+        &mut self,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        let name = self.name_editor.buf().trim().to_string();
+        let api_key = self.api_key_editor.buf().trim().to_string();
+        let base_url = self.base_url_editor.buf().trim().to_string();
+        let provider_type = self.provider_type_editor.buf().trim().to_string();
+        if name.is_empty() || api_key.is_empty() || base_url.is_empty() {
+            return;
+        }
+        let provider_type = if provider_type.is_empty() {
+            "openai-compat".into()
+        } else {
+            provider_type
+        };
+        if let Some(tx) = control_tx {
+            let _ = tx.send(crate::TuiControl::TestProvider {
+                name,
+                provider_type,
+                api_key,
+                base_url,
+            });
+            self.test_just_triggered = true;
+        }
+    }
+
     fn handle_add_key(
         &mut self,
         action: &KeyAction,
@@ -344,15 +471,28 @@ impl ProviderManager {
         if self.in_form {
             let editor = match self.form_field {
                 0 => &mut self.name_editor,
-                1 => &mut self.api_key_editor,
-                _ => &mut self.base_url_editor,
+                1 => &mut self.provider_type_editor,
+                2 => &mut self.api_key_editor,
+                3 => &mut self.base_url_editor,
+                4 => &mut self.context_budget_editor,
+                5 => &mut self.max_tokens_editor,
+                _ => &mut self.thinking_editor,
             };
             match action {
                 KeyAction::Escape => {
-                    self.in_form = false;
+                    if self.editing_provider.is_some() {
+                        self.show_add = false;
+                        self.in_form = false;
+                        self.editing_provider = None;
+                    } else {
+                        self.in_form = false;
+                    }
+                }
+                KeyAction::Char('t') => {
+                    self.test_form(control_tx);
                 }
                 KeyAction::Submit | KeyAction::Tab => {
-                    if self.form_field < 2 {
+                    if self.form_field < 6 {
                         self.form_field += 1;
                     } else {
                         self.commit_form(control_tx);
@@ -415,6 +555,14 @@ impl ProviderManager {
                         self.name_editor = InputEditor::default();
                         self.api_key_editor = InputEditor::default();
                         self.base_url_editor = InputEditor::default();
+                        let mut pt_ed = InputEditor::default();
+                        pt_ed.insert_str("openai-compat");
+                        self.provider_type_editor = pt_ed;
+                        self.context_budget_editor = InputEditor::default();
+                        self.max_tokens_editor = InputEditor::default();
+                        let mut th_ed = InputEditor::default();
+                        th_ed.insert_str("false");
+                        self.thinking_editor = th_ed;
                     } else {
                         let (label, _, _) = self.kinds[self.kind_selected];
                         let mut ed = InputEditor::default();
@@ -445,20 +593,47 @@ impl ProviderManager {
         let name = self.name_editor.buf().trim().to_string();
         let api_key = self.api_key_editor.buf().trim().to_string();
         let base_url = self.base_url_editor.buf().trim().to_string();
+        let provider_type = self.provider_type_editor.buf().trim().to_string();
+        let context_budget: Option<u64> = self.context_budget_editor.buf().trim().parse().ok();
+        let max_tokens: Option<u32> = self.max_tokens_editor.buf().trim().parse().ok();
+        let thinking = matches!(
+            self.thinking_editor.buf().trim().to_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        );
         if name.is_empty() || api_key.is_empty() || base_url.is_empty() {
             return;
         }
+        let provider_type = if provider_type.is_empty() {
+            "openai-compat".into()
+        } else {
+            provider_type
+        };
         if let Some(tx) = control_tx {
-            let _ = tx.send(crate::TuiControl::AddConfigProvider {
-                name,
-                provider_type: "openai-compat".into(),
-                api_key,
-                base_url,
-                models: Vec::new(),
-            });
+            if self.editing_provider.is_some() {
+                let _ = tx.send(crate::TuiControl::UpdateConfigProvider {
+                    name,
+                    provider_type,
+                    api_key,
+                    base_url,
+                    context_budget,
+                    max_tokens,
+                    thinking,
+                });
+            } else {
+                let _ = tx.send(crate::TuiControl::AddConfigProvider {
+                    name,
+                    provider_type,
+                    api_key,
+                    base_url,
+                    context_budget,
+                    max_tokens,
+                    thinking,
+                });
+            }
         }
         self.show_add = false;
         self.in_form = false;
+        self.editing_provider = None;
     }
 
     fn commit_add(
@@ -537,9 +712,9 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
     // Footer help
     let help = match mgr.focus {
         ProviderFocus::ProviderList => {
-            "e: enable/disable  |  d: delete  |  Enter: logout  |  r: refresh  |  a: add  |  Tab: models  |  Esc: close"
+            "a:add  e:edit  d:delete  r:refresh  t:test  Tab:models  Esc:close"
         }
-        ProviderFocus::ModelList => "Tab: providers  |  a: alias this model  |  Esc: back",
+        ProviderFocus::ModelList => "Tab:providers  a:alias  Esc:back",
     };
     let footer = Paragraph::new(Line::from(Span::styled(
         help,
@@ -572,19 +747,34 @@ fn render_provider_list(
                 ProviderStatus::Cached => ("●", false),
                 ProviderStatus::Refreshing => ("◐", false),
                 ProviderStatus::Disabled => ("○", true),
-                ProviderStatus::EnvKey => ("○", false),
+                ProviderStatus::EnvKey => ("●", false),
                 ProviderStatus::Inactive => ("✗", true),
                 ProviderStatus::Error => ("✗", false),
+            };
+            let source_tag = match p.source {
+                ProviderSource::Env => "env",
+                ProviderSource::AuthStore { .. } => "oauth",
+                ProviderSource::Config => "config",
             };
             let s = if muted {
                 style.add_modifier(Modifier::DIM)
             } else {
                 style
             };
-            ListItem::new(Line::from(Span::styled(
-                format!(" {} {}", status_symbol, p.name),
-                s,
-            )))
+            let detail = if p.detail.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", p.detail)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {} ", status_symbol), s),
+                Span::styled(format!("{:<20}", p.name), s),
+                Span::styled(
+                    format!("[{}]", source_tag),
+                    Style::default().fg(theme.meta_fg.into()),
+                ),
+                Span::styled(detail, Style::default().fg(theme.subtle_fg.into())),
+            ]))
         })
         .collect();
 
@@ -604,54 +794,104 @@ fn render_model_detail(
     mgr: &ProviderManager,
     theme: &crate::theme::Theme,
 ) {
-    let block = Block::default().borders(Borders::NONE).title(" Models ");
+    let block = Block::default().borders(Borders::NONE).title(" Details ");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Match model groups by vendor name (e.g. "codex").
-    let provider_name = mgr.providers.get(mgr.selected).map(|p| p.name.as_str());
+    let provider = mgr.providers.get(mgr.selected);
     let mut lines = vec![];
-    if let Some(name) = provider_name {
-        for g in &mgr.groups {
-            if g.provider_name == name {
-                lines.push(Line::from(Span::styled(
-                    format!(" {} models:", g.models.len()),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
-                for (mi, m) in g.models.iter().enumerate() {
-                    let max_tok = m
-                        .max_output_tokens
-                        .map(|n| format!("{}K", n / 1000))
-                        .unwrap_or_else(|| "—".to_string());
-                    let thinking = if m.thinking { "🧠" } else { "" };
-                    let is_sel = mgr.focus == ProviderFocus::ModelList && mgr.model_selected == mi;
-                    let style = if is_sel {
-                        Style::default()
-                            .fg(theme.accent.into())
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.tinted_fg.into())
-                    };
-                    let prefix = if is_sel { "▶" } else { " " };
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            " {} {}  {} ctx  {} out  {}",
-                            prefix,
-                            m.slug,
-                            atman_runtime::humanize::format_count(m.context_budget),
-                            max_tok,
-                            thinking
-                        ),
-                        style,
-                    )));
+
+    if let Some(p) = provider {
+        let label_style = Style::default()
+            .fg(theme.subtle_fg.into())
+            .add_modifier(Modifier::DIM);
+        let val_style = Style::default().fg(theme.tinted_fg.into());
+
+        lines.push(Line::from(vec![
+            Span::styled(" Name:   ", label_style),
+            Span::styled(p.name.clone(), val_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" Kind:   ", label_style),
+            Span::styled(p.kind.clone(), val_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" Source: ", label_style),
+            Span::styled(
+                match p.source {
+                    ProviderSource::Env => "environment variable",
+                    ProviderSource::AuthStore { .. } => "OAuth (auth.json)",
+                    ProviderSource::Config => "config.toml",
+                },
+                val_style,
+            ),
+        ]));
+
+        if !p.detail.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(" Info:   ", label_style),
+                Span::styled(p.detail.clone(), val_style),
+            ]));
+        }
+
+        // For config providers, show model entry details
+        if matches!(p.source, ProviderSource::Config) {
+            if let Some(entry) = atman_runtime::model_registry::model_entry(&p.name) {
+                lines.push(Line::from(""));
+                if let Some(ctx) = entry.context_budget {
+                    lines.push(Line::from(vec![
+                        Span::styled(" Context: ", label_style),
+                        Span::styled(atman_runtime::humanize::format_count(ctx), val_style),
+                    ]));
                 }
-                break;
+                if let Some(mt) = entry.max_tokens {
+                    lines.push(Line::from(vec![
+                        Span::styled(" Max out: ", label_style),
+                        Span::styled(format!("{}K", mt / 1000), val_style),
+                    ]));
+                }
+                if let Some(thinking) = entry.thinking {
+                    lines.push(Line::from(vec![
+                        Span::styled(" Think:  ", label_style),
+                        Span::styled(if thinking { "yes" } else { "no" }, val_style),
+                    ]));
+                }
+            }
+        }
+
+        // For OAuth providers, show cached models
+        if matches!(p.source, ProviderSource::AuthStore { .. }) {
+            for g in &mgr.groups {
+                if g.provider_name == p.name {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!(" {} cached models:", g.models.len()),
+                        label_style,
+                    )));
+                    for m in &g.models {
+                        let thinking = if m.thinking { " 🧠" } else { "" };
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                "  {}  {}  {}{}",
+                                m.slug,
+                                atman_runtime::humanize::format_count(m.context_budget),
+                                m.max_output_tokens
+                                    .map(|n| format!("{}K out", n / 1000))
+                                    .unwrap_or_else(|| "—".into()),
+                                thinking
+                            ),
+                            val_style,
+                        )));
+                    }
+                    break;
+                }
             }
         }
     }
+
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            " Select a provider to view models",
+            " Select a provider to view details",
             Style::default().fg(theme.meta_fg.into()),
         )));
     }
@@ -671,14 +911,20 @@ fn render_add_dialog(
     let inner = block.inner(area);
     f.render_widget(block, area);
     let mut lines = vec![];
+    let mut cursor_pos: Option<(u16, u16)> = None;
     if mgr.in_form {
-        let fields = [
+        let fields: [(&str, &str); 7] = [
             ("Name", mgr.name_editor.buf()),
+            ("Type", mgr.provider_type_editor.buf()),
             ("API Key", mgr.api_key_editor.buf()),
             ("Base URL", mgr.base_url_editor.buf()),
+            ("Context Budget", mgr.context_budget_editor.buf()),
+            ("Max Output", mgr.max_tokens_editor.buf()),
+            ("Thinking", mgr.thinking_editor.buf()),
         ];
         for (i, (label, val)) in fields.iter().enumerate() {
-            let style = if i == mgr.form_field {
+            let active = i == mgr.form_field;
+            let style = if active {
                 Style::default()
                     .fg(theme.accent.into())
                     .add_modifier(Modifier::BOLD)
@@ -686,14 +932,34 @@ fn render_add_dialog(
                 Style::default().fg(theme.tinted_fg.into())
             };
             lines.push(Line::from(Span::styled(format!(" {label}:"), style)));
-            lines.push(Line::from(Span::styled(
-                format!("  {val}"),
+            let display_val = if *label == "API Key" && !val.is_empty() {
+                "•".repeat(val.len().min(20))
+            } else {
+                (*val).to_string()
+            };
+            let val_line = Line::from(Span::styled(
+                format!("  {display_val}"),
                 Style::default().fg(theme.tinted_fg.into()),
-            )));
+            ));
+            if active {
+                let cur_buf = match i {
+                    0 => mgr.name_editor.buf(),
+                    1 => mgr.provider_type_editor.buf(),
+                    2 => mgr.api_key_editor.buf(),
+                    3 => mgr.base_url_editor.buf(),
+                    4 => mgr.context_budget_editor.buf(),
+                    5 => mgr.max_tokens_editor.buf(),
+                    _ => mgr.thinking_editor.buf(),
+                };
+                let y = inner.y + (lines.len() as u16);
+                let x = inner.x + 2 + cur_buf.len() as u16;
+                cursor_pos = Some((x, y));
+            }
+            lines.push(val_line);
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Tab/Enter next field · Enter on last to save · Esc cancel",
+            "Tab/Enter next · t:test · Enter on last to save · Esc cancel",
             Style::default().fg(theme.subtle_fg.into()),
         )));
     } else if mgr.name_focused {
@@ -702,6 +968,9 @@ fn render_add_dialog(
             format!("  {}", mgr.name_editor.buf()),
             Style::default().fg(theme.accent.into()),
         )));
+        let y = inner.y + (lines.len() as u16) - 1;
+        let x = inner.x + 2 + mgr.name_editor.buf().len() as u16;
+        cursor_pos = Some((x, y));
         lines.push(Line::from("Enter to confirm, Esc to cancel"));
     } else {
         for (i, (label, desc, _)) in mgr.kinds.iter().enumerate() {
@@ -720,6 +989,9 @@ fn render_add_dialog(
         lines.push(Line::from("Enter to select, Esc to cancel"));
     }
     f.render_widget(Paragraph::new(lines), inner);
+    if let Some((x, y)) = cursor_pos {
+        f.set_cursor_position((x, y));
+    }
 }
 
 fn render_confirm_dialog(

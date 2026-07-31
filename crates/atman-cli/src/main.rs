@@ -1830,29 +1830,57 @@ async fn cmd_repl_once(
                         provider_type,
                         api_key,
                         base_url,
-                        models,
+                        context_budget,
+                        max_tokens,
+                        thinking,
                     } => {
                         let dir = config_dir().ok();
                         if let Some(dir) = dir {
                             let path = dir.join("config.toml");
-                            let mut text = std::fs::read_to_string(&path).unwrap_or_default();
-                            if !text.ends_with('\n') && !text.is_empty() {
-                                text.push('\n');
-                            }
-                            text.push_str(&format!("[models.{name}]\n"));
-                            text.push_str(&format!("provider = \"{provider_type}\"\n"));
-                            text.push_str(&format!("api_key = \"{api_key}\"\n"));
-                            text.push_str(&format!("base_url = \"{base_url}\"\n"));
-                            if !models.is_empty() {
-                                let quoted: Vec<String> =
-                                    models.iter().map(|m| format!("\"{m}\"")).collect();
-                                text.push_str(&format!("models = [{}]\n", quoted.join(", ")));
-                            }
-                            text.push_str("context_budget = 128000\nmax_tokens = 16384\n");
-                            if std::fs::write(&path, &text).is_ok() {
+                            if let Ok(updated) = upsert_model_config(
+                                &path,
+                                &name,
+                                &provider_type,
+                                &api_key,
+                                &base_url,
+                                context_budget,
+                                max_tokens,
+                                thinking,
+                            ) {
+                                let _ = std::fs::write(&path, &updated);
                                 atman_runtime::notify!(
                                     success,
                                     "Provider \"{name}\" added to config.toml — restart to apply"
+                                );
+                            }
+                        }
+                    }
+                    atman_tui::TuiControl::UpdateConfigProvider {
+                        name,
+                        provider_type,
+                        api_key,
+                        base_url,
+                        context_budget,
+                        max_tokens,
+                        thinking,
+                    } => {
+                        let dir = config_dir().ok();
+                        if let Some(dir) = dir {
+                            let path = dir.join("config.toml");
+                            if let Ok(updated) = upsert_model_config(
+                                &path,
+                                &name,
+                                &provider_type,
+                                &api_key,
+                                &base_url,
+                                context_budget,
+                                max_tokens,
+                                thinking,
+                            ) {
+                                let _ = std::fs::write(&path, &updated);
+                                atman_runtime::notify!(
+                                    success,
+                                    "Provider \"{name}\" updated — restart to apply"
                                 );
                             }
                         }
@@ -1886,6 +1914,20 @@ async fn cmd_repl_once(
                                 );
                             }
                             let _ = tx.send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                        });
+                    }
+                    atman_tui::TuiControl::TestProvider {
+                        name,
+                        provider_type,
+                        api_key,
+                        base_url,
+                    } => {
+                        let tx = cmd_tx_for_models.clone();
+                        tokio::spawn(async move {
+                            let (msg, ok) =
+                                test_provider_endpoint(&name, &provider_type, &api_key, &base_url)
+                                    .await;
+                            let _ = tx.send(atman_tui::TuiCommand::ProviderTestResult((msg, ok)));
                         });
                     }
                     atman_tui::TuiControl::TermResize { handle, rows, cols } => {
@@ -6582,4 +6624,83 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
     println!("✓ Added MCP server \"{}\" to mcp_servers.json", name);
     println!("  Restart atman to apply.");
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_model_config(
+    path: &std::path::Path,
+    name: &str,
+    provider_type: &str,
+    api_key: &str,
+    base_url: &str,
+    context_budget: Option<u64>,
+    max_tokens: Option<u32>,
+    thinking: bool,
+) -> Result<String, String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml::Value =
+        toml::from_str(&text).map_err(|e| format!("parse config.toml: {e}"))?;
+    let models = doc
+        .as_table_mut()
+        .ok_or("config.toml is not a table")?
+        .entry("models")
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    let models_table = models.as_table_mut().ok_or("models is not a table")?;
+    let mut entry = toml::Table::new();
+    entry.insert("provider".into(), toml::Value::String(provider_type.into()));
+    entry.insert("api_key".into(), toml::Value::String(api_key.into()));
+    entry.insert("base_url".into(), toml::Value::String(base_url.into()));
+    if let Some(cb) = context_budget {
+        entry.insert("context_budget".into(), toml::Value::Integer(cb as i64));
+    }
+    if let Some(mt) = max_tokens {
+        entry.insert("max_tokens".into(), toml::Value::Integer(mt as i64));
+    }
+    entry.insert("thinking".into(), toml::Value::Boolean(thinking));
+    models_table.insert(name.into(), toml::Value::Table(entry));
+    toml::to_string_pretty(&doc).map_err(|e| format!("serialize config.toml: {e}"))
+}
+
+async fn test_provider_endpoint(
+    name: &str,
+    provider_type: &str,
+    api_key: &str,
+    base_url: &str,
+) -> (String, bool) {
+    let client = reqwest::Client::new();
+    let url = if provider_type == "anthropic" {
+        format!("{}/v1/messages", base_url.trim_end_matches('/'))
+    } else {
+        format!("{}/chat/completions", base_url.trim_end_matches('/'))
+    };
+    let body = serde_json::json!({
+        "model": name,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let mut req = client.post(&url).json(&body);
+    if provider_type == "anthropic" {
+        req = req
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        req = req.bearer_auth(api_key);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(15), req.send()).await {
+        Ok(Ok(resp)) => {
+            let status = resp.status();
+            if status.is_success() {
+                (format!("\"{}\" responded OK", name), true)
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                let short = body.chars().take(200).collect::<String>();
+                (
+                    format!("\"{}\" returned {} — {}", name, status, short),
+                    false,
+                )
+            }
+        }
+        Ok(Err(e)) => (format!("\"{}\" connection failed — {e}", name), false),
+        Err(_) => (format!("\"{}\" timed out after 15s", name), false),
+    }
 }
