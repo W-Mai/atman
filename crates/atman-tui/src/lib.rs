@@ -2531,36 +2531,10 @@ fn handle_key(
             KeyAction::Char('r') => {
                 if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
                     let name = s.name.clone();
-                    if app.mcp_remove_armed.as_deref() == Some(&name) {
-                        // Second click — actually remove
-                        app.mcp_remove_armed = None;
-                        match atman_runtime::mcp_config::remove(&name) {
-                            Ok(()) => {
-                                app.push_toast(
-                                    format!("removed {name} — restart to apply"),
-                                    app::NoteLevel::Success,
-                                    std::time::Duration::from_secs(4),
-                                    app::ToastPosition::TopRight,
-                                );
-                            }
-                            Err(e) => {
-                                app.push_toast(
-                                    format!("remove failed: {e}"),
-                                    app::NoteLevel::Error,
-                                    std::time::Duration::from_secs(5),
-                                    app::ToastPosition::TopRight,
-                                );
-                            }
-                        }
-                    } else {
-                        app.mcp_remove_armed = Some(name.clone());
-                        app.push_toast(
-                            format!("press r again to remove {name}"),
-                            app::NoteLevel::Warn,
-                            std::time::Duration::from_secs(4),
-                            app::ToastPosition::TopRight,
-                        );
-                    }
+                    app.mcp_remove_armed = Some(name.clone());
+                    app.modal_notification = Some(format!(
+                        "Remove MCP server \"{name}\"?\n\n  Enter = confirm   Esc = cancel"
+                    ));
                 }
                 return;
             }
@@ -2594,6 +2568,39 @@ fn handle_key(
         }
     }
     if app.modal_notification.is_some() {
+        if app.mcp_remove_armed.is_some() {
+            match action {
+                KeyAction::Submit => {
+                    let name = app.mcp_remove_armed.take().unwrap();
+                    app.modal_notification = None;
+                    match atman_runtime::mcp_config::remove(&name) {
+                        Ok(()) => {
+                            app.push_toast(
+                                format!("removed {name} — restart to apply"),
+                                app::NoteLevel::Success,
+                                std::time::Duration::from_secs(4),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                        Err(e) => {
+                            app.push_toast(
+                                format!("remove failed: {e}"),
+                                app::NoteLevel::Error,
+                                std::time::Duration::from_secs(5),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                    }
+                    return;
+                }
+                KeyAction::Escape => {
+                    app.mcp_remove_armed = None;
+                    app.modal_notification = None;
+                    return;
+                }
+                _ => return,
+            }
+        }
         if matches!(action, KeyAction::Escape) {
             app.modal_notification = None;
         }

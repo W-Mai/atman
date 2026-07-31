@@ -735,6 +735,12 @@ pub fn parse_mcp_json(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig> {
         auth_token: Option<String>,
         #[serde(default)]
         headers: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        disabled: bool,
+        #[serde(default)]
+        tier: Option<String>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
     }
 
     let file: JsonConfigFile = match serde_json::from_str(text) {
@@ -761,6 +767,18 @@ pub fn parse_mcp_json(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig> {
                     None,
                 ),
             };
+            let tier = raw
+                .tier
+                .as_deref()
+                .and_then(|t| match t {
+                    "Zero" | "zero" | "0" => Some(atman_runtime::Tier::Zero),
+                    "One" | "one" | "1" => Some(atman_runtime::Tier::One),
+                    "Two" | "two" | "2" => Some(atman_runtime::Tier::Two),
+                    "Three" | "three" | "3" => Some(atman_runtime::Tier::Three),
+                    "Four" | "four" | "4" => Some(atman_runtime::Tier::Four),
+                    _ => None,
+                })
+                .unwrap_or(atman_runtime::Tier::Three);
             atman_runtime::mcp::McpServerConfig {
                 name,
                 transport,
@@ -770,9 +788,9 @@ pub fn parse_mcp_json(text: &str) -> Vec<atman_runtime::mcp::McpServerConfig> {
                 url,
                 auth_token: raw.auth_token,
                 headers: raw.headers.into_iter().collect(),
-                tier: atman_runtime::Tier::Three,
-                timeout_ms: 30_000,
-                disabled: false,
+                tier,
+                timeout_ms: raw.timeout_ms.unwrap_or(30_000),
+                disabled: raw.disabled,
             }
         })
         .collect()
