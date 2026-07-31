@@ -1091,6 +1091,14 @@ fn reconcile(
     for (k, v) in flat {
         if plan.explicit_keys.contains(&k) {
             out.insert(k, v);
+        } else if k == plan.container_key {
+            if let serde_json::Value::Object(inner) = v {
+                for (ik, iv) in inner {
+                    container.insert(ik, iv);
+                }
+            } else {
+                container.insert(k, v);
+            }
         } else {
             container.insert(k, v);
         }
@@ -1547,6 +1555,34 @@ for line in sys.stdin:
         assert_eq!(out["action"], "update");
         assert_eq!(out["params"]["guid"], "abc");
         assert_eq!(out["params"]["due"], "2026-07-17");
+    }
+
+    #[test]
+    fn reconcile_merges_container_key_instead_of_nesting() {
+        let plan = ReconcilePlan {
+            explicit_keys: ["action".into()].into(),
+            container_key: "params".into(),
+            container_required: false,
+        };
+        let flat: serde_json::Map<_, _> = serde_json::json!({
+            "action": "list_events",
+            "params": {
+                "calendar_id": "cal_123",
+                "start_time": "2026-07-31T00:00:00+08:00"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let out = reconcile(&plan, flat);
+        assert_eq!(out["action"], "list_events");
+        assert_eq!(out["params"]["calendar_id"], "cal_123");
+        assert_eq!(out["params"]["start_time"], "2026-07-31T00:00:00+08:00");
+        assert!(
+            out["params"].get("params").is_none(),
+            "params should not be nested inside params"
+        );
     }
 
     #[test]
