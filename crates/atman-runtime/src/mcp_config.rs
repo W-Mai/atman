@@ -1,429 +1,493 @@
-//! Shared MCP server config file management.
+//! MCP server config file management — single source of truth.
 //!
-//! Reads and writes `mcp_servers.json` (standard `{ "mcpServers": { ... } }`
-//! format) and `config.toml` `[[mcp]]` blocks. Tries JSON first, falls back
-//! to TOML.
+//! Reads and writes `mcp_servers.json` and `config.toml [[mcp]]` blocks.
+//! All operations go through [`McpServerConfig`]:
+//!
+//! - [`load`] → `Vec<McpServerConfig>` (from JSON + TOML + Claude Desktop)
+//! - [`save`] → writes to `mcp_servers.json`
+//! - [`toggle_disabled`] = load → toggle → save
+//! - [`remove`] = load → filter → save
 
 use std::path::{Path, PathBuf};
 
+use crate::mcp::{McpServerConfig, TransportKind};
 use crate::storage;
+use crate::tool::Tier;
 
-// ── Path helpers ───────────────────────────────────────────────────
-
-pub fn config_path() -> Result<PathBuf, String> {
+pub fn json_path() -> Result<PathBuf, String> {
     let dir = storage::config_dir().map_err(|e| e.to_string())?;
     Ok(dir.join("mcp_servers.json"))
 }
 
-pub fn config_path_in(config_dir: &Path) -> PathBuf {
+pub fn json_path_in(config_dir: &Path) -> PathBuf {
     config_dir.join("mcp_servers.json")
 }
 
-fn config_toml_path() -> Result<PathBuf, String> {
-    let dir = storage::config_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join("config.toml"))
-}
-
-fn config_toml_path_in(config_dir: &Path) -> PathBuf {
+fn toml_path_in(config_dir: &Path) -> PathBuf {
     config_dir.join("config.toml")
 }
 
-// ── JSON load/save ─────────────────────────────────────────────────
+/// Load all MCP server configs from all sources: `config.toml` [[mcp]]
+/// blocks, `mcp_servers.json`, and Claude Desktop's config (read-only).
+/// Later entries override earlier ones by name.
+pub fn load(config_dir: Option<&Path>) -> Vec<McpServerConfig> {
+    let mut configs = load_in(config_dir.unwrap_or(Path::new("")));
 
-pub fn load_raw() -> serde_json::Value {
-    let path = match config_path() {
-        Ok(p) => p,
-        Err(_) => return serde_json::json!({"mcpServers": {}}),
-    };
-    load_from(&path)
-}
-
-pub fn load_raw_in(config_dir: &Path) -> serde_json::Value {
-    load_from(&config_path_in(config_dir))
-}
-
-fn load_from(path: &Path) -> serde_json::Value {
-    if !path.exists() {
-        return serde_json::json!({"mcpServers": {}});
+    // Claude Desktop auto-discover (read-only, macOS only)
+    if let Ok(home) = std::env::var("HOME") {
+        let claude_path = PathBuf::from(home)
+            .join("Library/Application Support/Claude/claude_desktop_config.json");
+        if claude_path.exists() {
+            if let Ok(text) = std::fs::read_to_string(&claude_path) {
+                configs.extend(parse_mcp_json(&text));
+            }
+        }
     }
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return serde_json::json!({"mcpServers": {}}),
+
+    dedup_keep_last(configs)
+}
+
+/// Load from a specific config directory only (no Claude Desktop discovery).
+pub fn load_in(config_dir: &Path) -> Vec<McpServerConfig> {
+    let mut configs = Vec::new();
+
+    let toml_path = toml_path_in(config_dir);
+    if toml_path.exists() {
+        if let Ok(text) = std::fs::read_to_string(&toml_path) {
+            configs.extend(parse_mcp_toml(&text));
+        }
+    }
+
+    let json_path = json_path_in(config_dir);
+    if json_path.exists() {
+        if let Ok(text) = std::fs::read_to_string(&json_path) {
+            configs.extend(parse_mcp_json(&text));
+        }
+    }
+
+    dedup_keep_last(configs)
+}
+
+/// Deduplicate by name, keeping the LAST occurrence (later sources override).
+fn dedup_keep_last(configs: Vec<McpServerConfig>) -> Vec<McpServerConfig> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result: Vec<McpServerConfig> = Vec::with_capacity(configs.len());
+    for cfg in configs.into_iter().rev() {
+        if seen.insert(cfg.name.clone()) {
+            result.push(cfg);
+        }
+    }
+    result.reverse();
+    result
+}
+
+/// Parse standard `mcpServers` JSON format.
+pub fn parse_mcp_json(text: &str) -> Vec<McpServerConfig> {
+    #[derive(serde::Deserialize)]
+    struct JsonConfigFile {
+        #[serde(default, rename = "mcpServers")]
+        mcp_servers: std::collections::HashMap<String, JsonServerConfig>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct JsonServerConfig {
+        #[serde(default)]
+        r#type: Option<String>,
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default, rename = "authToken")]
+        auth_token: Option<String>,
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        disabled: bool,
+        #[serde(default)]
+        tier: Option<String>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    }
+
+    let file: JsonConfigFile = match serde_json::from_str(text) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
     };
-    serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"mcpServers": {}}))
+    file.mcp_servers
+        .into_iter()
+        .map(|(name, raw)| {
+            let (transport, command, url) = match raw.r#type.as_deref() {
+                Some("sse") => (TransportKind::Sse, String::new(), raw.url),
+                Some("http") => (TransportKind::Http, String::new(), raw.url),
+                _ => (TransportKind::Stdio, raw.command.unwrap_or_default(), None),
+            };
+            McpServerConfig {
+                name,
+                transport,
+                command,
+                args: raw.args,
+                env: raw.env.into_iter().collect(),
+                url,
+                auth_token: raw.auth_token,
+                headers: raw.headers.into_iter().collect(),
+                tier: parse_tier_str(raw.tier.as_deref()),
+                timeout_ms: raw.timeout_ms.unwrap_or(30_000),
+                disabled: raw.disabled,
+            }
+        })
+        .collect()
 }
 
-pub fn save_raw(root: &serde_json::Value) -> Result<(), String> {
-    let path = config_path()?;
-    save_to(&path, root)
+/// Parse `config.toml` `[[mcp]]` blocks.
+pub fn parse_mcp_toml(text: &str) -> Vec<McpServerConfig> {
+    #[derive(Debug, serde::Deserialize)]
+    struct RawMcpConfigFile {
+        #[serde(default)]
+        mcp: Vec<RawMcpConfig>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct RawMcpConfig {
+        name: String,
+        #[serde(default)]
+        transport: Option<String>,
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        auth_token: Option<String>,
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        tier: Option<u8>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+        #[serde(default)]
+        disabled: bool,
+    }
+
+    let file: RawMcpConfigFile = match toml::from_str(text) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    file.mcp
+        .into_iter()
+        .map(|raw| {
+            let transport = match raw.transport.as_deref() {
+                Some("http") => TransportKind::Http,
+                Some("sse") => TransportKind::Sse,
+                _ => TransportKind::Stdio,
+            };
+            McpServerConfig {
+                name: raw.name,
+                transport,
+                command: raw.command.unwrap_or_default(),
+                args: raw.args,
+                env: raw.env.into_iter().collect(),
+                url: raw.url,
+                auth_token: raw.auth_token,
+                headers: raw.headers.into_iter().collect(),
+                tier: tier_from_int(raw.tier.unwrap_or(3)),
+                timeout_ms: raw.timeout_ms.unwrap_or(30_000),
+                disabled: raw.disabled,
+            }
+        })
+        .collect()
 }
 
-pub fn save_raw_in(config_dir: &Path, root: &serde_json::Value) -> Result<(), String> {
-    save_to(&config_path_in(config_dir), root)
+fn parse_tier_str(s: Option<&str>) -> Tier {
+    match s {
+        Some("Zero") | Some("zero") | Some("0") => Tier::Zero,
+        Some("One") | Some("one") | Some("1") => Tier::One,
+        Some("Two") | Some("two") | Some("2") => Tier::Two,
+        Some("Three") | Some("three") | Some("3") => Tier::Three,
+        Some("Four") | Some("four") | Some("4") => Tier::Four,
+        _ => Tier::Three,
+    }
 }
 
-fn save_to(path: &Path, root: &serde_json::Value) -> Result<(), String> {
+fn tier_from_int(n: u8) -> Tier {
+    match n {
+        0 => Tier::Zero,
+        1 => Tier::One,
+        2 => Tier::Two,
+        3 => Tier::Three,
+        _ => Tier::Four,
+    }
+}
+
+fn tier_to_str(t: Tier) -> &'static str {
+    match t {
+        Tier::Zero => "Zero",
+        Tier::One => "One",
+        Tier::Two => "Two",
+        Tier::Three => "Three",
+        Tier::Four => "Four",
+    }
+}
+
+/// Save configs to `mcp_servers.json`. Overwrites the file entirely.
+pub fn save(configs: &[McpServerConfig]) -> Result<(), String> {
+    let dir = storage::config_dir().map_err(|e| e.to_string())?;
+    save_in(&dir, configs)
+}
+
+/// Save configs to `mcp_servers.json` in an explicit config directory.
+pub fn save_in(config_dir: &Path, configs: &[McpServerConfig]) -> Result<(), String> {
+    let path = json_path_in(config_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let json = serde_json::to_string_pretty(root).map_err(|e| e.to_string())?;
-    std::fs::write(path, json + "\n").map_err(|e| e.to_string())?;
+    let root = configs_to_json(configs);
+    let json = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json + "\n").map_err(|e| e.to_string())?;
     Ok(())
 }
 
-// ── Remove ─────────────────────────────────────────────────────────
-
-/// Remove a server. Tries `mcp_servers.json` first, then `config.toml`.
-pub fn remove(name: &str) -> Result<(), String> {
-    let dir = storage::config_dir().map_err(|e| e.to_string())?;
-    remove_in(&dir, name)
+fn configs_to_json(configs: &[McpServerConfig]) -> serde_json::Value {
+    let mut servers = serde_json::Map::new();
+    for cfg in configs {
+        servers.insert(cfg.name.clone(), config_to_json_value(cfg));
+    }
+    serde_json::json!({ "mcpServers": serde_json::Value::Object(servers) })
 }
 
-pub fn remove_in(config_dir: &Path, name: &str) -> Result<(), String> {
-    // Try JSON first
-    let mut root = load_raw_in(config_dir);
-    if json_has_server(&root, name) {
-        json_remove(&mut root, name)?;
-        return save_raw_in(config_dir, &root);
+fn config_to_json_value(cfg: &McpServerConfig) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    match cfg.transport {
+        TransportKind::Sse => {
+            obj.insert("type".into(), "sse".into());
+        }
+        TransportKind::Http => {
+            obj.insert("type".into(), "http".into());
+        }
+        TransportKind::Stdio => {}
     }
-    // Fall back to TOML
-    let toml_path = config_toml_path_in(config_dir);
-    if toml_path.exists() {
-        let text = std::fs::read_to_string(&toml_path).map_err(|e| e.to_string())?;
-        let new_text = remove_mcp_block(&text, name)?;
-        std::fs::write(&toml_path, new_text).map_err(|e| e.to_string())?;
-        return Ok(());
+    if !cfg.command.is_empty() {
+        obj.insert("command".into(), cfg.command.clone().into());
     }
-    Err(format!(
-        "MCP server \"{name}\" not found in mcp_servers.json or config.toml"
-    ))
+    if !cfg.args.is_empty() {
+        obj.insert(
+            "args".into(),
+            serde_json::Value::Array(cfg.args.iter().map(|a| a.clone().into()).collect()),
+        );
+    }
+    if !cfg.env.is_empty() {
+        obj.insert(
+            "env".into(),
+            serde_json::Value::Object(
+                cfg.env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone().into()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(url) = &cfg.url {
+        obj.insert("url".into(), url.clone().into());
+    }
+    if let Some(token) = &cfg.auth_token {
+        obj.insert("authToken".into(), token.clone().into());
+    }
+    if !cfg.headers.is_empty() {
+        obj.insert(
+            "headers".into(),
+            serde_json::Value::Object(
+                cfg.headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone().into()))
+                    .collect(),
+            ),
+        );
+    }
+    obj.insert("tier".into(), tier_to_str(cfg.tier).into());
+    obj.insert("timeout_ms".into(), cfg.timeout_ms.into());
+    if cfg.disabled {
+        obj.insert("disabled".into(), true.into());
+    }
+    serde_json::Value::Object(obj)
 }
 
-// ── Toggle disabled ────────────────────────────────────────────────
-
-/// Toggle `disabled` flag. Tries `mcp_servers.json` first, then `config.toml`.
+/// Toggle the `disabled` flag on a server. Returns the new disabled value.
 pub fn toggle_disabled(name: &str) -> Result<bool, String> {
     let dir = storage::config_dir().map_err(|e| e.to_string())?;
     toggle_disabled_in(&dir, name)
 }
 
+/// Toggle `disabled` in an explicit config directory.
 pub fn toggle_disabled_in(config_dir: &Path, name: &str) -> Result<bool, String> {
-    // Try JSON first
-    let mut root = load_raw_in(config_dir);
-    if json_has_server(&root, name) {
-        let new_val = json_toggle(&mut root, name)?;
-        save_raw_in(config_dir, &root)?;
-        return Ok(new_val);
-    }
-    // Fall back to TOML
-    let toml_path = config_toml_path_in(config_dir);
-    if toml_path.exists() {
-        let text = std::fs::read_to_string(&toml_path).map_err(|e| e.to_string())?;
-        let (new_text, new_disabled) = toggle_mcp_block(&text, name)?;
-        std::fs::write(&toml_path, new_text).map_err(|e| e.to_string())?;
-        return Ok(new_disabled);
-    }
-    Err(format!(
-        "MCP server \"{name}\" not found in mcp_servers.json or config.toml"
-    ))
-}
-
-// ── JSON helpers ───────────────────────────────────────────────────
-
-fn json_has_server(root: &serde_json::Value, name: &str) -> bool {
-    root.get("mcpServers")
-        .and_then(|s| s.as_object())
-        .is_some_and(|s| s.contains_key(name))
-}
-
-fn json_remove(root: &mut serde_json::Value, name: &str) -> Result<(), String> {
-    let removed = root
-        .as_object_mut()
-        .and_then(|o| o.get_mut("mcpServers"))
-        .and_then(|s| s.as_object_mut())
-        .is_some_and(|s| s.remove(name).is_some());
-    if !removed {
-        return Err(format!(
-            "MCP server \"{name}\" not found in mcp_servers.json"
-        ));
-    }
-    Ok(())
-}
-
-fn json_toggle(root: &mut serde_json::Value, name: &str) -> Result<bool, String> {
-    let server = root
-        .as_object_mut()
-        .and_then(|o| o.get_mut("mcpServers"))
-        .and_then(|s| s.as_object_mut())
-        .and_then(|s| s.get_mut(name))
-        .ok_or_else(|| format!("MCP server \"{name}\" not found in mcp_servers.json"))?;
-    let obj = server
-        .as_object_mut()
-        .ok_or_else(|| format!("server \"{name}\" is not a JSON object"))?;
-    let current = obj
-        .get("disabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let new_val = !current;
-    obj.insert("disabled".to_string(), serde_json::Value::Bool(new_val));
+    let mut configs = load_in(config_dir);
+    let cfg = configs
+        .iter_mut()
+        .find(|c| c.name == name)
+        .ok_or_else(|| format!("MCP server \"{name}\" not found"))?;
+    cfg.disabled = !cfg.disabled;
+    let new_val = cfg.disabled;
+    save_in(config_dir, &configs)?;
     Ok(new_val)
 }
 
-// ── TOML text-based editing ────────────────────────────────────────
-
-/// Toggle `disabled` in a `[[mcp]]` block. Returns (new_text, new_disabled).
-fn toggle_mcp_block(text: &str, name: &str) -> Result<(String, bool), String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut result: Vec<String> = Vec::with_capacity(lines.len());
-    let mut i = 0;
-    let mut found = false;
-    let mut new_disabled = false;
-
-    while i < lines.len() {
-        if lines[i].trim() == "[[mcp]]" {
-            let block_start = i;
-            let mut block_end = i + 1;
-            while block_end < lines.len() && !lines[block_end].trim().starts_with("[[") {
-                block_end += 1;
-            }
-            let block_lines = &lines[block_start..block_end];
-            let block_text = block_lines.join("\n");
-
-            if extract_toml_string_field(&block_text, "name").as_deref() == Some(name) {
-                found = true;
-                let current = extract_toml_bool_field(&block_text, "disabled").unwrap_or(false);
-                new_disabled = !current;
-
-                let mut rebuilt: Vec<String> = Vec::new();
-                let mut disabled_set = false;
-                for bl in block_lines {
-                    if bl.trim().starts_with("disabled") && bl.contains('=') {
-                        rebuilt.push(format!("disabled = {new_disabled}"));
-                        disabled_set = true;
-                    } else {
-                        rebuilt.push(bl.to_string());
-                    }
-                }
-                if !disabled_set {
-                    let name_idx = rebuilt
-                        .iter()
-                        .position(|l| l.trim().starts_with("name") && l.contains('='))
-                        .unwrap_or(0);
-                    rebuilt.insert(name_idx + 1, format!("disabled = {new_disabled}"));
-                }
-                result.extend(rebuilt);
-                i = block_end;
-                continue;
-            }
-            for bl in block_lines {
-                result.push(bl.to_string());
-            }
-            i = block_end;
-        } else {
-            result.push(lines[i].to_string());
-            i += 1;
-        }
-    }
-
-    if !found {
-        return Err(format!("MCP server \"{name}\" not found in config.toml"));
-    }
-    Ok((result.join("\n"), new_disabled))
+/// Remove a server from the config.
+pub fn remove(name: &str) -> Result<(), String> {
+    let dir = storage::config_dir().map_err(|e| e.to_string())?;
+    remove_in(&dir, name)
 }
 
-/// Remove the `[[mcp]]` block with matching name.
-fn remove_mcp_block(text: &str, name: &str) -> Result<String, String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut result: Vec<String> = Vec::new();
-    let mut i = 0;
-    let mut found = false;
-
-    while i < lines.len() {
-        if lines[i].trim() == "[[mcp]]" {
-            let block_start = i;
-            let mut block_end = i + 1;
-            while block_end < lines.len() && !lines[block_end].trim().starts_with("[[") {
-                block_end += 1;
-            }
-            let block_lines = &lines[block_start..block_end];
-            let block_text = block_lines.join("\n");
-
-            if extract_toml_string_field(&block_text, "name").as_deref() == Some(name) {
-                found = true;
-                i = block_end;
-                if i < lines.len() && lines[i].trim().is_empty() {
-                    i += 1;
-                }
-                continue;
-            }
-            for bl in block_lines {
-                result.push(bl.to_string());
-            }
-            i = block_end;
-        } else {
-            result.push(lines[i].to_string());
-            i += 1;
-        }
+/// Remove a server from an explicit config directory.
+pub fn remove_in(config_dir: &Path, name: &str) -> Result<(), String> {
+    let mut configs = load_in(config_dir);
+    let before = configs.len();
+    configs.retain(|c| c.name != name);
+    if configs.len() == before {
+        return Err(format!("MCP server \"{name}\" not found"));
     }
-
-    if !found {
-        return Err(format!("MCP server \"{name}\" not found in config.toml"));
-    }
-    Ok(result.join("\n"))
+    save_in(config_dir, &configs)
 }
-
-fn extract_toml_string_field(text: &str, field: &str) -> Option<String> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix(field) {
-            let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                return Some(rest.trim().trim_matches('"').to_string());
-            }
-        }
-    }
-    None
-}
-
-fn extract_toml_bool_field(text: &str, field: &str) -> Option<bool> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix(field) {
-            let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                return Some(rest.trim().starts_with("true"));
-            }
-        }
-    }
-    None
-}
-
-// ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn load_raw_in_returns_empty_when_no_file() {
+    fn load_empty_when_no_files() {
         let dir = tempfile::tempdir().unwrap();
-        let root = load_raw_in(dir.path());
-        assert!(root.get("mcpServers").is_some());
-        assert!(root["mcpServers"].as_object().unwrap().is_empty());
+        let configs = load_in(dir.path());
+        assert!(configs.is_empty());
     }
 
     #[test]
-    fn save_and_load_roundtrip() {
+    fn save_then_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let root = serde_json::json!({
-            "mcpServers": {
-                "test-srv": { "command": "echo", "args": ["hello"] }
-            }
-        });
-        save_raw_in(dir.path(), &root).unwrap();
-        let loaded = load_raw_in(dir.path());
-        assert_eq!(loaded, root);
+        let original = vec![
+            McpServerConfig::stdio("srv-a", "echo", vec!["hello".into()], Tier::Two, 30_000),
+            McpServerConfig::http(
+                "srv-b",
+                "https://api.example.com",
+                Some("secret".into()),
+                Tier::Three,
+                30_000,
+            ),
+        ];
+        save_in(dir.path(), &original).unwrap();
+        let loaded = load_in(dir.path());
+        assert_eq!(loaded.len(), 2);
+        let a = loaded.iter().find(|c| c.name == "srv-a").unwrap();
+        assert_eq!(a.command, "echo");
+        assert_eq!(a.transport, TransportKind::Stdio);
+        let b = loaded.iter().find(|c| c.name == "srv-b").unwrap();
+        assert_eq!(b.transport, TransportKind::Http);
+        assert_eq!(b.url.as_deref(), Some("https://api.example.com"));
     }
 
     #[test]
-    fn remove_from_json() {
+    fn toggle_disabled_load_modify_save() {
         let dir = tempfile::tempdir().unwrap();
-        save_raw_in(
+        save_in(
             dir.path(),
-            &serde_json::json!({
-                "mcpServers": {
-                    "a": { "command": "echo" },
-                    "b": { "command": "ls" },
-                }
-            }),
+            &[McpServerConfig::stdio(
+                "srv",
+                "echo",
+                vec![],
+                Tier::Two,
+                30_000,
+            )],
         )
         .unwrap();
+
+        assert!(toggle_disabled_in(dir.path(), "srv").unwrap());
+        let loaded = load_in(dir.path());
+        assert!(loaded[0].disabled);
+
+        assert!(!toggle_disabled_in(dir.path(), "srv").unwrap());
+        let loaded = load_in(dir.path());
+        assert!(!loaded[0].disabled);
+    }
+
+    #[test]
+    fn toggle_disabled_on_toml_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            toml_path_in(dir.path()),
+            "[[mcp]]\nname = \"exa\"\ncommand = \"exa-mcp-server\"\ntimeout_ms = 30000\n",
+        )
+        .unwrap();
+
+        assert!(toggle_disabled_in(dir.path(), "exa").unwrap());
+        let loaded = load_in(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].disabled);
+        assert!(json_path_in(dir.path()).exists());
+    }
+
+    #[test]
+    fn remove_server() {
+        let dir = tempfile::tempdir().unwrap();
+        save_in(
+            dir.path(),
+            &[
+                McpServerConfig::stdio("a", "echo", vec![], Tier::Two, 30_000),
+                McpServerConfig::stdio("b", "ls", vec![], Tier::Two, 30_000),
+            ],
+        )
+        .unwrap();
+
         remove_in(dir.path(), "a").unwrap();
-        let loaded = load_raw_in(dir.path());
-        assert!(loaded["mcpServers"].as_object().unwrap().get("a").is_none());
-        assert!(loaded["mcpServers"].as_object().unwrap().get("b").is_some());
+        let loaded = load_in(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "b");
     }
 
     #[test]
     fn remove_missing_errors() {
         let dir = tempfile::tempdir().unwrap();
-        save_raw_in(
+        save_in(
             dir.path(),
-            &serde_json::json!({"mcpServers": {"a": {"command": "echo"}}}),
+            &[McpServerConfig::stdio(
+                "a",
+                "echo",
+                vec![],
+                Tier::Two,
+                30_000,
+            )],
         )
         .unwrap();
         assert!(remove_in(dir.path(), "nonexistent").is_err());
     }
 
     #[test]
-    fn toggle_disabled_json() {
+    fn toggle_missing_errors() {
         let dir = tempfile::tempdir().unwrap();
-        save_raw_in(
+        save_in(
             dir.path(),
-            &serde_json::json!({"mcpServers": {"srv": {"command": "echo"}}}),
-        )
-        .unwrap();
-        assert!(toggle_disabled_in(dir.path(), "srv").unwrap());
-        let loaded = load_raw_in(dir.path());
-        assert_eq!(
-            loaded["mcpServers"]["srv"]["disabled"].as_bool(),
-            Some(true)
-        );
-        assert!(!toggle_disabled_in(dir.path(), "srv").unwrap());
-    }
-
-    // ── TOML tests ──
-
-    #[test]
-    fn toggle_disabled_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml_path = config_toml_path_in(dir.path());
-        std::fs::write(
-            &toml_path,
-            "[compaction]\nreview = \"manual-only\"\n\n[[mcp]]\nname = \"exa\"\ncommand = \"exa-mcp-server\"\ntimeout_ms = 30000\n\n[[mcp]]\nname = \"feishu\"\ncommand = \"node\"\n",
-        )
-        .unwrap();
-
-        // Toggle exa → disabled = true
-        let new_val = toggle_disabled_in(dir.path(), "exa").unwrap();
-        assert!(new_val);
-        let text = std::fs::read_to_string(&toml_path).unwrap();
-        assert!(text.contains("disabled = true"));
-        assert!(text.contains("[compaction]")); // other content preserved
-        assert!(text.contains("name = \"feishu\"")); // other mcp block preserved
-
-        // Toggle exa again → disabled = false
-        let new_val = toggle_disabled_in(dir.path(), "exa").unwrap();
-        assert!(!new_val);
-        let text = std::fs::read_to_string(&toml_path).unwrap();
-        assert!(text.contains("disabled = false"));
-    }
-
-    #[test]
-    fn remove_from_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        let toml_path = config_toml_path_in(dir.path());
-        std::fs::write(
-            &toml_path,
-            "[compaction]\nreview = \"manual-only\"\n\n[[mcp]]\nname = \"exa\"\ncommand = \"exa-mcp-server\"\n\n[[mcp]]\nname = \"feishu\"\ncommand = \"node\"\n",
-        )
-        .unwrap();
-
-        remove_in(dir.path(), "exa").unwrap();
-        let text = std::fs::read_to_string(&toml_path).unwrap();
-        assert!(!text.contains("exa"));
-        assert!(text.contains("name = \"feishu\""));
-        assert!(text.contains("[compaction]"));
-    }
-
-    #[test]
-    fn toggle_toml_missing_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            config_toml_path_in(dir.path()),
-            "[[mcp]]\nname = \"other\"\n",
+            &[McpServerConfig::stdio(
+                "a",
+                "echo",
+                vec![],
+                Tier::Two,
+                30_000,
+            )],
         )
         .unwrap();
         assert!(toggle_disabled_in(dir.path(), "nonexistent").is_err());
+    }
+
+    #[test]
+    fn dedup_keeps_last() {
+        let configs = vec![
+            McpServerConfig::stdio("a", "from-toml", vec![], Tier::Two, 30_000),
+            McpServerConfig::stdio("a", "from-json", vec![], Tier::Two, 30_000),
+        ];
+        let deduped = dedup_keep_last(configs);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].command, "from-json");
     }
 }

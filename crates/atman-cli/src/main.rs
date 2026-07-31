@@ -1953,7 +1953,7 @@ async fn cmd_repl_once(
                         let tx = cmd_tx_for_models.clone();
                         let name = name.clone();
                         tokio::spawn(async move {
-                            let configs = atman_daemon::bootstrap::load_mcp_configs(
+                            let configs = atman_runtime::mcp_config::load(
                                 crate::config_dir().ok().as_deref(),
                             );
                             let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
@@ -5486,7 +5486,7 @@ fn parse_interjection_mode(text: &str) -> Option<String> {
 }
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
-    atman_daemon::bootstrap::load_mcp_configs(config_dir().ok().as_deref())
+    atman_runtime::mcp_config::load(config_dir().ok().as_deref())
 }
 
 async fn cmd_migrate(action: MigrateAction) -> Result<()> {
@@ -6235,7 +6235,6 @@ fn render_value(v: &Value) -> String {
 }
 
 async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
-    use atman_daemon::bootstrap;
     use std::io::Write as _;
     match action {
         McpAction::List => {
@@ -6432,7 +6431,7 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
         McpAction::Import { file } => {
             let text = std::fs::read_to_string(&file)
                 .map_err(|e| anyhow::anyhow!("read {}: {e}", file.display()))?;
-            let servers = bootstrap::parse_mcp_json(&text);
+            let servers = atman_runtime::mcp_config::parse_mcp_json(&text);
             if servers.is_empty() {
                 println!("No MCP servers found in {}", file.display());
                 return Ok(());
