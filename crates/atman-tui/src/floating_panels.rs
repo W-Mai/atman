@@ -30,6 +30,7 @@ pub enum PanelKind {
     Activity,
     Mermaid,
     Cheatsheet,
+    Mcp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,7 @@ impl PanelKind {
             PanelKind::Activity => "▸",
             PanelKind::Mermaid => "◇",
             PanelKind::Cheatsheet => "?",
+            PanelKind::Mcp => "⚡",
         }
     }
 }
@@ -336,6 +338,7 @@ pub fn render(
     animation_frame: u32,
     panel_close_armed: Option<(&str, bool)>,
     max_canvas: Rect,
+    mcp_servers: &[atman_runtime::mcp::McpServerStatus],
 ) -> FloatingPanelHitmap {
     let mut all_hitmap = FloatingPanelHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
@@ -592,6 +595,7 @@ pub fn render(
                 hovered_history_row,
                 &mut panel_hitmap,
                 animation_frame,
+                mcp_servers,
             );
             all_hitmap
                 .history_row_rects
@@ -861,6 +865,7 @@ fn render_panel_content(
     hovered_history_row: &Option<String>,
     hitmap_out: &mut FloatingPanelHitmap,
     animation_frame: u32,
+    mcp_servers: &[atman_runtime::mcp::McpServerStatus],
 ) {
     let _hovered_btn = hovered_btn;
     if area.height == 0 || area.width == 0 {
@@ -1014,6 +1019,9 @@ fn render_panel_content(
             let visible: Vec<Line> = lines.into_iter().skip(scroll as usize).collect();
             let p = ratatui::widgets::Paragraph::new(visible);
             f.render_widget(p, area);
+        }
+        PanelKind::Mcp => {
+            crate::mcp_manager::render_panel(f, area, panel.scroll, mcp_servers);
         }
         PanelKind::Task(kind) => {
             let snap = snapshots.iter().find(|s| s.source_handle == panel.id);

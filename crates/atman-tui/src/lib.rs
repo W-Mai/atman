@@ -23,6 +23,7 @@ pub mod form_modal;
 pub mod highlight;
 pub mod history;
 pub mod history_search_modal;
+pub mod mcp_manager;
 
 pub mod floating_panels;
 pub mod input;
@@ -1969,6 +1970,15 @@ fn dispatch_palette_entry(
         PaletteEntryId::ManageAliases => {
             app.alias_manager.toggle();
         }
+        PaletteEntryId::ManageMcp => {
+            let canvas = app.last_transcript_rect.unwrap_or_default();
+            app.floating_panels.open(
+                "mcp-manager",
+                crate::floating_panels::PanelKind::Mcp,
+                "MCP Servers",
+                canvas,
+            );
+        }
         PaletteEntryId::ShowHelp => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
             app.floating_panels.open(
@@ -3224,6 +3234,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             app.animation_frame,
             close_armed.as_ref().map(|(id, exp)| (id.as_str(), *exp)),
             max_canvas,
+            &app.context.mcp_servers,
         );
     } else {
         app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();

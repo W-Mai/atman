@@ -17,6 +17,7 @@ pub enum PaletteEntryId {
     ToggleSidebar,
     ManageProviders,
     ManageAliases,
+    ManageMcp,
     SetTrustMode,
     SetModeTheme,
     ShowHelp,
@@ -119,6 +120,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Manage Aliases...",
         hint: "Add, edit, and remove model aliases",
         keyword: "aliases alias model rename",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::ManageMcp,
+        group: "MCP",
+        label: "Manage MCP Servers...",
+        hint: "View MCP server status and tools",
+        keyword: "mcp servers tools resources prompts",
     },
     PaletteEntry {
         id: PaletteEntryId::SetTrustMode,
