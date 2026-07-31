@@ -1036,7 +1036,7 @@ fn render_panel_content(
             crate::mcp_manager::render_panel(
                 f,
                 area,
-                panel.scroll,
+                &mut panel.scroll,
                 mcp_servers,
                 expanded_mcp_servers,
                 mcp_selected,
