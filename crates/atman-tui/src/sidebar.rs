@@ -603,7 +603,7 @@ fn mcp_server_status_line<'a>(s: &atman_runtime::mcp::McpServerStatus) -> Line<'
         atman_runtime::mcp::McpServerState::Disabled => ("◌", t.subtle_fg, String::new()),
         atman_runtime::mcp::McpServerState::Pending => ("○", t.subtle_fg, String::new()),
         atman_runtime::mcp::McpServerState::Connecting => ("◐", t.warn, "(connecting...)".into()),
-        atman_runtime::mcp::McpServerState::Connected { tool_count } => {
+        atman_runtime::mcp::McpServerState::Connected { tool_count, .. } => {
             ("●", t.success, format!("{tool_count} tools"))
         }
         atman_runtime::mcp::McpServerState::Error { message } => {

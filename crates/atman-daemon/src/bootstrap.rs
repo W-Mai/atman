@@ -282,7 +282,17 @@ pub fn spawn_mcp_boot(
                             session.update_mcp_server(atman_runtime::mcp::McpServerStatus {
                                 name,
                                 transport,
-                                state: atman_runtime::mcp::McpServerState::Connected { tool_count },
+                                state: atman_runtime::mcp::McpServerState::Connected {
+                                    tool_count,
+                                    tools: arc_client
+                                        .tools
+                                        .iter()
+                                        .map(|t| atman_runtime::mcp::McpToolInfo {
+                                            name: t.name.clone(),
+                                            description: t.description.clone(),
+                                        })
+                                        .collect(),
+                                },
                             });
                         }
                         Err(e) => {

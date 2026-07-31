@@ -1190,14 +1190,29 @@ impl crate::tool::Tool for McpToolAdapter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolInfo {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpServerState {
     Disabled,
     Pending,
     Connecting,
-    Connected { tool_count: usize },
-    Error { message: String },
-    Disconnected { message: String },
-    Timeout { message: String },
+    Connected {
+        tool_count: usize,
+        tools: Vec<McpToolInfo>,
+    },
+    Error {
+        message: String,
+    },
+    Disconnected {
+        message: String,
+    },
+    Timeout {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1362,6 +1377,14 @@ pub async fn register_from_configs(
                     name: cfg.name.clone(),
                     tool_count,
                     transport: transport_kind,
+                    tools: arc_client
+                        .tools
+                        .iter()
+                        .map(|t| McpToolInfo {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                        })
+                        .collect(),
                 }));
             }
             Err(e) => out.push(Err(McpBootError {
@@ -1378,6 +1401,7 @@ pub struct McpClientStatus {
     pub name: String,
     pub tool_count: usize,
     pub transport: &'static str,
+    pub tools: Vec<McpToolInfo>,
 }
 
 #[derive(Debug, thiserror::Error)]

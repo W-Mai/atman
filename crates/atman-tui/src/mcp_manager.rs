@@ -62,7 +62,7 @@ pub fn render_panel(
             };
 
             let (status_glyph, status_color, detail) = match &s.state {
-                atman_runtime::mcp::McpServerState::Connected { tool_count } => {
+                atman_runtime::mcp::McpServerState::Connected { tool_count, .. } => {
                     ("●", t.success, format!("{} tools", tool_count))
                 }
                 atman_runtime::mcp::McpServerState::Connecting => {
