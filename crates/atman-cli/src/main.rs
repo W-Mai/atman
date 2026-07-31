@@ -1833,6 +1833,7 @@ async fn cmd_repl_once(
                         context_budget,
                         max_tokens,
                         thinking,
+                        enabled,
                     } => {
                         let dir = config_dir().ok();
                         if let Some(dir) = dir {
@@ -1846,12 +1847,16 @@ async fn cmd_repl_once(
                                 context_budget,
                                 max_tokens,
                                 thinking,
+                                Some(enabled),
                             ) {
                                 let _ = std::fs::write(&path, &updated);
-                                atman_runtime::notify!(
-                                    success,
-                                    "Provider \"{name}\" added to config.toml — restart to apply"
-                                );
+                                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                                if let Some(mc) = parse_model_config(&text) {
+                                    atman_runtime::model_registry::set_model_config(mc);
+                                }
+                                let _ = cmd_tx_for_models
+                                    .send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                                atman_runtime::notify!(success, "Provider \"{name}\" added");
                             }
                         }
                     }
@@ -1863,6 +1868,7 @@ async fn cmd_repl_once(
                         context_budget,
                         max_tokens,
                         thinking,
+                        enabled,
                     } => {
                         let dir = config_dir().ok();
                         if let Some(dir) = dir {
@@ -1876,12 +1882,16 @@ async fn cmd_repl_once(
                                 context_budget,
                                 max_tokens,
                                 thinking,
+                                Some(enabled),
                             ) {
                                 let _ = std::fs::write(&path, &updated);
-                                atman_runtime::notify!(
-                                    success,
-                                    "Provider \"{name}\" updated — restart to apply"
-                                );
+                                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                                if let Some(mc) = parse_model_config(&text) {
+                                    atman_runtime::model_registry::set_model_config(mc);
+                                }
+                                let _ = cmd_tx_for_models
+                                    .send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                                atman_runtime::notify!(success, "Provider \"{name}\" updated");
                             }
                         }
                     }
@@ -3528,6 +3538,8 @@ pub fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::M
         thinking: Option<bool>,
         #[serde(default)]
         max_tokens: Option<u32>,
+        #[serde(default)]
+        enabled: Option<bool>,
     }
     #[derive(serde::Deserialize, Default)]
     struct RawAlias {
@@ -3554,6 +3566,7 @@ pub fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::M
                 compact_threshold_ratio: m.compact_threshold_ratio,
                 thinking: m.thinking,
                 max_tokens: m.max_tokens,
+                enabled: m.enabled,
                 discovered: false,
             },
         );
@@ -6636,6 +6649,7 @@ fn upsert_model_config(
     context_budget: Option<u64>,
     max_tokens: Option<u32>,
     thinking: bool,
+    enabled: Option<bool>,
 ) -> Result<String, String> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let mut doc: toml::Value =
@@ -6657,6 +6671,9 @@ fn upsert_model_config(
         entry.insert("max_tokens".into(), toml::Value::Integer(mt as i64));
     }
     entry.insert("thinking".into(), toml::Value::Boolean(thinking));
+    if let Some(en) = enabled {
+        entry.insert("enabled".into(), toml::Value::Boolean(en));
+    }
     models_table.insert(name.into(), toml::Value::Table(entry));
     toml::to_string_pretty(&doc).map_err(|e| format!("serialize config.toml: {e}"))
 }

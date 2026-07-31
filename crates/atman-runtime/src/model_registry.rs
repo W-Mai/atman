@@ -20,8 +20,7 @@ pub struct ModelEntry {
     pub compact_threshold_ratio: Option<f64>,
     pub thinking: Option<bool>,
     pub max_tokens: Option<u32>,
-    /// True for models registered via discover (OAuth providers),
-    /// false for config.toml-defined models.
+    pub enabled: Option<bool>,
     #[allow(dead_code)]
     pub discovered: bool,
 }
@@ -94,6 +93,7 @@ pub fn register_discovered(
                 provider: Some(provider_name.to_string()),
                 context_budget: m.context_budget,
                 thinking: Some(m.thinking),
+                enabled: None,
                 discovered: true,
                 ..Default::default()
             };
@@ -324,6 +324,7 @@ fn reload_from_text(text: &str) {
                     compact_threshold_ratio: None,
                     thinking,
                     max_tokens,
+                    enabled: None,
                     discovered: false,
                 },
             );

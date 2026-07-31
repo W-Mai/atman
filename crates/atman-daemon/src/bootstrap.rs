@@ -603,6 +603,9 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
 
 fn register_providers_from_config(executor: &mut Executor) {
     for (name, entry) in atman_runtime::model_registry::all_model_entries() {
+        if entry.enabled == Some(false) {
+            continue;
+        }
         let Some(provider_type) = &entry.provider else {
             continue;
         };
