@@ -198,6 +198,7 @@ impl McpStdioTransport {
         args: &[String],
         env: &[(String, String)],
         timeout_ms: u64,
+        notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
     ) -> Result<Self, McpError> {
         let mut command = Command::new(cmd);
         command
@@ -222,8 +223,9 @@ impl McpStdioTransport {
 
         let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
         let pending_for_reader = pending.clone();
+        let notif_for_reader = notification_tx.clone();
         let reader_task = tokio::spawn(async move {
-            reader_loop(stdout, pending_for_reader).await;
+            reader_loop(stdout, pending_for_reader, notif_for_reader).await;
         });
 
         Ok(Self {
@@ -315,7 +317,11 @@ impl McpStdioTransport {
     }
 }
 
-async fn reader_loop(stdout: ChildStdout, pending: PendingCalls) {
+async fn reader_loop(
+    stdout: ChildStdout,
+    pending: PendingCalls,
+    notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
+) {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
     loop {
@@ -324,22 +330,41 @@ async fn reader_loop(stdout: ChildStdout, pending: PendingCalls) {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let parsed: JsonRpcResponse = match serde_json::from_str(&line) {
-                    Ok(r) => r,
+                let parsed: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
                     Err(_) => continue,
                 };
-                let Some(id) = parsed.id else {
+
+                if let Some(method) = parsed.get("method").and_then(|v| v.as_str()) {
+                    if parsed.get("id").is_some() {
+                        // Server → client request (e.g. sampling/createMessage).
+                        // TODO: wire sampling handler.
+                    } else {
+                        let notif = parse_notification(method, &parsed);
+                        let _ = notification_tx.send(notif);
+                    }
+                    continue;
+                }
+
+                let Some(id) = parsed.get("id").and_then(|v| v.as_u64()) else {
                     continue;
                 };
                 let sender = pending.lock().await.remove(&id);
                 if let Some(sender) = sender {
-                    let outcome = if let Some(err) = parsed.error {
+                    let outcome = if let Some(err) = parsed.get("error") {
                         Err(McpError::ServerError {
-                            code: err.code,
-                            message: err.message,
+                            code: err.get("code").and_then(|v| v.as_i64()).unwrap_or(-1),
+                            message: err
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string(),
                         })
                     } else {
-                        Ok(parsed.result.unwrap_or(serde_json::Value::Null))
+                        Ok(parsed
+                            .get("result")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null))
                     };
                     let _ = sender.send(outcome);
                 }
@@ -351,6 +376,57 @@ async fn reader_loop(stdout: ChildStdout, pending: PendingCalls) {
     let mut pending = pending.lock().await;
     for (_, tx) in pending.drain() {
         let _ = tx.send(Err(McpError::Disconnected));
+    }
+}
+
+fn parse_notification(method: &str, parsed: &serde_json::Value) -> McpNotification {
+    let params = parsed
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    match method {
+        "notifications/tools/list_changed" => McpNotification::ToolsListChanged,
+        "notifications/resources/list_changed" => McpNotification::ResourcesListChanged,
+        "notifications/prompts/list_changed" => McpNotification::PromptsListChanged,
+        "notifications/progress" => McpNotification::Progress {
+            progress_token: params
+                .get("progressToken")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            progress: params.get("progress").and_then(|v| v.as_f64()),
+            total: params.get("total").and_then(|v| v.as_f64()),
+            message: params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        },
+        "notifications/log" => McpNotification::Log {
+            level: params
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("info")
+                .to_string(),
+            data: params
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        },
+        "notifications/cancelled" => McpNotification::Cancelled {
+            request_id: params
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            reason: params
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        },
+        _ => McpNotification::Other {
+            method: method.to_string(),
+            params,
+        },
     }
 }
 
@@ -497,8 +573,7 @@ pub struct McpClient {
     transport: std::sync::Mutex<Arc<dyn McpTransport>>,
     pub tools: Vec<McpToolSchema>,
     reconnect: Option<ReconnectConfig>,
-    #[allow(dead_code)]
-    notification_tx: tokio::sync::mpsc::UnboundedSender<McpNotification>,
+    notification_tx: tokio::sync::broadcast::Sender<McpNotification>,
 }
 
 #[derive(Debug, Clone)]
@@ -549,10 +624,13 @@ impl McpClient {
         env: &[(String, String)],
         timeout_ms: u64,
     ) -> Result<Self, McpError> {
-        let transport: Arc<dyn McpTransport> =
-            Arc::new(McpStdioTransport::spawn(cmd, args, env, timeout_ms).await?);
+        let (notification_tx, _) = tokio::sync::broadcast::channel(256);
+        let transport: Arc<dyn McpTransport> = Arc::new(
+            McpStdioTransport::spawn(cmd, args, env, timeout_ms, notification_tx.clone()).await?,
+        );
         let name = name.into();
         let mut client = Self::finish_connect(name.clone(), transport).await?;
+        client.notification_tx = notification_tx;
         client.reconnect = Some(ReconnectConfig::Stdio {
             cmd: cmd.to_string(),
             args: args.to_vec(),
@@ -606,7 +684,7 @@ impl McpClient {
             .await?;
         let list = transport.call("tools/list", serde_json::json!({})).await?;
         let tools = parse_tools_list(&list)?;
-        let (notification_tx, _notification_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (notification_tx, _) = tokio::sync::broadcast::channel(256);
         Ok(Self {
             name,
             transport: std::sync::Mutex::new(transport),
@@ -621,6 +699,10 @@ impl McpClient {
         t.kind()
     }
 
+    pub fn subscribe_notifications(&self) -> tokio::sync::broadcast::Receiver<McpNotification> {
+        self.notification_tx.subscribe()
+    }
+
     async fn reconnect(&self) -> Result<(), McpError> {
         let cfg = self.reconnect.as_ref().ok_or(McpError::Disconnected)?;
         let new_transport: Arc<dyn McpTransport> = match cfg {
@@ -629,7 +711,10 @@ impl McpClient {
                 args,
                 env,
                 timeout_ms,
-            } => Arc::new(McpStdioTransport::spawn(cmd, args, env, *timeout_ms).await?),
+            } => Arc::new(
+                McpStdioTransport::spawn(cmd, args, env, *timeout_ms, self.notification_tx.clone())
+                    .await?,
+            ),
             ReconnectConfig::Http {
                 url,
                 auth_token,
@@ -1141,10 +1226,15 @@ for line in sys.stdin:
         let script_path = dir.path().join("mcp_echo.py");
         std::fs::write(&script_path, script).unwrap();
 
-        let transport =
-            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], &[], 5000)
-                .await
-                .unwrap();
+        let transport = McpStdioTransport::spawn(
+            "python3",
+            &[script_path.display().to_string()],
+            &[],
+            5000,
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
+        .unwrap();
 
         let result = transport
             .call("hello", serde_json::json!({"x": 1}))
@@ -1166,10 +1256,15 @@ for line in sys.stdin:
         let script_path = dir.path().join("mcp_err.py");
         std::fs::write(&script_path, script).unwrap();
 
-        let transport =
-            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], &[], 5000)
-                .await
-                .unwrap();
+        let transport = McpStdioTransport::spawn(
+            "python3",
+            &[script_path.display().to_string()],
+            &[],
+            5000,
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
+        .unwrap();
         let err = transport
             .call("boom", serde_json::json!({}))
             .await
@@ -1188,10 +1283,15 @@ for line in sys.stdin:
         let script_path = dir.path().join("mcp_silent.py");
         std::fs::write(&script_path, script).unwrap();
 
-        let transport =
-            McpStdioTransport::spawn("python3", &[script_path.display().to_string()], &[], 200)
-                .await
-                .unwrap();
+        let transport = McpStdioTransport::spawn(
+            "python3",
+            &[script_path.display().to_string()],
+            &[],
+            200,
+            tokio::sync::broadcast::channel(256).0,
+        )
+        .await
+        .unwrap();
         let err = transport
             .call("hangs", serde_json::json!({}))
             .await
