@@ -1189,9 +1189,12 @@ impl crate::tool::Tool for McpToolAdapter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Name and description of a single tool exposed by an MCP server.
+#[derive(Debug, Clone, PartialEq, Eq, documented::Documented, documented::DocumentedFields)]
 pub struct McpToolInfo {
+    /// The tool name as reported by the MCP server.
     pub name: String,
+    /// Human-readable description of what the tool does, if provided.
     pub description: Option<String>,
 }
 
@@ -1235,26 +1238,43 @@ pub fn mcp_counts(servers: &[McpServerStatus]) -> (u16, u16) {
     (ok, total)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Transport protocol used to communicate with an MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, documented::DocumentedVariants)]
 pub enum TransportKind {
     #[default]
+    /// Spawn a subprocess and communicate via stdin/stdout (JSON-RPC over stdio).
     Stdio,
+    /// Send JSON-RPC requests over HTTP.
     Http,
+    /// Receive server-pushed messages via Server-Sent Events.
     Sse,
 }
 
+/// Configuration for a single MCP server connection.
+#[derive(Debug, Clone, documented::Documented, documented::DocumentedFields)]
 pub struct McpServerConfig {
+    /// Unique name for this server, used in tool names as `mcp.{name}.{tool}`.
     pub name: String,
+    /// Transport protocol: stdio, http, or sse.
     #[allow(clippy::field_reassign_with_default)]
     pub transport: TransportKind,
+    /// stdio: the executable command to spawn.
     pub command: String,
+    /// stdio: command-line arguments passed to the executable.
     pub args: Vec<String>,
+    /// stdio: environment variables for the subprocess.
     pub env: Vec<(String, String)>,
+    /// http/sse: the server URL to connect to.
     pub url: Option<String>,
+    /// http/sse: bearer token for authentication.
     pub auth_token: Option<String>,
+    /// http/sse: custom HTTP headers.
     pub headers: Vec<(String, String)>,
+    /// Approval tier applied to all tools from this server.
     pub tier: crate::tool::Tier,
+    /// Connection initialization timeout in milliseconds.
     pub timeout_ms: u64,
+    /// If true, skip this server at startup.
     pub disabled: bool,
 }
 

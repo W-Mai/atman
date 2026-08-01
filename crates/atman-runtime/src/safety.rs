@@ -44,10 +44,12 @@ impl SafetyClassifier for NoopClassifier {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, documented::DocumentedVariants)]
 pub enum SafetyMode {
     #[default]
+    /// Log a warning but allow the content through.
     Warn,
+    /// Block the content entirely.
     Deny,
 }
 
@@ -146,10 +148,16 @@ impl SafetyClassifier for OpenAiModerationClassifier {
     }
 }
 
+/// Configuration for safety checks on LLM input/output.
+#[derive(documented::Documented, documented::DocumentedFields)]
 pub struct SafetyConfig {
+    /// Whether safety checks are active.
     pub enabled: bool,
+    /// Action to take when unsafe content is detected.
     pub mode: SafetyMode,
+    /// If true, attempt to auto-rewrite unsafe content instead of blocking.
     pub auto_rewrite: bool,
+    /// The classifier implementation used to scan content.
     pub classifier: Arc<dyn SafetyClassifier>,
 }
 

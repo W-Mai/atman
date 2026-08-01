@@ -1,12 +1,27 @@
 use crate::tool::ApprovalLevel;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+/// Trust mode controls how aggressively tools auto-approve.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    documented::DocumentedVariants,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustMode {
+    /// Auto-approve only Tier::Zero (read-only) tools; everything else needs manual approval.
     Calm,
     #[default]
+    /// Auto-approve Tier::Zero and Tier::One; Tier::Two+ needs approval.
     Steady,
+    /// Auto-approve up to Tier::Two; Tier::Three+ needs approval.
     Eager,
+    /// Auto-approve everything including dangerous operations.
     Reckless,
 }
 
@@ -74,12 +89,26 @@ impl std::str::FromStr for TrustMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+/// What to do when a tool outside the flow's declared tool list is invoked (Eager mode only).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    documented::DocumentedVariants,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum OutsideBehavior {
+    /// Deny any tool not in the declared list.
     Deny,
     #[default]
+    /// Prompt the user to approve undeclared tools.
     Approve,
+    /// Allow all tools without prompting.
     Allow,
 }
 
@@ -109,14 +138,30 @@ impl std::str::FromStr for OutsideBehavior {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+/// Display theme for trust mode labels in the TUI.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    Default,
+    documented::DocumentedVariants,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
     #[default]
+    /// Standard English labels.
     Default,
+    /// Wuxia (martial arts) themed labels.
     Wuxia,
+    /// Animal-themed labels.
     Animal,
+    /// Weather-themed labels.
     Weather,
+    /// Drink-themed labels.
     Drink,
 }
 
@@ -385,12 +430,24 @@ impl Theme {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// User-configurable trust settings: mode, display theme, and outside-tool behavior.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    documented::Documented,
+    documented::DocumentedFields,
+)]
 pub struct TrustConfig {
+    /// How aggressively tools are auto-approved.
     #[serde(default)]
     pub mode: TrustMode,
+    /// Display theme for trust mode labels.
     #[serde(default)]
     pub theme: Theme,
+    /// Behavior for tools outside the declared list (Eager mode only).
     #[serde(default)]
     pub outside: OutsideBehavior,
 }

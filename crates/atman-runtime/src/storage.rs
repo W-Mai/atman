@@ -154,17 +154,42 @@ pub fn resolve_current_project_scope() -> Result<PathBuf> {
     resolve_project_scope_for(&project_root)
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// Controls where session data is stored.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    documented::Documented,
+    documented::DocumentedFields,
+)]
 pub struct StorageConfig {
+    /// Storage scope: `global` (shared across projects) or `local` (per-project).
     #[serde(default)]
     pub scope: Option<StorageScope>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// Whether data is shared globally or scoped to the local project.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    documented::DocumentedVariants,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageScope {
     #[default]
+    /// Shared across all projects.
     Global,
+    /// Scoped to the current project directory.
     Local,
 }
 
