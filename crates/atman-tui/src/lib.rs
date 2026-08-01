@@ -2476,6 +2476,101 @@ fn handle_key(
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    // MCP add form intercepts all keys when open
+    if app.mcp_add_form.is_some() {
+        let mut form = app.mcp_add_form.take().unwrap();
+        let mut close = false;
+        let mut reload = false;
+        let mut toast: Option<(String, app::NoteLevel)> = None;
+
+        match action {
+            KeyAction::Escape => {
+                close = true;
+            }
+            KeyAction::Tab => {
+                form.next_field();
+            }
+            KeyAction::BackTab => {
+                form.prev_field();
+            }
+            KeyAction::Submit => match form.build_config() {
+                Ok(cfg) => {
+                    let mut configs = atman_runtime::mcp_config::load(None);
+                    configs.retain(|c| c.name != cfg.name);
+                    configs.push(cfg);
+                    match atman_runtime::mcp_config::save(&configs) {
+                        Ok(()) => {
+                            reload = true;
+                            close = true;
+                            toast = Some(("MCP server added".into(), app::NoteLevel::Success));
+                        }
+                        Err(e) => form.error = Some(format!("save failed: {e}")),
+                    }
+                }
+                Err(e) => form.error = Some(e),
+            },
+            KeyAction::Char(c) => {
+                form.error = None;
+                match form.field {
+                    0 => form.name.insert_char(c),
+                    2 if form.transport_idx == 0 => form.command.insert_char(c),
+                    2 => form.url.insert_char(c),
+                    3 => form.args.insert_char(c),
+                    4 => form.env.insert_char(c),
+                    _ => {}
+                }
+            }
+            KeyAction::Backspace => {
+                form.error = None;
+                match form.field {
+                    0 => form.name.backspace(),
+                    2 if form.transport_idx == 0 => form.command.backspace(),
+                    2 => form.url.backspace(),
+                    3 => form.args.backspace(),
+                    4 => form.env.backspace(),
+                    _ => {}
+                }
+            }
+            KeyAction::CursorLeft => {
+                form.error = None;
+                match form.field {
+                    1 if form.transport_idx > 0 => form.transport_idx -= 1,
+                    5 if form.tier_idx > 0 => form.tier_idx -= 1,
+                    _ => {}
+                }
+            }
+            KeyAction::CursorRight => {
+                form.error = None;
+                match form.field {
+                    1 if form.transport_idx < 2 => form.transport_idx += 1,
+                    5 if form.tier_idx < 2 => form.tier_idx += 1,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+
+        if close {
+            app.mcp_add_form = None;
+        } else {
+            app.mcp_add_form = Some(form);
+        }
+        if reload {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::McpReload);
+            }
+        }
+        if let Some((msg, level)) = toast {
+            app.push_toast(
+                msg,
+                level,
+                std::time::Duration::from_secs(3),
+                app::ToastPosition::TopRight,
+            );
+        }
+        return;
+    }
+
     if let KeyAction::Tab = action {
         if let Some(id) = app.floating_panels.focused.clone()
             && let Some(panel) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
@@ -2560,6 +2655,10 @@ fn handle_key(
                         "Remove MCP server \"{name}\"?\n\n  Enter = confirm   Esc = cancel"
                     ));
                 }
+                return;
+            }
+            KeyAction::Char('a') => {
+                app.mcp_add_form = Some(crate::mcp_manager::McpAddForm::default());
                 return;
             }
             KeyAction::Char('t') => {
@@ -3660,6 +3759,20 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     // Modal notification overlay
     if let Some(ref msg) = app.modal_notification {
         render_notify_modal(f, area, msg);
+    }
+    if let Some(form) = &app.mcp_add_form {
+        let w = 60.min(area.width);
+        let h = 22.min(area.height);
+        let x = area.x + (area.width - w) / 2;
+        let y = area.y + (area.height - h) / 2;
+        let form_area = ratatui::layout::Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        };
+        crate::floating_panels::render_shadow(f, form_area, &crate::theme::theme());
+        crate::mcp_manager::render_mcp_add_form(f, form_area, form);
     }
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;

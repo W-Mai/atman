@@ -257,6 +257,7 @@ pub struct AppState {
     pub expanded_mcp_servers: HashSet<String>,
     pub mcp_selected: usize,
     pub mcp_remove_armed: Option<String>,
+    pub mcp_add_form: Option<crate::mcp_manager::McpAddForm>,
     pub last_floating_hitmap: crate::floating_panels::FloatingPanelHitmap,
     pub last_task_panel_rect: Option<ratatui::layout::Rect>,
     pub last_task_panel_hitmap: crate::task_panel::TaskPanelHitMap,
