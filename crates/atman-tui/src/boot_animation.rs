@@ -3,6 +3,7 @@ use atman_runtime::event::TurnId;
 use atman_runtime::workflow::{
     NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind,
 };
+use crossterm::event::{Event as CtEvent, KeyCode, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::widgets::Paragraph;
@@ -127,6 +128,13 @@ pub async fn run_boot_animation(
     let reveal_ms_per_row: u128 = 60;
     let mut toasts: Vec<atman_runtime::notify::Notification> = Vec::new();
     let mut channel_closed = false;
+
+    // Consume input events to prevent tty input buffer exhaustion during
+    // boot animation. Without this, mouse events pile up in the OS buffer
+    // until stdout writes block, causing a CPU-0% deadlock.
+    let (mut key_events, reader_shutdown) = crate::spawn_event_reader();
+    let mut sigterm = crate::build_sigterm_stream();
+
     let result: Result<(
         Terminal<CrosstermBackend<std::io::Stdout>>,
         Vec<atman_runtime::notify::Notification>,
@@ -198,6 +206,23 @@ pub async fn run_boot_animation(
                     }
                 }
             }
+            // Drain and discard all input events to keep the tty input
+            // buffer empty. Ctrl+C / Esc aborts the boot animation early.
+            ev = key_events.recv() => {
+                if let Some(Ok(CtEvent::Key(ke))) = ev {
+                    if ke.code == KeyCode::Char('c')
+                        && ke.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        break Ok((terminal, toasts));
+                    }
+                    if ke.code == KeyCode::Esc {
+                        break Ok((terminal, toasts));
+                    }
+                }
+            }
+            _ = crate::wait_sigterm(sigterm.as_mut()) => {
+                break Ok((terminal, toasts));
+            }
         }
         let can_exit = ready_at
             .map(|t| t.elapsed() >= hold_after_ready)
@@ -207,6 +232,7 @@ pub async fn run_boot_animation(
             break Ok((terminal, toasts));
         }
     };
+    reader_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
     result
 }
 

@@ -360,6 +360,10 @@ async fn run_frames(
         editor.seed_history(past);
     }
     let (mut key_events, reader_shutdown) = spawn_event_reader();
+    // Flush stale input events accumulated during boot animation.
+    // Without this, mouse events from the boot phase flood the first
+    // render frame and cause a visible stutter.
+    while key_events.try_recv().is_ok() {}
     let mut interrupt_prompt: Option<std::time::Instant> = None;
     let mut shutdown = handle.shutdown_rx.take();
     let mut sigterm = build_sigterm_stream();
@@ -1012,6 +1016,12 @@ async fn run_frames(
                                 app.drag_target = None;
                                 app.resize_target = None;
                             } else if let MouseEventKind::Moved = me.kind {
+                                let skip_hover = app.startup_intro.is_some()
+                                    || matches!(
+                                        app.items.first(),
+                                        Some(crate::app::OutputItem::StartupCard { .. })
+                                    );
+                                if !skip_hover {
                                 // floating panel button hover
                                 let btn_hover = app
                                     .floating_panels
@@ -1122,6 +1132,7 @@ async fn run_frames(
                                     app.set_hovered_history_btn(false);
                                     app.set_hovered_hamburger(false);
                                 }
+                                } // if !skip_hover
                             }
                             interrupt_prompt = None;
                         }
@@ -1465,17 +1476,17 @@ async fn wait_form_change(
 }
 
 #[cfg(unix)]
-fn build_sigterm_stream() -> Option<tokio::signal::unix::Signal> {
+pub(crate) fn build_sigterm_stream() -> Option<tokio::signal::unix::Signal> {
     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()
 }
 
 #[cfg(not(unix))]
-fn build_sigterm_stream() -> Option<()> {
+pub(crate) fn build_sigterm_stream() -> Option<()> {
     None
 }
 
 #[cfg(unix)]
-async fn wait_sigterm(sig: Option<&mut tokio::signal::unix::Signal>) {
+pub(crate) async fn wait_sigterm(sig: Option<&mut tokio::signal::unix::Signal>) {
     match sig {
         Some(s) => {
             let _ = s.recv().await;
@@ -1485,7 +1496,7 @@ async fn wait_sigterm(sig: Option<&mut tokio::signal::unix::Signal>) {
 }
 
 #[cfg(not(unix))]
-async fn wait_sigterm(_sig: Option<&mut ()>) {
+pub(crate) async fn wait_sigterm(_sig: Option<&mut ()>) {
     std::future::pending().await
 }
 
@@ -1522,7 +1533,7 @@ impl Drop for ReaderGuard {
     }
 }
 
-fn spawn_event_reader() -> (
+pub(crate) fn spawn_event_reader() -> (
     tokio::sync::mpsc::UnboundedReceiver<std::io::Result<CtEvent>>,
     Arc<AtomicBool>,
 ) {
