@@ -8,6 +8,7 @@ pub mod form;
 pub mod fs;
 pub mod git;
 pub mod git_ops;
+pub mod help;
 pub mod hunk;
 pub mod memory;
 pub mod memory_stubs;
@@ -69,6 +70,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(form::FormAsk));
     reg.register(Arc::new(session::SessionPush));
     reg.register(Arc::new(sleep::Sleep));
+    reg.register(Arc::new(help::HelpShow));
 }
 
 pub fn register_git_ops(reg: &mut ToolRegistry) {
