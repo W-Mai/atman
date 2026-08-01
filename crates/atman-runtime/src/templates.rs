@@ -115,6 +115,7 @@ flow agent_loop(iteration: int) -> string {
             plan.write, plan.read, plan.tick,
             agent.spawn,
             form.ask,
+            help.show,
             preview.push,
             session.push, sleep,
             "mcp.*"
