@@ -105,16 +105,44 @@ pub fn render(
     crate::sanitize_widget_edges(f, area);
     f.render_widget(ratatui::widgets::Clear, area);
 
+    let panel_bg = t.modal_bg.into();
+
+    // Top padding row — matches task_panel style: a 1-row bg fill above the
+    // title so the title sits on row 1, not row 0.
+    f.render_widget(
+        Block::default().style(Style::default().bg(panel_bg)),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            "  ≡",
+            Style::default()
+                .fg(t.heading.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "Context",
+            Style::default()
+                .fg(t.heading.into())
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
     let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(t.subtle_fg.into()))
-        .title(" ≡ ")
+        .style(Style::default().bg(panel_bg))
+        .title(title_line)
         .padding(ratatui::widgets::Padding {
-            left: 2,
-            right: 2,
+            left: 1,
+            right: 1,
             top: 1,
-            bottom: 1,
+            bottom: 0,
         });
     let inner = outer.inner(area);
     f.render_widget(outer, area);
@@ -123,8 +151,8 @@ pub fn render(
 
     // Hamburger button — left side of the title row (≡ in block title).
     result.collapse_btn_rect = Some(Rect {
-        x: area.x + 1,
-        y: area.y,
+        x: area.x,
+        y: area.y + 1,
         width: 3,
         height: 1,
     });
@@ -336,6 +364,7 @@ pub fn render(
             }
         }
     }
+    crate::floating_panels::render_shadow(f, area, &t);
     result
 }
 
@@ -791,14 +820,15 @@ fn render_strip(
         // No content — still render a minimal block so the
         // hamburger remains clickable. Show context dot (D).
         let mini = Rect { height: 3, ..area };
-        let outer = Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(t.subtle_fg.into()))
-            .title(" ≡ ");
-        let inner = outer.inner(mini);
+        let panel_bg = t.modal_bg.into();
         f.render_widget(ratatui::widgets::Clear, mini);
-        f.render_widget(outer, mini);
+        f.render_widget(Block::default().style(Style::default().bg(panel_bg)), mini);
+        let inner = Rect {
+            x: mini.x,
+            y: mini.y + 1,
+            width: mini.width,
+            height: mini.height.saturating_sub(1),
+        };
         let ctx_dot = if inputs.context.window_budget > 0
             && inputs.context.window_tokens > inputs.context.window_budget
         {
@@ -815,11 +845,12 @@ fn render_strip(
             inner,
         );
         result.expand_btn_rect = Some(Rect {
-            x: mini.x + 1,
-            y: mini.y,
+            x: mini.x,
+            y: mini.y + 1,
             width: 3,
             height: 1,
         });
+        crate::floating_panels::render_shadow(f, mini, &t);
         return result;
     }
 
@@ -827,14 +858,34 @@ fn render_strip(
         height: available.saturating_add(2),
         ..area
     };
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(t.subtle_fg.into()))
-        .title(" ≡ ");
-    let inner = outer.inner(capped);
+    let panel_bg = t.modal_bg.into();
     f.render_widget(ratatui::widgets::Clear, capped);
-    f.render_widget(outer, capped);
+    f.render_widget(
+        Block::default()
+            .style(Style::default().bg(panel_bg))
+            .title(
+                Line::from(vec![Span::styled(
+                    "  ≡",
+                    Style::default()
+                        .fg(t.heading.into())
+                        .add_modifier(Modifier::BOLD),
+                )])
+                .alignment(Alignment::Center),
+            )
+            .padding(ratatui::widgets::Padding {
+                left: 0,
+                right: 0,
+                top: 1,
+                bottom: 0,
+            }),
+        capped,
+    );
+    let inner = Rect {
+        x: capped.x,
+        y: capped.y + 1,
+        width: capped.width,
+        height: capped.height.saturating_sub(1),
+    };
 
     // Hamburger button — left side of the title row.
     result.expand_btn_rect = Some(Rect {
@@ -947,6 +998,7 @@ fn render_strip(
         }
     }
 
+    crate::floating_panels::render_shadow(f, capped, &t);
     result
 }
 
