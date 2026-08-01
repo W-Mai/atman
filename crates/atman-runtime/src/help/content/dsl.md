@@ -94,13 +94,23 @@ Actions: `abort(msg?)` or `warn(msg?)`
 
 ### Contract blocks
 
-```
+Optional block at the start of a flow body. The parser accepts any block
+name with `key: value` kwargs, but only `capabilities` is enforced by the
+runtime:
+
+```atman
 contract {
     scope { read: [project_root], write: [project_root], network: [any] }
     capabilities { shell: true }
     interjection { accept: [L1, L4] }
 }
 ```
+
+| Block | Enforced | Description |
+|-------|----------|-------------|
+| `capabilities { shell: true }` | ✅ yes | Required for Tier 4 tools (bash, term). Without it, shell tools are blocked. |
+| `scope { read, write, network }` | declarative | Declares intended access scope. Not enforced — FS access is controlled by session-level `fs_access_mode`. |
+| `interjection { accept: [L1, L4] }` | declarative | Declares which interjection levels to auto-accept. Not enforced — injections are user-triggered. |
 
 ## Types
 
