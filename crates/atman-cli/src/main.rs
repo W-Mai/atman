@@ -1984,6 +1984,104 @@ async fn cmd_repl_once(
                             });
                         });
                     }
+                    atman_tui::TuiControl::McpListResources { name } => {
+                        let tx = cmd_tx_for_models.clone();
+                        let name = name.clone();
+                        tokio::spawn(async move {
+                            let configs = atman_runtime::mcp_config::load(
+                                crate::config_dir().ok().as_deref(),
+                            );
+                            let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
+                                let _ = tx.send(atman_tui::TuiCommand::McpResourcesResult {
+                                    name,
+                                    resources: Vec::new(),
+                                });
+                                return;
+                            };
+                            let client = match cfg.transport {
+                                atman_runtime::mcp::TransportKind::Stdio => {
+                                    atman_runtime::mcp::McpClient::connect_stdio(
+                                        &cfg.name,
+                                        &cfg.command,
+                                        &cfg.args,
+                                        &cfg.env,
+                                        cfg.timeout_ms,
+                                    )
+                                    .await
+                                }
+                                _ => match cfg.url.as_deref() {
+                                    Some(url) => {
+                                        atman_runtime::mcp::McpClient::connect_http(
+                                            &cfg.name,
+                                            url,
+                                            cfg.auth_token.clone(),
+                                            cfg.timeout_ms,
+                                        )
+                                        .await
+                                    }
+                                    None => Err(atman_runtime::mcp::McpError::Protocol(
+                                        "transport requires url".into(),
+                                    )),
+                                },
+                            };
+                            let resources = match client {
+                                Ok(c) => c.list_resources().await.unwrap_or_default(),
+                                Err(_) => Vec::new(),
+                            };
+                            let _ = tx.send(atman_tui::TuiCommand::McpResourcesResult {
+                                name,
+                                resources,
+                            });
+                        });
+                    }
+                    atman_tui::TuiControl::McpListPrompts { name } => {
+                        let tx = cmd_tx_for_models.clone();
+                        let name = name.clone();
+                        tokio::spawn(async move {
+                            let configs = atman_runtime::mcp_config::load(
+                                crate::config_dir().ok().as_deref(),
+                            );
+                            let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
+                                let _ = tx.send(atman_tui::TuiCommand::McpPromptsResult {
+                                    name,
+                                    prompts: Vec::new(),
+                                });
+                                return;
+                            };
+                            let client = match cfg.transport {
+                                atman_runtime::mcp::TransportKind::Stdio => {
+                                    atman_runtime::mcp::McpClient::connect_stdio(
+                                        &cfg.name,
+                                        &cfg.command,
+                                        &cfg.args,
+                                        &cfg.env,
+                                        cfg.timeout_ms,
+                                    )
+                                    .await
+                                }
+                                _ => match cfg.url.as_deref() {
+                                    Some(url) => {
+                                        atman_runtime::mcp::McpClient::connect_http(
+                                            &cfg.name,
+                                            url,
+                                            cfg.auth_token.clone(),
+                                            cfg.timeout_ms,
+                                        )
+                                        .await
+                                    }
+                                    None => Err(atman_runtime::mcp::McpError::Protocol(
+                                        "transport requires url".into(),
+                                    )),
+                                },
+                            };
+                            let prompts = match client {
+                                Ok(c) => c.list_prompts().await.unwrap_or_default(),
+                                Err(_) => Vec::new(),
+                            };
+                            let _ =
+                                tx.send(atman_tui::TuiCommand::McpPromptsResult { name, prompts });
+                        });
+                    }
                     atman_tui::TuiControl::McpReload => {
                         if let Some(tx) = mcp_shutdown_tx.take() {
                             let _ = tx.send(());

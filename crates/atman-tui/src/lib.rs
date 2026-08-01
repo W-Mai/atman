@@ -187,6 +187,12 @@ pub enum TuiControl {
         name: String,
     },
     McpReload,
+    McpListResources {
+        name: String,
+    },
+    McpListPrompts {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +218,14 @@ pub enum TuiCommand {
         ok: bool,
     },
     McpReloaded,
+    McpResourcesResult {
+        name: String,
+        resources: Vec<atman_runtime::mcp::McpResource>,
+    },
+    McpPromptsResult {
+        name: String,
+        prompts: Vec<atman_runtime::mcp::McpPrompt>,
+    },
 }
 
 pub struct TuiHandle {
@@ -1375,6 +1389,12 @@ async fn run_frames(
                                 std::time::Duration::from_secs(3),
                                 app::ToastPosition::TopRight,
                             );
+                        }
+                        TuiCommand::McpResourcesResult { name, resources } => {
+                            app.mcp_resources_cache.insert(name, resources);
+                        }
+                        TuiCommand::McpPromptsResult { name, prompts } => {
+                            app.mcp_prompts_cache.insert(name, prompts);
                         }
                     }
                 }
@@ -2591,6 +2611,42 @@ fn handle_key(
     {
         let server_count = app.context.mcp_servers.len();
         match action {
+            KeyAction::Tab => {
+                app.mcp_browser_tab = app.mcp_browser_tab.next();
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    match app.mcp_browser_tab {
+                        crate::mcp_manager::McpBrowserTab::Resources
+                            if !app.mcp_resources_cache.contains_key(&name) =>
+                        {
+                            if let Some(tx) = control_tx {
+                                let _ = tx.send(TuiControl::McpListResources { name });
+                                app.push_toast(
+                                    "loading resources…".to_string(),
+                                    app::NoteLevel::Info,
+                                    std::time::Duration::from_secs(3),
+                                    app::ToastPosition::TopRight,
+                                );
+                            }
+                        }
+                        crate::mcp_manager::McpBrowserTab::Prompts
+                            if !app.mcp_prompts_cache.contains_key(&name) =>
+                        {
+                            if let Some(tx) = control_tx {
+                                let _ = tx.send(TuiControl::McpListPrompts { name });
+                                app.push_toast(
+                                    "loading prompts…".to_string(),
+                                    app::NoteLevel::Info,
+                                    std::time::Duration::from_secs(3),
+                                    app::ToastPosition::TopRight,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            }
             KeyAction::HistoryUp | KeyAction::Char('k') => {
                 app.mcp_remove_armed = None;
                 if app.mcp_selected > 0 {
@@ -3590,6 +3646,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             &app.expanded_mcp_servers,
             app.mcp_selected,
             &app.hovered_mcp_row,
+            &crate::mcp_manager::McpBrowserState {
+                tab: app.mcp_browser_tab,
+                resources: &app.mcp_resources_cache,
+                prompts: &app.mcp_prompts_cache,
+            },
         );
     } else {
         app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();

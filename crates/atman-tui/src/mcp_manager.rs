@@ -11,6 +11,12 @@ use std::collections::HashSet;
 /// Indent + name column + space = 3 + 22 + 1 = 26 chars before description.
 const TOOL_DESC_OFFSET: usize = 26;
 
+pub struct McpBrowserState<'a> {
+    pub tab: McpBrowserTab,
+    pub resources: &'a std::collections::HashMap<String, Vec<atman_runtime::mcp::McpResource>>,
+    pub prompts: &'a std::collections::HashMap<String, Vec<atman_runtime::mcp::McpPrompt>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_panel(
     f: &mut ratatui::Frame,
@@ -21,6 +27,7 @@ pub fn render_panel(
     selected: usize,
     hovered: &Option<String>,
     hitmap_out: &mut FloatingPanelHitmap,
+    browser: &McpBrowserState<'_>,
 ) {
     let t = theme();
     let mut lines: Vec<Line> = Vec::new();
@@ -152,44 +159,147 @@ pub fn render_panel(
 
             if is_expanded {
                 if let atman_runtime::mcp::McpServerState::Connected { tools, .. } = &s.state {
-                    if tools.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            "   (no tools exposed)",
-                            Style::default().fg(t.subtle_fg.into()),
-                        )));
-                    } else {
-                        lines.push(Line::from(vec![
-                            Span::styled("   ", Style::default().bg(t.code_bg.into())),
-                            Span::styled(
-                                format!("{:<22} Description", "Tool"),
-                                Style::default()
-                                    .fg(t.subtle_fg.into())
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]));
-                        lines.push(Line::from(Span::styled(
-                            "   ────────────────────  ──────────────────────────────",
-                            Style::default().fg(t.subtle_fg.into()),
-                        )));
+                    // Tab switch hint
+                    let tab_label = |tab: McpBrowserTab, current: McpBrowserTab| -> String {
+                        if tab == current {
+                            format!("[●]{}", tab.label())
+                        } else {
+                            format!("[ ]{}", tab.label())
+                        }
+                    };
+                    let tabs_line = format!(
+                        " Tab: {}  {}  {}",
+                        tab_label(McpBrowserTab::Tools, browser.tab),
+                        tab_label(McpBrowserTab::Resources, browser.tab),
+                        tab_label(McpBrowserTab::Prompts, browser.tab),
+                    );
+                    lines.push(Line::from(Span::styled(
+                        tabs_line,
+                        Style::default().fg(t.subtle_fg.into()),
+                    )));
 
-                        for tool in tools {
-                            let name = width::truncate(&tool.name, 22);
-                            let desc = tool.description.as_deref().unwrap_or("");
-                            let desc_wrapped = width::word_wrap(desc, desc_width);
-                            for (di, desc_line) in desc_wrapped.iter().enumerate() {
-                                let name_str = if di == 0 {
-                                    width::pad_right(&name, 22)
-                                } else {
-                                    " ".repeat(22)
-                                };
+                    match browser.tab {
+                        McpBrowserTab::Tools => {
+                            if tools.is_empty() {
+                                lines.push(Line::from(Span::styled(
+                                    "   (no tools exposed)",
+                                    Style::default().fg(t.subtle_fg.into()),
+                                )));
+                            } else {
                                 lines.push(Line::from(vec![
                                     Span::styled("   ", Style::default().bg(t.code_bg.into())),
-                                    Span::styled(name_str, Style::default().fg(t.tinted_fg.into())),
                                     Span::styled(
-                                        desc_line.clone(),
-                                        Style::default().fg(t.subtle_fg.into()),
+                                        format!("{:<22} Description", "Tool"),
+                                        Style::default()
+                                            .fg(t.subtle_fg.into())
+                                            .add_modifier(Modifier::BOLD),
                                     ),
                                 ]));
+                                lines.push(Line::from(Span::styled(
+                                    "   ────────────────────  ──────────────────────────────",
+                                    Style::default().fg(t.subtle_fg.into()),
+                                )));
+
+                                for tool in tools {
+                                    let name = width::truncate(&tool.name, 22);
+                                    let desc = tool.description.as_deref().unwrap_or("");
+                                    let desc_wrapped = width::word_wrap(desc, desc_width);
+                                    for (di, desc_line) in desc_wrapped.iter().enumerate() {
+                                        let name_str = if di == 0 {
+                                            width::pad_right(&name, 22)
+                                        } else {
+                                            " ".repeat(22)
+                                        };
+                                        lines.push(Line::from(vec![
+                                            Span::styled(
+                                                "   ",
+                                                Style::default().bg(t.code_bg.into()),
+                                            ),
+                                            Span::styled(
+                                                name_str,
+                                                Style::default().fg(t.tinted_fg.into()),
+                                            ),
+                                            Span::styled(
+                                                desc_line.clone(),
+                                                Style::default().fg(t.subtle_fg.into()),
+                                            ),
+                                        ]));
+                                    }
+                                }
+                            }
+                        }
+                        McpBrowserTab::Resources => {
+                            let resources = browser.resources.get(&s.name);
+                            match resources {
+                                None => {
+                                    lines.push(Line::from(Span::styled(
+                                        "   loading…",
+                                        Style::default().fg(t.subtle_fg.into()),
+                                    )));
+                                }
+                                Some(rs) if rs.is_empty() => {
+                                    lines.push(Line::from(Span::styled(
+                                        "   (no resources)",
+                                        Style::default().fg(t.subtle_fg.into()),
+                                    )));
+                                }
+                                Some(rs) => {
+                                    for r in rs {
+                                        let name = width::truncate(&r.name, 22);
+                                        let desc = r.description.as_deref().unwrap_or("");
+                                        lines.push(Line::from(vec![
+                                            Span::styled(
+                                                "   ",
+                                                Style::default().bg(t.code_bg.into()),
+                                            ),
+                                            Span::styled(
+                                                width::pad_right(&name, 22),
+                                                Style::default().fg(t.tinted_fg.into()),
+                                            ),
+                                            Span::styled(
+                                                desc.to_string(),
+                                                Style::default().fg(t.subtle_fg.into()),
+                                            ),
+                                        ]));
+                                    }
+                                }
+                            }
+                        }
+                        McpBrowserTab::Prompts => {
+                            let prompts = browser.prompts.get(&s.name);
+                            match prompts {
+                                None => {
+                                    lines.push(Line::from(Span::styled(
+                                        "   loading…",
+                                        Style::default().fg(t.subtle_fg.into()),
+                                    )));
+                                }
+                                Some(ps) if ps.is_empty() => {
+                                    lines.push(Line::from(Span::styled(
+                                        "   (no prompts)",
+                                        Style::default().fg(t.subtle_fg.into()),
+                                    )));
+                                }
+                                Some(ps) => {
+                                    for p in ps {
+                                        let name = width::truncate(&p.name, 22);
+                                        let desc = p.description.as_deref().unwrap_or("");
+                                        lines.push(Line::from(vec![
+                                            Span::styled(
+                                                "   ",
+                                                Style::default().bg(t.code_bg.into()),
+                                            ),
+                                            Span::styled(
+                                                width::pad_right(&name, 22),
+                                                Style::default().fg(t.tinted_fg.into()),
+                                            ),
+                                            Span::styled(
+                                                desc.to_string(),
+                                                Style::default().fg(t.subtle_fg.into()),
+                                            ),
+                                        ]));
+                                    }
+                                }
                             }
                         }
                     }
@@ -200,7 +310,7 @@ pub fn render_panel(
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            " [a]dd  [Enter] expand  [↑↓] navigate  [t] test  [r] remove  [d] toggle  [Esc] close",
+            " [a]dd  [Enter] expand  [Tab] switch  [↑↓] navigate  [t] test  [r] remove  [d] toggle  [Esc] close",
             Style::default().fg(t.subtle_fg.into()),
         )));
     }
@@ -285,6 +395,32 @@ fn server_display(
 // ── MCP Add Form ──
 
 const MCP_ADD_FIELDS: usize = 6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum McpBrowserTab {
+    #[default]
+    Tools,
+    Resources,
+    Prompts,
+}
+
+impl McpBrowserTab {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Tools => Self::Resources,
+            Self::Resources => Self::Prompts,
+            Self::Prompts => Self::Tools,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tools => "Tools",
+            Self::Resources => "Resources",
+            Self::Prompts => "Prompts",
+        }
+    }
+}
 
 pub struct McpAddForm {
     pub name: crate::input::InputEditor,

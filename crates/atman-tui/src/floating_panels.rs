@@ -342,6 +342,7 @@ pub fn render(
     expanded_mcp_servers: &std::collections::HashSet<String>,
     mcp_selected: usize,
     hovered_mcp_row: &Option<String>,
+    mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
 ) -> FloatingPanelHitmap {
     let mut all_hitmap = FloatingPanelHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
@@ -602,6 +603,7 @@ pub fn render(
                 expanded_mcp_servers,
                 mcp_selected,
                 hovered_mcp_row,
+                mcp_browser,
             );
             all_hitmap
                 .history_row_rects
@@ -878,6 +880,7 @@ fn render_panel_content(
     expanded_mcp_servers: &std::collections::HashSet<String>,
     mcp_selected: usize,
     hovered_mcp_row: &Option<String>,
+    mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
 ) {
     let _hovered_btn = hovered_btn;
     if area.height == 0 || area.width == 0 {
@@ -1042,6 +1045,7 @@ fn render_panel_content(
                 mcp_selected,
                 hovered_mcp_row,
                 hitmap_out,
+                mcp_browser,
             );
         }
         PanelKind::Task(kind) => {
