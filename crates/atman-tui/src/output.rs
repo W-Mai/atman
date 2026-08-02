@@ -2689,6 +2689,17 @@ fn collect_all_leaves(
 
 fn leaf_is_running(nodes: &[atman_runtime::workflow::WorkflowNode], path: &[usize]) -> bool {
     use atman_runtime::workflow::NodeStatus;
+    let node = leaf_at_path(nodes, path);
+    matches!(
+        node.map(|n| n.status),
+        Some(NodeStatus::Running | NodeStatus::Pending)
+    )
+}
+
+fn leaf_at_path<'a>(
+    nodes: &'a [atman_runtime::workflow::WorkflowNode],
+    path: &[usize],
+) -> Option<&'a atman_runtime::workflow::WorkflowNode> {
     let mut cur = nodes;
     let mut node = None;
     for &i in path {
@@ -2696,13 +2707,10 @@ fn leaf_is_running(nodes: &[atman_runtime::workflow::WorkflowNode], path: &[usiz
         if let Some(n) = node {
             cur = &n.children;
         } else {
-            return false;
+            return None;
         }
     }
-    matches!(
-        node.map(|n| n.status),
-        Some(NodeStatus::Running | NodeStatus::Pending)
-    )
+    node
 }
 
 fn collect_visible_nodes<'a>(
@@ -2777,20 +2785,58 @@ fn render_collapsed_workflow_card(
     top_spans.push(Span::styled("─╮".to_string(), border_style));
     let mut lines: Vec<Line<'static>> = vec![Line::from(top_spans)];
 
-    let mut all_leaf_paths: Vec<Vec<usize>> = Vec::new();
-    collect_all_leaves(&graph.root, &mut all_leaf_paths, &mut Vec::new());
-    let running_paths: Vec<Vec<usize>> = all_leaf_paths
-        .iter()
-        .filter(|p| leaf_is_running(&graph.root, p))
-        .cloned()
-        .collect();
-    let selected_paths: Vec<Vec<usize>> = if running_paths.is_empty() {
-        all_leaf_paths.iter().rev().take(3).rev().cloned().collect()
-    } else if running_paths.len() > 3 {
-        running_paths.iter().rev().take(3).rev().cloned().collect()
-    } else {
-        running_paths
+    let sorted_root: Vec<atman_runtime::workflow::WorkflowNode> = {
+        let mut r = graph.root.clone();
+        r.sort_by_key(|n| n.started_at);
+        r
     };
+    let root = &sorted_root;
+
+    let mut all_leaf_paths: Vec<Vec<usize>> = Vec::new();
+    collect_all_leaves(root, &mut all_leaf_paths, &mut Vec::new());
+
+    let mut leaves_with_time: Vec<(Vec<usize>, chrono::DateTime<chrono::Utc>)> = all_leaf_paths
+        .iter()
+        .map(|p| {
+            let ts = leaf_at_path(root, p)
+                .and_then(|n| n.started_at)
+                .unwrap_or_else(chrono::Utc::now);
+            (p.clone(), ts)
+        })
+        .collect();
+    leaves_with_time.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+    let running_paths: Vec<Vec<usize>> = leaves_with_time
+        .iter()
+        .filter(|(p, _)| leaf_is_running(root, p))
+        .map(|(p, _)| p.clone())
+        .collect();
+
+    let ordered_pool: Vec<Vec<usize>> = if !running_paths.is_empty() {
+        running_paths
+    } else {
+        leaves_with_time.iter().map(|(p, _)| p.clone()).collect()
+    };
+
+    let mut selected_paths: Vec<Vec<usize>> = Vec::new();
+    for count in 1..=ordered_pool.len() {
+        let candidates: Vec<Vec<usize>> = ordered_pool.iter().take(count).cloned().collect();
+        let mut visible = std::collections::HashSet::new();
+        for path in &candidates {
+            for i in 1..=path.len() {
+                visible.insert(path[..i].to_vec());
+            }
+        }
+        let mut visible_nodes: Vec<(&atman_runtime::workflow::WorkflowNode, Vec<usize>)> =
+            Vec::new();
+        collect_visible_nodes(root, &visible, &mut Vec::new(), &mut visible_nodes);
+        let top_level_count = visible_nodes.iter().filter(|(_, p)| p.len() == 1).count();
+        let estimated_rows = top_level_count * 4;
+        selected_paths = candidates;
+        if estimated_rows >= MAX_COLLAPSED_BODY_ROWS || count == ordered_pool.len() {
+            break;
+        }
+    }
     let mut visible: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
     for path in &selected_paths {
         for i in 1..=path.len() {
@@ -2807,7 +2853,7 @@ fn render_collapsed_workflow_card(
         })
         .collect();
     let mut visible_nodes: Vec<(&atman_runtime::workflow::WorkflowNode, Vec<usize>)> = Vec::new();
-    collect_visible_nodes(&graph.root, &visible, &mut Vec::new(), &mut visible_nodes);
+    collect_visible_nodes(root, &visible, &mut Vec::new(), &mut visible_nodes);
     let top_level: Vec<&atman_runtime::workflow::WorkflowNode> = visible_nodes
         .iter()
         .filter(|(_, p)| p.len() == 1)
@@ -2834,6 +2880,15 @@ fn render_collapsed_workflow_card(
             &mut pending_counter,
             Some(&visible_str),
         );
+    }
+    if body_lines.len() > MAX_COLLAPSED_BODY_ROWS {
+        let drain_count = body_lines.len() - MAX_COLLAPSED_BODY_ROWS;
+        body_lines.drain(..drain_count);
+        regions.retain(|r| r.end_row > drain_count as u32);
+        for r in regions.iter_mut() {
+            r.start_row = r.start_row.saturating_sub(drain_count as u32);
+            r.end_row = r.end_row.saturating_sub(drain_count as u32);
+        }
     }
     apply_lens_fade(&mut body_lines);
     let card_body_start_row = lines.len() as u32;
@@ -3097,6 +3152,7 @@ fn append_fanout_horizontal(
 
 const MAX_BOX_WIDTH: u16 = crate::layout::CONTENT_MAX_WIDTH;
 const INDENT_PER_DEPTH: u16 = 4;
+const MAX_COLLAPSED_BODY_ROWS: usize = 27;
 
 fn tree_prefix_spans(ancestor_last: &[bool], is_last: Option<bool>) -> Vec<Span<'static>> {
     let t = crate::theme::theme();
@@ -5003,6 +5059,137 @@ mod tests {
             "each iteration must render, got: {flat}"
         );
         assert!(flat.contains("final"));
+    }
+
+    fn make_tool_node(
+        id: &str,
+        label: &str,
+        started_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> atman_runtime::workflow::WorkflowNode {
+        use atman_runtime::workflow::{NodeStatus, WorkflowNode, WorkflowNodeKind};
+        WorkflowNode {
+            id: id.into(),
+            kind: WorkflowNodeKind::ToolCall {
+                tool_use_id: id.into(),
+                tool: label.into(),
+                args_preview: String::new(),
+                result_preview: None,
+            },
+            label: label.into(),
+            status: NodeStatus::Ok,
+            started_at,
+            ended_at: None,
+            output_preview: None,
+            children: Vec::new(),
+            parallelism: atman_runtime::workflow::Parallelism::Serial,
+            approval: None,
+            llm_stats: None,
+        }
+    }
+
+    #[test]
+    fn collapsed_card_caps_body_at_max_rows_for_large_workflow() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let now = chrono::Utc::now();
+        let root: Vec<_> = (0..20)
+            .map(|i| {
+                make_tool_node(
+                    &format!("n{i}"),
+                    &format!("tool_{i}"),
+                    Some(now + chrono::Duration::milliseconds(i)),
+                )
+            })
+            .collect();
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root,
+        };
+        let (lines, _regions) = render_collapsed_workflow_card(&graph, 0, 80, false);
+        let total = lines.len();
+        assert!(
+            total <= 30,
+            "collapsed card should cap at ~30 rows, got {total}"
+        );
+    }
+
+    #[test]
+    fn collapsed_card_shows_more_than_3_leaves_when_available() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let now = chrono::Utc::now();
+        let root: Vec<_> = (0..8)
+            .map(|i| {
+                make_tool_node(
+                    &format!("n{i}"),
+                    &format!("tool_{i}"),
+                    Some(now + chrono::Duration::milliseconds(i)),
+                )
+            })
+            .collect();
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root,
+        };
+        let (lines, _regions) = render_collapsed_workflow_card(&graph, 0, 80, false);
+        let flat = flatten_lines(&lines);
+        let tool_count = flat.matches("tool_").count();
+        assert!(
+            tool_count > 3,
+            "should show more than 3 tools, got {tool_count}"
+        );
+    }
+
+    #[test]
+    fn collapsed_card_regions_within_bounds_after_truncation() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let now = chrono::Utc::now();
+        let root: Vec<_> = (0..20)
+            .map(|i| {
+                make_tool_node(
+                    &format!("n{i}"),
+                    &format!("tool_{i}"),
+                    Some(now + chrono::Duration::milliseconds(i)),
+                )
+            })
+            .collect();
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root,
+        };
+        let (lines, regions) = render_collapsed_workflow_card(&graph, 0, 80, false);
+        let total = lines.len() as u32;
+        for r in &regions {
+            assert!(
+                r.end_row <= total,
+                "region end_row {} exceeds total lines {}",
+                r.end_row,
+                total
+            );
+            assert!(
+                r.start_row <= r.end_row,
+                "region start_row {} > end_row {}",
+                r.start_row,
+                r.end_row
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_card_newest_node_at_bottom() {
+        use atman_runtime::workflow::WorkflowGraph;
+        let now = chrono::Utc::now();
+        let root = vec![
+            make_tool_node("old", "old_tool", Some(now)),
+            make_tool_node("new", "new_tool", Some(now + chrono::Duration::seconds(10))),
+        ];
+        let graph = WorkflowGraph {
+            turn_id: atman_runtime::event::TurnId::now(),
+            root,
+        };
+        let (lines, _regions) = render_collapsed_workflow_card(&graph, 0, 80, false);
+        let flat = flatten_lines(&lines);
+        let old_pos = flat.find("old_tool").unwrap_or(usize::MAX);
+        let new_pos = flat.find("new_tool").unwrap_or(0);
+        assert!(new_pos > old_pos, "newest node should be below older node");
     }
 }
 
