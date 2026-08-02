@@ -103,6 +103,7 @@ flow agent_loop(iteration: int) -> string {
             fs.read, fs.write, fs.edit, fs.list, fs.grep,
             bash.spawn, bash.status, bash.output, bash.kill, bash.list,
             term.spawn, term.input, term.capture, term.resize, term.kill, term.list,
+            term.find,
             task.list, task.kill,
             web.fetch, web.search,
             hunk.review, hunk.apply, hunk.plan_edit,

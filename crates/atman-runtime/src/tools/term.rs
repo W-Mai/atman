@@ -798,6 +798,30 @@ fn spawn_pty_direct(
     })
 }
 
+fn cell_text(screen: &TerminalScreen, row: u16, col: u16) -> String {
+    let idx = (row as usize) * (screen.cols as usize) + (col as usize);
+    match screen.cells.get(idx) {
+        Some(cell) if cell.wide_continuation => String::new(),
+        Some(cell) if cell.chars.is_empty() => " ".to_string(),
+        Some(cell) => cell.chars.clone(),
+        None => " ".to_string(),
+    }
+}
+
+fn find_pattern_on_screen(screen: &TerminalScreen, pattern: &str) -> Option<(u16, u16)> {
+    for r in 0..screen.rows {
+        let row_text: String = (0..screen.cols)
+            .map(|c| cell_text(screen, r, c))
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        if let Some(pos) = row_text.find(pattern) {
+            return Some((r, pos as u16));
+        }
+    }
+    None
+}
+
 fn screen_to_value(screen: &TerminalScreen) -> Value {
     let cells: Vec<Value> = screen
         .cells
@@ -969,7 +993,14 @@ impl Tool for TermCapture {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Read the terminal screen. Default returns plain text (format: \"text\").\nUse start_row/end_row to read only part of the screen — e.g. last 5 rows\nto check the prompt or command output without wasting context.\n\nBest practices:\n- After sending a command, capture to see the result.\n- Use start_row/end_row to read only the relevant part (e.g. last 10 rows).\n- format: \"screen\" returns full cell data with colors/styles — rarely needed,\n  only use when you need to inspect TUI layout or colors.\n- Default format: \"text\" is sufficient for most cases (reading command output,\n  checking prompts, seeing error messages).",
+            "Read the terminal screen. Default returns plain text (format: \"text\").\n\
+             Use start_row/end_row and start_col/end_col to read a rectangular region.\n\n\
+             Best practices:\n\
+             - After sending a command, capture to see the result.\n\
+             - Use start_row/end_row to read only the relevant part (e.g. last 10 rows).\n\
+             - Use start_col/end_col to read a column range (e.g. skip line numbers).\n\
+             - format: \"screen\" returns full cell data with colors/styles.\n\
+             - Default format: \"text\" is sufficient for most cases.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -979,7 +1010,9 @@ impl Tool for TermCapture {
                 "handle": {"type": "string"},
                 "format": {"type": "string", "enum": ["text", "screen"], "default": "text"},
                 "start_row": {"type": "integer", "default": 0, "description": "Start row (0-based). Default 0."},
-                "end_row": {"type": "integer", "description": "End row (exclusive). Default: full height."}
+                "end_row": {"type": "integer", "description": "End row (exclusive). Default: full height."},
+                "start_col": {"type": "integer", "default": 0, "description": "Start column (0-based). Default 0."},
+                "end_col": {"type": "integer", "description": "End column (exclusive). Default: full width."}
             },
             "required": ["handle"]
         })
@@ -1004,44 +1037,378 @@ impl Tool for TermCapture {
             let end_row = extract_optional_int(&args, "end_row")
                 .unwrap_or(screen.rows as i64)
                 .clamp(start_row as i64, screen.rows as i64) as u16;
+            let start_col = extract_optional_int(&args, "start_col")
+                .unwrap_or(0)
+                .clamp(0, screen.cols as i64) as u16;
+            let end_col = extract_optional_int(&args, "end_col")
+                .unwrap_or(screen.cols as i64)
+                .clamp(start_col as i64, screen.cols as i64) as u16;
             let state = entry.current_state();
             let mut fields = vec![
                 ("handle".into(), Value::Str(handle.clone())),
                 ("state".into(), state_to_value(&state)),
-                ("rows".into(), Value::Int(screen.rows as i64)),
-                ("cols".into(), Value::Int(screen.cols as i64)),
+                ("rows".into(), Value::Int((end_row - start_row) as i64)),
+                ("cols".into(), Value::Int((end_col - start_col) as i64)),
             ];
             if format == "screen" {
-                let cols = screen.cols as usize;
-                let start = start_row as usize * cols;
-                let end = end_row as usize * cols;
+                let sub_rows = end_row - start_row;
+                let sub_cols = end_col - start_col;
+                let sub_cells: Vec<TerminalCell> = (start_row..end_row)
+                    .flat_map(|r| {
+                        (start_col..end_col)
+                            .map(|c| {
+                                screen
+                                    .cells
+                                    .get((r as usize) * (screen.cols as usize) + (c as usize))
+                                    .cloned()
+                                    .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
                 let cursor = screen.cursor.and_then(|(row, col)| {
-                    (start_row..end_row)
-                        .contains(&row)
-                        .then_some((row - start_row, col))
+                    if (start_row..end_row).contains(&row) && (start_col..end_col).contains(&col) {
+                        Some((row - start_row, col - start_col))
+                    } else {
+                        None
+                    }
                 });
                 let partial_screen = TerminalScreen {
-                    rows: end_row - start_row,
-                    cols: screen.cols,
-                    cells: screen.cells[start..end].to_vec(),
+                    rows: sub_rows,
+                    cols: sub_cols,
+                    cells: sub_cells,
                     cursor,
                     alt_screen: screen.alt_screen,
                 };
-                fields[2] = ("rows".into(), Value::Int(partial_screen.rows as i64));
                 fields.push(("screen".into(), screen_to_value(&partial_screen)));
             } else {
-                let parser = entry.parser.lock().expect("parser poisoned");
-                let text = parser
-                    .screen()
-                    .rows(0, screen.cols)
-                    .skip(start_row as usize)
-                    .take((end_row - start_row) as usize)
+                let text = (start_row..end_row)
+                    .map(|r| {
+                        let row_text: String = (start_col..end_col)
+                            .map(|c| cell_text(&screen, r, c))
+                            .collect();
+                        row_text.trim_end().to_string()
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 fields.push(("text".into(), Value::Str(text)));
             }
             Ok(Value::Struct(fields))
         })
+    }
+}
+
+pub struct TermFind;
+impl Tool for TermFind {
+    fn name(&self) -> &str {
+        "term.find"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Four
+    }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Search terminal screen for text and/or style. Returns list of matches.\n\n\
+             - pattern: substring to search for (case-sensitive). Omit for style-only search.\n\
+             - style: optional filter. Only cells matching ALL specified style fields count.\n\
+             - Combine both: find red 'error' text, bold prompts, etc.\n\n\
+             Style fields: bold, italic, underline, inverse, dim, fg, bg.\n\
+             Colors: name (\"red\") or {r,g,b} struct (discover via term.capture format=\"screen\").\n\n\
+             Returns: { matches: [{row, col, text}], count: N }",
+        )
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {"type": "string"},
+                "pattern": {"type": "string", "description": "Substring to search for. Omit for style-only search."},
+                "style": {
+                    "type": "object",
+                    "properties": {
+                        "bold": {"type": "boolean"},
+                        "italic": {"type": "boolean"},
+                        "underline": {"type": "boolean"},
+                        "inverse": {"type": "boolean"},
+                        "dim": {"type": "boolean"},
+                        "fg": {"type": "string", "description": "Color name or {r,g,b} struct"},
+                        "bg": {"type": "string", "description": "Color name or {r,g,b} struct"}
+                    },
+                    "description": "Optional style filter. All specified fields must match."
+                },
+                "start_row": {"type": "integer", "default": 0},
+                "end_row": {"type": "integer", "description": "Exclusive. Default: full height."}
+            },
+            "required": ["handle"]
+        })
+    }
+    fn call<'a>(
+        &'a self,
+        args: crate::tool::ToolArgs,
+        ctx: &'a crate::tool::ToolCtx,
+    ) -> crate::tool::BoxFut<'a, crate::tool::ToolResult> {
+        Box::pin(async move {
+            let handle = extract_string(&args, "handle", 0)?;
+            let pattern = extract_optional_string(&args, "pattern");
+            let style_filter = parse_style_filter(&args)?;
+            if pattern.is_none() && style_filter.is_none() {
+                return Err(RuntimeError::ToolFailed(
+                    "term.find: provide at least pattern or style".into(),
+                ));
+            }
+            let registry = ctx.term_registry.clone().ok_or_else(|| {
+                RuntimeError::ToolFailed("term.find: registry not available".into())
+            })?;
+            let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
+            let entry = registry.lookup(&handle, &session_id)?;
+            let screen = entry.snapshot();
+            let start_row = extract_optional_int(&args, "start_row")
+                .unwrap_or(0)
+                .clamp(0, screen.rows as i64) as u16;
+            let end_row = extract_optional_int(&args, "end_row")
+                .unwrap_or(screen.rows as i64)
+                .clamp(start_row as i64, screen.rows as i64) as u16;
+
+            let mut matches = Vec::new();
+            for r in start_row..end_row {
+                let row_cells: Vec<&TerminalCell> =
+                    (0..screen.cols).map(|c| cell_ref(&screen, r, c)).collect();
+                let row_text: String = row_cells
+                    .iter()
+                    .map(|c| {
+                        if c.wide_continuation {
+                            ""
+                        } else {
+                            c.chars.as_str()
+                        }
+                    })
+                    .collect::<String>();
+                let row_text_trimmed = row_text.trim_end();
+
+                if let Some(ref pat) = pattern {
+                    let mut start = 0;
+                    while let Some(pos) = row_text_trimmed[start..].find(pat) {
+                        let abs_col = start + pos;
+                        let style_ok = style_filter
+                            .as_ref()
+                            .map(|sf| sf.matches(row_cells.get(abs_col).copied()))
+                            .unwrap_or(true);
+                        if style_ok {
+                            let matched_text = pat.clone();
+                            matches.push(Value::Struct(vec![
+                                ("row".into(), Value::Int(r as i64)),
+                                ("col".into(), Value::Int(abs_col as i64)),
+                                ("text".into(), Value::Str(matched_text)),
+                            ]));
+                        }
+                        start += pos + pat.len();
+                        if start >= row_text_trimmed.len() {
+                            break;
+                        }
+                    }
+                } else if let Some(ref sf) = style_filter {
+                    let mut col = 0usize;
+                    while col < screen.cols as usize {
+                        if sf.matches(row_cells.get(col).copied())
+                            && !row_cells[col].chars.is_empty()
+                        {
+                            let start_col = col;
+                            let mut text = String::new();
+                            while col < screen.cols as usize
+                                && sf.matches(row_cells.get(col).copied())
+                                && !row_cells[col].wide_continuation
+                            {
+                                text.push_str(&row_cells[col].chars);
+                                col += 1;
+                            }
+                            if !text.trim().is_empty() {
+                                matches.push(Value::Struct(vec![
+                                    ("row".into(), Value::Int(r as i64)),
+                                    ("col".into(), Value::Int(start_col as i64)),
+                                    ("text".into(), Value::Str(text)),
+                                ]));
+                            }
+                        } else {
+                            col += 1;
+                        }
+                    }
+                }
+            }
+            let count = matches.len() as i64;
+            Ok(Value::Struct(vec![
+                ("matches".into(), Value::List(matches)),
+                ("count".into(), Value::Int(count)),
+            ]))
+        })
+    }
+}
+
+fn cell_ref(screen: &TerminalScreen, row: u16, col: u16) -> &TerminalCell {
+    let idx = (row as usize) * (screen.cols as usize) + (col as usize);
+    screen.cells.get(idx).unwrap_or(&DEFAULT_CELL)
+}
+
+static DEFAULT_CELL: TerminalCell = TerminalCell {
+    chars: String::new(),
+    fg: TerminalColor::Default,
+    bg: TerminalColor::Default,
+    bold: false,
+    italic: false,
+    underline: false,
+    inverse: false,
+    dim: false,
+    wide: false,
+    wide_continuation: false,
+};
+
+struct StyleFilter {
+    bold: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    inverse: Option<bool>,
+    dim: Option<bool>,
+    fg: Option<TerminalColor>,
+    bg: Option<TerminalColor>,
+}
+
+impl StyleFilter {
+    fn matches(&self, cell: Option<&TerminalCell>) -> bool {
+        let Some(cell) = cell else {
+            return false;
+        };
+        if self.bold == Some(true) && !cell.bold {
+            return false;
+        }
+        if self.bold == Some(false) && cell.bold {
+            return false;
+        }
+        if self.italic == Some(true) && !cell.italic {
+            return false;
+        }
+        if self.italic == Some(false) && cell.italic {
+            return false;
+        }
+        if self.underline == Some(true) && !cell.underline {
+            return false;
+        }
+        if self.underline == Some(false) && cell.underline {
+            return false;
+        }
+        if self.inverse == Some(true) && !cell.inverse {
+            return false;
+        }
+        if self.inverse == Some(false) && cell.inverse {
+            return false;
+        }
+        if self.dim == Some(true) && !cell.dim {
+            return false;
+        }
+        if self.dim == Some(false) && cell.dim {
+            return false;
+        }
+        if let Some(fg) = &self.fg {
+            if !color_matches(fg, &cell.fg) {
+                return false;
+            }
+        }
+        if let Some(bg) = &self.bg {
+            if !color_matches(bg, &cell.bg) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn parse_style_filter(args: &crate::tool::ToolArgs) -> Result<Option<StyleFilter>, RuntimeError> {
+    let style = match args.named("style") {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    Ok(Some(StyleFilter {
+        bold: get_optional_bool(style, "bold"),
+        italic: get_optional_bool(style, "italic"),
+        underline: get_optional_bool(style, "underline"),
+        inverse: get_optional_bool(style, "inverse"),
+        dim: get_optional_bool(style, "dim"),
+        fg: get_optional_color(style, "fg")?,
+        bg: get_optional_color(style, "bg")?,
+    }))
+}
+
+fn get_optional_bool(style: &Value, field: &str) -> Option<bool> {
+    match style.field(field) {
+        Some(Value::Bool(b)) => Some(*b),
+        _ => None,
+    }
+}
+
+fn get_optional_color(style: &Value, field: &str) -> Result<Option<TerminalColor>, RuntimeError> {
+    match style.field(field) {
+        Some(v) => parse_color(v).map(Some).ok_or_else(|| {
+            RuntimeError::ToolFailed(format!(
+                "term.find: invalid color for '{field}' — use name (\"red\") or {{r,g,b}} struct"
+            ))
+        }),
+        None => Ok(None),
+    }
+}
+
+fn parse_color(val: &Value) -> Option<TerminalColor> {
+    match val {
+        Value::Str(name) => color_name_to_terminal(name),
+        Value::Struct(fields) => {
+            let r = fields
+                .iter()
+                .find(|(k, _)| k == "r")
+                .and_then(|(_, v)| match v {
+                    Value::Int(n) => Some(*n),
+                    _ => None,
+                })?;
+            let g = fields
+                .iter()
+                .find(|(k, _)| k == "g")
+                .and_then(|(_, v)| match v {
+                    Value::Int(n) => Some(*n),
+                    _ => None,
+                })?;
+            let b = fields
+                .iter()
+                .find(|(k, _)| k == "b")
+                .and_then(|(_, v)| match v {
+                    Value::Int(n) => Some(*n),
+                    _ => None,
+                })?;
+            Some(TerminalColor::Rgb(r as u8, g as u8, b as u8))
+        }
+        _ => None,
+    }
+}
+
+fn color_name_to_terminal(name: &str) -> Option<TerminalColor> {
+    let idx = match name {
+        "default" => return Some(TerminalColor::Default),
+        "black" => 0,
+        "red" => 1,
+        "green" => 2,
+        "yellow" => 3,
+        "blue" => 4,
+        "magenta" => 5,
+        "cyan" => 6,
+        "white" => 7,
+        _ => return None,
+    };
+    Some(TerminalColor::Idx(idx))
+}
+
+fn color_matches(desired: &TerminalColor, actual: &TerminalColor) -> bool {
+    match (desired, actual) {
+        (TerminalColor::Default, TerminalColor::Default) => true,
+        (TerminalColor::Idx(d), TerminalColor::Idx(a)) => *d == *a || (*d < 8 && *a == *d + 8),
+        (TerminalColor::Rgb(dr, dg, db), TerminalColor::Rgb(ar, ag, ab)) => {
+            dr == ar && dg == ag && db == ab
+        }
+        _ => false,
     }
 }
 
@@ -1263,5 +1630,79 @@ mod tests {
         registry.insert(entry);
         assert!(registry.lookup(&h.to_string(), "session_a").is_ok());
         assert!(registry.lookup(&h.to_string(), "session_b").is_err());
+    }
+
+    fn make_screen(rows: u16, cols: u16, text: &str) -> TerminalScreen {
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser.process(text.as_bytes());
+        snapshot_screen(&parser)
+    }
+
+    #[test]
+    fn cell_text_returns_chars_for_filled_cell() {
+        let screen = make_screen(1, 5, "hello");
+        assert_eq!(cell_text(&screen, 0, 0), "h");
+        assert_eq!(cell_text(&screen, 0, 4), "o");
+    }
+
+    #[test]
+    fn cell_text_returns_space_for_empty_cell() {
+        let screen = make_screen(1, 5, "hi");
+        assert_eq!(cell_text(&screen, 0, 2), " ");
+    }
+
+    #[test]
+    fn find_pattern_returns_position() {
+        let screen = make_screen(2, 10, "hello\r\nworld");
+        let pos = find_pattern_on_screen(&screen, "world");
+        assert_eq!(pos, Some((1, 0)));
+    }
+
+    #[test]
+    fn find_pattern_returns_none_when_absent() {
+        let screen = make_screen(1, 5, "hello");
+        assert!(find_pattern_on_screen(&screen, "xyz").is_none());
+    }
+
+    #[test]
+    fn color_name_maps_to_ansi_idx() {
+        assert_eq!(color_name_to_terminal("red"), Some(TerminalColor::Idx(1)));
+        assert_eq!(
+            color_name_to_terminal("default"),
+            Some(TerminalColor::Default)
+        );
+        assert_eq!(color_name_to_terminal("nonexistent"), None);
+    }
+
+    #[test]
+    fn color_matches_bright_variant_to_base_name() {
+        let desired = TerminalColor::Idx(1);
+        let actual_bright = TerminalColor::Idx(9);
+        assert!(color_matches(&desired, &actual_bright));
+        let actual_normal = TerminalColor::Idx(1);
+        assert!(color_matches(&desired, &actual_normal));
+    }
+
+    #[test]
+    fn color_matches_rgb_exact() {
+        let desired = TerminalColor::Rgb(255, 128, 0);
+        let actual = TerminalColor::Rgb(255, 128, 0);
+        assert!(color_matches(&desired, &actual));
+        let wrong = TerminalColor::Rgb(255, 128, 1);
+        assert!(!color_matches(&desired, &wrong));
+    }
+
+    #[test]
+    fn parse_color_accepts_name_and_rgb() {
+        assert_eq!(
+            parse_color(&Value::Str("blue".into())),
+            Some(TerminalColor::Idx(4))
+        );
+        let rgb = Value::Struct(vec![
+            ("r".into(), Value::Int(10)),
+            ("g".into(), Value::Int(20)),
+            ("b".into(), Value::Int(30)),
+        ]);
+        assert_eq!(parse_color(&rgb), Some(TerminalColor::Rgb(10, 20, 30)));
     }
 }

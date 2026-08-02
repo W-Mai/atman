@@ -118,6 +118,7 @@ pub fn register_terminal(reg: &mut ToolRegistry) -> Arc<term::TermRegistry> {
     reg.register(Arc::new(term::TermSpawn));
     reg.register(Arc::new(term::TermInput));
     reg.register(Arc::new(term::TermCapture));
+    reg.register(Arc::new(term::TermFind));
     reg.register(Arc::new(term::TermResize));
     reg.register(Arc::new(term::TermKill));
     reg.register(Arc::new(term::TermList));
@@ -132,6 +133,7 @@ pub fn register_terminal_with_task_registry(
     reg.register(Arc::new(term::TermSpawn));
     reg.register(Arc::new(term::TermInput));
     reg.register(Arc::new(term::TermCapture));
+    reg.register(Arc::new(term::TermFind));
     reg.register(Arc::new(term::TermResize));
     reg.register(Arc::new(term::TermKill));
     reg.register(Arc::new(term::TermList));
