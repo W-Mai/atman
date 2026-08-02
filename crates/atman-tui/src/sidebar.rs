@@ -184,7 +184,7 @@ pub fn render(
 
     // Meta only visible when both panels expanded
     let meta_height: u16 = if !upper_collapsed && !lower_collapsed {
-        3
+        4
     } else {
         0
     };
@@ -1213,10 +1213,11 @@ fn render_meta_plain(
     _t: &crate::theme::Theme,
 ) {
     let mut lines: Vec<Line<'_>> = Vec::new();
-    lines.push(Line::from("")); // blank separator
+    lines.push(Line::from("")); // move down one line
     if let Some(root) = project_root {
         lines.push(project_dir_line(root));
     }
+    lines.push(Line::from("")); // blank between project and version
     lines.push(version_line(app_version, latest_release));
     f.render_widget(
         ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Right),
