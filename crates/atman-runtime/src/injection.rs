@@ -35,6 +35,18 @@ pub enum InjectionLevel {
     L4HardStop,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionSource {
+    #[default]
+    User,
+    Watcher {
+        watcher_id: String,
+        kind: String,
+        handle: String,
+    },
+}
+
 impl InjectionLevel {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -57,6 +69,8 @@ pub struct Injection {
     pub level: InjectionLevel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_target: Option<String>,
+    #[serde(default)]
+    pub source: InjectionSource,
 }
 
 fn default_level() -> InjectionLevel {
@@ -82,6 +96,7 @@ impl Injection {
             state: InjectionState::Pending,
             level,
             redirect_target,
+            source: InjectionSource::User,
         }
     }
 }
@@ -127,5 +142,40 @@ mod tests {
     fn new_pending_starts_in_pending_state() {
         let inj = Injection::new_pending(TurnId::now(), "x");
         assert_eq!(inj.state, InjectionState::Pending);
+    }
+
+    #[test]
+    fn old_event_without_source_deserializes_as_user() {
+        let json = serde_json::json!({
+            "id": uuid::Uuid::now_v7(),
+            "text": "old message",
+            "turn_id": uuid::Uuid::now_v7().to_string(),
+            "created_at": "2026-01-01T00:00:00Z",
+            "state": "pending",
+            "level": "l1_nudge"
+        });
+        let inj: Injection = serde_json::from_value(json).unwrap();
+        assert_eq!(inj.source, InjectionSource::User);
+    }
+
+    #[test]
+    fn watcher_source_roundtrips() {
+        let inj = Injection {
+            id: InjectionId::now(),
+            text: "pattern found".into(),
+            turn_id: TurnId::now(),
+            created_at: chrono::Utc::now(),
+            state: InjectionState::Pending,
+            level: crate::injection::InjectionLevel::L1Nudge,
+            redirect_target: None,
+            source: InjectionSource::Watcher {
+                watcher_id: "w_abc".into(),
+                kind: "terminal".into(),
+                handle: "term_x".into(),
+            },
+        };
+        let s = serde_json::to_string(&inj).unwrap();
+        let back: Injection = serde_json::from_str(&s).unwrap();
+        assert_eq!(inj, back);
     }
 }

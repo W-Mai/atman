@@ -68,7 +68,7 @@ pub use event::{
 };
 pub use executor::Executor;
 pub use hunk::{ApplyError, EditProposal, Hunk, HunkLine};
-pub use injection::{Injection, InjectionId, InjectionState};
+pub use injection::{Injection, InjectionId, InjectionSource, InjectionState};
 pub use message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
 pub use projection::message_window::{TranscriptEntry, replay_transcript_from};
 pub use provider::{LlmRequest, Provider, ProviderRegistry, TokenUsage};
