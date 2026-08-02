@@ -411,7 +411,7 @@ async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.has_active_animation() || app.hovered_sidebar_row.is_some() => {
+            _ = animation_tick.tick(), if app.has_active_animation() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
             _ = intro_tick.tick(), if app.startup_intro.is_some() => {
@@ -744,6 +744,31 @@ async fn run_frames(
                                 {
                                     app.todo_collapsed = !app.todo_collapsed;
                                     app.save_ui_state();
+                                } else if app.sidebar_popup.is_some()
+                                    && app
+                                        .last_sidebar_popup_rect
+                                        .map(|r| !rect_contains(r, me.column, me.row))
+                                        .unwrap_or(true)
+                                {
+                                    app.sidebar_popup = None;
+                                } else if let Some((key, _)) = app
+                                    .last_sidebar_strip_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(**r, me.column, me.row))
+                                {
+                                    if let Some(idx) = key
+                                        .strip_prefix("plan:")
+                                        .and_then(|s| s.parse::<usize>().ok())
+                                    {
+                                        app.sidebar_popup =
+                                            Some(crate::sidebar::SidebarPopupKind::Plan(idx));
+                                    } else if let Some(idx) = key
+                                        .strip_prefix("todo:")
+                                        .and_then(|s| s.parse::<usize>().ok())
+                                    {
+                                        app.sidebar_popup =
+                                            Some(crate::sidebar::SidebarPopupKind::Todo(idx));
+                                    }
                                 } else if let Some(r) = app.last_ctx_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -1085,7 +1110,7 @@ async fn run_frames(
                                     app.hovered_mcp_row = mcp_hover;
                                 }
 
-                                // Sidebar strip hover (for marquee effect)
+                                // Sidebar strip hover
                                 let sidebar_hover = app
                                     .last_sidebar_strip_rects
                                     .iter()
@@ -1093,7 +1118,6 @@ async fn run_frames(
                                     .map(|(k, _)| k.clone());
                                 if app.hovered_sidebar_row != sidebar_hover {
                                     app.hovered_sidebar_row = sidebar_hover;
-                                    app.marquee_start_frame = app.animation_frame;
                                 }
 
                                 // Sidebar hamburger hover (upper panel title)
@@ -3638,7 +3662,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 hovered_hamburger: app.hovered_sidebar_hamburger,
                 hovered_lower: app.hovered_sidebar_lower,
                 hovered_more: app.hovered_sidebar_more,
-                marquee_start_frame: app.marquee_start_frame,
                 on_goal_scroll: &|_c| {},
                 on_plans_scroll: &|_c| {},
                 on_todos_scroll: &|_c| {},
@@ -3660,6 +3683,16 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_lower_title_rect = sr.lower_title_rect;
         app.last_sidebar_more_rect = sr.mcp_more_rect;
         app.last_sidebar_strip_rects = sr.strip_rects;
+    }
+    // ── Sidebar popup (Plan/Todo item full text) ──
+    if let Some(kind) = app.sidebar_popup {
+        if let Some(sidebar_rect) = app.last_sidebar_rect {
+            let popup_rect =
+                crate::sidebar::render_sidebar_popup(f, sidebar_rect, kind, &app.plans, &app.todos);
+            app.last_sidebar_popup_rect = Some(popup_rect);
+        }
+    } else {
+        app.last_sidebar_popup_rect = None;
     }
     if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(
         l.transcript,

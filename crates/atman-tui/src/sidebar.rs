@@ -5,6 +5,12 @@ use ratatui::text::{Line, Span};
 
 pub const GOAL_MAX_LINES: usize = 5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarPopupKind {
+    Plan(usize),
+    Todo(usize),
+}
+
 pub struct SidebarInputs<'a> {
     pub goal: Option<&'a str>,
     pub context: &'a ContextSnapshot,
@@ -34,7 +40,6 @@ pub struct SidebarInputs<'a> {
     pub hovered_hamburger: bool,
     pub hovered_lower: bool,
     pub hovered_more: bool,
-    pub marquee_start_frame: u32,
     pub on_goal_scroll: &'a dyn Fn(u16),
     pub on_plans_scroll: &'a dyn Fn(u16),
     pub on_todos_scroll: &'a dyn Fn(u16),
@@ -168,12 +173,12 @@ pub fn render(
     // upper content = sections + 2 gaps + 4 padding (top+title+blockpad+contentpad) + 1 bottom
     let upper_need: u16 = 4 + 1 + goal_lines + 1 + plan_lines + 1 + todo_lines + 1;
 
-    let ctx_lines = if inputs.context_collapsed { 0 } else { 5 };
+    let ctx_lines = if inputs.context_collapsed { 0 } else { 7 };
     let mcp_count = inputs.context.mcp_servers.len() as u16;
     let mcp_lines = if inputs.mcp_collapsed {
         0
     } else {
-        2 + mcp_count + 1 // +1 for "more" row
+        1 + mcp_count + 1 // header + servers + more row
     };
     let lower_need: u16 = 4 + 1 + ctx_lines + 1 + mcp_lines + 1;
 
@@ -682,25 +687,6 @@ fn render_panel_frame(
     );
 }
 
-fn marquee_offset(animation_frame: u32, start_frame: u32, text_w: usize, max_w: usize) -> usize {
-    if text_w <= max_w {
-        return 0;
-    }
-    let elapsed = animation_frame.saturating_sub(start_frame);
-    let scroll_range = text_w - max_w + 1;
-    let cycle = scroll_range * 2 + 20;
-    let phase = (elapsed as usize / 3) % cycle;
-    if phase < 10 {
-        0
-    } else if phase < 10 + scroll_range {
-        phase - 10
-    } else if phase < 10 + scroll_range + 10 {
-        scroll_range - 1
-    } else {
-        scroll_range - 1 - (phase - 10 - scroll_range - 10)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_upper_content(
     f: &mut ratatui::Frame,
@@ -816,18 +802,7 @@ fn render_upper_content(
                     };
                     let indent = if total <= 1 { " " } else { "│" };
                     let step_text = &step.text;
-                    let text_w = crate::width::width(step_text);
-                    let display = if text_w > step_max && is_hovered {
-                        let offset = marquee_offset(
-                            inputs.animation_frame,
-                            inputs.marquee_start_frame,
-                            text_w,
-                            step_max,
-                        );
-                        crate::width::trim_display_offset(step_text, offset, step_max)
-                    } else {
-                        crate::width::truncate(step_text, step_max)
-                    };
+                    let display = crate::width::truncate(step_text, step_max);
                     let bg = if is_hovered {
                         content_bg_hover
                     } else {
@@ -918,18 +893,7 @@ fn render_upper_content(
                             .add_modifier(Modifier::CROSSED_OUT),
                     ),
                 };
-                let text_w = crate::width::width(&todo.why);
-                let display = if text_w > todo_max && is_hovered {
-                    let offset = marquee_offset(
-                        inputs.animation_frame,
-                        inputs.marquee_start_frame,
-                        text_w,
-                        todo_max,
-                    );
-                    crate::width::trim_display_offset(&todo.why, offset, todo_max)
-                } else {
-                    crate::width::truncate(&todo.why, todo_max)
-                };
+                let display = crate::width::truncate(&todo.why, todo_max);
                 let bg = if is_hovered {
                     content_bg_hover
                 } else {
@@ -1024,8 +988,57 @@ fn render_lower_content(
         lines.push(kv_line_bg("model", &model, plain, kv_w, content_bg));
         lines.push(kv_line_bg("window", &window, plain, kv_w, content_bg));
         lines.push(kv_line_bg(
+            "total",
+            &format!(
+                "↑{} · ↓{}",
+                format_count(ctx.tokens_in),
+                format_count(ctx.tokens_out)
+            ),
+            plain,
+            kv_w,
+            content_bg,
+        ));
+        let cache_val = if ctx.cache_read > 0 || ctx.cache_write > 0 {
+            let hit_rate = if ctx.tokens_in > 0 {
+                (ctx.cache_read as f64 / ctx.tokens_in as f64 * 100.0) as u64
+            } else {
+                0
+            };
+            format!(
+                "read {} · write {} · {}%",
+                format_count(ctx.cache_read),
+                format_count(ctx.cache_write),
+                hit_rate,
+            )
+        } else {
+            "—".to_string()
+        };
+        lines.push(kv_line_bg("cache", &cache_val, plain, kv_w, content_bg));
+        lines.push(kv_line_bg(
+            "last",
+            &format!(
+                "ttft {} · {:.0} tok/s",
+                if ctx.last_ttft_ms > 0 {
+                    format!("{}ms", ctx.last_ttft_ms)
+                } else {
+                    "—".to_string()
+                },
+                ctx.last_tokens_per_sec
+            ),
+            plain,
+            kv_w,
+            content_bg,
+        ));
+        lines.push(kv_line_bg(
             "attach",
             &format!("{}", inputs.attach_count),
+            plain,
+            kv_w,
+            content_bg,
+        ));
+        lines.push(kv_line_bg(
+            "memory",
+            &format!("recent×{}", ctx.memory_recent_count),
             plain,
             kv_w,
             content_bg,
@@ -1261,6 +1274,124 @@ fn kv_line_bg<'a>(
         ),
         Span::styled(val, value_style.bg(bg)),
     ])
+}
+
+/// Render a sidebar popup showing the full text of a clicked plan step or todo item.
+/// Small floating panel to the left of the sidebar — no buttons, just content + shadow.
+pub fn render_sidebar_popup(
+    f: &mut ratatui::Frame,
+    sidebar_rect: ratatui::layout::Rect,
+    kind: SidebarPopupKind,
+    plans: &[atman_runtime::memory::plan::Plan],
+    todos: &[atman_runtime::memory::todo::Todo],
+) -> ratatui::layout::Rect {
+    let t = crate::theme::theme();
+    let panel_bg = t.modal_bg.into();
+    let accent = Style::default()
+        .fg(t.accent.into())
+        .add_modifier(Modifier::BOLD);
+
+    // Get the full text for the clicked item
+    let (title, full_text) = match kind {
+        SidebarPopupKind::Plan(idx) => {
+            let latest = plans.iter().max_by_key(|p| p.updated_at);
+            match latest.and_then(|p| p.steps.get(idx)) {
+                Some(step) => {
+                    let label = if step.done { "✓" } else { "○" };
+                    (format!(" {label} Step {}", idx + 1), step.text.clone())
+                }
+                None => return ratatui::layout::Rect::default(),
+            }
+        }
+        SidebarPopupKind::Todo(idx) => match todos.get(idx) {
+            Some(todo) => {
+                use atman_runtime::memory::todo::TodoStatus;
+                let label = match todo.status {
+                    TodoStatus::Pending => "○",
+                    TodoStatus::InProgress => "⚡",
+                    TodoStatus::Done => "✓",
+                    TodoStatus::Cancelled => "✗",
+                };
+                let mut text = todo.why.clone();
+                if !todo.where_.is_empty() || !todo.how.is_empty() {
+                    text.push_str(&format!("\n  {} · {}", todo.where_, todo.how));
+                }
+                (format!(" {label} Todo"), text)
+            }
+            None => return ratatui::layout::Rect::default(),
+        },
+    };
+
+    // Build content lines with word wrap
+    let popup_w: u16 = 52;
+    let wrap_w = (popup_w as usize).saturating_sub(4);
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    lines.push(Line::from(Span::styled(format!("  ≡{title}"), accent)));
+    lines.push(Line::from(""));
+    for line in full_text.lines() {
+        let wrapped = crate::width::word_wrap(line, wrap_w);
+        if wrapped.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  ",
+                Style::default().fg(t.tinted_fg.into()),
+            )));
+        }
+        for w in &wrapped {
+            lines.push(Line::from(Span::styled(
+                format!("  {w}"),
+                Style::default().fg(t.tinted_fg.into()),
+            )));
+        }
+    }
+
+    let popup_h: u16 = (lines.len() as u16 + 2).min(sidebar_rect.height);
+    let popup_x = sidebar_rect.x.saturating_sub(popup_w).saturating_sub(1);
+    let popup_y = sidebar_rect.y;
+    let popup_area = ratatui::layout::Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_w,
+        height: popup_h,
+    };
+
+    crate::sanitize_widget_edges(f, popup_area);
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+
+    // top padding row
+    f.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(panel_bg)),
+        ratatui::layout::Rect {
+            x: popup_area.x,
+            y: popup_area.y,
+            width: popup_area.width,
+            height: 1,
+        },
+    );
+    let content_area = ratatui::layout::Rect {
+        x: popup_area.x,
+        y: popup_area.y + 1,
+        width: popup_area.width,
+        height: popup_area.height.saturating_sub(1),
+    };
+    f.render_widget(
+        ratatui::widgets::Block::default()
+            .style(Style::default().bg(panel_bg))
+            .padding(ratatui::widgets::Padding {
+                left: 1,
+                right: 1,
+                top: 0,
+                bottom: 1,
+            }),
+        content_area,
+    );
+    let visible: Vec<Line<'_>> = lines
+        .into_iter()
+        .take(content_area.height.saturating_sub(1) as usize)
+        .collect();
+    f.render_widget(ratatui::widgets::Paragraph::new(visible), content_area);
+
+    crate::floating_panels::render_shadow(f, popup_area, &t);
+    popup_area
 }
 
 #[cfg(test)]
