@@ -113,6 +113,7 @@ pub struct Session {
     messages: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
     pub turn: TurnState,
     pub watch: WatchHub,
+    pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
     pub compaction: CompactionState,
     pub interactions: InteractionServices,
     injection_queue: Mutex<Vec<Injection>>,
@@ -652,6 +653,7 @@ impl Session {
                 plans: plans_watch,
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
+            watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
@@ -752,6 +754,7 @@ impl Session {
                 plans: plans_watch,
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
+            watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             compaction: {
                 let c = CompactionState::new();
                 if persisted.window_tokens > 0 {
@@ -801,6 +804,7 @@ impl Session {
                 plans: plans_watch,
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
+            watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),

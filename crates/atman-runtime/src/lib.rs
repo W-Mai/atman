@@ -56,6 +56,7 @@ pub mod tools;
 pub mod trust;
 pub mod validate;
 pub mod value;
+pub mod watch;
 pub mod workflow;
 
 pub use cost::{CostSummary, summarize_by_model, summarize_by_provider, total};

@@ -329,6 +329,7 @@ async fn dispatch_tool_call<'a>(
             .with_session_messages(session.messages_full())
             .with_session_messages_handle(session.messages_handle())
             .with_session_runtime(session.clone())
+            .with_watch_hub(std::sync::Arc::clone(&session.watch_hub))
             .with_compact_lock_handle(session.compact_lock_handle())
     } else {
         ctx_with_anchors

@@ -334,17 +334,18 @@ fn exec_stmt<'a>(
             }
             Stmt::When { cond, body } => {
                 let c = eval_expr(cond, env, ctx).await;
-                match c {
-                    Value::Bool(true) => (exec_stmts(body, env, ctx).await, Some("true".into())),
-                    Value::Bool(false) => (StmtOutcome::Continue, Some("false".into())),
-                    Value::Err(e) => (StmtOutcome::Err(e), None),
-                    other => (
-                        StmtOutcome::Err(RuntimeError::TypeMismatch {
-                            expected: "bool".into(),
-                            actual: other.kind_name().into(),
-                        }),
-                        None,
-                    ),
+                let truthy = match c {
+                    Value::Bool(b) => b,
+                    Value::Unit => false,
+                    Value::Err(e) => {
+                        return (StmtOutcome::Err(e), None);
+                    }
+                    _ => true,
+                };
+                if truthy {
+                    (exec_stmts(body, env, ctx).await, Some("true".into()))
+                } else {
+                    (StmtOutcome::Continue, Some("false".into()))
                 }
             }
             Stmt::Return { value } => {
@@ -1160,8 +1161,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn when_cond_non_bool_is_type_error() {
-        let err = run(
+    async fn when_cond_unit_is_falsy() {
+        let out = run(
             r#"flow t() -> Int {
     when 1 {
         return 1
@@ -1172,8 +1173,26 @@ mod tests {
             vec![],
         )
         .await
-        .unwrap_err();
-        assert!(matches!(err, RuntimeError::TypeMismatch { .. }));
+        .unwrap();
+        assert!(matches!(out, Value::Int(1)));
+    }
+
+    #[tokio::test]
+    async fn when_cond_struct_is_truthy() {
+        let out = run(
+            r#"flow t() -> Int {
+    x = { a: 1 }
+    when x {
+        return 42
+    }
+    return 0
+}
+"#,
+            vec![],
+        )
+        .await
+        .unwrap();
+        assert!(matches!(out, Value::Int(42)));
     }
 
     #[tokio::test]

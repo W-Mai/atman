@@ -119,11 +119,20 @@ flow agent_loop(iteration: int) -> string {
             help.show,
             preview.push,
             session.push, sleep,
+            watch, watcher.list, watcher.unwatch, wait_for_watcher, has_pending_injections,
             "mcp.*"
         ]
     }
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
+        when has_pending_injections() {
+            return subflow(agent_loop, iteration + 1)
+        }
+        event = wait_for_watcher(timeout_ms: 30000)
+        when event {
+            session.push(event)
+            return subflow(agent_loop, iteration + 1)
+        }
         return text_concat(reply)
     }
     tool_results = dispatch_all(tool_uses)

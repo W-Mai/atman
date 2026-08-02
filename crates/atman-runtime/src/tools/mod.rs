@@ -80,6 +80,14 @@ pub fn register_git_ops(reg: &mut ToolRegistry) {
     reg.register(Arc::new(git_ops::GitPush));
 }
 
+pub fn register_watch(reg: &mut ToolRegistry) {
+    reg.register(Arc::new(crate::watch::Watch));
+    reg.register(Arc::new(crate::watch::WatcherList));
+    reg.register(Arc::new(crate::watch::WatcherUnwatch));
+    reg.register(Arc::new(crate::watch::WaitForWatcher));
+    reg.register(Arc::new(crate::watch::HasPendingInjections));
+}
+
 pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {
     let registry = Arc::new(bash_bg::BgRegistry::new());
     reg.register(Arc::new(bash_bg::BashSpawn));

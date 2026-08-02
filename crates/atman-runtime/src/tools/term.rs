@@ -822,6 +822,37 @@ fn find_pattern_on_screen(screen: &TerminalScreen, pattern: &str) -> Option<(u16
     None
 }
 
+impl crate::watch::Watchable for TermEntry {
+    fn watch_output(
+        self: std::sync::Arc<Self>,
+        pattern: String,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::watch::WatchResult> + Send>>
+    {
+        let stream_tx = self.stream_tx.clone();
+        Box::pin(async move {
+            let mut rx = stream_tx.subscribe();
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,
+                    result = rx.recv() => match result {
+                        Ok(crate::tools::term::TermStreamEvent::Chunk { screen, .. }) => {
+                            if let Some((r, c)) = find_pattern_on_screen(&screen, &pattern) {
+                                return crate::watch::WatchResult::Matched {
+                                    row: Some(r),
+                                    col: Some(c),
+                                    text: pattern,
+                                };
+                            }
+                        }
+                        _ => return crate::watch::WatchResult::SourceExited,
+                    }
+                }
+            }
+        })
+    }
+}
+
 fn screen_to_value(screen: &TerminalScreen) -> Value {
     let cells: Vec<Value> = screen
         .cells

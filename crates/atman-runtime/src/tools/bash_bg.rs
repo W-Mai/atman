@@ -182,6 +182,42 @@ pub struct BgEntry {
     pub task_id: Option<crate::task_registry::TaskId>,
 }
 
+impl crate::watch::Watchable for BgEntry {
+    fn watch_output(
+        self: std::sync::Arc<Self>,
+        pattern: String,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::watch::WatchResult> + Send>>
+    {
+        let output = self.output.clone();
+        let status = self.status.clone();
+        Box::pin(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        let text = {
+                            let out = output.lock().unwrap();
+                            String::from_utf8_lossy(&out.combined).into_owned()
+                        };
+                        if let Some(pos) = text.find(&pattern) {
+                            return crate::watch::WatchResult::Matched {
+                                row: None,
+                                col: Some(pos as u16),
+                                text: pattern,
+                            };
+                        }
+                        let st = status.lock().unwrap().clone();
+                        if !matches!(st, BgStatus::Running { .. }) {
+                            return crate::watch::WatchResult::SourceExited;
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct BgRegistry {
     entries: Mutex<HashMap<String, Arc<BgEntry>>>,
@@ -314,7 +350,7 @@ impl BgRegistry {
         ]))
     }
 
-    fn lookup(&self, handle_str: &str, session_id: &str) -> Result<Arc<BgEntry>, RuntimeError> {
+    pub fn lookup(&self, handle_str: &str, session_id: &str) -> Result<Arc<BgEntry>, RuntimeError> {
         let handle = BgHandle::parse(handle_str).ok_or_else(|| {
             RuntimeError::ToolFailed(format!("bash: invalid handle `{handle_str}`"))
         })?;

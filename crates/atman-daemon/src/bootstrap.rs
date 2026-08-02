@@ -326,6 +326,7 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     let fetch_rule = build_fetch_rule(&opts.project_root, opts.home_dir.as_deref()).await;
     tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
     tools::register_git_ops(&mut executor.tools);
+    tools::register_watch(&mut executor.tools);
     let task_registry = atman_runtime::TaskRegistry::new();
     let bg_registry =
         tools::register_bash_bg_with_task_registry(&mut executor.tools, task_registry.clone());

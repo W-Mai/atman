@@ -98,6 +98,7 @@ pub struct ToolCtx {
         Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
     pub term_registry: Option<std::sync::Arc<crate::tools::term::TermRegistry>>,
+    pub watch_hub: Option<std::sync::Arc<crate::watch::WatchHub>>,
     pub task_registry: Option<crate::task_registry::TaskRegistry>,
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,
@@ -261,6 +262,11 @@ impl ToolCtx {
         registry: std::sync::Arc<crate::tools::term::TermRegistry>,
     ) -> Self {
         self.term_registry = Some(registry);
+        self
+    }
+
+    pub fn with_watch_hub(mut self, hub: std::sync::Arc<crate::watch::WatchHub>) -> Self {
+        self.watch_hub = Some(hub);
         self
     }
 
