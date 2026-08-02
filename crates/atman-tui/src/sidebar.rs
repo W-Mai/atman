@@ -784,6 +784,9 @@ fn render_upper_content(
                 )));
                 let total = p.steps.len();
                 let step_max = content_w.saturating_sub(8);
+
+                // Build all plan body lines into a temp vector
+                let mut plan_body: Vec<(usize, Line<'_>)> = Vec::new();
                 for (i, step) in p.steps.iter().enumerate() {
                     let row_key = format!("plan:{i}");
                     let is_hovered = inputs.hovered_row == Some(row_key.as_str());
@@ -801,13 +804,49 @@ fn render_upper_content(
                         )
                     };
                     let indent = if total <= 1 { " " } else { "│" };
-                    let step_text = &step.text;
-                    let display = crate::width::truncate(step_text, step_max);
+                    let display = crate::width::truncate(&step.text, step_max);
                     let bg = if is_hovered {
                         content_bg_hover
                     } else {
                         content_bg
                     };
+                    plan_body.push((
+                        i,
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" {indent} "),
+                                Style::default().fg(t.subtle_fg.into()).bg(bg),
+                            ),
+                            Span::styled(format!("{glyph} "), glyph_style.bg(bg)),
+                            Span::styled(
+                                format!("{:>2}. ", i + 1),
+                                Style::default().fg(t.meta_fg.into()).bg(bg),
+                            ),
+                            Span::styled(display, text_style.bg(bg)),
+                        ]),
+                    ));
+                }
+
+                // Calculate visible height: remaining space minus todo minimum (header + 1 item)
+                let lines_so_far = lines.len() as u16;
+                let todo_min = if inputs.todo_collapsed { 1 } else { 2 };
+                let avail = area
+                    .height
+                    .saturating_sub(lines_so_far + 1 + todo_min)
+                    .max(1) as usize;
+                let body_len = plan_body.len();
+                let scroll = (inputs.plans_scroll as usize).min(body_len.saturating_sub(avail));
+                let visible_count = body_len.min(avail);
+                let can_scroll_up = scroll > 0;
+                let can_scroll_down = scroll + visible_count < body_len;
+
+                for (vi, (step_idx, mut line)) in plan_body
+                    .into_iter()
+                    .skip(scroll)
+                    .take(visible_count)
+                    .enumerate()
+                {
+                    let row_key = format!("plan:{step_idx}");
                     let row_y = area.y + lines.len() as u16;
                     result.strip_rects.insert(
                         row_key,
@@ -818,18 +857,13 @@ fn render_upper_content(
                             height: 1,
                         },
                     );
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!(" {indent} "),
-                            Style::default().fg(t.subtle_fg.into()).bg(bg),
-                        ),
-                        Span::styled(format!("{glyph} "), glyph_style.bg(bg)),
-                        Span::styled(
-                            format!("{:>2}. ", i + 1),
-                            Style::default().fg(t.meta_fg.into()).bg(bg),
-                        ),
-                        Span::styled(display, text_style.bg(bg)),
-                    ]));
+                    // Fade first visible if can scroll up, last visible if can scroll down
+                    if (vi == 0 && can_scroll_up) || (vi == visible_count - 1 && can_scroll_down) {
+                        line.spans
+                            .iter_mut()
+                            .for_each(|s| s.style = s.style.add_modifier(Modifier::DIM));
+                    }
+                    lines.push(line);
                 }
             }
         }
@@ -873,10 +907,11 @@ fn render_upper_content(
             )));
         } else {
             let todo_max = content_w.saturating_sub(4);
+
+            // Build all todo body lines into a temp vector
+            let mut todo_body: Vec<(usize, Line<'_>)> = Vec::new();
             for (i, todo) in inputs.todos.iter().enumerate() {
                 use atman_runtime::memory::todo::TodoStatus;
-                let row_key = format!("todo:{i}");
-                let is_hovered = inputs.hovered_row == Some(row_key.as_str());
                 let (glyph, glyph_style) = match todo.status {
                     TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg.into())),
                     TodoStatus::InProgress => (
@@ -894,11 +929,37 @@ fn render_upper_content(
                     ),
                 };
                 let display = crate::width::truncate(&todo.why, todo_max);
+                let is_hovered = inputs.hovered_row == Some(format!("todo:{i}").as_str());
                 let bg = if is_hovered {
                     content_bg_hover
                 } else {
                     content_bg
                 };
+                todo_body.push((
+                    i,
+                    Line::from(vec![
+                        Span::styled(format!("  {glyph} "), glyph_style.bg(bg)),
+                        Span::styled(display, Style::default().fg(t.tinted_fg.into()).bg(bg)),
+                    ]),
+                ));
+            }
+
+            // Calculate visible height: remaining space
+            let lines_so_far = lines.len() as u16;
+            let avail = area.height.saturating_sub(lines_so_far).max(1) as usize;
+            let body_len = todo_body.len();
+            let scroll = (inputs.todos_scroll as usize).min(body_len.saturating_sub(avail));
+            let visible_count = body_len.min(avail);
+            let can_scroll_up = scroll > 0;
+            let can_scroll_down = scroll + visible_count < body_len;
+
+            for (vi, (todo_i, mut line)) in todo_body
+                .into_iter()
+                .skip(scroll)
+                .take(visible_count)
+                .enumerate()
+            {
+                let row_key = format!("todo:{todo_i}");
                 let row_y = area.y + lines.len() as u16;
                 result.strip_rects.insert(
                     row_key,
@@ -909,10 +970,12 @@ fn render_upper_content(
                         height: 1,
                     },
                 );
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {glyph} "), glyph_style.bg(bg)),
-                    Span::styled(display, Style::default().fg(t.tinted_fg.into()).bg(bg)),
-                ]));
+                if (vi == 0 && can_scroll_up) || (vi == visible_count - 1 && can_scroll_down) {
+                    line.spans
+                        .iter_mut()
+                        .for_each(|s| s.style = s.style.add_modifier(Modifier::DIM));
+                }
+                lines.push(line);
             }
         }
         result.todo_rect = Some(Rect {
