@@ -411,7 +411,7 @@ async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.has_active_animation() => {
+            _ = animation_tick.tick(), if app.has_active_animation() || app.hovered_sidebar_row.is_some() => {
                 app.animation_frame = app.animation_frame.wrapping_add(1);
             }
             _ = intro_tick.tick(), if app.startup_intro.is_some() => {
@@ -719,6 +719,16 @@ async fn run_frames(
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.sidebar_lower_collapsed = !app.sidebar_lower_collapsed;
+                                } else if let Some(r) = app.last_sidebar_more_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    let canvas = app.last_transcript_rect.unwrap_or_default();
+                                    app.floating_panels.open(
+                                        "mcp-manager",
+                                        crate::floating_panels::PanelKind::Mcp,
+                                        "MCP Servers",
+                                        canvas,
+                                    );
                                 } else if let Some(r) = app.last_goal_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -1083,6 +1093,7 @@ async fn run_frames(
                                     .map(|(k, _)| k.clone());
                                 if app.hovered_sidebar_row != sidebar_hover {
                                     app.hovered_sidebar_row = sidebar_hover;
+                                    app.marquee_start_frame = app.animation_frame;
                                 }
 
                                 // Sidebar hamburger hover (upper panel title)
@@ -1102,6 +1113,15 @@ async fn run_frames(
                                     .unwrap_or(false);
                                 if app.hovered_sidebar_lower != lower_hover {
                                     app.hovered_sidebar_lower = lower_hover;
+                                }
+
+                                // Sidebar MCP "more" row hover
+                                let more_hover = app
+                                    .last_sidebar_more_rect
+                                    .map(|r| rect_contains(r, me.column, me.row))
+                                    .unwrap_or(false);
+                                if app.hovered_sidebar_more != more_hover {
+                                    app.hovered_sidebar_more = more_hover;
                                 }
 
                                 if let Some(idx) = app.hit_test(me.column, me.row)
@@ -3617,6 +3637,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 hovered_row: app.hovered_sidebar_row.as_deref(),
                 hovered_hamburger: app.hovered_sidebar_hamburger,
                 hovered_lower: app.hovered_sidebar_lower,
+                hovered_more: app.hovered_sidebar_more,
+                marquee_start_frame: app.marquee_start_frame,
                 on_goal_scroll: &|_c| {},
                 on_plans_scroll: &|_c| {},
                 on_todos_scroll: &|_c| {},
@@ -3636,6 +3658,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_expand_btn_rect = sr.expand_btn_rect;
         app.last_upper_title_rect = sr.upper_title_rect;
         app.last_lower_title_rect = sr.lower_title_rect;
+        app.last_sidebar_more_rect = sr.mcp_more_rect;
         app.last_sidebar_strip_rects = sr.strip_rects;
     }
     if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(

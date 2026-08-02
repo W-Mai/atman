@@ -33,6 +33,8 @@ pub struct SidebarInputs<'a> {
     pub hovered_row: Option<&'a str>,
     pub hovered_hamburger: bool,
     pub hovered_lower: bool,
+    pub hovered_more: bool,
+    pub marquee_start_frame: u32,
     pub on_goal_scroll: &'a dyn Fn(u16),
     pub on_plans_scroll: &'a dyn Fn(u16),
     pub on_todos_scroll: &'a dyn Fn(u16),
@@ -76,6 +78,7 @@ pub struct SidebarRenderResult {
     pub expand_btn_rect: Option<Rect>,
     pub upper_title_rect: Option<Rect>,
     pub lower_title_rect: Option<Rect>,
+    pub mcp_more_rect: Option<Rect>,
     pub strip_rects: std::collections::HashMap<String, Rect>,
 }
 
@@ -95,6 +98,7 @@ impl SidebarRenderResult {
             expand_btn_rect: None,
             upper_title_rect: None,
             lower_title_rect: None,
+            mcp_more_rect: None,
             strip_rects: std::collections::HashMap::new(),
         }
     }
@@ -169,7 +173,7 @@ pub fn render(
     let mcp_lines = if inputs.mcp_collapsed {
         0
     } else {
-        2 + mcp_count
+        2 + mcp_count + 1 // +1 for "more" row
     };
     let lower_need: u16 = 4 + 1 + ctx_lines + 1 + mcp_lines + 1;
 
@@ -185,16 +189,19 @@ pub fn render(
     // Height allocation:
     // - Both expanded: lower takes content height, upper takes remaining
     // - Any collapsed: each panel takes its own content height (no "remaining")
+    //   but clamped to available space so it doesn't push other panel off screen
     let (upper_expanded_h, lower_expanded_h) = if !upper_collapsed && !lower_collapsed {
         let lower_h = lower_need.min(available.saturating_sub(4));
         let upper_h = available.saturating_sub(lower_h + gap).max(4);
         (upper_h, lower_h)
     } else if !upper_collapsed {
-        // Only upper expanded — takes content height, not remaining
-        (upper_need, 0)
+        // Only upper expanded — clamp to available minus collapsed stripe
+        let max_h = available.saturating_sub(lower_strip_h + gap);
+        (upper_need.min(max_h).max(4), 0)
     } else if !lower_collapsed {
-        // Only lower expanded — takes content height
-        (0, lower_need)
+        // Only lower expanded — clamp to available minus collapsed stripe
+        let max_h = available.saturating_sub(upper_strip_h + gap);
+        (0, lower_need.min(max_h).max(4))
     } else {
         (0, 0)
     };
@@ -675,13 +682,14 @@ fn render_panel_frame(
     );
 }
 
-fn marquee_offset(animation_frame: u32, text_w: usize, max_w: usize) -> usize {
+fn marquee_offset(animation_frame: u32, start_frame: u32, text_w: usize, max_w: usize) -> usize {
     if text_w <= max_w {
         return 0;
     }
+    let elapsed = animation_frame.saturating_sub(start_frame);
     let scroll_range = text_w - max_w + 1;
     let cycle = scroll_range * 2 + 20;
-    let phase = (animation_frame as usize / 3) % cycle;
+    let phase = (elapsed as usize / 3) % cycle;
     if phase < 10 {
         0
     } else if phase < 10 + scroll_range {
@@ -810,7 +818,12 @@ fn render_upper_content(
                     let step_text = &step.text;
                     let text_w = crate::width::width(step_text);
                     let display = if text_w > step_max && is_hovered {
-                        let offset = marquee_offset(inputs.animation_frame, text_w, step_max);
+                        let offset = marquee_offset(
+                            inputs.animation_frame,
+                            inputs.marquee_start_frame,
+                            text_w,
+                            step_max,
+                        );
                         crate::width::trim_display_offset(step_text, offset, step_max)
                     } else {
                         crate::width::truncate(step_text, step_max)
@@ -907,7 +920,12 @@ fn render_upper_content(
                 };
                 let text_w = crate::width::width(&todo.why);
                 let display = if text_w > todo_max && is_hovered {
-                    let offset = marquee_offset(inputs.animation_frame, text_w, todo_max);
+                    let offset = marquee_offset(
+                        inputs.animation_frame,
+                        inputs.marquee_start_frame,
+                        text_w,
+                        todo_max,
+                    );
                     crate::width::trim_display_offset(&todo.why, offset, todo_max)
                 } else {
                     crate::width::truncate(&todo.why, todo_max)
@@ -954,7 +972,7 @@ fn render_lower_content(
     f: &mut ratatui::Frame,
     area: Rect,
     content_bg: ratatui::style::Color,
-    _content_bg_hover: ratatui::style::Color,
+    content_bg_hover: ratatui::style::Color,
     content_w: usize,
     inputs: &SidebarInputs<'_>,
     t: &crate::theme::Theme,
@@ -1070,6 +1088,37 @@ fn render_lower_content(
                 ),
             ]));
         }
+    }
+
+    // ── "More" row (··· centered) — opens MCP settings panel ──
+    if !inputs.mcp_collapsed {
+        let more_y = area.y + lines.len() as u16;
+        let more_bg = if inputs.hovered_more {
+            content_bg_hover
+        } else {
+            content_bg
+        };
+        let more_fg = if inputs.hovered_more {
+            t.heading.lerp(ratatui::style::Color::White, 0.3)
+        } else {
+            t.subtle_fg.into()
+        };
+        let w = area.width as usize;
+        let dots = "···";
+        let dots_w = crate::width::width(dots);
+        let left_pad = w.saturating_sub(dots_w) / 2;
+        let right_pad = w.saturating_sub(left_pad + dots_w);
+        lines.push(Line::from(vec![
+            Span::styled(" ".repeat(left_pad), Style::default().bg(more_bg)),
+            Span::styled(dots, Style::default().fg(more_fg).bg(more_bg)),
+            Span::styled(" ".repeat(right_pad), Style::default().bg(more_bg)),
+        ]));
+        result.mcp_more_rect = Some(Rect {
+            x: area.x,
+            y: more_y,
+            width: area.width,
+            height: 1,
+        });
     }
 
     let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
