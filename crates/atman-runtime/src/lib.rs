@@ -56,6 +56,7 @@ pub mod tools;
 pub mod trust;
 pub mod validate;
 pub mod value;
+pub use watch::WatchHub;
 pub mod watch;
 pub mod workflow;
 

@@ -129,6 +129,7 @@ pub fn render(
     collapsed: bool,
     collapsed_groups: &std::collections::HashSet<TaskKind>,
     hover: &TaskPanelHover,
+    watch_hub: Option<&atman_runtime::WatchHub>,
 ) -> TaskPanelHitMap {
     if collapsed {
         let hitmap = render_strip(f, area, snapshots, hover);
@@ -382,6 +383,32 @@ pub fn render(
 
             // compute content lines (used for both collapsed summary and expanded view)
             let content_lines: Vec<String> = compute_content_lines(snap, activity_nodes, items);
+            let watcher_lines: Vec<String> = if let Some(hub) = watch_hub {
+                let watchers = hub.list_watchers_for_handle(&snap.source_handle);
+                if watchers.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut lines = vec![format!("👁 watchers ({}):", watchers.len())];
+                    for w in &watchers {
+                        let mode_str = match w.mode {
+                            atman_runtime::watch::WatchMode::Once => "once",
+                            atman_runtime::watch::WatchMode::Persist => "persist",
+                        };
+                        let id_short = &w.id[..w.id.len().min(10)];
+                        lines.push(format!(
+                            "  {} \"{}\" {} {}s/{}s",
+                            id_short,
+                            crate::width::truncate(&w.pattern, 15),
+                            mode_str,
+                            w.age.as_secs(),
+                            w.timeout.as_secs()
+                        ));
+                    }
+                    lines
+                }
+            } else {
+                Vec::new()
+            };
             let label_max = w.saturating_sub(left_w + right_w);
             let collapse_label_max = if snap.kind == TaskKind::Bash {
                 (label_max / 3).max(8)
@@ -399,8 +426,16 @@ pub fn render(
             let summary = if is_expanded {
                 String::new()
             } else {
+                let watcher_count = watcher_lines
+                    .len()
+                    .saturating_sub(if watcher_lines.is_empty() { 0 } else { 1 });
+                let watcher_prefix = if watcher_count > 0 {
+                    format!("👁{} ", watcher_count)
+                } else {
+                    String::new()
+                };
                 let actual_label_w = crate::width::width(&label);
-                content_lines
+                let content_summary = content_lines
                     .last()
                     .map(|l| {
                         let smax = w
@@ -408,7 +443,8 @@ pub fn render(
                             .max(1);
                         crate::width::truncate(l, smax)
                     })
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                format!("{watcher_prefix}{content_summary}")
             };
             let label_w = crate::width::width(&label);
             let pad = w.saturating_sub(left_w + label_w + right_w);
@@ -692,11 +728,13 @@ pub fn render(
             row += 1;
 
             // content lines already computed above
-            let content_rows: Vec<String> = if content_lines.is_empty() {
+            let content_rows: Vec<String> = if content_lines.is_empty() && watcher_lines.is_empty()
+            {
                 vec![String::new()]
             } else {
                 content_lines
                     .iter()
+                    .chain(watcher_lines.iter())
                     .map(|c| crate::width::truncate(c, w.saturating_sub(4)))
                     .collect()
             };
@@ -1062,6 +1100,7 @@ mod tests {
                     false,
                     &std::collections::HashSet::new(),
                     &hover,
+                    None,
                 );
             })
             .unwrap();

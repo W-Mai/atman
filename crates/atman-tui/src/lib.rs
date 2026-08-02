@@ -3710,6 +3710,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             kill_armed_expired: app.kill_arm_expired(),
             expanded_tasks: app.expanded_tasks.clone(),
         };
+        let watch_hub = app.session.as_ref().map(|s| &*s.watch_hub);
         let hitmap = crate::task_panel::render(
             f,
             tp_area,
@@ -3719,6 +3720,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             app.task_panel_collapsed,
             &app.task_panel_collapsed_groups,
             &hover,
+            watch_hub,
         );
         app.last_task_panel_rect = Some(tp_area);
         app.last_task_panel_hitmap = hitmap;
