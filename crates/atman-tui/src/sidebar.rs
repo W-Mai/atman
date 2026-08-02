@@ -1218,7 +1218,10 @@ fn render_meta_plain(
         lines.push(project_dir_line(root));
     }
     lines.push(version_line(app_version, latest_release));
-    f.render_widget(ratatui::widgets::Paragraph::new(lines), area);
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(lines).alignment(ratatui::layout::Alignment::Right),
+        area,
+    );
 }
 
 fn project_dir_line<'a>(dir: &str) -> Line<'a> {
