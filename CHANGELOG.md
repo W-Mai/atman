@@ -4,6 +4,88 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [1.5.0] — 2026-08-22
+
+Sidebar redesign, MCP complete support, built-in help tool, and table auto-wrap. The right sidebar is rebuilt as two independent panels matching the left task panel's visual language. MCP gains full protocol support (resources, prompts, sampling, SSE, notifications) with a TUI manager panel and CLI commands. A docstring-driven `help.show` tool provides version-synced help content.
+
+---
+
+### 🎯 Highlights
+
+- **Sidebar two-panel layout** — Goal/Plan/Todos and Context/MCP are now separate panels with `modal_bg` fill, shadow rings, and independent collapse to narrow status-dot stripes. Dynamic height allocation, scroll with fade hints, and click-to-popup for truncated items.
+- **MCP complete** — tool schemas reach the LLM (critical fix), plus resources, prompts, sampling, SSE transport, notifications, env vars, and JSON config (Claude Desktop compatible). TUI panel with expandable tool list, Tab browser, add form, and hot-reload. CLI: `atman mcp add/list/remove/test/import`.
+- **`help.show` tool** — docstring-driven help module with dynamic topics (tools, CLI, config, MCP) and static content (DSL syntax, features). Compiled at build time from `///` comments; staleness tests ensure coverage.
+- **Table auto-wrap** — markdown tables proportionally shrink columns and word-wrap cell content, handling CJK and emoji correctly.
+- **Startup freeze fix** — boot animation now consumes mouse events to prevent tty input buffer exhaustion.
+
+---
+
+### ✨ Features
+
+#### Sidebar Redesign
+
+- **Two-panel layout** — the sidebar splits into an upper panel (Goal / Plan / Todos) and a lower panel (Context / MCP), each with `modal_bg` background, `render_shadow` ring, and no borders — matching the left task panel's visual language.
+- **Independent collapse** — each panel collapses to a narrow 5-column stripe (`SIDEBAR_STRIP_WIDTH`) with centered hamburger, status dots (plan steps, todo status, context budget, MCP server state), and symmetric top/bottom padding. Collapsed stripes right-align; expanded panels take full width above them.
+- **Dynamic height** — when both expanded, the lower panel takes its content height and the upper takes the remainder. When any panel is collapsed, each takes only its content height. Meta (project path + version) is hidden when any panel is collapsed.
+- **Hover brightening** — hamburger `≡` and panel titles brighten on hover (`heading.lerp(White, 0.3)`), matching the task panel pattern. Applied to both sidebar and task panel.
+- **Scroll with fade hints** — Plan and Todo sections scroll independently. When content overflows, the first and/or last visible line is dimmed to indicate scroll direction.
+- **Click-to-popup** — clicking a truncated plan step or todo item opens a small floating panel to the left of the sidebar with the full text, word-wrapped. Click outside to dismiss.
+- **MCP "more" row** — a centered `···` row at the bottom of the MCP server list opens the MCP floating panel on click.
+- **Meta outside panels** — project path (color-coded parent/name) and version (with `∴` update-status dot) render below the panels, right-aligned, with spacing between them.
+- **Triangle unification** — expand/collapse glyphs changed from `▾`/`▸` to `⌄`/`›` to match the task panel.
+- **Context restoration** — all 7 context kv-lines restored (model, window, total, cache, last, attach, memory) after being accidentally reduced to 3.
+
+#### MCP Complete
+
+- **Tool schema fix** — `McpToolAdapter` now stores and exposes `input_schema` and `description` from the MCP server's `tools/list` response. The LLM sees actual parameter schemas instead of empty `{"type":"object"}`.
+- **Resources & prompts** — `McpClient::list_resources()`, `read_resource()`, `list_prompts()`, `get_prompt()` fully implemented. TUI Tab browser cycles Tools/Resources/Prompts with async fetching. CLI: `atman mcp resources/prompts <server>`.
+- **Sampling** — MCP servers can request LLM calls via `sampling/createMessage`. A `SamplingHandler` callback wired through `bootstrap.rs` resolves the model and makes the call.
+- **SSE transport** — `TransportKind::Sse` parses `text/event-stream` responses for server-initiated notifications.
+- **Notifications** — `McpNotification` enum covers `tools/list_changed`, `resources/list_changed`, `prompts/list_changed`, `progress`, `log`, `cancelled`. The stdio reader loop parses and forwards all notification types.
+- **Env field** — `McpServerConfig.env: Vec<(String, String)>` passed to child process via `Command::envs()`.
+- **JSON config** — `mcp_servers.json` in standard `mcpServers` format (Claude Desktop / Cursor / Cline compatible). TOML `[[mcp]]` blocks remain for backwards compat. `mcp_config::load()` merges both sources.
+- **MCP TUI panel** — `PanelKind::Mcp` floating panel with server table (status glyph, name, transport, tool count), expandable tool list with descriptions, keyboard navigation (`j/k`, `Enter`, `Tab`, `a`, `t`, `r`, `d`), and mouse hover/click.
+- **MCP add form** — press `a` in the MCP panel to open a form modal (name, transport, command/URL, args, env, tier). Saves to `mcp_servers.json` and triggers hot-reload.
+- **Hot-reload** — `TuiControl::McpReload` + `spawn_mcp_boot` re-registers MCP servers without restarting atman.
+- **CLI commands** — `atman mcp add [--template <name>]`, `list`, `remove <name>`, `test <name>`, `tools <name>`, `resources <name>`, `prompts <name>`, `import <file>`. 12 curated templates (filesystem, github, gitlab, sqlite, fetch, memory, puppeteer, brave-search, google-maps, sequential-thinking, time, everart).
+
+#### help.show Tool
+
+- **Docstring-driven** — `#[derive(Documented, DocumentedFields)]` on `SafetyConfig`, `StorageConfig`, `TrustConfig`, `McpServerConfig`, `TransportKind`, `McpToolInfo` extracts `///` comments at compile time into `DOCS` / `FIELD_DOCS` constants. Zero runtime cost.
+- **Dynamic topics** — `tools` topic renders from the live `ToolRegistry`; `cli` topic renders from `META_COMMANDS`; `config` topic renders from config struct docstrings; `mcp` topic renders from MCP types.
+- **Static topics** — `dsl` (syntax reference) and `features` (capability list) embedded as markdown at compile time via `include_str!`.
+- **Staleness tests** — `test_all_tools_have_description`, `test_all_config_fields_documented`, `test_tools_topic_matches_registry`, `test_cli_topic_matches_meta_commands`.
+
+#### Table Auto-Wrap
+
+- **`width::word_wrap`** — word-boundary wrapping for ASCII, character-boundary for CJK/emoji. Single grapheme wider than `max_w` stays on its own line (overflow allowed).
+- **Table rendering** — `flush_table()` proportionally shrinks columns when `cells_total > available`, wraps each cell to its column width, and renders multi-line rows with proper alignment.
+- **Consolidation** — `mermaid/sequence.rs:wrap_label` and `mcp_manager.rs` tool descriptions consolidated onto `word_wrap`.
+
+#### Provider Manager
+
+- **Add dialog** — `openai-compat` provider type with name, API key, base URL, models fields. Writes to `config.toml` and triggers re-registration.
+- **Edit form** — Tab cycle through fields, cursor display, enabled/disabled toggle.
+- **BackTab** — `Shift+Tab` (`BackTab`) key action added for reverse field navigation.
+
+#### Startup Freeze Fix
+
+- **Boot animation event reader** — `run_boot_animation` now spawns an event reader to consume mouse events during boot, preventing tty input buffer exhaustion that caused a CPU-0% deadlock.
+- **Signal handler** — `Ctrl+C` / `Esc` / `SIGTERM` abort the boot animation early.
+- **run_loop hardening** — stale events flushed on entry; hover detection skipped during startup/intro.
+
+---
+
+### 🐛 Bug Fixes
+
+- **MCP reconcile nesting** — container key was nested inside itself in `build_reconcile_plan`, causing infinite recursion on certain Zod-style schemas.
+- **Duplicate content on thinking retry** — thinking signature extraction from `content_block_start` prevented duplicate content blocks when retrying with thinking enabled.
+- **Table overflow** — dynamic `col_min` calculation when columns are tight prevents table cells from overflowing `rule_width`.
+- **Byte-boundary panic** — tool result truncation now uses grapheme-aware truncation instead of byte slicing, preventing panics on multi-byte character boundaries.
+- **DSL contract scope** — contract scope and interjection marked as declarative in DSL syntax reference.
+
+---
+
 ## [1.4.0] — 2026-08-01
 
 Diagram rendering, code quality, and CJK correctness. Mermaid diagrams are now a first-class output type with 18 diagram types, a floating panel with split view, and scroll/pan support. ANSI code blocks, math formulas, and character-level diffs ship. A workspace-wide `width` module fixes CJK/emoji alignment across the entire TUI.
