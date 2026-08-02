@@ -2,7 +2,6 @@ use atman_runtime::ContextSnapshot;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 pub const GOAL_MAX_LINES: usize = 5;
 
@@ -28,6 +27,12 @@ pub struct SidebarInputs<'a> {
     pub meta_collapsed: bool,
     pub mcp_collapsed: bool,
     pub sidebar_collapsed: bool,
+    pub upper_collapsed: bool,
+    pub lower_collapsed: bool,
+    pub animation_frame: u32,
+    pub hovered_row: Option<&'a str>,
+    pub hovered_hamburger: bool,
+    pub hovered_lower: bool,
     pub on_goal_scroll: &'a dyn Fn(u16),
     pub on_plans_scroll: &'a dyn Fn(u16),
     pub on_todos_scroll: &'a dyn Fn(u16),
@@ -69,6 +74,8 @@ pub struct SidebarRenderResult {
     pub mcp_hdr_rect: Option<Rect>,
     pub collapse_btn_rect: Option<Rect>,
     pub expand_btn_rect: Option<Rect>,
+    pub upper_title_rect: Option<Rect>,
+    pub lower_title_rect: Option<Rect>,
     pub strip_rects: std::collections::HashMap<String, Rect>,
 }
 
@@ -86,6 +93,8 @@ impl SidebarRenderResult {
             mcp_hdr_rect: None,
             collapse_btn_rect: None,
             expand_btn_rect: None,
+            upper_title_rect: None,
+            lower_title_rect: None,
             strip_rects: std::collections::HashMap::new(),
         }
     }
@@ -98,19 +107,311 @@ pub fn render(
 ) -> SidebarRenderResult {
     let t = crate::theme::theme();
 
-    if inputs.sidebar_collapsed {
-        return render_strip(f, area, inputs);
+    // When entire sidebar is collapsed (user toggle or narrow terminal lock),
+    // force both panels into collapsed stripe mode — uses the same two-panel
+    // layout with centered ≡, not the old single-strip.
+    let upper_collapsed = inputs.upper_collapsed || inputs.sidebar_collapsed;
+    let lower_collapsed = inputs.lower_collapsed || inputs.sidebar_collapsed;
+
+    // Don't blanket-clear the entire sidebar area — only clear where panels
+    // actually render. This avoids black gaps next to collapsed stripes.
+    let panel_bg = t.modal_bg.into();
+    let content_bg_hover: ratatui::style::Color = t.modal_bg.lerp(t.highlight_bg, 0.3);
+
+    let gap: u16 = 1;
+
+    // ── Dynamic height calculation ──
+
+    // Calculate collapsed strip heights based on content
+    let upper_strip_h: u16 = {
+        let plan = inputs.plans.iter().max_by_key(|p| p.updated_at);
+        let p_steps = plan.map(|p| p.steps.len() as u16).unwrap_or(0);
+        let has_plan = plan.is_some();
+        let has_todos = !inputs.todos.is_empty();
+        let t_items = inputs.todos.len() as u16;
+        let dots = (if has_plan { 1 } else { 0 })
+            + p_steps
+            + (if has_plan && has_todos { 1 } else { 0 })
+            + (if has_todos { 1 } else { 0 })
+            + t_items;
+        2 + dots + 1 // top pad + title + dots + bottom pad
+    };
+    let lower_strip_h: u16 = {
+        let mcp_count = inputs.context.mcp_servers.len() as u16;
+        let dots = 1 + (if mcp_count > 0 { 1 } else { 0 }) + mcp_count;
+        2 + dots + 1 // top pad + title + dots + bottom pad
+    };
+
+    // Calculate content needs
+    let goal_lines = if inputs.goal_collapsed { 0 } else { 6 };
+    let plan_steps = inputs
+        .plans
+        .iter()
+        .max_by_key(|p| p.updated_at)
+        .map(|p| p.steps.len() as u16)
+        .unwrap_or(0);
+    let plan_lines = if inputs.plan_collapsed {
+        0
+    } else {
+        2 + plan_steps
+    };
+    let todo_count = inputs.todos.len() as u16;
+    let todo_lines = if inputs.todo_collapsed {
+        0
+    } else {
+        2 + todo_count * 2
+    };
+    // upper content = sections + 2 gaps + 4 padding (top+title+blockpad+contentpad) + 1 bottom
+    let upper_need: u16 = 4 + 1 + goal_lines + 1 + plan_lines + 1 + todo_lines + 1;
+
+    let ctx_lines = if inputs.context_collapsed { 0 } else { 5 };
+    let mcp_count = inputs.context.mcp_servers.len() as u16;
+    let mcp_lines = if inputs.mcp_collapsed {
+        0
+    } else {
+        2 + mcp_count
+    };
+    let lower_need: u16 = 4 + 1 + ctx_lines + 1 + mcp_lines + 1;
+
+    // Meta only visible when both panels expanded
+    let meta_height: u16 = if !upper_collapsed && !lower_collapsed {
+        3
+    } else {
+        0
+    };
+    let available = area.height.saturating_sub(meta_height + gap * 2);
+    let strip_w = crate::layout::SIDEBAR_STRIP_WIDTH;
+
+    // Height allocation:
+    // - Both expanded: lower takes content height, upper takes remaining
+    // - Any collapsed: each panel takes its own content height (no "remaining")
+    let (upper_expanded_h, lower_expanded_h) = if !upper_collapsed && !lower_collapsed {
+        let lower_h = lower_need.min(available.saturating_sub(4));
+        let upper_h = available.saturating_sub(lower_h + gap).max(4);
+        (upper_h, lower_h)
+    } else if !upper_collapsed {
+        // Only upper expanded — takes content height, not remaining
+        (upper_need, 0)
+    } else if !lower_collapsed {
+        // Only lower expanded — takes content height
+        (0, lower_need)
+    } else {
+        (0, 0)
+    };
+
+    // Build layout items: (is_upper, is_collapsed, height)
+    // Expanded first (in original order), then collapsed (in original order)
+    let mut layout: Vec<(bool, bool, u16)> = Vec::new();
+    if !upper_collapsed {
+        layout.push((true, false, upper_expanded_h));
+    }
+    if !lower_collapsed {
+        layout.push((false, false, lower_expanded_h));
+    }
+    if upper_collapsed {
+        layout.push((true, true, upper_strip_h));
+    }
+    if lower_collapsed {
+        layout.push((false, true, lower_strip_h));
     }
 
-    crate::sanitize_widget_edges(f, area);
-    f.render_widget(ratatui::widgets::Clear, area);
+    // Compute rects for each layout item
+    let mut y = area.y;
+    let mut upper_area: Option<Rect> = None;
+    let mut lower_area: Option<Rect> = None;
+    for &(is_upper, is_collapsed, h) in &layout {
+        let (r_x, r_w) = if is_collapsed {
+            // Narrow stripe, right-aligned
+            let x = area.x + area.width.saturating_sub(strip_w);
+            (x, strip_w)
+        } else {
+            // Full width
+            (area.x, area.width)
+        };
+        let r = Rect {
+            x: r_x,
+            y,
+            width: r_w,
+            height: h,
+        };
+        if is_upper {
+            upper_area = Some(r);
+        } else {
+            lower_area = Some(r);
+        }
+        y += h + gap;
+    }
 
-    let panel_bg = t.modal_bg.into();
+    let meta_area = Rect {
+        x: area.x,
+        y: y + gap,
+        width: area.width,
+        height: meta_height,
+    };
+    let mut result = SidebarRenderResult::empty();
 
-    // Top padding row — matches task_panel style: a 1-row bg fill above the
-    // title so the title sits on row 1, not row 0.
+    // ── Upper panel ──
+    if let Some(upper_area) = upper_area {
+        crate::sanitize_widget_edges(f, upper_area);
+        f.render_widget(ratatui::widgets::Clear, upper_area);
+        if upper_collapsed {
+            render_collapsed_strip(
+                f,
+                upper_area,
+                panel_bg,
+                &t,
+                &inputs,
+                true,
+                inputs.hovered_hamburger,
+            );
+            result.upper_title_rect = Some(Rect {
+                x: upper_area.x,
+                y: upper_area.y + 1,
+                width: upper_area.width,
+                height: 1,
+            });
+        } else {
+            render_panel_frame(
+                f,
+                upper_area,
+                panel_bg,
+                "Goal / Plan / Todos",
+                &t,
+                inputs.hovered_hamburger,
+            );
+            result.upper_title_rect = Some(Rect {
+                x: upper_area.x,
+                y: upper_area.y + 1,
+                width: upper_area.width,
+                height: 1,
+            });
+            result.collapse_btn_rect = Some(Rect {
+                x: upper_area.x,
+                y: upper_area.y + 1,
+                width: upper_area.width,
+                height: 1,
+            });
+            if upper_area.height > 4 {
+                let inner = Rect {
+                    x: upper_area.x + 2,
+                    y: upper_area.y + 3,
+                    width: upper_area.width.saturating_sub(4),
+                    height: upper_area.height.saturating_sub(4),
+                };
+                if inner.height > 0 && inner.width > 0 {
+                    result = render_upper_content(
+                        f,
+                        inner,
+                        panel_bg,
+                        content_bg_hover,
+                        inner.width as usize,
+                        &inputs,
+                        &t,
+                        result,
+                    );
+                }
+            }
+        }
+        crate::floating_panels::render_shadow(f, upper_area, &t);
+    }
+
+    // ── Lower panel ──
+    if let Some(lower_area) = lower_area {
+        crate::sanitize_widget_edges(f, lower_area);
+        f.render_widget(ratatui::widgets::Clear, lower_area);
+        if lower_collapsed {
+            render_collapsed_strip(
+                f,
+                lower_area,
+                panel_bg,
+                &t,
+                &inputs,
+                false,
+                inputs.hovered_lower,
+            );
+            result.lower_title_rect = Some(Rect {
+                x: lower_area.x,
+                y: lower_area.y + 1,
+                width: lower_area.width,
+                height: 1,
+            });
+        } else {
+            render_panel_frame(
+                f,
+                lower_area,
+                panel_bg,
+                "Context / MCP",
+                &t,
+                inputs.hovered_lower,
+            );
+            result.lower_title_rect = Some(Rect {
+                x: lower_area.x,
+                y: lower_area.y + 1,
+                width: lower_area.width,
+                height: 1,
+            });
+            if lower_area.height > 4 {
+                let inner = Rect {
+                    x: lower_area.x + 2,
+                    y: lower_area.y + 3,
+                    width: lower_area.width.saturating_sub(4),
+                    height: lower_area.height.saturating_sub(4),
+                };
+                if inner.height > 0 && inner.width > 0 {
+                    result = render_lower_content(
+                        f,
+                        inner,
+                        panel_bg,
+                        content_bg_hover,
+                        inner.width as usize,
+                        &inputs,
+                        &t,
+                        result,
+                    );
+                }
+            }
+        }
+        crate::floating_panels::render_shadow(f, lower_area, &t);
+    }
+
+    // ── Meta (only when both panels expanded) ──
+    if !upper_collapsed && !lower_collapsed {
+        render_meta_plain(
+            f,
+            meta_area,
+            inputs.project_root,
+            inputs.app_version,
+            inputs.latest_release,
+            &t,
+        );
+    }
+
+    result
+}
+
+/// Render a collapsed panel as a thin vertical strip with centered ≡
+/// and status dots (same logic as original sidebar strip mode).
+fn render_collapsed_strip(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    panel_bg: ratatui::style::Color,
+    t: &crate::theme::Theme,
+    inputs: &SidebarInputs<'_>,
+    is_upper: bool,
+    hovered: bool,
+) {
+    let fg = if hovered {
+        t.heading.lerp(ratatui::style::Color::White, 0.3)
+    } else {
+        t.heading.into()
+    };
+    let accent = Style::default().fg(t.accent.into());
+    let tinted = Style::default().fg(t.tinted_fg.into());
+    let success = Style::default().fg(t.success.into());
+
+    // top padding row
     f.render_widget(
-        Block::default().style(Style::default().bg(panel_bg)),
+        ratatui::widgets::Block::default().style(Style::default().bg(panel_bg)),
         Rect {
             x: area.x,
             y: area.y,
@@ -118,554 +419,681 @@ pub fn render(
             height: 1,
         },
     );
+    // title row with centered ≡
+    let glyph = "≡";
+    let glyph_w = crate::width::width(glyph) as u16;
+    let left_pad = area.width.saturating_sub(glyph_w) / 2;
+    f.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(panel_bg)),
+        Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        },
+    );
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(Line::from(vec![
+            Span::styled(" ".repeat(left_pad as usize), Style::default().bg(panel_bg)),
+            Span::styled(glyph, Style::default().fg(fg).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ".repeat(area.width.saturating_sub(left_pad + glyph_w) as usize),
+                Style::default().bg(panel_bg),
+            ),
+        ])),
+        Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: 1,
+        },
+    );
 
-    let title_line = Line::from(vec![
-        Span::styled(
-            "  ≡",
-            Style::default()
-                .fg(t.heading.into())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "Context",
-            Style::default()
-                .fg(t.heading.into())
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-
-    let outer = Block::default()
-        .style(Style::default().bg(panel_bg))
-        .title(title_line)
-        .padding(ratatui::widgets::Padding {
-            left: 1,
-            right: 1,
-            top: 1,
-            bottom: 0,
-        });
-    let inner = outer.inner(area);
-    f.render_widget(outer, area);
-
-    let mut result = SidebarRenderResult::empty();
-
-    // Hamburger button — left side of the title row (≡ in block title).
-    result.collapse_btn_rect = Some(Rect {
+    // ── Status dots ──
+    let dot_start_y = area.y + 2;
+    let dot_area = Rect {
         x: area.x,
-        y: area.y + 1,
-        width: 3,
-        height: 1,
-    });
-
-    if inner.height == 0 || inner.width == 0 {
-        return result;
+        y: dot_start_y,
+        width: area.width,
+        height: area.height.saturating_sub(3), // top pad + title + bottom pad
+    };
+    if dot_area.height == 0 {
+        // Still render bottom padding
+        return;
     }
 
-    let _goal_need: u16 = 7;
-    let _plans_need: u16 = 3;
-
-    let goal_lines_full = inputs
-        .goal
-        .map(|g| g.lines().count() as u16 + 1)
-        .unwrap_or(2);
-    let plan_lines_full = {
-        let latest = inputs.plans.iter().max_by_key(|p| p.updated_at);
-        match latest {
-            Some(p) => 1 + p.steps.len() as u16,
-            None => 2,
+    if is_upper {
+        let plan = inputs.plans.iter().max_by_key(|p| p.updated_at);
+        let has_plan = plan.is_some();
+        let has_todos = !inputs.todos.is_empty();
+        let p_head: u16 = if has_plan { 1 } else { 0 };
+        let p_steps: u16 = plan.map(|p| p.steps.len() as u16).unwrap_or(0);
+        let p_gap: u16 = if has_plan && has_todos { 1 } else { 0 };
+        let t_head: u16 = if has_todos { 1 } else { 0 };
+        let t_items: u16 = inputs.todos.len() as u16;
+        let needed = p_head + p_steps + p_gap + t_head + t_items;
+        if needed == 0 {
+            return;
         }
-    };
-    let todo_lines_full = {
-        if inputs.todos.is_empty() {
-            2
-        } else {
-            (inputs.todos.len() * 2 + 1) as u16
-        }
-    };
 
-    // When collapsed, each section takes only the header line (1).
-    let goal_lines = if inputs.goal_collapsed {
-        1
-    } else {
-        goal_lines_full
-    };
-    let plan_lines_raw = if inputs.plan_collapsed {
-        1
-    } else {
-        plan_lines_full
-    };
-    let todo_lines_raw = if inputs.todo_collapsed {
-        1
-    } else {
-        todo_lines_full
-    };
-    let context_lines: u16 = if inputs.context_collapsed { 1 } else { 9 };
-    let meta_lines_full: u16 = 5; // title + pwd + version line
-    let meta_lines: u16 = if inputs.meta_collapsed {
-        1
-    } else {
-        meta_lines_full
-    };
-    let mcp_lines_full: u16 = 1 + inputs.context.mcp_servers.len().min(20) as u16;
-    let mcp_lines: u16 = if inputs.mcp_collapsed {
-        1
-    } else {
-        mcp_lines_full
-    };
-    let divider_gap: u16 = 1;
-
-    let bottom_min = 1 + divider_gap + context_lines + 1 + mcp_lines + 1 + meta_lines; // divider + gap + ctx + gap + mcp + gap + meta
-
-    // Cap Plan/Todo so they don't push Meta off screen.
-    let avail = inner.height.saturating_sub(goal_lines + 3 + bottom_min);
-    let plan_lines = plan_lines_raw.min(avail.saturating_sub(todo_lines_raw.min(avail)).max(1));
-    let todo_lines = todo_lines_raw.min(avail.saturating_sub(plan_lines).max(1));
-
-    let task_total = goal_lines + 1 + plan_lines + 1 + todo_lines;
-    let needed = task_total + bottom_min;
-    let spacing = inner.height.saturating_sub(needed);
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(goal_lines),
-            Constraint::Length(1),
-            Constraint::Length(plan_lines),
-            Constraint::Length(1),
-            Constraint::Length(todo_lines),
-            Constraint::Length(spacing),
-            Constraint::Length(bottom_min),
-        ])
-        .split(inner);
-
-    let collapse_btn = result.collapse_btn_rect.take();
-    result = SidebarRenderResult::empty();
-    result.collapse_btn_rect = collapse_btn;
-
-    // Goal, Plan, Todo at sections 0, 2, 4 (gaps at 1, 3)
-    if goal_lines > 0 {
-        let glyph = if inputs.goal_collapsed { "▸" } else { "▾" };
-        let header = format!("{glyph} Goal");
-        result.goal_hdr_rect = Some(header_row(sections[0]));
-        if inputs.goal_collapsed {
-            f.render_widget(Paragraph::new(section_title(&header)), sections[0]);
-            result.goal_rect = None;
-        } else {
-            result.goal_rect = Some(sections[0]);
-            let c = render_scrollable_section(
-                f,
-                sections[0],
-                &header,
-                goal_body(inputs.goal),
-                inputs.goal_scroll,
-            );
-            (inputs.on_goal_scroll)(c);
-        }
-    }
-    if plan_lines > 0 {
-        let glyph = if inputs.plan_collapsed { "▸" } else { "▾" };
-        let header = format!(
-            "{glyph} {}",
-            plans_header(inputs.plans).replacen("▸ ", "", 1)
-        );
-        result.plan_hdr_rect = Some(header_row(sections[2]));
-        if inputs.plan_collapsed {
-            f.render_widget(Paragraph::new(section_title(&header)), sections[2]);
-            result.plan_rect = None;
-        } else {
-            result.plan_rect = Some(sections[2]);
-            let body = plans_body(inputs.plans);
-            let c = render_scrollable_section(f, sections[2], &header, body, inputs.plans_scroll);
-            (inputs.on_plans_scroll)(c);
-        }
-    }
-    if todo_lines > 0 {
-        let glyph = if inputs.todo_collapsed { "▸" } else { "▾" };
-        let header = format!(
-            "{glyph} {}",
-            todos_header(inputs.todos).replacen("▸ ", "", 1)
-        );
-        result.todo_hdr_rect = Some(header_row(sections[4]));
-        if inputs.todo_collapsed {
-            f.render_widget(Paragraph::new(section_title(&header)), sections[4]);
-            result.todo_rect = None;
-        } else {
-            result.todo_rect = Some(sections[4]);
-            let body = todos_body(inputs.todos);
-            let c = render_scrollable_section(f, sections[4], &header, body, inputs.todos_scroll);
-            (inputs.on_todos_scroll)(c);
-        }
-    }
-
-    // Bottom area: divider + gap + context + meta (at section 6)
-    let bottom_area = sections[6];
-    {
-        let mp = Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(t.subtle_fg.into()));
-        let inner = mp.inner(bottom_area);
-        f.render_widget(mp, bottom_area);
-
-        let meta_sections = Layout::default()
+        let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(divider_gap),
-                Constraint::Length(context_lines),
-                Constraint::Length(1), // gap between context and mcp
-                Constraint::Length(mcp_lines),
-                Constraint::Length(1), // gap between mcp and meta
-                Constraint::Length(meta_lines),
+                Constraint::Length(p_head),
+                Constraint::Length(p_steps),
+                Constraint::Length(p_gap),
+                Constraint::Length(t_head),
+                Constraint::Length(t_items),
             ])
-            .split(inner);
+            .split(dot_area);
 
-        if context_lines > 0 {
-            let glyph = if inputs.context_collapsed {
-                "▸"
-            } else {
-                "▾"
-            };
-            result.ctx_hdr_rect = Some(header_row(meta_sections[1]));
-            if inputs.context_collapsed {
-                let header = format!("{glyph} Context");
-                f.render_widget(Paragraph::new(section_title(&header)), meta_sections[1]);
-            } else {
+        let mut si = 0;
+        if has_plan {
+            f.render_widget(
+                ratatui::widgets::Paragraph::new(Line::from(Span::styled("P", accent)))
+                    .alignment(Alignment::Center),
+                sections[si],
+            );
+        }
+        si += 1;
+        if has_plan {
+            if let Some(p) = plan {
+                for (r, step) in p.steps.iter().enumerate() {
+                    let row_rect = Rect {
+                        y: sections[si].y + r as u16,
+                        height: 1,
+                        ..sections[si]
+                    };
+                    let (sym, style) = if step.done {
+                        ("✓", success)
+                    } else {
+                        ("○", tinted)
+                    };
+                    f.render_widget(
+                        ratatui::widgets::Paragraph::new(Line::from(Span::styled(sym, style)))
+                            .alignment(Alignment::Center),
+                        row_rect,
+                    );
+                }
+            }
+        }
+        si += 1;
+        si += 1; // p_gap
+        if has_todos {
+            f.render_widget(
+                ratatui::widgets::Paragraph::new(Line::from(Span::styled("T", accent)))
+                    .alignment(Alignment::Center),
+                sections[si],
+            );
+        }
+        si += 1;
+        if has_todos {
+            let sec = sections[si];
+            for (r, todo) in inputs.todos.iter().enumerate() {
+                use atman_runtime::memory::todo::TodoStatus;
+                let row_rect = Rect {
+                    y: sec.y + r as u16,
+                    height: 1,
+                    ..sec
+                };
+                let (sym, style) = match todo.status {
+                    TodoStatus::Done => ("✓", success),
+                    TodoStatus::Cancelled => ("✕", Style::default().fg(t.subtle_fg.into())),
+                    _ => ("○", tinted),
+                };
                 f.render_widget(
-                    context_section(inputs.context, inputs.attach_count, inputs.streaming),
-                    meta_sections[1],
+                    ratatui::widgets::Paragraph::new(Line::from(Span::styled(sym, style)))
+                        .alignment(Alignment::Center),
+                    row_rect,
                 );
             }
         }
-        if meta_lines > 0 {
-            let glyph = if inputs.meta_collapsed { "▸" } else { "▾" };
-            result.meta_hdr_rect = Some(header_row(meta_sections[5]));
-            if inputs.meta_collapsed {
-                let header = format!("{glyph} Meta");
-                f.render_widget(Paragraph::new(section_title(&header)), meta_sections[5]);
-            } else {
-                f.render_widget(
-                    meta_section(
-                        inputs.project_root,
-                        inputs.app_version,
-                        inputs.latest_release,
-                    ),
-                    meta_sections[5],
-                );
-            }
+    } else {
+        // Lower panel: context dot + MCP server status dots
+        let ctx = &inputs.context;
+        let ctx_dot_h: u16 = 1;
+        let mcp_count = ctx.mcp_servers.len() as u16;
+        let mcp_gap: u16 = if mcp_count > 0 { 1 } else { 0 };
+        let needed = ctx_dot_h + mcp_gap + mcp_count;
+        if needed == 0 {
+            return;
         }
-        if mcp_lines > 0 {
-            let glyph = if inputs.mcp_collapsed { "▸" } else { "▾" };
-            result.mcp_hdr_rect = Some(header_row(meta_sections[3]));
-            if inputs.mcp_collapsed {
-                let (ok, total) = atman_runtime::mcp::mcp_counts(&inputs.context.mcp_servers);
-                let header = format!("{glyph} MCP ({ok}/{total})");
-                f.render_widget(Paragraph::new(section_title(&header)), meta_sections[3]);
-            } else {
-                f.render_widget(mcp_section(&inputs.context.mcp_servers), meta_sections[3]);
+
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(ctx_dot_h),
+                Constraint::Length(mcp_gap),
+                Constraint::Length(mcp_count),
+            ])
+            .split(dot_area);
+
+        let ctx_dot_span = if ctx.window_budget > 0 && ctx.window_tokens > ctx.window_budget {
+            Span::styled("●", Style::default().fg(t.error.into()))
+        } else if ctx.window_budget > 0 && ctx.window_tokens as f64 > ctx.window_budget as f64 * 0.8
+        {
+            Span::styled("●", Style::default().fg(t.warn.into()))
+        } else {
+            Span::styled("○", Style::default().fg(t.success.into()))
+        };
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(Line::from(ctx_dot_span)).alignment(Alignment::Center),
+            sections[0],
+        );
+
+        if mcp_count > 0 {
+            let sec = sections[2];
+            for (r, s) in ctx.mcp_servers.iter().enumerate() {
+                let row_rect = Rect {
+                    y: sec.y + r as u16,
+                    height: 1,
+                    ..sec
+                };
+                let (g, color) = match &s.state {
+                    atman_runtime::mcp::McpServerState::Connected { .. } => ("●", t.success),
+                    atman_runtime::mcp::McpServerState::Connecting => ("◐", t.warn),
+                    atman_runtime::mcp::McpServerState::Error { .. } => ("✗", t.error),
+                    atman_runtime::mcp::McpServerState::Disabled => ("◌", t.subtle_fg),
+                    atman_runtime::mcp::McpServerState::Disconnected { .. } => ("○", t.subtle_fg),
+                    atman_runtime::mcp::McpServerState::Timeout { .. } => ("⏱", t.warn),
+                    atman_runtime::mcp::McpServerState::Pending => ("·", t.subtle_fg),
+                };
+                f.render_widget(
+                    ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+                        g,
+                        Style::default().fg(color.into()),
+                    )))
+                    .alignment(Alignment::Center),
+                    row_rect,
+                );
             }
         }
     }
-    crate::floating_panels::render_shadow(f, area, &t);
-    result
 }
 
-fn render_scrollable_section(
+/// Render panel frame exactly like task_panel:
+/// Row 0: modal_bg top padding
+/// Row 1: modal_bg title row (≡ Title)
+/// Row 2+: modal_bg (block inner, content drawn on top by caller)
+fn render_panel_frame(
     f: &mut ratatui::Frame,
     area: Rect,
-    header: &str,
-    body: Vec<Line<'_>>,
-    scroll: u16,
-) -> u16 {
-    let t = crate::theme::theme();
-    let header_line = Line::from(Span::styled(
-        header.to_string(),
-        Style::default()
-            .fg(t.accent.into())
-            .add_modifier(Modifier::BOLD),
-    ));
-    let body_count = body.len() as u16;
-    let visible_body = area.height.saturating_sub(1);
-    let max_scroll = body_count.saturating_sub(visible_body);
-    let clamped = scroll.min(max_scroll);
-    let sub = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
-    f.render_widget(Paragraph::new(header_line), sub[0]);
-    f.render_widget(Paragraph::new(body).scroll((clamped, 0)), sub[1]);
-    clamped
+    panel_bg: ratatui::style::Color,
+    title: &str,
+    t: &crate::theme::Theme,
+    hovered_hamburger: bool,
+) {
+    let hamburger_fg: ratatui::style::Color = if hovered_hamburger {
+        t.heading.lerp(ratatui::style::Color::White, 0.3)
+    } else {
+        t.heading.into()
+    };
+    let title_fg: ratatui::style::Color = if hovered_hamburger {
+        t.heading.lerp(ratatui::style::Color::White, 0.15)
+    } else {
+        t.heading.into()
+    };
+    // top padding row
+    f.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(panel_bg)),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
+    );
+    // title block covers rest of area, with top padding for the title
+    f.render_widget(
+        ratatui::widgets::Block::default()
+            .style(Style::default().bg(panel_bg))
+            .title(Line::from(vec![
+                Span::styled(
+                    "  ≡",
+                    Style::default()
+                        .fg(hamburger_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    title,
+                    Style::default().fg(title_fg).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .padding(ratatui::widgets::Padding {
+                left: 0,
+                right: 0,
+                top: 1,
+                bottom: 0,
+            }),
+        Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        },
+    );
 }
 
-fn goal_body(goal: Option<&str>) -> Vec<Line<'_>> {
-    let goal_text = goal.unwrap_or("(none)");
+fn marquee_offset(animation_frame: u32, text_w: usize, max_w: usize) -> usize {
+    if text_w <= max_w {
+        return 0;
+    }
+    let scroll_range = text_w - max_w + 1;
+    let cycle = scroll_range * 2 + 20;
+    let phase = (animation_frame as usize / 3) % cycle;
+    if phase < 10 {
+        0
+    } else if phase < 10 + scroll_range {
+        phase - 10
+    } else if phase < 10 + scroll_range + 10 {
+        scroll_range - 1
+    } else {
+        scroll_range - 1 - (phase - 10 - scroll_range - 10)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_upper_content(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    content_bg: ratatui::style::Color,
+    content_bg_hover: ratatui::style::Color,
+    content_w: usize,
+    inputs: &SidebarInputs<'_>,
+    t: &crate::theme::Theme,
+    mut result: SidebarRenderResult,
+) -> SidebarRenderResult {
+    let accent = Style::default()
+        .fg(t.accent.into())
+        .add_modifier(Modifier::BOLD);
+
     let mut lines: Vec<Line<'_>> = Vec::new();
-    for (i, l) in goal_text.lines().enumerate() {
-        if i == GOAL_MAX_LINES {
+
+    // ── Goal section ──
+    let goal_glyph = if inputs.goal_collapsed { "›" } else { "⌄" };
+    let goal_hdr = format!("{goal_glyph} Goal");
+    result.goal_hdr_rect = Some(Rect {
+        x: area.x,
+        y: area.y + lines.len() as u16,
+        width: area.width,
+        height: 1,
+    });
+    lines.push(Line::from(Span::styled(goal_hdr, accent)));
+
+    if !inputs.goal_collapsed {
+        let goal_text = inputs.goal.unwrap_or("(none)");
+        let goal_w = content_w.saturating_sub(4); // "  " indent
+        let wrapped = crate::width::word_wrap(goal_text, goal_w);
+        let max_lines = 6usize;
+        for (i, l) in wrapped.iter().enumerate() {
+            if i >= max_lines {
+                lines.push(Line::from(Span::styled(
+                    "  …",
+                    Style::default().fg(t.subtle_fg.into()),
+                )));
+                break;
+            }
             lines.push(Line::from(Span::styled(
-                "  …",
-                Style::default().fg(crate::theme::theme().subtle_fg.into()),
+                format!("  {l}"),
+                Style::default().fg(t.tinted_fg.into()),
             )));
-            break;
         }
-        lines.push(Line::from(Span::raw(format!("  {l}"))));
+        result.goal_rect = Some(Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: lines.len() as u16,
+        });
+    } else {
+        result.goal_rect = None;
     }
-    lines
-}
 
-fn plans_header(plans: &[atman_runtime::memory::plan::Plan]) -> String {
-    let latest = plans.iter().max_by_key(|p| p.updated_at);
-    match latest {
-        Some(p) => {
-            let (done, total) = p.progress();
-            format!("▸ Plan ({done}/{total})")
+    lines.push(Line::from(""));
+
+    // ── Plan section ──
+    let plan_glyph = if inputs.plan_collapsed { "›" } else { "⌄" };
+    let plan_hdr = {
+        let latest = inputs.plans.iter().max_by_key(|p| p.updated_at);
+        match latest {
+            Some(p) => {
+                let (done, total) = p.progress();
+                format!("{plan_glyph} Plan ({done}/{total})")
+            }
+            None => format!("{plan_glyph} Plan"),
         }
-        None => "▸ Plan".to_string(),
-    }
-}
+    };
+    result.plan_hdr_rect = Some(Rect {
+        x: area.x,
+        y: area.y + lines.len() as u16,
+        width: area.width,
+        height: 1,
+    });
+    lines.push(Line::from(Span::styled(plan_hdr, accent)));
 
-fn plans_body(plans: &[atman_runtime::memory::plan::Plan]) -> Vec<Line<'_>> {
-    let t = crate::theme::theme();
-    let latest = plans.iter().max_by_key(|p| p.updated_at);
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    match latest {
-        None => {
+    if !inputs.plan_collapsed {
+        let latest = inputs.plans.iter().max_by_key(|p| p.updated_at);
+        match latest {
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "  (no active plan)",
+                    Style::default().fg(t.subtle_fg.into()),
+                )));
+            }
+            Some(p) => {
+                let title_max = content_w.saturating_sub(2);
+                lines.push(Line::from(Span::styled(
+                    crate::width::truncate(&p.title, title_max),
+                    Style::default()
+                        .fg(t.tinted_fg.into())
+                        .add_modifier(Modifier::BOLD),
+                )));
+                let total = p.steps.len();
+                let step_max = content_w.saturating_sub(8);
+                for (i, step) in p.steps.iter().enumerate() {
+                    let row_key = format!("plan:{i}");
+                    let is_hovered = inputs.hovered_row == Some(row_key.as_str());
+                    let (glyph, glyph_style, text_style) = if step.done {
+                        (
+                            "✓",
+                            Style::default().fg(t.success.into()),
+                            Style::default().fg(t.meta_fg.into()),
+                        )
+                    } else {
+                        (
+                            "○",
+                            Style::default().fg(t.subtle_fg.into()),
+                            Style::default().fg(t.tinted_fg.into()),
+                        )
+                    };
+                    let indent = if total <= 1 { " " } else { "│" };
+                    let step_text = &step.text;
+                    let text_w = crate::width::width(step_text);
+                    let display = if text_w > step_max && is_hovered {
+                        let offset = marquee_offset(inputs.animation_frame, text_w, step_max);
+                        crate::width::trim_display_offset(step_text, offset, step_max)
+                    } else {
+                        crate::width::truncate(step_text, step_max)
+                    };
+                    let bg = if is_hovered {
+                        content_bg_hover
+                    } else {
+                        content_bg
+                    };
+                    let row_y = area.y + lines.len() as u16;
+                    result.strip_rects.insert(
+                        row_key,
+                        Rect {
+                            x: area.x,
+                            y: row_y,
+                            width: area.width,
+                            height: 1,
+                        },
+                    );
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!(" {indent} "),
+                            Style::default().fg(t.subtle_fg.into()).bg(bg),
+                        ),
+                        Span::styled(format!("{glyph} "), glyph_style.bg(bg)),
+                        Span::styled(
+                            format!("{:>2}. ", i + 1),
+                            Style::default().fg(t.meta_fg.into()).bg(bg),
+                        ),
+                        Span::styled(display, text_style.bg(bg)),
+                    ]));
+                }
+            }
+        }
+        result.plan_rect = Some(Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: lines.len() as u16,
+        });
+    } else {
+        result.plan_rect = None;
+    }
+
+    lines.push(Line::from(""));
+
+    // ── Todo section ──
+    let todo_glyph = if inputs.todo_collapsed { "›" } else { "⌄" };
+    let todo_hdr = {
+        use atman_runtime::memory::todo::TodoStatus;
+        let done = inputs
+            .todos
+            .iter()
+            .filter(|tt| matches!(tt.status, TodoStatus::Done))
+            .count();
+        let total = inputs.todos.len();
+        format!("{todo_glyph} Todos ({done}/{total})")
+    };
+    result.todo_hdr_rect = Some(Rect {
+        x: area.x,
+        y: area.y + lines.len() as u16,
+        width: area.width,
+        height: 1,
+    });
+    lines.push(Line::from(Span::styled(todo_hdr, accent)));
+
+    if !inputs.todo_collapsed {
+        if inputs.todos.is_empty() {
             lines.push(Line::from(Span::styled(
-                "  (no active plan)",
+                "  (no todos)",
                 Style::default().fg(t.subtle_fg.into()),
             )));
-        }
-        Some(p) => {
-            lines.push(Line::from(Span::styled(
-                crate::width::truncate(&p.title, 30),
-                Style::default()
-                    .fg(t.tinted_fg.into())
-                    .add_modifier(Modifier::BOLD),
-            )));
-            let total = p.steps.len();
-            for (i, step) in p.steps.iter().enumerate() {
-                let num = format!("{}", i + 1);
-                let (glyph, glyph_style, text_style) = if step.done {
-                    (
-                        "✓",
-                        Style::default().fg(t.success.into()),
-                        Style::default().fg(t.meta_fg.into()),
-                    )
-                } else {
-                    (
-                        "○",
-                        Style::default().fg(t.subtle_fg.into()),
-                        Style::default().fg(t.tinted_fg.into()),
-                    )
-                };
-                let indent = if total <= 1 { "  " } else { " │" };
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!(" {indent} "),
-                        Style::default().fg(t.subtle_fg.into()),
+        } else {
+            let todo_max = content_w.saturating_sub(4);
+            for (i, todo) in inputs.todos.iter().enumerate() {
+                use atman_runtime::memory::todo::TodoStatus;
+                let row_key = format!("todo:{i}");
+                let is_hovered = inputs.hovered_row == Some(row_key.as_str());
+                let (glyph, glyph_style) = match todo.status {
+                    TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg.into())),
+                    TodoStatus::InProgress => (
+                        "⚡",
+                        Style::default()
+                            .fg(t.warn.into())
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!("{glyph} "), glyph_style),
-                    Span::styled(format!("{num:>2}. "), Style::default().fg(t.meta_fg.into())),
-                    Span::styled(crate::width::truncate(&step.text, 22), text_style),
+                    TodoStatus::Done => ("✓", Style::default().fg(t.success.into())),
+                    TodoStatus::Cancelled => (
+                        "✗",
+                        Style::default()
+                            .fg(t.subtle_fg.into())
+                            .add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                };
+                let text_w = crate::width::width(&todo.why);
+                let display = if text_w > todo_max && is_hovered {
+                    let offset = marquee_offset(inputs.animation_frame, text_w, todo_max);
+                    crate::width::trim_display_offset(&todo.why, offset, todo_max)
+                } else {
+                    crate::width::truncate(&todo.why, todo_max)
+                };
+                let bg = if is_hovered {
+                    content_bg_hover
+                } else {
+                    content_bg
+                };
+                let row_y = area.y + lines.len() as u16;
+                result.strip_rects.insert(
+                    row_key,
+                    Rect {
+                        x: area.x,
+                        y: row_y,
+                        width: area.width,
+                        height: 1,
+                    },
+                );
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {glyph} "), glyph_style.bg(bg)),
+                    Span::styled(display, Style::default().fg(t.tinted_fg.into()).bg(bg)),
                 ]));
             }
         }
+        result.todo_rect = Some(Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: lines.len() as u16,
+        });
+    } else {
+        result.todo_rect = None;
     }
-    lines
+
+    // Render all lines, clipped to area
+    let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
+    f.render_widget(ratatui::widgets::Paragraph::new(visible), area);
+    result
 }
 
-fn todos_header(todos: &[atman_runtime::memory::todo::Todo]) -> String {
-    use atman_runtime::memory::todo::TodoStatus;
-    let done = todos
-        .iter()
-        .filter(|tt| matches!(tt.status, TodoStatus::Done))
-        .count();
-    let total = todos.len();
-    format!("▸ Todos ({done}/{total})")
-}
-
-fn todos_body<'a>(todos: &'a [atman_runtime::memory::todo::Todo]) -> Vec<Line<'a>> {
-    use atman_runtime::memory::todo::TodoStatus;
-    let t = crate::theme::theme();
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    for todo in todos {
-        let (glyph, glyph_style) = match todo.status {
-            TodoStatus::Pending => ("○", Style::default().fg(t.subtle_fg.into())),
-            TodoStatus::InProgress => (
-                "⚡",
-                Style::default()
-                    .fg(t.warn.into())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            TodoStatus::Done => ("✓", Style::default().fg(t.success.into())),
-            TodoStatus::Cancelled => (
-                "✗",
-                Style::default()
-                    .fg(t.subtle_fg.into())
-                    .add_modifier(Modifier::CROSSED_OUT),
-            ),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {glyph} "), glyph_style),
-            Span::styled(
-                crate::width::truncate(&todo.why, 32),
-                Style::default().fg(t.tinted_fg.into()),
-            ),
-        ]));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "    {} · {}",
-                crate::width::truncate(&todo.where_, 20),
-                crate::width::truncate(&todo.how, 8)
-            ),
-            Style::default().fg(t.meta_fg.into()),
-        )));
-    }
-    lines
-}
-
-fn context_section<'a>(
-    ctx: &'a ContextSnapshot,
-    attach_count: usize,
-    streaming: bool,
-) -> Paragraph<'a> {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+#[allow(clippy::too_many_arguments)]
+fn render_lower_content(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    content_bg: ratatui::style::Color,
+    _content_bg_hover: ratatui::style::Color,
+    content_w: usize,
+    inputs: &SidebarInputs<'_>,
+    t: &crate::theme::Theme,
+    mut result: SidebarRenderResult,
+) -> SidebarRenderResult {
+    let accent = Style::default()
+        .fg(t.accent.into())
+        .add_modifier(Modifier::BOLD);
     let plain = Style::default();
-    let model = if ctx.model.is_empty() {
-        "—".to_string()
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    // ── Context section ──
+    let ctx_glyph = if inputs.context_collapsed {
+        "›"
     } else {
-        ctx.model.clone()
+        "⌄"
     };
-    let stream_style = if streaming { bold } else { plain };
-    use atman_runtime::humanize::format_count;
-    let window = if ctx.window_budget == 0 && ctx.window_tokens == 0 {
-        "—".to_string()
-    } else if ctx.window_budget == 0 {
-        format_count(ctx.window_tokens)
-    } else {
-        format!(
-            "{} / {} ({}%)",
-            format_count(ctx.window_tokens),
-            format_count(ctx.window_budget),
-            (ctx.window_tokens as f64 / ctx.window_budget as f64 * 100.0) as u64
-        )
-    };
-    let lines = vec![
-        Line::from(section_title("▸ Context")),
-        kv_line("model", model, plain),
-        kv_line("window", window, stream_style),
-        kv_line(
-            "total",
+    let ctx_hdr = format!("{ctx_glyph} Context");
+    result.ctx_hdr_rect = Some(Rect {
+        x: area.x,
+        y: area.y + lines.len() as u16,
+        width: area.width,
+        height: 1,
+    });
+    lines.push(Line::from(Span::styled(ctx_hdr, accent)));
+
+    if !inputs.context_collapsed {
+        let ctx = inputs.context;
+        let model = if ctx.model.is_empty() {
+            "—".to_string()
+        } else {
+            ctx.model.clone()
+        };
+        use atman_runtime::humanize::format_count;
+        let window = if ctx.window_budget == 0 && ctx.window_tokens == 0 {
+            "—".to_string()
+        } else if ctx.window_budget == 0 {
+            format_count(ctx.window_tokens)
+        } else {
             format!(
-                "↑{} · ↓{}",
-                format_count(ctx.tokens_in),
-                format_count(ctx.tokens_out)
-            ),
+                "{} / {} ({}%)",
+                format_count(ctx.window_tokens),
+                format_count(ctx.window_budget),
+                (ctx.window_tokens as f64 / ctx.window_budget as f64 * 100.0) as u64
+            )
+        };
+        let kv_w = content_w.saturating_sub(2);
+        lines.push(kv_line_bg("model", &model, plain, kv_w, content_bg));
+        lines.push(kv_line_bg("window", &window, plain, kv_w, content_bg));
+        lines.push(kv_line_bg(
+            "attach",
+            &format!("{}", inputs.attach_count),
             plain,
-        ),
-        kv_line(
-            "cache",
-            if ctx.cache_read > 0 || ctx.cache_write > 0 {
-                let hit_rate = if ctx.tokens_in > 0 {
-                    (ctx.cache_read as f64 / ctx.tokens_in as f64 * 100.0) as u64
-                } else {
-                    0
-                };
-                format!(
-                    "read {} · write {} · {}%",
-                    format_count(ctx.cache_read),
-                    format_count(ctx.cache_write),
-                    hit_rate,
-                )
-            } else {
-                "—".to_string()
-            },
-            plain,
-        ),
-        kv_line(
-            "last",
-            format!(
-                "ttft {} · {:.0} tok/s",
-                if ctx.last_ttft_ms > 0 {
-                    format!("{}ms", ctx.last_ttft_ms)
-                } else {
-                    "—".to_string()
-                },
-                ctx.last_tokens_per_sec
-            ),
-            plain,
-        ),
-        kv_line("attach", format!("{attach_count}"), plain),
-        kv_line(
-            "memory",
-            format!("recent×{}", ctx.memory_recent_count),
-            plain,
-        ),
-    ];
-    Paragraph::new(lines)
+            kv_w,
+            content_bg,
+        ));
+    }
+
+    lines.push(Line::from(""));
+
+    // ── MCP section ──
+    let mcp_glyph = if inputs.mcp_collapsed { "›" } else { "⌄" };
+    let (ok, total) = atman_runtime::mcp::mcp_counts(&inputs.context.mcp_servers);
+    let mcp_hdr = format!("{mcp_glyph} MCP ({ok}/{total})");
+    result.mcp_hdr_rect = Some(Rect {
+        x: area.x,
+        y: area.y + lines.len() as u16,
+        width: area.width,
+        height: 1,
+    });
+    lines.push(Line::from(Span::styled(mcp_hdr, accent)));
+
+    if !inputs.mcp_collapsed {
+        for s in &inputs.context.mcp_servers {
+            let transport = match s.transport {
+                atman_runtime::mcp::TransportKind::Stdio => "stdio",
+                atman_runtime::mcp::TransportKind::Http => "http",
+                atman_runtime::mcp::TransportKind::Sse => "sse",
+            };
+            let (glyph, color, detail) = match &s.state {
+                atman_runtime::mcp::McpServerState::Disabled => ("◌", t.subtle_fg, String::new()),
+                atman_runtime::mcp::McpServerState::Pending => ("○", t.subtle_fg, String::new()),
+                atman_runtime::mcp::McpServerState::Connecting => {
+                    ("◐", t.warn, "connecting".into())
+                }
+                atman_runtime::mcp::McpServerState::Connected { tool_count, .. } => {
+                    ("●", t.success, format!("{tool_count} tools"))
+                }
+                atman_runtime::mcp::McpServerState::Error { message } => {
+                    ("✗", t.error, crate::width::truncate(message, 16))
+                }
+                atman_runtime::mcp::McpServerState::Disconnected { message } => {
+                    ("⏏", t.error, crate::width::truncate(message, 16))
+                }
+                atman_runtime::mcp::McpServerState::Timeout { message } => {
+                    ("⏱", t.warn, crate::width::truncate(message, 16))
+                }
+            };
+            let name_max = content_w.saturating_sub(16);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {glyph} "),
+                    Style::default().fg(color.into()).bg(content_bg),
+                ),
+                Span::styled(
+                    crate::width::pad_right(&crate::width::truncate(&s.name, name_max), name_max),
+                    Style::default().fg(t.tinted_fg.into()).bg(content_bg),
+                ),
+                Span::styled(
+                    format!(" {transport:<5} {detail}"),
+                    Style::default().fg(t.subtle_fg.into()).bg(content_bg),
+                ),
+            ]));
+        }
+    }
+
+    let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
+    f.render_widget(ratatui::widgets::Paragraph::new(visible), area);
+    result
 }
 
-fn meta_section<'a>(
-    project_root: Option<&'a str>,
-    app_version: &'a str,
-    latest_release: Option<&'a str>,
-) -> Paragraph<'a> {
-    let mut lines: Vec<Line<'_>> = Vec::with_capacity(5);
-    lines.push(Line::from(section_title("▸ Meta")));
-
+/// Meta rendered as plain text, no panel, no bg fill.
+/// Preserves the original version dot coloring and project path coloring.
+fn render_meta_plain(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    project_root: Option<&str>,
+    app_version: &str,
+    latest_release: Option<&str>,
+    _t: &crate::theme::Theme,
+) {
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    lines.push(Line::from("")); // blank separator
     if let Some(root) = project_root {
-        lines.push(Line::from(""));
         lines.push(project_dir_line(root));
     }
-    lines.push(Line::from(""));
     lines.push(version_line(app_version, latest_release));
-
-    Paragraph::new(lines).wrap(Wrap { trim: false })
-}
-
-fn mcp_server_status_line<'a>(s: &atman_runtime::mcp::McpServerStatus) -> Line<'a> {
-    let t = crate::theme::theme();
-    let transport = match s.transport {
-        atman_runtime::mcp::TransportKind::Stdio => "stdio",
-        atman_runtime::mcp::TransportKind::Http => "http",
-        atman_runtime::mcp::TransportKind::Sse => "sse",
-    };
-    let (glyph, color, detail) = match &s.state {
-        atman_runtime::mcp::McpServerState::Disabled => ("◌", t.subtle_fg, String::new()),
-        atman_runtime::mcp::McpServerState::Pending => ("○", t.subtle_fg, String::new()),
-        atman_runtime::mcp::McpServerState::Connecting => ("◐", t.warn, "(connecting...)".into()),
-        atman_runtime::mcp::McpServerState::Connected { tool_count, .. } => {
-            ("●", t.success, format!("{tool_count} tools"))
-        }
-        atman_runtime::mcp::McpServerState::Error { message } => {
-            ("✗", t.error, format!("({message})"))
-        }
-        atman_runtime::mcp::McpServerState::Disconnected { message } => {
-            ("⏏", t.error, format!("({message})"))
-        }
-        atman_runtime::mcp::McpServerState::Timeout { message } => {
-            ("⏱", t.warn, format!("({message})"))
-        }
-    };
-    Line::from(vec![
-        Span::styled(format!("  {glyph} "), Style::default().fg(color.into())),
-        Span::styled(
-            format!("{:<14}", s.name),
-            Style::default().fg(t.meta_fg.into()),
-        ),
-        Span::styled(
-            format!("{:<6}", transport),
-            Style::default().fg(t.subtle_fg.into()),
-        ),
-        Span::styled(detail, Style::default().fg(t.subtle_fg.into())),
-    ])
-}
-
-fn mcp_section<'a>(servers: &[atman_runtime::mcp::McpServerStatus]) -> Paragraph<'a> {
-    let mut lines: Vec<Line<'_>> = Vec::with_capacity(1 + servers.len());
-    lines.push(Line::from(section_title("▸ MCP")));
-    for s in servers {
-        lines.push(mcp_server_status_line(s));
-    }
-    Paragraph::new(lines).wrap(Wrap { trim: false })
+    f.render_widget(ratatui::widgets::Paragraph::new(lines), area);
 }
 
 fn project_dir_line<'a>(dir: &str) -> Line<'a> {
@@ -694,12 +1122,12 @@ fn version_line<'a>(version: &str, latest: Option<&'a str>) -> Line<'a> {
     let dot_color = match latest {
         Some(latest_ver) => {
             if version_is_newer(latest_ver, version) {
-                t.warn // newer version available — yellow
+                t.warn
             } else {
-                t.success // up to date — green
+                t.success
             }
         }
-        None => t.subtle_fg, // check failed / loading — gray
+        None => t.subtle_fg,
     };
     let dots = Span::styled(" ∴ ", Style::default().fg(dot_color.into()));
     let brand = Span::styled("atman", Style::default().fg(t.accent.into()));
@@ -709,17 +1137,16 @@ fn version_line<'a>(version: &str, latest: Option<&'a str>) -> Line<'a> {
     );
     match latest {
         Some(latest_ver) if version_is_newer(latest_ver, version) => {
-            let latest = Span::styled(
+            let latest_span = Span::styled(
                 format!("→ v{latest_ver}"),
                 Style::default().fg(t.success.into()),
             );
-            Line::from(vec![dots, brand, ver, Span::raw("  "), latest])
+            Line::from(vec![dots, brand, ver, Span::raw("  "), latest_span])
         }
         _ => Line::from(vec![dots, brand, ver]),
     }
 }
 
-/// Returns true if `candidate` is a strictly newer semver than `current`.
 fn version_is_newer(candidate: &str, current: &str) -> bool {
     let parse =
         |s: &str| -> Vec<u64> { s.split('.').filter_map(|p| p.parse::<u64>().ok()).collect() };
@@ -736,30 +1163,6 @@ fn version_is_newer(candidate: &str, current: &str) -> bool {
         }
     }
     c.len() > v.len()
-}
-
-fn section_title(text: &str) -> Span<'_> {
-    Span::styled(
-        text,
-        Style::default()
-            .fg(crate::theme::theme().accent.into())
-            .add_modifier(Modifier::BOLD),
-    )
-}
-
-/// Return a rect covering only the first row of `area` — used for click detection.
-fn header_row(area: Rect) -> Rect {
-    Rect { height: 1, ..area }
-}
-
-fn kv_line<'a>(key: &'a str, value: String, value_style: Style) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(
-            format!("  {key:<7}"),
-            Style::default().fg(crate::theme::theme().subtle_fg.into()),
-        ),
-        Span::styled(value, value_style),
-    ])
 }
 
 fn abbreviate_dir(dir: &str) -> String {
@@ -788,218 +1191,27 @@ fn abbreviate_dir(dir: &str) -> String {
     format!("{head}…{tail}")
 }
 
-// ── collapsed strip ──
-
-fn render_strip(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    inputs: SidebarInputs<'_>,
-) -> SidebarRenderResult {
-    let t = crate::theme::theme();
-    let mut result = SidebarRenderResult::empty();
-
-    let plan = inputs.plans.iter().max_by_key(|p| p.updated_at);
-    let has_plan = plan.is_some();
-    let has_todos = !inputs.todos.is_empty();
-
-    // Layout: ctx_dot + top_pad + P(section) + gap + T(section).
-    // Each plan step / todo item gets one row, in original order.
-    let ctx_dot: u16 = 1;
-    let top_pad: u16 = if has_plan || has_todos { 1 } else { 0 };
-    let p_head: u16 = if has_plan { 1 } else { 0 };
-    let p_steps: u16 = plan.map(|p| p.steps.len() as u16).unwrap_or(0);
-    let p_gap: u16 = if has_plan && has_todos { 1 } else { 0 };
-    let t_head: u16 = if has_todos { 1 } else { 0 };
-    let t_items: u16 = inputs.todos.len() as u16;
-
-    let needed = ctx_dot + top_pad + p_head + p_steps + p_gap + t_head + t_items;
-    let inner_avail = area.height.saturating_sub(2);
-    let available = inner_avail.min(needed);
-
-    if available == 0 {
-        // No content — still render a minimal block so the
-        // hamburger remains clickable. Show context dot (D).
-        let mini = Rect { height: 3, ..area };
-        let panel_bg = t.modal_bg.into();
-        f.render_widget(ratatui::widgets::Clear, mini);
-        f.render_widget(Block::default().style(Style::default().bg(panel_bg)), mini);
-        let inner = Rect {
-            x: mini.x,
-            y: mini.y + 1,
-            width: mini.width,
-            height: mini.height.saturating_sub(1),
-        };
-        let ctx_dot = if inputs.context.window_budget > 0
-            && inputs.context.window_tokens > inputs.context.window_budget
-        {
-            Span::styled("●", Style::default().fg(t.error.into()))
-        } else if inputs.context.window_budget > 0
-            && inputs.context.window_tokens as f64 > inputs.context.window_budget as f64 * 0.8
-        {
-            Span::styled("●", Style::default().fg(t.warn.into()))
-        } else {
-            Span::styled("○", Style::default().fg(t.success.into()))
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(ctx_dot)).alignment(Alignment::Center),
-            inner,
-        );
-        result.expand_btn_rect = Some(Rect {
-            x: mini.x,
-            y: mini.y + 1,
-            width: 3,
-            height: 1,
-        });
-        crate::floating_panels::render_shadow(f, mini, &t);
-        return result;
-    }
-
-    let capped = Rect {
-        height: available.saturating_add(2),
-        ..area
-    };
-    let panel_bg = t.modal_bg.into();
-    f.render_widget(ratatui::widgets::Clear, capped);
-    f.render_widget(
-        Block::default()
-            .style(Style::default().bg(panel_bg))
-            .title(
-                Line::from(vec![Span::styled(
-                    "  ≡",
-                    Style::default()
-                        .fg(t.heading.into())
-                        .add_modifier(Modifier::BOLD),
-                )])
-                .alignment(Alignment::Center),
-            )
-            .padding(ratatui::widgets::Padding {
-                left: 0,
-                right: 0,
-                top: 1,
-                bottom: 0,
-            }),
-        capped,
-    );
-    let inner = Rect {
-        x: capped.x,
-        y: capped.y + 1,
-        width: capped.width,
-        height: capped.height.saturating_sub(1),
-    };
-
-    // Hamburger button — left side of the title row.
-    result.expand_btn_rect = Some(Rect {
-        x: capped.x + 1,
-        y: capped.y,
-        width: 3,
-        height: 1,
-    });
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(ctx_dot),
-            Constraint::Length(top_pad),
-            Constraint::Length(p_head),
-            Constraint::Length(p_steps),
-            Constraint::Length(p_gap),
-            Constraint::Length(t_head),
-            Constraint::Length(t_items),
-        ])
-        .split(inner);
-
-    let mut si = 0usize;
-
-    let accent = Style::default().fg(t.accent.into());
-    let tinted = Style::default().fg(t.tinted_fg.into());
-    let success = Style::default().fg(t.success.into());
-
-    let ctx = &inputs.context;
-    let ctx_dot_span = if ctx.window_budget > 0 && ctx.window_tokens > ctx.window_budget {
-        Span::styled("●", Style::default().fg(t.error.into()))
-    } else if ctx.window_budget > 0 && ctx.window_tokens as f64 > ctx.window_budget as f64 * 0.8 {
-        Span::styled("●", Style::default().fg(t.warn.into()))
-    } else {
-        Span::styled("○", Style::default().fg(t.success.into()))
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(ctx_dot_span)).alignment(Alignment::Center),
-        sections[si],
-    );
-    si += 1;
-    si += 1;
-
-    if has_plan {
-        result.plan_hdr_rect = Some(Rect {
-            x: sections[si].x,
-            y: sections[si].y,
-            width: sections[si].width,
-            height: 1,
-        });
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled("P", accent))).alignment(Alignment::Center),
-            sections[si],
-        );
-    }
-    si += 1; // p_head
-    if has_plan {
-        let sec = sections[si];
-        if let Some(p) = plan {
-            for (r, step) in p.steps.iter().enumerate() {
-                let row_rect = Rect {
-                    y: sec.y + r as u16,
-                    height: 1,
-                    ..sec
-                };
-                let sym = if step.done { "✓" } else { "○" };
-                let style = if step.done { success } else { tinted };
-                f.render_widget(
-                    Paragraph::new(Line::from(Span::styled(sym, style)))
-                        .alignment(Alignment::Center),
-                    row_rect,
-                );
-            }
-        }
-    }
-    si += 1;
-    si += 1; // p_gap
-    if has_todos {
-        result.todo_hdr_rect = Some(Rect {
-            x: sections[si].x,
-            y: sections[si].y,
-            width: sections[si].width,
-            height: 1,
-        });
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled("T", accent))).alignment(Alignment::Center),
-            sections[si],
-        );
-    }
-    si += 1; // t_head
-    if has_todos {
-        let sec = sections[si];
-        for (r, todo) in inputs.todos.iter().enumerate() {
-            let row_rect = Rect {
-                y: sec.y + r as u16,
-                height: 1,
-                ..sec
-            };
-            let (sym, style) = match todo.status {
-                atman_runtime::memory::todo::TodoStatus::Done => ("✓", success),
-                atman_runtime::memory::todo::TodoStatus::Cancelled => {
-                    ("✕", Style::default().fg(t.subtle_fg.into()))
-                }
-                _ => ("○", tinted),
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(sym, style))).alignment(Alignment::Center),
-                row_rect,
-            );
-        }
-    }
-
-    crate::floating_panels::render_shadow(f, capped, &t);
-    result
+/// kv_line with bg fill for content area.
+fn kv_line_bg<'a>(
+    key: &'a str,
+    value: &str,
+    value_style: Style,
+    max_w: usize,
+    bg: ratatui::style::Color,
+) -> Line<'a> {
+    let key_str = format!("  {key}:");
+    let key_w = crate::width::width(&key_str);
+    let val_max = max_w.saturating_sub(key_w);
+    let val = crate::width::truncate(value, val_max);
+    Line::from(vec![
+        Span::styled(
+            key_str,
+            Style::default()
+                .fg(crate::theme::theme().subtle_fg.into())
+                .bg(bg),
+        ),
+        Span::styled(val, value_style.bg(bg)),
+    ])
 }
 
 #[cfg(test)]

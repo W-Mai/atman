@@ -142,7 +142,7 @@ pub fn render(
 
     let panel_bg: Color = t.modal_bg.into();
     let hamburger_fg: Color = if hover.hovered_hamburger {
-        t.highlight_bg.lerp(t.heading, 0.3)
+        t.heading.lerp(Color::White, 0.3)
     } else {
         t.heading.into()
     };
@@ -904,7 +904,7 @@ fn render_strip(
         height: 1,
     };
     let hamburger_fg: Color = if hover.hovered_hamburger {
-        t.highlight_bg.lerp(t.heading, 0.3)
+        t.heading.lerp(Color::White, 0.3)
     } else {
         t.heading.into()
     };

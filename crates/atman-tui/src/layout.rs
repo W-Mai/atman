@@ -55,7 +55,7 @@ pub fn compute_sidebar_rect(area: Rect, show: bool, collapsed: bool) -> Option<R
         .saturating_add(area.width)
         .saturating_sub(width)
         .saturating_sub(1);
-    let y = area.y.saturating_add(2);
+    let y = area.y.saturating_add(1);
     Some(Rect {
         x,
         y,
@@ -274,7 +274,7 @@ mod tests {
         let rect = compute_sidebar_rect(area, true, false).unwrap();
         assert_eq!(rect.width, SIDEBAR_WIDTH);
         assert_eq!(rect.x + rect.width, area.x + area.width - 1);
-        assert_eq!(rect.y, area.y + 2);
+        assert_eq!(rect.y, area.y + 1);
     }
 
     #[test]

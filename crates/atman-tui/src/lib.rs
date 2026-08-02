@@ -711,6 +711,14 @@ async fn run_frames(
                                         .id
                                         .clone();
                                     app.floating_panels.focus(&fp_id);
+                                } else if let Some(r) = app.last_upper_title_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.sidebar_upper_collapsed = !app.sidebar_upper_collapsed;
+                                } else if let Some(r) = app.last_lower_title_rect
+                                    && rect_contains(r, me.column, me.row)
+                                {
+                                    app.sidebar_lower_collapsed = !app.sidebar_lower_collapsed;
                                 } else if let Some(r) = app.last_goal_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -1065,6 +1073,35 @@ async fn run_frames(
                                     .map(|(n, _)| n.clone());
                                 if app.hovered_mcp_row != mcp_hover {
                                     app.hovered_mcp_row = mcp_hover;
+                                }
+
+                                // Sidebar strip hover (for marquee effect)
+                                let sidebar_hover = app
+                                    .last_sidebar_strip_rects
+                                    .iter()
+                                    .find(|(_, r)| rect_contains(**r, me.column, me.row))
+                                    .map(|(k, _)| k.clone());
+                                if app.hovered_sidebar_row != sidebar_hover {
+                                    app.hovered_sidebar_row = sidebar_hover;
+                                }
+
+                                // Sidebar hamburger hover (upper panel title)
+                                let ham_hover = app
+                                    .last_collapse_btn_rect
+                                    .or(app.last_upper_title_rect)
+                                    .map(|r| rect_contains(r, me.column, me.row))
+                                    .unwrap_or(false);
+                                if app.hovered_sidebar_hamburger != ham_hover {
+                                    app.hovered_sidebar_hamburger = ham_hover;
+                                }
+
+                                // Sidebar lower panel title hover
+                                let lower_hover = app
+                                    .last_lower_title_rect
+                                    .map(|r| rect_contains(r, me.column, me.row))
+                                    .unwrap_or(false);
+                                if app.hovered_sidebar_lower != lower_hover {
+                                    app.hovered_sidebar_lower = lower_hover;
                                 }
 
                                 if let Some(idx) = app.hit_test(me.column, me.row)
@@ -3574,6 +3611,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 meta_collapsed: app.meta_collapsed,
                 mcp_collapsed: app.mcp_collapsed,
                 sidebar_collapsed: sidebar_effective_collapsed,
+                upper_collapsed: app.sidebar_upper_collapsed,
+                lower_collapsed: app.sidebar_lower_collapsed,
+                animation_frame: app.animation_frame,
+                hovered_row: app.hovered_sidebar_row.as_deref(),
+                hovered_hamburger: app.hovered_sidebar_hamburger,
+                hovered_lower: app.hovered_sidebar_lower,
                 on_goal_scroll: &|_c| {},
                 on_plans_scroll: &|_c| {},
                 on_todos_scroll: &|_c| {},
@@ -3591,6 +3634,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_mcp_hdr_rect = sr.mcp_hdr_rect;
         app.last_collapse_btn_rect = sr.collapse_btn_rect;
         app.last_expand_btn_rect = sr.expand_btn_rect;
+        app.last_upper_title_rect = sr.upper_title_rect;
+        app.last_lower_title_rect = sr.lower_title_rect;
+        app.last_sidebar_strip_rects = sr.strip_rects;
     }
     if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(
         l.transcript,

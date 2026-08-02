@@ -29,6 +29,10 @@ pub struct PersistedUiState {
     #[serde(default)]
     pub meta_collapsed: bool,
     #[serde(default)]
+    pub sidebar_upper_collapsed: bool,
+    #[serde(default)]
+    pub sidebar_lower_collapsed: bool,
+    #[serde(default)]
     pub panel_sizes: std::collections::HashMap<String, (u16, u16)>,
     #[serde(default)]
     pub task_panel_collapsed: bool,
@@ -47,6 +51,8 @@ impl Default for PersistedUiState {
             todo_collapsed: false,
             context_collapsed: false,
             meta_collapsed: false,
+            sidebar_upper_collapsed: false,
+            sidebar_lower_collapsed: false,
             panel_sizes: std::collections::HashMap::new(),
             task_panel_collapsed: false,
         }
@@ -105,6 +111,8 @@ impl PersistedUiState {
             todo_collapsed: app.todo_collapsed,
             context_collapsed: app.context_collapsed,
             meta_collapsed: app.meta_collapsed,
+            sidebar_upper_collapsed: app.sidebar_upper_collapsed,
+            sidebar_lower_collapsed: app.sidebar_lower_collapsed,
             panel_sizes: app.panel_sizes.clone(),
             task_panel_collapsed: app.task_panel_collapsed,
         }
@@ -122,6 +130,8 @@ impl PersistedUiState {
         app.todo_collapsed = self.todo_collapsed;
         app.context_collapsed = self.context_collapsed;
         app.meta_collapsed = self.meta_collapsed;
+        app.sidebar_upper_collapsed = self.sidebar_upper_collapsed;
+        app.sidebar_lower_collapsed = self.sidebar_lower_collapsed;
         app.panel_sizes = self.panel_sizes.clone();
         app.task_panel_collapsed = self.task_panel_collapsed;
     }
