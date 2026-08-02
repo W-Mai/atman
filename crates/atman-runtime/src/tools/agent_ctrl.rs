@@ -6,11 +6,134 @@ use crate::provider::LlmRequest;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult, ToolSpec};
 use crate::value::Value;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 pub struct AgentSpawn;
 
 const DEFAULT_MAX_ITER: u64 = 20;
 const MAX_ITER_HARD_CAP: u64 = 200;
+
+#[derive(Debug, Clone)]
+pub enum AgentRunStatus {
+    Running {
+        started_at: chrono::DateTime<chrono::Utc>,
+    },
+    Ok {
+        ended_at: chrono::DateTime<chrono::Utc>,
+        final_text: String,
+    },
+    Err {
+        ended_at: chrono::DateTime<chrono::Utc>,
+        message: String,
+    },
+    Killed {
+        ended_at: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+impl AgentRunStatus {
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Running { .. } => "running",
+            Self::Ok { .. } => "ok",
+            Self::Err { .. } => "err",
+            Self::Killed { .. } => "killed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    AssistantDone { text: String },
+    Exited { status: AgentRunStatus },
+}
+
+pub struct AgentEntry {
+    pub handle: String,
+    pub goal: String,
+    pub status: Arc<Mutex<AgentRunStatus>>,
+    pub output: Arc<Mutex<String>>,
+    pub cancel: tokio_util::sync::CancellationToken,
+    pub stream_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+}
+
+impl crate::watch::Watchable for AgentEntry {
+    fn watch_output(
+        self: Arc<Self>,
+        pattern: String,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::watch::WatchResult> + Send>>
+    {
+        let stream_tx = self.stream_tx.clone();
+        Box::pin(async move {
+            let mut rx = stream_tx.subscribe();
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,
+                    result = rx.recv() => match result {
+                        Ok(AgentEvent::AssistantDone { text }) => {
+                            if text.find(&pattern).is_some() {
+                                return crate::watch::WatchResult::Matched {
+                                    row: None,
+                                    col: None,
+                                    text,
+                                };
+                            }
+                        }
+                        Ok(AgentEvent::Exited { .. }) | Err(_) => return crate::watch::WatchResult::SourceExited,
+                    }
+                }
+            }
+        })
+    }
+}
+
+#[derive(Default)]
+pub struct AgentRegistry {
+    entries: Mutex<std::collections::HashMap<String, Arc<AgentEntry>>>,
+}
+
+impl AgentRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn create_entry(&self, handle: String, goal: String) -> Arc<AgentEntry> {
+        let (stream_tx, _) = tokio::sync::broadcast::channel(64);
+        let entry = Arc::new(AgentEntry {
+            handle: handle.clone(),
+            goal,
+            status: Arc::new(Mutex::new(AgentRunStatus::Running {
+                started_at: chrono::Utc::now(),
+            })),
+            output: Arc::new(Mutex::new(String::new())),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            stream_tx,
+        });
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(handle, Arc::clone(&entry));
+        entry
+    }
+
+    pub fn lookup(&self, handle: &str) -> Result<Arc<AgentEntry>, RuntimeError> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(handle)
+            .map(Arc::clone)
+            .ok_or_else(|| RuntimeError::ToolFailed(format!("agent: handle '{handle}' not found")))
+    }
+
+    pub fn remove(&self, handle: &str) {
+        self.entries.lock().unwrap().remove(handle);
+    }
+}
 
 impl Tool for AgentSpawn {
     fn name(&self) -> &str {
@@ -36,7 +159,10 @@ impl Tool for AgentSpawn {
              to all tools available to you), `max_iterations` (optional int, default 20, capped \
              at 200), `model` (optional model name — defaults to the last model this session \
              used, then configured models, then claude-opus-4.7), `flow` (optional .at file path \
-             or command name; goal is passed as the first flow argument).",
+             or command name; goal is passed as the first flow argument). \
+             `async` (optional bool, default false) — when true, returns a handle immediately \
+             instead of blocking for the final text. Use agent.status/agent.output/agent.kill \
+             to manage the async sub-agent, and watch(handle, pattern) to monitor its output.",
         )
     }
 
@@ -48,14 +174,31 @@ impl Tool for AgentSpawn {
                 "tools": {"type": "array", "items": {"type": "string"}},
                 "max_iterations": {"type": "integer"},
                 "model": {"type": "string"},
-                "flow": {"type": "string"}
+                "flow": {"type": "string"},
+                "async": {"type": "boolean", "default": false}
             },
             "required": ["goal"]
         })
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
-        Box::pin(async move { run_sub_agent(args, ctx).await })
+        Box::pin(async move {
+            let is_async = args
+                .named("async")
+                .and_then(|v| {
+                    if let Value::Bool(b) = v {
+                        Some(*b)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false);
+            if is_async {
+                run_sub_agent_async(args, ctx).await
+            } else {
+                run_sub_agent(args, ctx).await
+            }
+        })
     }
 }
 
@@ -181,6 +324,310 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             format!("\n[partial output: {}]", truncate(&last, 400))
         };
         Ok(Value::Str(format!("[sub-agent failed: {reason}]{partial}")))
+    }
+}
+
+async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
+    let goal = extract_goal(&args)?;
+    let model = pick_model(&args, ctx);
+    let providers = ctx.providers.clone().ok_or_else(|| {
+        RuntimeError::ToolFailed("agent.spawn: no provider registry available on ctx".into())
+    })?;
+    let provider = providers.resolve(&model).ok_or_else(|| {
+        RuntimeError::ToolFailed(format!("agent.spawn: no provider for model `{model}`"))
+    })?;
+    let agent_registry = ctx.agent_registry.clone().ok_or_else(|| {
+        RuntimeError::ToolFailed("agent.spawn: no agent registry available on ctx".into())
+    })?;
+
+    let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
+    let entry = agent_registry.create_entry(handle.clone(), goal.clone());
+
+    let task_registry = ctx.task_registry.clone();
+    let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
+    let child_run_id = FlowRunId::now();
+    if let Some(tr) = &task_registry {
+        tr.register(
+            crate::task_registry::TaskKind::Agent,
+            goal.clone(),
+            child_run_id.0.to_string(),
+            session_id,
+            entry.cancel.clone(),
+        );
+    }
+
+    let entry_clone = Arc::clone(&entry);
+    let ctx_clone = ctx.clone();
+    tokio::spawn(async move {
+        run_sub_agent_background(entry_clone, args, provider, ctx_clone, child_run_id).await;
+    });
+
+    Ok(Value::Struct(vec![
+        ("handle".into(), Value::Str(handle)),
+        ("status".into(), Value::Str("running".into())),
+    ]))
+}
+
+async fn run_sub_agent_background(
+    entry: Arc<AgentEntry>,
+    args: ToolArgs,
+    provider: Arc<dyn crate::provider::Provider>,
+    ctx: ToolCtx,
+    child_run_id: FlowRunId,
+) {
+    let goal = entry.goal.clone();
+    let max_iter = extract_max_iter(&args);
+    let tool_filter = extract_tool_filter(&args).unwrap_or(None);
+    let registry = match ctx.registry.as_ref() {
+        Some(r) => r.clone(),
+        None => {
+            let status = AgentRunStatus::Err {
+                ended_at: chrono::Utc::now(),
+                message: "no tool registry".into(),
+            };
+            *entry.status.lock().unwrap() = status.clone();
+            let _ = entry.stream_tx.send(AgentEvent::Exited { status });
+            return;
+        }
+    };
+    let tool_specs = build_tool_specs(registry.as_ref(), tool_filter.as_deref());
+    let model = pick_model(&args, &ctx);
+    emit_child_flow_start(&ctx, &child_run_id, &goal);
+    let turn = ctx
+        .turn_id
+        .clone()
+        .unwrap_or_else(crate::event::TurnId::now);
+    let mut messages: Vec<Message> = vec![Message::user_text(turn.clone(), goal.clone())];
+    let mut final_text: Option<String> = None;
+    let mut failure_reason: Option<String> = None;
+
+    for iter in 0..max_iter {
+        if entry.cancel.is_cancelled() {
+            failure_reason = Some("cancelled".into());
+            break;
+        }
+        let req = LlmRequest {
+            model: model.clone(),
+            messages: messages.clone(),
+            system: None,
+            input: Value::Unit,
+            schema: None,
+            cache_prompt: false,
+            tools: tool_specs.clone(),
+            thinking_enabled: false,
+            stall_timeout_secs: 120,
+        };
+        let outcome = call_streaming_sub_agent(provider.as_ref(), req, &ctx).await;
+        match outcome {
+            Ok(am) => {
+                emit_child_llm_call(&ctx, &child_run_id, &model, &am);
+                let text = am.text_concat();
+                let _ = entry
+                    .stream_tx
+                    .send(AgentEvent::AssistantDone { text: text.clone() });
+                entry.output.lock().unwrap().push_str(&text);
+                let uses = extract_tool_uses(&am.message);
+                messages.push(am.message.clone());
+                emit_assistant_msg(&ctx, &child_run_id, &am.message);
+                if uses.is_empty() {
+                    final_text = Some(text);
+                    break;
+                }
+                let mut child_ctx = sanitize_child_ctx(&ctx);
+                child_ctx.session_messages = Some(std::sync::Arc::new(messages.clone()));
+                let tool_results = dispatch_child_tools(&uses, registry.as_ref(), &child_ctx).await;
+                let turn_for_results = messages
+                    .last()
+                    .map(|m| m.turn_id.clone())
+                    .unwrap_or_else(crate::event::TurnId::now);
+                let combined = Message {
+                    turn_id: turn_for_results,
+                    role: MessageRole::Tool,
+                    parts: tool_results,
+                };
+                emit_tool_result_msg(&ctx, &child_run_id, &combined);
+                messages.push(combined);
+            }
+            Err(e) => {
+                failure_reason = Some(format!("provider error at iter {iter}: {e}"));
+                break;
+            }
+        }
+    }
+
+    let status = if let Some(text) = final_text {
+        AgentRunStatus::Ok {
+            ended_at: chrono::Utc::now(),
+            final_text: text,
+        }
+    } else if entry.cancel.is_cancelled() {
+        AgentRunStatus::Killed {
+            ended_at: chrono::Utc::now(),
+        }
+    } else {
+        AgentRunStatus::Err {
+            ended_at: chrono::Utc::now(),
+            message: failure_reason.unwrap_or_else(|| format!("hit max iterations {max_iter}")),
+        }
+    };
+    let flow_status = match &status {
+        AgentRunStatus::Ok { .. } => FlowStatus::Ok,
+        AgentRunStatus::Killed { .. } => FlowStatus::Cancelled,
+        AgentRunStatus::Err { message, .. } => FlowStatus::Errored {
+            message: message.clone(),
+        },
+        AgentRunStatus::Running { .. } => unreachable!(),
+    };
+    emit_child_flow_end(&ctx, &child_run_id, &flow_status);
+    *entry.status.lock().unwrap() = status.clone();
+    let _ = entry.stream_tx.send(AgentEvent::Exited { status });
+}
+
+pub struct AgentStatus;
+impl Tool for AgentStatus {
+    fn name(&self) -> &str {
+        "agent.status"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Check the status of an async sub-agent. Returns handle, status, goal, and timing.")
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"handle": {"type": "string"}},
+            "required": ["handle"]
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let handle = extract_string(&args, "handle", 0)?;
+            let reg = ctx.agent_registry.clone().ok_or_else(|| {
+                RuntimeError::ToolFailed("agent.status: no agent registry".into())
+            })?;
+            let entry = reg.lookup(&handle)?;
+            let st = entry.status.lock().unwrap().clone();
+            let goal = entry.goal.clone();
+            Ok(Value::Struct(vec![
+                ("handle".into(), Value::Str(handle)),
+                ("status".into(), Value::Str(st.kind_str().into())),
+                ("goal".into(), Value::Str(goal)),
+            ]))
+        })
+    }
+}
+
+pub struct AgentOutput;
+impl Tool for AgentOutput {
+    fn name(&self) -> &str {
+        "agent.output"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Read accumulated assistant text from an async sub-agent.")
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {"type": "string"},
+                "cursor": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 4096}
+            },
+            "required": ["handle"]
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let handle = extract_string(&args, "handle", 0)?;
+            let cursor = args
+                .named("cursor")
+                .and_then(|v| {
+                    if let Value::Int(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0)
+                .max(0) as usize;
+            let limit = args
+                .named("limit")
+                .and_then(|v| {
+                    if let Value::Int(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(4096)
+                .max(1) as usize;
+            let reg = ctx.agent_registry.clone().ok_or_else(|| {
+                RuntimeError::ToolFailed("agent.output: no agent registry".into())
+            })?;
+            let entry = reg.lookup(&handle)?;
+            let output = entry.output.lock().unwrap().clone();
+            let chunk = output.chars().skip(cursor).take(limit).collect::<String>();
+            let next_cursor = cursor + chunk.chars().count();
+            let eof = next_cursor >= output.chars().count();
+            Ok(Value::Struct(vec![
+                ("handle".into(), Value::Str(handle)),
+                ("chunk".into(), Value::Str(chunk)),
+                ("cursor".into(), Value::Int(cursor as i64)),
+                ("next_cursor".into(), Value::Int(next_cursor as i64)),
+                ("eof".into(), Value::Bool(eof)),
+            ]))
+        })
+    }
+}
+
+pub struct AgentKill;
+impl Tool for AgentKill {
+    fn name(&self) -> &str {
+        "agent.kill"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Four
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Cancel a running async sub-agent by handle.")
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"handle": {"type": "string"}},
+            "required": ["handle"]
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let handle = extract_string(&args, "handle", 0)?;
+            let reg = ctx
+                .agent_registry
+                .clone()
+                .ok_or_else(|| RuntimeError::ToolFailed("agent.kill: no agent registry".into()))?;
+            let entry = reg.lookup(&handle)?;
+            entry.cancel.cancel();
+            Ok(Value::Unit)
+        })
+    }
+}
+
+fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, RuntimeError> {
+    let value = match args.named(name) {
+        Some(v) => v,
+        None => args.positional(pos)?,
+    };
+    match value {
+        Value::Str(s) => Ok(s.clone()),
+        other => Err(RuntimeError::TypeMismatch {
+            expected: "string".into(),
+            actual: other.kind_name().into(),
+        }),
     }
 }
 

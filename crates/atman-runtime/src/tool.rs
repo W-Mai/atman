@@ -99,6 +99,7 @@ pub struct ToolCtx {
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
     pub term_registry: Option<std::sync::Arc<crate::tools::term::TermRegistry>>,
     pub watch_hub: Option<std::sync::Arc<crate::watch::WatchHub>>,
+    pub agent_registry: Option<std::sync::Arc<crate::tools::agent_ctrl::AgentRegistry>>,
     pub task_registry: Option<crate::task_registry::TaskRegistry>,
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,
@@ -267,6 +268,14 @@ impl ToolCtx {
 
     pub fn with_watch_hub(mut self, hub: std::sync::Arc<crate::watch::WatchHub>) -> Self {
         self.watch_hub = Some(hub);
+        self
+    }
+
+    pub fn with_agent_registry(
+        mut self,
+        registry: std::sync::Arc<crate::tools::agent_ctrl::AgentRegistry>,
+    ) -> Self {
+        self.agent_registry = Some(registry);
         self
     }
 

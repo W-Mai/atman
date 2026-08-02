@@ -114,6 +114,7 @@ pub struct Session {
     pub turn: TurnState,
     pub watch: WatchHub,
     pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
+    pub agent_registry: std::sync::Arc<crate::tools::agent_ctrl::AgentRegistry>,
     pub compaction: CompactionState,
     pub interactions: InteractionServices,
     injection_queue: Mutex<Vec<Injection>>,
@@ -654,6 +655,7 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
+            agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
@@ -755,6 +757,7 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
+            agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
             compaction: {
                 let c = CompactionState::new();
                 if persisted.window_tokens > 0 {
@@ -805,6 +808,7 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
+            agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),

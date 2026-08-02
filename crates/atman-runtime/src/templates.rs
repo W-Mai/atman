@@ -114,7 +114,7 @@ flow agent_loop(iteration: int) -> string {
             memory.recent_turns, memory.history.search, memory.history.read,
             memory.spec.status, memory.spec.update, memory.spec.deviate,
             plan.write, plan.read, plan.tick,
-            agent.spawn,
+            agent.spawn, agent.status, agent.output, agent.kill,
             form.ask,
             help.show,
             preview.push,

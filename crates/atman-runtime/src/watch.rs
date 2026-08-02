@@ -425,10 +425,19 @@ impl Tool for Watch {
                     );
                 }
                 crate::task_registry::TaskKind::Agent => {
-                    return Err(RuntimeError::ToolFailed(
-                        "watch: agent monitoring requires async agent.spawn (not yet available)"
-                            .into(),
-                    ));
+                    let reg = ctx.agent_registry.clone().ok_or_else(|| {
+                        RuntimeError::ToolFailed("watch: agent registry not available".into())
+                    })?;
+                    let entry = reg.lookup(&handle)?;
+                    let watchable: Arc<dyn Watchable> = Arc::clone(&entry) as Arc<dyn Watchable>;
+                    spawn_watcher(
+                        watch_hub,
+                        watcher_id.clone(),
+                        source,
+                        pattern,
+                        Duration::from_millis(timeout_ms),
+                        watchable,
+                    );
                 }
                 _ => unreachable!(),
             }
