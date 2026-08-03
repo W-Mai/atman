@@ -2965,6 +2965,11 @@ fn render_collapsed_workflow_card(
     let mut regions: Vec<NodeRegion> = Vec::new();
     let mut pending_counter: u8 = 0;
     let child_count = top_level.len();
+    let min_depth = visible_nodes
+        .iter()
+        .map(|(_, p)| p.len().saturating_sub(1))
+        .min()
+        .unwrap_or(0) as u16;
     for (i, node) in top_level.iter().enumerate() {
         let path = format!("{i}");
         let is_last = i + 1 == child_count;
@@ -2981,7 +2986,7 @@ fn render_collapsed_workflow_card(
             running,
             &mut pending_counter,
             Some(&visible_str),
-            1,
+            min_depth,
         );
     }
     if body_lines.len() > max_body_rows {
