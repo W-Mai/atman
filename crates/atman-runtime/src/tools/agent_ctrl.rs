@@ -412,6 +412,8 @@ async fn run_sub_agent_background(
     let goal = entry.goal.clone();
     let max_iter = extract_max_iter(&args);
     let tool_filter = extract_tool_filter(&args).unwrap_or(None);
+    let mut ctx = ctx;
+    ctx.cancel = entry.cancel.clone();
     let registry = match ctx.registry.as_ref() {
         Some(r) => r.clone(),
         None => {
