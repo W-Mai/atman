@@ -92,6 +92,7 @@ pub enum OutputItem {
         output: String,
         iteration: u64,
         done: bool,
+        workflow_graph: WorkflowGraph,
     },
 }
 
@@ -304,6 +305,29 @@ pub struct AppState {
     last_lag_note_idx: Option<usize>,
     last_lag_at: Option<Instant>,
     last_lag_count: u64,
+}
+
+fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
+    match frame {
+        StreamFrame::FlowStart { run_id, .. }
+        | StreamFrame::FlowNodeStart { run_id, .. }
+        | StreamFrame::FlowNodeEnd { run_id, .. }
+        | StreamFrame::FlowDone { run_id, .. }
+        | StreamFrame::FlowGraph { run_id, .. }
+        | StreamFrame::ToolNode { run_id, .. } => Some(run_id.as_str()),
+        StreamFrame::AssistantMsg {
+            flow_run_id: Some(rid),
+            ..
+        }
+        | StreamFrame::ToolResultMsg {
+            flow_run_id: Some(rid),
+            ..
+        }
+        | StreamFrame::LlmCallStats {
+            run_id: Some(rid), ..
+        } => Some(rid.as_str()),
+        _ => None,
+    }
 }
 
 impl AppState {
@@ -1431,6 +1455,7 @@ impl AppState {
                     output: String::new(),
                     iteration: 0,
                     done: false,
+                    workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
                 });
                 self.sub_agent_run_ids.insert(child_run_id, idx);
             }
@@ -1485,6 +1510,15 @@ impl AppState {
     }
 
     fn ensure_workflow_panel_and_apply(&mut self, frame: &StreamFrame) {
+        if let Some(rid) = frame_run_id(frame)
+            && let Some(&idx) = self.sub_agent_run_ids.get(rid)
+            && let Some(OutputItem::SubAgentActivity { workflow_graph, .. }) =
+                self.items.get_mut(idx)
+        {
+            workflow_graph.apply_stream_frame(frame);
+            self.items_version = self.items_version.wrapping_add(1);
+            return;
+        }
         let is_panel_creator = matches!(
             frame,
             StreamFrame::FlowStart { .. } | StreamFrame::FlowGraph { .. }

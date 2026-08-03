@@ -447,6 +447,7 @@ fn item_content_hash(
             output,
             iteration,
             done,
+            ..
         } => {
             12u8.hash(&mut h);
             str_fp(handle).hash(&mut h);
