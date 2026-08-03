@@ -194,7 +194,7 @@ impl Tool for AgentSpawn {
              - \"subagent.at\" — no @, takes first non-describe flow\n\
              - \"/abs/path/my.at@main\" — absolute path\n\n\
              Default flow is `subagent.at` (research/verify/implement/review roles). \
-             Required: `flow`, `async`. Other named args pass through to the flow. \
+             Required: `flow`. `async` is optional (default true). Other named args pass through to the flow. \
              Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
              Best practice: call flow.list to see available flows and params, then pass \
              matching named args. Missing params use flow-defined defaults.",
@@ -206,9 +206,9 @@ impl Tool for AgentSpawn {
             "type": "object",
             "properties": {
                 "flow": {"type": "string"},
-                "async": {"type": "boolean"}
+                "async": {"type": "boolean", "default": true}
             },
-            "required": ["flow", "async"],
+            "required": ["flow"],
             "additionalProperties": true
         })
     }
@@ -224,7 +224,7 @@ impl Tool for AgentSpawn {
                         None
                     }
                 })
-                .unwrap_or(false);
+                .unwrap_or(true);
             if is_async {
                 run_sub_agent_async(args, ctx).await
             } else {
@@ -340,11 +340,15 @@ impl Tool for AgentStatus {
             let entry = reg.lookup(&handle)?;
             let st = entry.status.lock().unwrap().clone();
             let goal = entry.goal.clone();
-            Ok(Value::Struct(vec![
+            let mut fields = vec![
                 ("handle".into(), Value::Str(handle)),
                 ("status".into(), Value::Str(st.kind_str().into())),
                 ("goal".into(), Value::Str(goal)),
-            ]))
+            ];
+            if let AgentRunStatus::Err { message, .. } = &st {
+                fields.push(("error".into(), Value::Str(message.clone())));
+            }
+            Ok(Value::Struct(fields))
         })
     }
 }
