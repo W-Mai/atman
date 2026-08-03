@@ -1098,6 +1098,31 @@ fn render_panel_content(
                         render_placeholder(f, area, &panel.title);
                     }
                 }
+                TaskKind::Agent => {
+                    let item = items.iter().rev().find(|it| match it {
+                        OutputItem::SubAgentActivity { handle, .. } => *handle == panel.id,
+                        _ => false,
+                    });
+                    if let Some(OutputItem::SubAgentActivity {
+                        handle,
+                        goal,
+                        model,
+                        status,
+                        output,
+                        iteration,
+                        done,
+                        ..
+                    }) = item
+                    {
+                        render_sub_agent_panel(
+                            f, area, handle, goal, model, status, output, *iteration, *done,
+                        );
+                    } else if let Some(snap) = snap {
+                        render_task_meta(f, area, kind, snap);
+                    } else {
+                        render_placeholder(f, area, &panel.title);
+                    }
+                }
                 _ => {
                     let wp_idx = items.iter().enumerate().rev().find(|(_, it)| {
                         if let OutputItem::WorkflowPanel { graph, .. } = it {
@@ -1330,6 +1355,62 @@ fn render_history_content(
         ]));
     }
     f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_sub_agent_panel(
+    f: &mut Frame,
+    area: Rect,
+    handle: &str,
+    goal: &str,
+    model: &str,
+    status: &str,
+    output: &str,
+    iteration: u64,
+    done: bool,
+) {
+    let t = crate::theme::theme();
+    let label_style = Style::default().fg(t.subtle_fg.into());
+    let value_style = Style::default().fg(t.tinted_fg.into());
+    let accent_style = Style::default().fg(t.accent.into());
+
+    let icon = match status {
+        "ok" => "✓",
+        "err" => "✗",
+        "killed" => "⊘",
+        _ if done => "✓",
+        _ => "◐",
+    };
+    let iter_str = if done {
+        String::new()
+    } else {
+        format!(" (iter {iteration})")
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::styled(
+        format!(" {icon} {handle}{iter_str}"),
+        accent_style,
+    ));
+    lines.push(Line::from(vec![
+        Span::styled(" goal:   ", label_style),
+        Span::styled(goal.to_string(), value_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" model:  ", label_style),
+        Span::styled(model.to_string(), value_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" status: ", label_style),
+        Span::styled(status.to_string(), value_style),
+    ]));
+    lines.push(Line::from(""));
+
+    for line in output.lines() {
+        lines.push(Line::from(line.to_string()));
+    }
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_task_meta(f: &mut Frame, area: Rect, kind: TaskKind, snap: &TaskSnapshot) {
