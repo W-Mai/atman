@@ -1010,6 +1010,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 &args,
                 context_mode,
                 ctx.session_runtime.as_ref(),
+                ctx.tool_ctx.session_messages_handle.as_ref(),
                 &turn_id,
                 ctx.events,
                 ctx.flow_run_id.as_ref(),

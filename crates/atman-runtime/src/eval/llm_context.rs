@@ -13,6 +13,9 @@ pub fn build_llm_context(
     args: &LlmNodeArgs,
     context_mode: ContextMode,
     session: Option<&std::sync::Arc<crate::session::Session>>,
+    session_messages_handle: Option<
+        &std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>,
+    >,
     turn_id: &crate::event::TurnId,
     events: Option<&crate::event::EventSink>,
     flow_run_id: Option<&crate::event::FlowRunId>,
@@ -32,6 +35,17 @@ pub fn build_llm_context(
             }
             ContextMode::None => Vec::new(),
         };
+        let budget_text = args.prompt.clone().unwrap_or_default();
+        if let Some(p) = args.prompt.clone()
+            && !p.is_empty()
+        {
+            history.push(crate::message::Message::user_text(turn_id.clone(), p));
+        }
+        (history, budget_text)
+    } else if !matches!(context_mode, ContextMode::None)
+        && let Some(handle) = session_messages_handle
+    {
+        let mut history = handle.lock().unwrap().clone();
         let budget_text = args.prompt.clone().unwrap_or_default();
         if let Some(p) = args.prompt.clone()
             && !p.is_empty()
