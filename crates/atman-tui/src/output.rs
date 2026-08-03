@@ -2690,6 +2690,7 @@ pub fn render_workflow_panel_with_regions(
                 running,
                 &mut pending_counter,
                 None,
+                0,
             );
         }
         lines.push(Line::raw(""));
@@ -2980,6 +2981,7 @@ fn render_collapsed_workflow_card(
             running,
             &mut pending_counter,
             Some(&visible_str),
+            1,
         );
     }
     if body_lines.len() > max_body_rows {
@@ -3348,11 +3350,12 @@ fn append_workflow_node_boxed(
     flow_running: bool,
     pending_counter: &mut u8,
     visible_paths: Option<&std::collections::HashSet<String>>,
+    depth_offset: u16,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
     let t = crate::theme::theme();
     let depth = ancestor_last.len() as u16;
-    let prefix_w = depth.saturating_mul(INDENT_PER_DEPTH);
+    let prefix_w = depth.saturating_sub(depth_offset) * INDENT_PER_DEPTH;
     let col0 = prefix_w;
     let budget = panel_width.saturating_sub(prefix_w).min(MAX_BOX_WIDTH);
     if budget < 8 {
@@ -3476,7 +3479,8 @@ fn append_workflow_node_boxed(
     let mut child_ancestor_last: Vec<bool> = ancestor_last.to_vec();
     child_ancestor_last.push(is_last);
     let child_count = node.children.len();
-    let child_prefix_w = child_ancestor_last.len() as u16 * INDENT_PER_DEPTH;
+    let child_prefix_w = child_ancestor_last.len() as u16;
+    let child_prefix_w = child_prefix_w.saturating_sub(depth_offset) * INDENT_PER_DEPTH;
     if is_fanout_group(node)
         && (2..=FANOUT_MAX_BRANCHES).contains(&child_count)
         && panel_width >= FANOUT_MIN_WIDTH
@@ -3493,6 +3497,7 @@ fn append_workflow_node_boxed(
             animation_frame,
             flow_running,
             pending_counter,
+            depth_offset,
         );
         return;
     }
@@ -3517,6 +3522,7 @@ fn append_workflow_node_boxed(
             flow_running,
             pending_counter,
             visible_paths,
+            depth_offset,
         );
     }
 }
@@ -3533,9 +3539,10 @@ fn append_fanout_horizontal_boxed(
     animation_frame: u32,
     flow_running: bool,
     pending_counter: &mut u8,
+    depth_offset: u16,
 ) {
     let branch_count = branches.len();
-    let prefix_w = ancestor_last.len() as u16 * INDENT_PER_DEPTH;
+    let prefix_w = (ancestor_last.len() as u16).saturating_sub(depth_offset) * INDENT_PER_DEPTH;
     let col_width = panel_width
         .saturating_sub(prefix_w)
         .saturating_div(branch_count as u16);
@@ -3560,6 +3567,7 @@ fn append_fanout_horizontal_boxed(
             flow_running,
             pending_counter,
             None,
+            depth_offset,
         );
         per_branch_lines.push(b_lines);
         per_branch_regions.push(b_regions);
