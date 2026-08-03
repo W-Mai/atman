@@ -4,6 +4,7 @@ use crate::tool::ToolRegistry;
 
 pub mod agent_ctrl;
 pub mod bash_bg;
+pub mod flow_check;
 pub mod flow_list;
 pub mod form;
 pub mod fs;
@@ -76,6 +77,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(sleep::Sleep));
     reg.register(Arc::new(help::HelpShow));
     reg.register(Arc::new(flow_list::FlowList));
+    reg.register(Arc::new(flow_check::FlowCheck));
 }
 
 pub fn register_git_ops(reg: &mut ToolRegistry) {
