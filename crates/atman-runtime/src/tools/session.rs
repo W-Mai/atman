@@ -53,16 +53,9 @@ impl Tool for SessionPush {
                         _ => None,
                     })
                     .collect(),
-                Value::Str(s) => {
-                    let turn_id = ctx
-                        .turn_id
-                        .clone()
-                        .unwrap_or_else(crate::event::TurnId::now);
-                    vec![Message::assistant_text(turn_id, s)]
-                }
                 other => {
                     return Err(RuntimeError::TypeMismatch {
-                        expected: "message, list of message, or string".into(),
+                        expected: "message or list of message".into(),
                         actual: other.kind_name().into(),
                     });
                 }

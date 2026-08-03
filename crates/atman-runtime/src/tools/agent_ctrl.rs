@@ -546,7 +546,8 @@ async fn run_flow_agent(
     });
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
-    child_ctx.session_messages = Some(std::sync::Arc::new(Vec::new()));
+    child_ctx.session_messages_handle =
+        Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
     let out = crate::exec::exec_flow_with_siblings(
         flow,
         flow_args,

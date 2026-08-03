@@ -136,6 +136,7 @@ flow agent_loop(iteration: int) -> string {
             help.show,
             preview.push,
             session.push, sleep,
+            message.user, message.assistant, message.system, message.tool,
             watch, watcher.list, watcher.unwatch, wait_for_watcher, has_pending_injections,
             "mcp.*"
         ]
@@ -183,6 +184,9 @@ flow research_loop(goal: string, model: string, max_iter: int, iteration: int) -
     when iteration >= max_iter {
         return "[sub-agent: max iterations reached]"
     }
+    when iteration == 0 {
+        session.push(message.user(goal))
+    }
     reply = llm {
         model: model
         context: session
@@ -210,6 +214,9 @@ flow research_loop(goal: string, model: string, max_iter: int, iteration: int) -
 flow verify_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
     when iteration >= max_iter {
         return "[sub-agent: max iterations reached]"
+    }
+    when iteration == 0 {
+        session.push(message.user(goal))
     }
     reply = llm {
         model: model
@@ -240,6 +247,9 @@ flow implement_loop(goal: string, model: string, max_iter: int, iteration: int) 
     when iteration >= max_iter {
         return "[sub-agent: max iterations reached]"
     }
+    when iteration == 0 {
+        session.push(message.user(goal))
+    }
     reply = llm {
         model: model
         context: session
@@ -268,6 +278,9 @@ flow implement_loop(goal: string, model: string, max_iter: int, iteration: int) 
 flow review_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
     when iteration >= max_iter {
         return "[sub-agent: max iterations reached]"
+    }
+    when iteration == 0 {
+        session.push(message.user(goal))
     }
     reply = llm {
         model: model

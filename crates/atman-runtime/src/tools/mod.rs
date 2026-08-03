@@ -60,6 +60,10 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(stdlib::ListAny));
     reg.register(Arc::new(stdlib::ListAll));
     reg.register(Arc::new(stdlib::ListReduce));
+    reg.register(Arc::new(stdlib::MessageUser));
+    reg.register(Arc::new(stdlib::MessageAssistant));
+    reg.register(Arc::new(stdlib::MessageSystem));
+    reg.register(Arc::new(stdlib::MessageTool));
     reg.register(Arc::new(git::GitDiff));
     reg.register(Arc::new(git_ops::GitShow));
     reg.register(Arc::new(git_ops::GitLog));

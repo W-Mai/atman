@@ -633,6 +633,144 @@ impl Tool for Concat {
     }
 }
 
+pub struct MessageUser;
+
+impl Tool for MessageUser {
+    fn name(&self) -> &str {
+        "message.user"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Construct a user-role Message from a text string. Use with session.push to inject user instructions into the session history before an llm { context: session } call.",
+        )
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"]
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let text = extract_string(&args, "text", 0)?;
+            let turn_id = ctx
+                .turn_id
+                .clone()
+                .unwrap_or_else(crate::event::TurnId::now);
+            Ok(Value::Message(crate::message::Message::user_text(
+                turn_id, text,
+            )))
+        })
+    }
+}
+
+pub struct MessageAssistant;
+
+impl Tool for MessageAssistant {
+    fn name(&self) -> &str {
+        "message.assistant"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Construct an assistant-role Message from a text string.")
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"]
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let text = extract_string(&args, "text", 0)?;
+            let turn_id = ctx
+                .turn_id
+                .clone()
+                .unwrap_or_else(crate::event::TurnId::now);
+            Ok(Value::Message(crate::message::Message::assistant_text(
+                turn_id, text,
+            )))
+        })
+    }
+}
+
+pub struct MessageSystem;
+
+impl Tool for MessageSystem {
+    fn name(&self) -> &str {
+        "message.system"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Construct a system-role Message from a text string.")
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"]
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let text = extract_string(&args, "text", 0)?;
+            let turn_id = ctx
+                .turn_id
+                .clone()
+                .unwrap_or_else(crate::event::TurnId::now);
+            Ok(Value::Message(crate::message::Message::system_text(
+                turn_id, text,
+            )))
+        })
+    }
+}
+
+pub struct MessageTool;
+
+impl Tool for MessageTool {
+    fn name(&self) -> &str {
+        "message.tool"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Zero
+    }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Construct a tool-role Message from a text string. Rarely needed directly — dispatch_all already returns tool-role Messages.",
+        )
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"]
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let text = extract_string(&args, "text", 0)?;
+            let turn_id = ctx
+                .turn_id
+                .clone()
+                .unwrap_or_else(crate::event::TurnId::now);
+            Ok(Value::Message(crate::message::Message {
+                turn_id,
+                role: crate::message::MessageRole::Tool,
+                parts: vec![crate::message::MessagePart::Text { text }],
+            }))
+        })
+    }
+}
+
 pub struct ExtractToolUses;
 
 impl Tool for ExtractToolUses {
