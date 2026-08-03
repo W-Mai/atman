@@ -369,20 +369,29 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let task_registry = ctx.task_registry.clone();
     let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
     let child_run_id = FlowRunId::now();
-    if let Some(tr) = &task_registry {
+    let task_id = task_registry.as_ref().map(|tr| {
         tr.register(
             crate::task_registry::TaskKind::Agent,
             goal.clone(),
             handle.clone(),
             session_id,
             entry.cancel.clone(),
-        );
-    }
+        )
+    });
 
     let entry_clone = Arc::clone(&entry);
     let ctx_clone = ctx.clone();
     tokio::spawn(async move {
-        run_sub_agent_background(entry_clone, args, provider, ctx_clone, child_run_id).await;
+        run_sub_agent_background(
+            entry_clone,
+            args,
+            provider,
+            ctx_clone,
+            child_run_id,
+            task_registry,
+            task_id,
+        )
+        .await;
     });
 
     Ok(Value::Struct(vec![
@@ -397,6 +406,8 @@ async fn run_sub_agent_background(
     provider: Arc<dyn crate::provider::Provider>,
     ctx: ToolCtx,
     child_run_id: FlowRunId,
+    task_registry: Option<crate::task_registry::TaskRegistry>,
+    task_id: Option<crate::task_registry::TaskId>,
 ) {
     let goal = entry.goal.clone();
     let max_iter = extract_max_iter(&args);
@@ -503,6 +514,14 @@ async fn run_sub_agent_background(
     };
     emit_child_flow_end(&ctx, &child_run_id, &flow_status);
     *entry.status.lock().unwrap() = status.clone();
+    if let (Some(tr), Some(tid)) = (&task_registry, &task_id) {
+        let ts = match &flow_status {
+            FlowStatus::Ok => crate::task_registry::TaskStatus::Ok,
+            FlowStatus::Cancelled => crate::task_registry::TaskStatus::Killed,
+            FlowStatus::Errored { .. } => crate::task_registry::TaskStatus::Err,
+        };
+        tr.finish(tid, ts);
+    }
     let _ = entry.stream_tx.send(AgentEvent::Exited { status });
 }
 
