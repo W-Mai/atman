@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
@@ -286,12 +286,16 @@ flow review_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
 }
 "#;
 
-pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<PathBuf> {
+pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
     let commands_dir = config_dir.join("commands");
     std::fs::create_dir_all(&commands_dir)
         .with_context(|| format!("mkdir {}", commands_dir.display()))?;
-    let path = commands_dir.join("agent.at");
-    std::fs::write(&path, AGENT_AT).with_context(|| format!("write {}", path.display()))?;
+    let agent_path = commands_dir.join("agent.at");
+    std::fs::write(&agent_path, AGENT_AT)
+        .with_context(|| format!("write {}", agent_path.display()))?;
+    let subagent_path = commands_dir.join("subagent.at");
+    std::fs::write(&subagent_path, SUBAGENT_AT)
+        .with_context(|| format!("write {}", subagent_path.display()))?;
 
     let prompts_dir = config_dir.join("prompts");
     std::fs::create_dir_all(&prompts_dir)
@@ -300,5 +304,5 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<PathBuf> {
     std::fs::write(&system_md, SYSTEM_MD)
         .with_context(|| format!("write {}", system_md.display()))?;
 
-    Ok(path)
+    Ok(())
 }
