@@ -244,7 +244,7 @@ impl Tool for AgentSpawn {
 async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let goal = extract_goal(&args)?;
     if let Some(flow) = extract_flow(&args)? {
-        return run_flow_agent(&flow, goal, ctx).await;
+        return run_flow_agent(&flow, goal, &args, ctx).await;
     }
     let max_iter = extract_max_iter(&args);
     let tool_filter = extract_tool_filter(&args)?;
@@ -737,7 +737,12 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
     }
 }
 
-async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResult {
+async fn run_flow_agent(
+    flow_ref: &str,
+    goal: String,
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+) -> ToolResult {
     let Some(registry) = ctx.registry.as_ref() else {
         return Err(RuntimeError::ToolFailed(
             "flow.spawn: no tool registry available on ctx".into(),
@@ -758,11 +763,18 @@ async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResu
             path.display()
         )));
     };
-    let args = flow
-        .params
-        .first()
-        .map(|p| vec![(p.name.name.clone(), Value::Str(goal))])
-        .unwrap_or_default();
+    let mut flow_args: Vec<(String, Value)> = Vec::new();
+    if let Some(first_param) = flow.params.first() {
+        flow_args.push((first_param.name.name.clone(), Value::Str(goal)));
+    }
+    for (key, value) in &args.named {
+        if key == "flow" || key == "async" || key == "goal" {
+            continue;
+        }
+        if flow.params.iter().any(|p| p.name.name == *key) {
+            flow_args.push((key.clone(), value.clone()));
+        }
+    }
     let flows = file
         .flows
         .iter()
@@ -783,7 +795,7 @@ async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResu
     child_ctx.session_messages = Some(std::sync::Arc::new(Vec::new()));
     let out = crate::exec::exec_flow_with_siblings(
         flow,
-        args,
+        flow_args,
         registry.as_ref(),
         &child_ctx,
         providers.as_ref(),
