@@ -3450,7 +3450,11 @@ fn append_workflow_node_boxed(
     };
     let compact_content =
         3 + status_seg + kind_seg + crate::width::width(label.as_str()) + approval_seg + 2;
-    let compact_w = compact_content.min(budget as usize) as u16;
+    let compact_w = if depth_offset > 0 {
+        budget
+    } else {
+        compact_content.min(budget as usize) as u16
+    };
     let outer_width = if is_expanded { budget } else { compact_w };
     let mut scratch: Vec<Line<'static>> = Vec::new();
     let start_row = out.len() as u32;
