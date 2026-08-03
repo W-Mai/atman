@@ -309,7 +309,7 @@ fn render(
         false,
         frame,
         splash.banner_rect.width,
-        10,
+        12,
     );
     let cap = splash.banner_rect.height as usize;
     if lines.len() > cap {
