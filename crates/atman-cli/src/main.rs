@@ -2310,6 +2310,38 @@ async fn cmd_repl_once(
             &reporter,
         )
         .await;
+
+        while session.watch_hub.has_active_watchers() {
+            let timeout = std::time::Duration::from_secs(300);
+            tokio::select! {
+                biased;
+                Some(line) = input_rx.recv() => {
+                    pushback.push_back(line);
+                    break;
+                }
+                evt = session.watch_hub.wait_for_event(timeout) => {
+                    if let Some(evt) = evt {
+                        let event_text = atman_runtime::watch::format_watch_event_text(&evt);
+                        reporter.info(&event_text);
+                        run_turn_with_interjection(
+                            session.clone(),
+                            &executor,
+                            &lifecycles,
+                            classifier.as_ref(),
+                            &event_text,
+                            &mut pending,
+                            TurnKind::Bare,
+                            &mut input_rx,
+                            &mut pushback,
+                            &reporter,
+                        )
+                        .await;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     lifecycles
