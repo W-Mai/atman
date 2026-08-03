@@ -2828,25 +2828,29 @@ fn render_collapsed_workflow_card(
         leaves_with_time.iter().map(|(p, _)| p.clone()).collect()
     };
 
-    let mut selected_paths: Vec<Vec<usize>> = Vec::new();
-    for count in 1..=ordered_pool.len() {
-        let candidates: Vec<Vec<usize>> = ordered_pool.iter().take(count).cloned().collect();
-        let mut visible = std::collections::HashSet::new();
-        for path in &candidates {
-            for i in 1..=path.len() {
-                visible.insert(path[..i].to_vec());
-            }
+    // `estimated_rows` only depends on how many distinct top-level nodes the
+    // first `count` paths cover:
+    //   top_level_count(count) = |{ path[0] : path ∈ ordered_pool[..count] }|
+    // Monotonic non-decreasing in `count` (the visible set only grows), so we
+    // precompute in O(N) and binary-search in O(log N), replacing the old
+    // O(N²) loop that rebuilt `visible` + re-ran `collect_visible_nodes` each
+    // iteration.
+    let total = ordered_pool.len();
+    let mut seen_top: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut prefix_top_level_count: Vec<usize> = Vec::with_capacity(total + 1);
+    prefix_top_level_count.push(0);
+    for path in &ordered_pool {
+        if let Some(&top) = path.first() {
+            seen_top.insert(top);
         }
-        let mut visible_nodes: Vec<(&atman_runtime::workflow::WorkflowNode, Vec<usize>)> =
-            Vec::new();
-        collect_visible_nodes(root, &visible, &mut Vec::new(), &mut visible_nodes);
-        let top_level_count = visible_nodes.iter().filter(|(_, p)| p.len() == 1).count();
-        let estimated_rows = top_level_count * 4;
-        selected_paths = candidates;
-        if estimated_rows >= max_body_rows || count == ordered_pool.len() {
-            break;
-        }
+        prefix_top_level_count.push(seen_top.len());
     }
+    // Smallest `count` with estimated_rows >= max_body_rows; fall back to all
+    // paths if none qualify. partition_point returns the first index where the
+    // predicate ("< max_body_rows") is false.
+    let idx = prefix_top_level_count[1..].partition_point(|&tc| (tc * 4) < max_body_rows);
+    let target_count = (idx + 1).min(total);
+    let selected_paths: Vec<Vec<usize>> = ordered_pool.iter().take(target_count).cloned().collect();
     let mut visible: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
     for path in &selected_paths {
         for i in 1..=path.len() {
