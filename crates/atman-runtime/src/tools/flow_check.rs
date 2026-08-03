@@ -16,11 +16,12 @@ impl Tool for FlowCheck {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Validate and lint a .at flow file. Returns errors (undefined \
-             vars, undefined tools, type mismatches) and warnings (unused \
-             params, too many positional args). Use after writing or editing \
-             a flow to catch mistakes before spawning. Pass `flow` as a \
-             filename (e.g. 'subagent.at') or path.",
+            "Validate and lint a .at flow file. Checks all flows in the file \
+             for undefined variables, undefined tools, and type mismatches \
+             (errors), plus unused params and too many positional args \
+             (warnings). Pass `flow` as a filename (e.g. 'subagent.at') or \
+             path. Use after writing or editing a flow to catch mistakes \
+             before spawning.",
         )
     }
 
