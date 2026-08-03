@@ -26,6 +26,9 @@ pub enum ValidationError {
 pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
     let mut scope: HashSet<String> = flow.params.iter().map(|p| p.name.name.clone()).collect();
+    for name in BUILTIN_VARS {
+        scope.insert(name.to_string());
+    }
     let mut kinds: HashMap<String, &'static str> = HashMap::new();
     walk_stmts(&flow.body, &mut scope, &mut kinds, tools, &mut errors);
     if errors.is_empty() {
@@ -34,6 +37,27 @@ pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<Validat
         Err(errors)
     }
 }
+
+const BUILTIN_VARS: &[&str] = &[
+    "session",
+    "fs",
+    "bash",
+    "term",
+    "task",
+    "web",
+    "hunk",
+    "git",
+    "test",
+    "memory",
+    "plan",
+    "form",
+    "help",
+    "preview",
+    "session_tool",
+    "sleep",
+    "watch",
+    "watcher",
+];
 
 fn infer_node_kind(value: &Expr) -> Option<&'static str> {
     match value {

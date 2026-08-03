@@ -473,9 +473,9 @@ async fn run_flow_agent(
     let file = atman_dsl::parse::parse_file(&src).map_err(|e| {
         RuntimeError::ToolFailed(format!("flow.spawn: parse {}: {e}", path.display()))
     })?;
-    let Some(flow) = file.flows.first() else {
+    let Some(flow) = file.flows.iter().find(|f| f.name.name != "describe") else {
         return Err(RuntimeError::ToolFailed(format!(
-            "flow.spawn: no flow in {}",
+            "flow.spawn: no entry flow in {} (all flows are describe())",
             path.display()
         )));
     };
