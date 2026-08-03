@@ -2720,6 +2720,8 @@ fn render_stream_frame(
         | StreamFrame::DiffPreview { .. }
         | StreamFrame::CompactionSummary { .. }
         | StreamFrame::MermaidDiagram { .. }
+        | StreamFrame::SubAgentStarted { .. }
+        | StreamFrame::SubAgentDone { .. }
         | StreamFrame::LlmRetry
         | StreamFrame::Unknown => {}
     }
@@ -4727,6 +4729,7 @@ async fn preview_scene_chat(session: std::sync::Arc<Session>) {
     let _ = tx.send(StreamFrame::LlmChunk {
         text: "# Hello from atman\n\n".into(),
         model: "demo".into(),
+        run_id: None,
     });
     for word in [
         "atman ",
@@ -4739,6 +4742,7 @@ async fn preview_scene_chat(session: std::sync::Arc<Session>) {
         let _ = tx.send(StreamFrame::LlmChunk {
             text: word.into(),
             model: "demo".into(),
+            run_id: None,
         });
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
@@ -4759,10 +4763,14 @@ async fn preview_scene_chat(session: std::sync::Arc<Session>) {
         let _ = tx.send(StreamFrame::LlmChunk {
             text: word.into(),
             model: "demo".into(),
+            run_id: None,
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let _ = tx.send(StreamFrame::LlmDone { total_tokens: 48 });
+    let _ = tx.send(StreamFrame::LlmDone {
+        total_tokens: 48,
+        run_id: None,
+    });
 }
 
 async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) {

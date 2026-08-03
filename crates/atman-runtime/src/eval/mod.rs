@@ -575,8 +575,9 @@ async fn call_and_maybe_stream(
     req: crate::provider::LlmRequest,
     session: Option<&crate::session::Session>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    flow_run_id: Option<&crate::event::FlowRunId>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let result = call_and_maybe_stream_inner(provider, req, session, stream_tx).await;
+    let result = call_and_maybe_stream_inner(provider, req, session, stream_tx, flow_run_id).await;
     if let (Some(sess), Err(RuntimeError::AttachmentError { reason })) = (session, &result) {
         let count = sess.record_attachment_degrade(reason);
         if count > 0 {
@@ -595,12 +596,14 @@ async fn call_and_maybe_stream_inner(
     req: crate::provider::LlmRequest,
     session: Option<&crate::session::Session>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    flow_run_id: Option<&crate::event::FlowRunId>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
     let stream_tx = stream_tx.or_else(|| session.map(|s| s.stream_tx()));
     let Some(stream_tx) = stream_tx else {
         return provider.call(req).await;
     };
     let model_name = req.model.clone();
+    let run_id = flow_run_id.map(|r| r.0.to_string());
     let stall_secs = req.stall_timeout_secs;
     let request_start = std::time::Instant::now();
     let mut first_token_at: Option<std::time::Instant> = None;
@@ -635,6 +638,7 @@ async fn call_and_maybe_stream_inner(
                         let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
                             text,
                             model: model_name.clone(),
+                            run_id: run_id.clone(),
                         });
                         if stall_active {
                             stall_sleep
@@ -644,10 +648,16 @@ async fn call_and_maybe_stream_inner(
                     }
                     Ok(crate::event::NodeEvent::ThinkingChunk { text }) => {
                         mark_first_token(&mut first_token_at);
-                        let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
+                        let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk {
+                            text,
+                            run_id: run_id.clone(),
+                        });
                     }
                     Ok(crate::event::NodeEvent::LlmDone { total_tokens }) => {
-                        let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
+                        let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone {
+                            total_tokens,
+                            run_id: run_id.clone(),
+                        });
                     }
                     Ok(_) | Err(_) => {}
                 }
@@ -669,14 +679,21 @@ async fn call_and_maybe_stream_inner(
                             let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
                                 text,
                                 model: model_name.clone(),
+                                run_id: run_id.clone(),
                             });
                         }
                         crate::event::NodeEvent::ThinkingChunk { text } => {
                             mark_first_token(&mut first_token_at);
-                            let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
+                            let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk {
+                                text,
+                                run_id: run_id.clone(),
+                            });
                         }
                         crate::event::NodeEvent::LlmDone { total_tokens } => {
-                            let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
+                            let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone {
+                                total_tokens,
+                                run_id: run_id.clone(),
+                            });
                         }
                         _ => {}
                     }
@@ -1113,6 +1130,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         req,
                         ctx.session_runtime.as_deref(),
                         ctx.tool_ctx.stream_tx.clone(),
+                        ctx.flow_run_id.as_ref(),
                     )
                     .await;
                     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -3101,7 +3119,8 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_secs(3));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result = call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx)).await;
+        let result =
+            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None).await;
         match result {
             Err(RuntimeError::ToolFailed(msg)) => {
                 assert!(
@@ -3121,7 +3140,8 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_millis(100));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result = call_and_maybe_stream(&provider, stall_req(2), None, Some(stream_tx)).await;
+        let result =
+            call_and_maybe_stream(&provider, stall_req(2), None, Some(stream_tx), None).await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3138,7 +3158,8 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_secs(3));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result = call_and_maybe_stream(&provider, stall_req(0), None, Some(stream_tx)).await;
+        let result =
+            call_and_maybe_stream(&provider, stall_req(0), None, Some(stream_tx), None).await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3156,7 +3177,8 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_millis(800));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result = call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx)).await;
+        let result =
+            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None).await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3173,7 +3195,8 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_secs(2));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result = call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx)).await;
+        let result =
+            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None).await;
         assert!(
             matches!(&result, Err(RuntimeError::ToolFailed(msg)) if msg.contains("stall timeout")),
             "expected stall timeout, got: {result:?}"

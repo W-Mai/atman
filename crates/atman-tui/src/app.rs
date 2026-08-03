@@ -995,7 +995,7 @@ impl AppState {
 
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         match frame {
-            StreamFrame::ThinkingChunk { text } => {
+            StreamFrame::ThinkingChunk { text, .. } => {
                 self.waiting_for_llm = false;
                 if let Some(OutputItem::Thinking { text: t, .. }) = self.items.last_mut() {
                     t.push_str(&text);
@@ -1381,6 +1381,7 @@ impl AppState {
                 self.push_item(OutputItem::MermaidDiagram { source });
                 self.reset_lag_state();
             }
+            StreamFrame::SubAgentStarted { .. } | StreamFrame::SubAgentDone { .. } => {}
             StreamFrame::Unknown => {}
         }
     }
@@ -1633,10 +1634,12 @@ mod tests {
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "hello ".into(),
             model: "m".into(),
+            run_id: None,
         });
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "world".into(),
             model: "m".into(),
+            run_id: None,
         });
         assert_eq!(app.items.len(), 1);
         match &app.items[0] {
@@ -1655,8 +1658,12 @@ mod tests {
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "hi".into(),
             model: "m".into(),
+            run_id: None,
         });
-        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 3 });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 3,
+            run_id: None,
+        });
         assert_eq!(app.items.len(), 1, "no extra markdown item after done");
         match &app.items[0] {
             OutputItem::AssistantMd { md, streaming, .. } => {
@@ -1671,8 +1678,14 @@ mod tests {
     #[test]
     fn llm_done_finalizes_thinking_without_text_chunks() {
         let mut app = AppState::new("s".into(), None);
-        app.apply_stream_frame(StreamFrame::ThinkingChunk { text: "hmm".into() });
-        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 5 });
+        app.apply_stream_frame(StreamFrame::ThinkingChunk {
+            text: "hmm".into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 5,
+            run_id: None,
+        });
         assert_eq!(app.items.len(), 1);
         match &app.items[0] {
             OutputItem::Thinking { done, text, .. } => {
@@ -1688,13 +1701,17 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::ThinkingChunk {
             text: "thinking...".into(),
+            run_id: None,
         });
         app.apply_stream_frame(StreamFrame::ToolUseStart {
             tool: "fs.read".into(),
             args_preview: "\"x\"".into(),
             id: "tc1".into(),
         });
-        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 5 });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 5,
+            run_id: None,
+        });
         match &app.items[0] {
             OutputItem::Thinking { done, .. } => assert!(*done, "thinking stuck spinning"),
             _ => panic!("expected Thinking"),
@@ -1707,11 +1724,16 @@ mod tests {
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "partial".into(),
             model: "m".into(),
+            run_id: None,
         });
         app.apply_stream_frame(StreamFrame::ThinkingChunk {
             text: "rethink".into(),
+            run_id: None,
         });
-        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 9 });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 9,
+            run_id: None,
+        });
         match &app.items[0] {
             OutputItem::AssistantMd { streaming, md, .. } => {
                 assert!(!*streaming, "AssistantMd must be finalized");
@@ -1734,12 +1756,20 @@ mod tests {
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "prev".into(),
             model: "m".into(),
+            run_id: None,
         });
-        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 1 });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 1,
+            run_id: None,
+        });
         app.apply_stream_frame(StreamFrame::ThinkingChunk {
             text: "new turn".into(),
+            run_id: None,
         });
-        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 2 });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 2,
+            run_id: None,
+        });
         match &app.items[0] {
             OutputItem::AssistantMd { md, streaming, .. } => {
                 assert_eq!(md, "prev");
@@ -1781,10 +1811,12 @@ mod tests {
         let mut app = AppState::new("s".into(), None);
         app.apply_stream_frame(StreamFrame::ThinkingChunk {
             text: "let me think".into(),
+            run_id: None,
         });
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "hello".into(),
             model: "m".into(),
+            run_id: None,
         });
         assert_eq!(app.items.len(), 2);
         app.apply_stream_frame(StreamFrame::LlmRetry);
@@ -1819,13 +1851,21 @@ mod tests {
         });
         app.apply_stream_frame(StreamFrame::ThinkingChunk {
             text: "done thinking".into(),
+            run_id: None,
         });
-        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 5 });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 5,
+            run_id: None,
+        });
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "final answer".into(),
             model: "m".into(),
+            run_id: None,
         });
-        app.apply_stream_frame(StreamFrame::LlmDone { total_tokens: 10 });
+        app.apply_stream_frame(StreamFrame::LlmDone {
+            total_tokens: 10,
+            run_id: None,
+        });
         assert_eq!(app.items.len(), 3);
         app.apply_stream_frame(StreamFrame::LlmRetry);
         assert_eq!(
@@ -2107,6 +2147,7 @@ mod tests {
         app.apply_stream_frame(StreamFrame::LlmChunk {
             text: "hi".into(),
             model: "m".into(),
+            run_id: None,
         });
         app.record_lag(3, t0 + Duration::from_millis(50));
         let lag_texts: Vec<_> = app

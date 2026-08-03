@@ -37,7 +37,7 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
     let mut got_done = false;
     while let Ok(frame) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
         match frame {
-            Ok(StreamFrame::LlmChunk { text, model }) => {
+            Ok(StreamFrame::LlmChunk { text, model, .. }) => {
                 assert!(!text.is_empty(), "chunk text should not be empty");
                 assert_eq!(model, "mock");
                 got_chunk = true;

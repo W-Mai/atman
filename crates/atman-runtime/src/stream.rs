@@ -35,12 +35,18 @@ pub enum StreamFrame {
     LlmChunk {
         text: String,
         model: String,
+        #[serde(default)]
+        run_id: Option<String>,
     },
     ThinkingChunk {
         text: String,
+        #[serde(default)]
+        run_id: Option<String>,
     },
     LlmDone {
         total_tokens: u64,
+        #[serde(default)]
+        run_id: Option<String>,
     },
     /// Discard streaming output from the previous attempt before retrying.
     LlmRetry,
@@ -175,6 +181,17 @@ pub enum StreamFrame {
     },
     MermaidDiagram {
         source: String,
+    },
+    SubAgentStarted {
+        handle: String,
+        goal: String,
+        child_run_id: String,
+        model: String,
+    },
+    SubAgentDone {
+        handle: String,
+        status: String,
+        final_text: String,
     },
     #[serde(other)]
     Unknown,

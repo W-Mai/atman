@@ -905,18 +905,26 @@ fn forward_stream_event(ev: NodeEvent, ctx: &ToolCtx, model: &str) {
     let Some(tx) = &ctx.stream_tx else {
         return;
     };
+    let run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
     match ev {
         NodeEvent::LlmChunk { text, .. } => {
             let _ = tx.send(crate::stream::StreamFrame::LlmChunk {
                 text,
                 model: model.to_string(),
+                run_id: run_id.clone(),
             });
         }
         NodeEvent::ThinkingChunk { text } => {
-            let _ = tx.send(crate::stream::StreamFrame::ThinkingChunk { text });
+            let _ = tx.send(crate::stream::StreamFrame::ThinkingChunk {
+                text,
+                run_id: run_id.clone(),
+            });
         }
         NodeEvent::LlmDone { total_tokens } => {
-            let _ = tx.send(crate::stream::StreamFrame::LlmDone { total_tokens });
+            let _ = tx.send(crate::stream::StreamFrame::LlmDone {
+                total_tokens,
+                run_id,
+            });
         }
         _ => {}
     }
