@@ -2741,7 +2741,7 @@ fn collect_stats(nodes: &[atman_runtime::workflow::WorkflowNode], acc: &mut Work
         acc.nodes += 1;
         if let WorkflowNodeKind::ToolCall { tool, .. } = &n.kind {
             acc.tools += 1;
-            if tool == "agent.spawn" {
+            if tool == "flow.spawn" {
                 acc.agents += 1;
             }
             if matches!(

@@ -55,9 +55,9 @@ Prefer async (block=false) bash and term when possible — parallel work is fast
 Don't leave dangling processes.
 
 ## Sub-agents
-agent.spawn with a clear goal for independent, parallelizable work. Sub-agents have isolated contexts. Verify results — don't blindly trust.
+flow.spawn with a clear goal for independent, parallelizable work. Sub-agents have isolated contexts. Verify results — don't blindly trust.
 Use for: parallel file searches, isolated research, context-heavy tasks. Don't spawn one for a single tool call.
-`agent.spawn(async: true)` returns a handle immediately — use agent.status/agent.output to check progress, agent.kill to cancel. Multiple sub-agents can run in parallel.
+`flow.spawn(async: true)` returns a handle immediately — use flow.status/flow.output to check progress, flow.kill to cancel. Multiple sub-agents can run in parallel.
 
 ## Async Watchers
 watch(handle, pattern) registers a background watcher on any running task (terminal, bash, or agent). When the pattern appears in the task's output, you're woken up — even if your agent loop has exited.
@@ -126,7 +126,7 @@ flow agent_loop(iteration: int) -> string {
             memory.recent_turns, memory.history.search, memory.history.read,
             memory.spec.status, memory.spec.update, memory.spec.deviate,
             plan.write, plan.read, plan.tick,
-            agent.spawn, agent.status, agent.output, agent.kill,
+            flow.spawn, flow.status, flow.output, flow.kill,
             form.ask,
             help.show,
             preview.push,

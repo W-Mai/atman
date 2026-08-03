@@ -176,7 +176,7 @@ impl AgentRegistry {
 
 impl Tool for AgentSpawn {
     fn name(&self) -> &str {
-        "agent.spawn"
+        "flow.spawn"
     }
 
     fn tier(&self) -> Tier {
@@ -200,7 +200,7 @@ impl Tool for AgentSpawn {
              used, then configured models, then claude-opus-4.7), `flow` (optional .at file path \
              or command name; goal is passed as the first flow argument). \
              `async` (optional bool, default false) — when true, returns a handle immediately \
-             instead of blocking for the final text. Use agent.status/agent.output/agent.kill \
+             instead of blocking for the final text. Use flow.status/flow.output/flow.kill \
              to manage the async sub-agent, and watch(handle, pattern) to monitor its output.",
         )
     }
@@ -251,7 +251,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let model = pick_model(&args, ctx);
     let Some(providers) = ctx.providers.as_ref() else {
         return Err(RuntimeError::ToolFailed(
-            "agent.spawn: no provider registry available on ctx".into(),
+            "flow.spawn: no provider registry available on ctx".into(),
         ));
     };
     let Some(provider) = providers.resolve(&model) else {
@@ -261,7 +261,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     };
     let Some(registry) = ctx.registry.as_ref() else {
         return Err(RuntimeError::ToolFailed(
-            "agent.spawn: no tool registry available on ctx".into(),
+            "flow.spawn: no tool registry available on ctx".into(),
         ));
     };
     let tool_specs = build_tool_specs(registry.as_ref(), tool_filter.as_deref());
@@ -370,13 +370,13 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let goal = extract_goal(&args)?;
     let model = pick_model(&args, ctx);
     let providers = ctx.providers.clone().ok_or_else(|| {
-        RuntimeError::ToolFailed("agent.spawn: no provider registry available on ctx".into())
+        RuntimeError::ToolFailed("flow.spawn: no provider registry available on ctx".into())
     })?;
     let provider = providers.resolve(&model).ok_or_else(|| {
-        RuntimeError::ToolFailed(format!("agent.spawn: no provider for model `{model}`"))
+        RuntimeError::ToolFailed(format!("flow.spawn: no provider for model `{model}`"))
     })?;
     let agent_registry = ctx.agent_registry.clone().ok_or_else(|| {
-        RuntimeError::ToolFailed("agent.spawn: no agent registry available on ctx".into())
+        RuntimeError::ToolFailed("flow.spawn: no agent registry available on ctx".into())
     })?;
 
     let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
@@ -590,7 +590,7 @@ async fn run_sub_agent_background(
 pub struct AgentStatus;
 impl Tool for AgentStatus {
     fn name(&self) -> &str {
-        "agent.status"
+        "flow.status"
     }
     fn tier(&self) -> Tier {
         Tier::Zero
@@ -608,9 +608,10 @@ impl Tool for AgentStatus {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
-            let reg = ctx.agent_registry.clone().ok_or_else(|| {
-                RuntimeError::ToolFailed("agent.status: no agent registry".into())
-            })?;
+            let reg = ctx
+                .agent_registry
+                .clone()
+                .ok_or_else(|| RuntimeError::ToolFailed("flow.status: no agent registry".into()))?;
             let entry = reg.lookup(&handle)?;
             let st = entry.status.lock().unwrap().clone();
             let goal = entry.goal.clone();
@@ -626,7 +627,7 @@ impl Tool for AgentStatus {
 pub struct AgentOutput;
 impl Tool for AgentOutput {
     fn name(&self) -> &str {
-        "agent.output"
+        "flow.output"
     }
     fn tier(&self) -> Tier {
         Tier::Zero
@@ -670,9 +671,10 @@ impl Tool for AgentOutput {
                 })
                 .unwrap_or(4096)
                 .max(1) as usize;
-            let reg = ctx.agent_registry.clone().ok_or_else(|| {
-                RuntimeError::ToolFailed("agent.output: no agent registry".into())
-            })?;
+            let reg = ctx
+                .agent_registry
+                .clone()
+                .ok_or_else(|| RuntimeError::ToolFailed("flow.output: no agent registry".into()))?;
             let entry = reg.lookup(&handle)?;
             let output = entry.output.lock().unwrap().clone();
             let chunk = output.chars().skip(cursor).take(limit).collect::<String>();
@@ -692,7 +694,7 @@ impl Tool for AgentOutput {
 pub struct AgentKill;
 impl Tool for AgentKill {
     fn name(&self) -> &str {
-        "agent.kill"
+        "flow.kill"
     }
     fn tier(&self) -> Tier {
         Tier::Four
@@ -713,7 +715,7 @@ impl Tool for AgentKill {
             let reg = ctx
                 .agent_registry
                 .clone()
-                .ok_or_else(|| RuntimeError::ToolFailed("agent.kill: no agent registry".into()))?;
+                .ok_or_else(|| RuntimeError::ToolFailed("flow.kill: no agent registry".into()))?;
             let entry = reg.lookup(&handle)?;
             entry.cancel.cancel();
             Ok(Value::Unit)
@@ -738,21 +740,21 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
 async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResult {
     let Some(registry) = ctx.registry.as_ref() else {
         return Err(RuntimeError::ToolFailed(
-            "agent.spawn: no tool registry available on ctx".into(),
+            "flow.spawn: no tool registry available on ctx".into(),
         ));
     };
     let Some(providers) = ctx.providers.as_ref() else {
         return Err(RuntimeError::ToolFailed(
-            "agent.spawn: no provider registry available on ctx".into(),
+            "flow.spawn: no provider registry available on ctx".into(),
         ));
     };
     let (path, src) = read_flow_source(flow_ref).await?;
     let file = atman_dsl::parse::parse_file(&src).map_err(|e| {
-        RuntimeError::ToolFailed(format!("agent.spawn: parse {}: {e}", path.display()))
+        RuntimeError::ToolFailed(format!("flow.spawn: parse {}: {e}", path.display()))
     })?;
     let Some(flow) = file.flows.first() else {
         return Err(RuntimeError::ToolFailed(format!(
-            "agent.spawn: no flow in {}",
+            "flow.spawn: no flow in {}",
             path.display()
         )));
     };
@@ -820,7 +822,7 @@ fn extract_goal(args: &ToolArgs) -> Result<String, RuntimeError> {
             expected: "non-empty goal string".into(),
             actual: other.kind_name().into(),
         }),
-        None => Err(RuntimeError::MissingArg("agent.spawn.goal".into())),
+        None => Err(RuntimeError::MissingArg("flow.spawn.goal".into())),
     }
 }
 
@@ -889,14 +891,14 @@ async fn read_flow_source(flow_ref: &str) -> Result<(PathBuf, String), RuntimeEr
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
                 return Err(RuntimeError::ToolFailed(format!(
-                    "agent.spawn: read {}: {e}",
+                    "flow.spawn: read {}: {e}",
                     path.display()
                 )));
             }
         }
     }
     Err(RuntimeError::ToolFailed(format!(
-        "agent.spawn: flow `{flow_ref}` not found"
+        "flow.spawn: flow `{flow_ref}` not found"
     )))
 }
 

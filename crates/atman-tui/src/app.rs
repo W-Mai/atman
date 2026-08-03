@@ -1592,7 +1592,7 @@ impl AppState {
                         *ended_at = None;
                     }
                 }
-                // Insert subflow run_id so nested subflows (e.g. agent.spawn)
+                // Insert subflow run_id so nested subflows (e.g. flow.spawn)
                 // can find the parent panel. The top_level_run_ids guard in
                 // apply_stream_frame prevents subflow FlowDone from closing it.
                 self.workflow_run_to_panel

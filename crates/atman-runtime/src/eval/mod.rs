@@ -763,7 +763,7 @@ fn available_models_system_prompt() -> Option<String> {
                 .join(", ")
         ));
     }
-    lines.push("Use these names or aliases with agent.spawn's model parameter.".into());
+    lines.push("Use these names or aliases with flow.spawn's model parameter.".into());
     lines.push("[/available models]".into());
     Some(lines.join("\n"))
 }

@@ -112,7 +112,7 @@ fn render_boxed_to_string(root: WorkflowNode, width: u16) -> String {
 fn preview_collapsed_workflow_card() {
     let root = root_flow(vec![
         ok_tool("t0", "fs.read", "path=lib.rs", "ok · 200 lines"),
-        pending_tool("t1", "agent.spawn", "goal=research auth flow", "auto"),
+        pending_tool("t1", "flow.spawn", "goal=research auth flow", "auto"),
         pending_tool("t2", "shell.exec", "cargo test -p atman-tui", "dangerous"),
         pending_tool("t3", "fs.edit", "src/output.rs:120..145", "approve"),
         ok_tool("t4", "fs.write", "path=log.txt", "wrote 42 bytes"),
