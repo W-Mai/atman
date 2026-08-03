@@ -1103,10 +1103,16 @@ fn render_panel_content(
                     }
                 }
                 TaskKind::Agent => {
-                    let item = items.iter().rev().find(|it| match it {
-                        OutputItem::SubAgentActivity { handle, .. } => *handle == panel.id,
-                        _ => false,
-                    });
+                    let item_idx = items
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, it)| match it {
+                            OutputItem::SubAgentActivity { handle, .. } => *handle == panel.id,
+                            _ => false,
+                        })
+                        .map(|(i, _)| i);
+                    let item = item_idx.and_then(|i| items.get(i));
                     if let Some(OutputItem::SubAgentActivity {
                         handle,
                         goal,
@@ -1117,6 +1123,7 @@ fn render_panel_content(
                         done,
                         messages,
                         workflow_graph,
+                        expanded_nodes,
                         ..
                     }) = item
                     {
@@ -1132,8 +1139,11 @@ fn render_panel_content(
                             *done,
                             messages,
                             workflow_graph,
+                            expanded_nodes,
                             panel.scroll,
                             animation_frame,
+                            hitmap_out,
+                            item_idx.unwrap(),
                         );
                     } else if let Some(snap) = snap {
                         render_task_meta(f, area, kind, snap);
@@ -1388,8 +1398,11 @@ fn render_sub_agent_panel(
     done: bool,
     messages: &[Message],
     workflow_graph: &WorkflowGraph,
+    expanded_nodes: &HashSet<String>,
     scroll: u16,
     animation_frame: u32,
+    hitmap_out: &mut FloatingPanelHitmap,
+    item_idx: usize,
 ) {
     let t = crate::theme::theme();
     let label_style = Style::default().fg(t.subtle_fg.into());
@@ -1430,16 +1443,34 @@ fn render_sub_agent_panel(
     lines.push(Line::from(""));
 
     // Section 2: Workflow graph — reuse the same renderer as the main transcript
-    let expanded_nodes = HashSet::new();
-    let (wf_lines, _regions) = crate::output::render_workflow_panel_with_regions(
+    let wf_offset = lines.len() as u32;
+    let (wf_lines, regions) = crate::output::render_workflow_panel_with_regions(
         workflow_graph,
-        &expanded_nodes,
+        expanded_nodes,
         true,
         false,
         animation_frame,
         area.width,
         crate::output::MAX_COLLAPSED_BODY_ROWS,
     );
+    for r in &regions {
+        let row0 = area.y as u32 + r.start_row + wf_offset;
+        let row1 = area.y as u32 + r.end_row + wf_offset;
+        let col0 = area.x + r.col_start;
+        let col1 = area.x + r.col_end;
+        if col1 > col0 && row1 > row0 {
+            hitmap_out.workflow_node_rects.push((
+                item_idx,
+                r.path_key.clone(),
+                Rect {
+                    x: col0,
+                    y: row0 as u16,
+                    width: col1 - col0,
+                    height: (row1 - row0) as u16,
+                },
+            ));
+        }
+    }
     lines.extend(wf_lines);
     lines.push(Line::from(""));
 
@@ -1456,6 +1487,24 @@ fn render_sub_agent_panel(
                 streaming: false,
                 retried: false,
             },
+            atman_runtime::message::MessageRole::Tool => {
+                let content: String = msg
+                    .parts
+                    .iter()
+                    .filter_map(|p| {
+                        if let atman_runtime::message::MessagePart::ToolResult { content, .. } = p {
+                            Some(content.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                OutputItem::SystemNote {
+                    text: content,
+                    level: crate::app::NoteLevel::Info,
+                }
+            }
             _ => OutputItem::SystemNote {
                 text: msg.text_concat(),
                 level: crate::app::NoteLevel::Info,

@@ -96,6 +96,7 @@ pub enum OutputItem {
         expanded: bool,
         messages: Vec<Message>,
         workflow_graph: WorkflowGraph,
+        expanded_nodes: HashSet<String>,
     },
 }
 
@@ -513,6 +514,14 @@ impl AppState {
         None
     }
 
+    pub fn sub_agent_item_handle(&self, idx: usize) -> Option<String> {
+        let item = self.items.get(idx)?;
+        if let crate::app::OutputItem::SubAgentActivity { handle, .. } = item {
+            return Some(handle.clone());
+        }
+        None
+    }
+
     pub fn mermaid_item_source(&self, idx: usize) -> Option<String> {
         let item = self.items.get(idx)?;
         if let crate::app::OutputItem::MermaidDiagram { source } = item {
@@ -569,9 +578,12 @@ impl AppState {
     }
 
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
-        if let Some(OutputItem::WorkflowPanel { expanded_nodes, .. }) =
-            self.items.get_mut(panel_index)
-        {
+        if let Some(item) = self.items.get_mut(panel_index) {
+            let expanded_nodes = match item {
+                OutputItem::WorkflowPanel { expanded_nodes, .. } => expanded_nodes,
+                OutputItem::SubAgentActivity { expanded_nodes, .. } => expanded_nodes,
+                _ => return,
+            };
             if !expanded_nodes.remove(node_id) {
                 expanded_nodes.insert(node_id.to_string());
             }
@@ -731,6 +743,7 @@ impl AppState {
                     item,
                     OutputItem::Terminal { done: false, .. }
                         | OutputItem::Bash { done: false, .. }
+                        | OutputItem::SubAgentActivity { done: false, .. }
                         | OutputItem::CompactionSummary {
                             phase: CompactionPhase::Running,
                             ..
@@ -797,6 +810,14 @@ impl AppState {
 
     pub fn toggle_bash_expand(&mut self, item_index: usize) {
         if let Some(OutputItem::Bash { expanded, .. }) = self.items.get_mut(item_index) {
+            *expanded = !*expanded;
+            self.items_version = self.items_version.wrapping_add(1);
+        }
+    }
+
+    pub fn toggle_sub_agent_expand(&mut self, item_index: usize) {
+        if let Some(OutputItem::SubAgentActivity { expanded, .. }) = self.items.get_mut(item_index)
+        {
             *expanded = !*expanded;
             self.items_version = self.items_version.wrapping_add(1);
         }
@@ -1461,6 +1482,7 @@ impl AppState {
                     expanded: false,
                     messages: Vec::new(),
                     workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+                    expanded_nodes: HashSet::new(),
                 });
                 self.sub_agent_run_ids.insert(child_run_id, idx);
             }

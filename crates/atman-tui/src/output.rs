@@ -458,6 +458,9 @@ fn item_content_hash(
             str_fp(output).hash(&mut h);
             iteration.hash(&mut h);
             done.hash(&mut h);
+            if !done {
+                animation_frame.hash(&mut h);
+            }
         }
     }
     h.finish()
@@ -578,6 +581,17 @@ pub fn render_item_with_regions(
                 vec![NodeRegion {
                     panel_item_index: item_index,
                     path_key: MERMAID_FULLSCREEN_KEY.to_string(),
+                    start_row: 1,
+                    end_row: 2,
+                    col_start: panel_width.saturating_sub(6) as u16,
+                    col_end: panel_width as u16,
+                }]
+            }
+            OutputItem::SubAgentActivity { .. } if lines.len() >= 2 => {
+                let panel_width = ctx.panel_width as usize;
+                vec![NodeRegion {
+                    panel_item_index: item_index,
+                    path_key: SUB_AGENT_FULLSCREEN_KEY.to_string(),
                     start_row: 1,
                     end_row: 2,
                     col_start: panel_width.saturating_sub(6) as u16,
@@ -2740,6 +2754,7 @@ pub const COLLAPSED_CARD_FULLSCREEN_KEY: &str = "__collapsed_card_fullscreen__";
 pub const TERMINAL_FULLSCREEN_KEY: &str = "__terminal_fullscreen__";
 pub const BASH_FULLSCREEN_KEY: &str = "__bash_fullscreen__";
 pub const MERMAID_FULLSCREEN_KEY: &str = "__mermaid_fullscreen__";
+pub const SUB_AGENT_FULLSCREEN_KEY: &str = "__sub_agent_fullscreen__";
 
 fn collect_all_leaves(
     nodes: &[atman_runtime::workflow::WorkflowNode],

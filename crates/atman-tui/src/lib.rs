@@ -941,6 +941,16 @@ async fn run_frames(
                                                 app.last_transcript_rect.unwrap_or_default();
                                             app.open_task_panel(&handle, canvas);
                                         }
+                                    } else if node_id
+                                        == crate::output::SUB_AGENT_FULLSCREEN_KEY
+                                    {
+                                        if let Some(handle) =
+                                            app.sub_agent_item_handle(panel_idx)
+                                        {
+                                            let canvas =
+                                                app.last_transcript_rect.unwrap_or_default();
+                                            app.open_task_panel(&handle, canvas);
+                                        }
                                     } else if node_id == crate::output::MERMAID_FULLSCREEN_KEY
                                     {
                                         let canvas =
@@ -977,6 +987,11 @@ async fn run_frames(
                                         app.items.get(idx)
                                 {
                                     app.toggle_bash_expand(idx);
+                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    && let Some(crate::app::OutputItem::SubAgentActivity { .. }) =
+                                        app.items.get(idx)
+                                {
+                                    app.toggle_sub_agent_expand(idx);
                                 } else if let Some(idx) = app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::DiffPreview { .. }) =
                                         app.items.get(idx)
