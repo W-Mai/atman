@@ -350,7 +350,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         tr.register(
             crate::task_registry::TaskKind::Agent,
             goal.clone(),
-            child_run_id.0.to_string(),
+            handle.clone(),
             session_id,
             entry.cancel.clone(),
         );
