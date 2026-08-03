@@ -2904,6 +2904,26 @@ fn render_collapsed_workflow_card(
             r.end_row = r.end_row.saturating_sub(drain_count as u32);
         }
     }
+    let common_prefix = body_lines
+        .iter()
+        .filter(|l| !l.spans.is_empty())
+        .map(|l| {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.chars()
+                .take_while(|c| matches!(c, ' ' | '┊' | '├' | '└' | '┈'))
+                .count()
+        })
+        .min()
+        .unwrap_or(0);
+    if common_prefix > 0 {
+        for line in body_lines.iter_mut() {
+            trim_line_left(line, common_prefix);
+        }
+        for r in regions.iter_mut() {
+            r.col_start = r.col_start.saturating_sub(common_prefix as u16);
+            r.col_end = r.col_end.saturating_sub(common_prefix as u16);
+        }
+    }
     apply_lens_fade(&mut body_lines);
     let card_body_start_row = lines.len() as u32;
     for r in regions.iter_mut() {
@@ -2935,6 +2955,29 @@ fn render_collapsed_workflow_card(
         col_end: outer_width,
     });
     (lines, regions)
+}
+
+fn trim_line_left(line: &mut Line<'static>, n: usize) {
+    if n == 0 {
+        return;
+    }
+    let mut remaining = n;
+    let mut new_spans = Vec::with_capacity(line.spans.len());
+    for span in line.spans.drain(..) {
+        if remaining == 0 {
+            new_spans.push(span);
+            continue;
+        }
+        let chars: Vec<char> = span.content.chars().collect();
+        if chars.len() <= remaining {
+            remaining -= chars.len();
+        } else {
+            let trimmed: String = chars[remaining..].iter().collect();
+            remaining = 0;
+            new_spans.push(Span::styled(trimmed, span.style));
+        }
+    }
+    line.spans = new_spans;
 }
 
 fn apply_lens_fade(body_lines: &mut [Line<'static>]) {
