@@ -412,8 +412,6 @@ async fn run_sub_agent_background(
     let goal = entry.goal.clone();
     let max_iter = extract_max_iter(&args);
     let tool_filter = extract_tool_filter(&args).unwrap_or(None);
-    let mut ctx = ctx;
-    ctx.cancel = entry.cancel.clone();
     let registry = match ctx.registry.as_ref() {
         Some(r) => r.clone(),
         None => {
@@ -453,7 +451,13 @@ async fn run_sub_agent_background(
             thinking_enabled: false,
             stall_timeout_secs: 120,
         };
-        let outcome = call_streaming_sub_agent(provider.as_ref(), req, &ctx).await;
+        let outcome = tokio::select! {
+            _ = entry.cancel.cancelled() => {
+                failure_reason = Some("cancelled".into());
+                break;
+            }
+            r = call_streaming_sub_agent(provider.as_ref(), req, &ctx) => r,
+        };
         match outcome {
             Ok(am) => {
                 emit_child_llm_call(&ctx, &child_run_id, &model, &am);
