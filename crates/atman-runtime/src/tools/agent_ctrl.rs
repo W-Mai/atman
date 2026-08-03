@@ -59,6 +59,11 @@ pub struct AgentEntry {
     pub output: Arc<Mutex<String>>,
     pub cancel: tokio_util::sync::CancellationToken,
     pub stream_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    pub messages: Arc<Mutex<Vec<Message>>>,
+    pub iteration: Arc<std::sync::atomic::AtomicU64>,
+    pub child_run_id: FlowRunId,
+    pub model: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl crate::watch::Watchable for AgentEntry {
@@ -125,7 +130,13 @@ impl AgentRegistry {
         Self::default()
     }
 
-    pub fn create_entry(&self, handle: String, goal: String) -> Arc<AgentEntry> {
+    pub fn create_entry(
+        &self,
+        handle: String,
+        goal: String,
+        model: String,
+        child_run_id: FlowRunId,
+    ) -> Arc<AgentEntry> {
         let (stream_tx, _) = tokio::sync::broadcast::channel(64);
         let entry = Arc::new(AgentEntry {
             handle: handle.clone(),
@@ -136,6 +147,11 @@ impl AgentRegistry {
             output: Arc::new(Mutex::new(String::new())),
             cancel: tokio_util::sync::CancellationToken::new(),
             stream_tx,
+            messages: Arc::new(Mutex::new(Vec::new())),
+            iteration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            child_run_id,
+            model,
+            started_at: chrono::Utc::now(),
         });
         self.entries
             .lock()
@@ -364,11 +380,16 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     })?;
 
     let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
-    let entry = agent_registry.create_entry(handle.clone(), goal.clone());
+    let child_run_id = FlowRunId::now();
+    let entry = agent_registry.create_entry(
+        handle.clone(),
+        goal.clone(),
+        model.clone(),
+        child_run_id.clone(),
+    );
 
     let task_registry = ctx.task_registry.clone();
     let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
-    let child_run_id = FlowRunId::now();
     let task_id = task_registry.as_ref().map(|tr| {
         tr.register(
             crate::task_registry::TaskKind::Agent,
