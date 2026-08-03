@@ -184,19 +184,20 @@ impl Tool for AgentSpawn {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Spawn an independent sub-agent to handle a focused sub-goal. The sub-agent runs its \
-             own message history and iteration counter, uses the same tool registry (or a subset \
-             you pick), and returns its final assistant text as this tool's result. Prefer this \
-             over doing large exploratory work directly when it would otherwise flood the main \
-             conversation with search output or scratch reasoning. Parameters: \
-             `goal` (required string), `tools` (optional list of tool-name strings — defaults \
-             to all tools available to you), `max_iterations` (optional int, default 20, capped \
-             at 200), `model` (optional model name — defaults to the last model this session \
-             used, then configured models, then claude-opus-4.7), `flow` (optional .at file path \
-             or command name; goal is passed as the first flow argument). \
-             `async` (optional bool, default false) — when true, returns a handle immediately \
-             instead of blocking for the final text. Use flow.status/flow.output/flow.kill \
-             to manage the async sub-agent, and watch(handle, pattern) to monitor its output.",
+            "Spawn a DSL flow as an independent sub-agent with its own message history and \
+             iteration counter. All named args except `flow` and `async` pass through to the \
+             flow as parameters — call flow.list first to discover available flows and their \
+             parameter signatures.\n\n\
+             Flow reference syntax: `file@flow_name`\n\
+             - \"subagent.at@subagent\" — run the `subagent` flow in subagent.at\n\
+             - \"subagent@research_loop\" — .at suffix optional\n\
+             - \"subagent.at\" — no @, takes first non-describe flow\n\
+             - \"/abs/path/my.at@main\" — absolute path\n\n\
+             Default flow is `subagent.at` (research/verify/implement/review roles). \
+             Required: `flow`, `async`. Other named args pass through to the flow. \
+             Use flow.status/flow.output/flow.kill to manage async sub-agents by handle. \
+             Best practice: call flow.list to see available flows and params, then pass \
+             matching named args. Missing params use flow-defined defaults.",
         )
     }
 
@@ -204,14 +205,11 @@ impl Tool for AgentSpawn {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "goal": {"type": "string"},
-                "tools": {"type": "array", "items": {"type": "string"}},
-                "max_iterations": {"type": "integer"},
-                "model": {"type": "string"},
                 "flow": {"type": "string"},
-                "async": {"type": "boolean", "default": false}
+                "async": {"type": "boolean"}
             },
-            "required": ["goal"]
+            "required": ["flow", "async"],
+            "additionalProperties": true
         })
     }
 
@@ -237,13 +235,19 @@ impl Tool for AgentSpawn {
 }
 
 async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
-    let goal = extract_goal(&args)?;
+    let goal = match args.named("goal") {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
     let flow = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
     run_flow_agent(&flow, goal, &args, ctx).await
 }
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
-    let goal = extract_goal(&args)?;
+    let goal = match args.named("goal") {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
     let model = extract_string(&args, "model", 0).unwrap_or_else(|_| "smart".to_string());
     let agent_registry = ctx.agent_registry.clone().ok_or_else(|| {
         RuntimeError::ToolFailed("flow.spawn: no agent registry available on ctx".into())
@@ -253,15 +257,19 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
     let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
     let child_run_id = FlowRunId::now();
-    let entry =
-        agent_registry.create_entry(handle.clone(), goal.clone(), model, child_run_id.clone());
+    let entry = agent_registry.create_entry(
+        handle.clone(),
+        goal.clone().unwrap_or_default(),
+        model,
+        child_run_id.clone(),
+    );
 
     let task_registry = ctx.task_registry.clone();
     let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
     let task_id = task_registry.as_ref().map(|tr| {
         tr.register(
             crate::task_registry::TaskKind::Agent,
-            goal.clone(),
+            goal.clone().unwrap_or_default(),
             handle.clone(),
             session_id,
             entry.cancel.clone(),
@@ -271,7 +279,8 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let entry_clone = Arc::clone(&entry);
     let ctx_clone = ctx.clone();
     tokio::spawn(async move {
-        let result = run_flow_agent(&flow_ref, entry_clone.goal.clone(), &args, &ctx_clone).await;
+        let result =
+            run_flow_agent(&flow_ref, Some(entry_clone.goal.clone()), &args, &ctx_clone).await;
         let status = match &result {
             Ok(Value::Str(s)) => AgentRunStatus::Ok {
                 ended_at: chrono::Utc::now(),
@@ -455,7 +464,7 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
 
 async fn run_flow_agent(
     flow_ref: &str,
-    goal: String,
+    goal: Option<String>,
     args: &ToolArgs,
     ctx: &ToolCtx,
 ) -> ToolResult {
@@ -469,19 +478,44 @@ async fn run_flow_agent(
             "flow.spawn: no provider registry available on ctx".into(),
         ));
     };
-    let (path, src) = read_flow_source(flow_ref).await?;
+    let (file_part, flow_name) = match flow_ref.split_once('@') {
+        Some((f, n)) => (f, Some(n.to_string())),
+        None => (flow_ref, None),
+    };
+    let (path, src) = read_flow_source(file_part).await?;
     let file = atman_dsl::parse::parse_file(&src).map_err(|e| {
         RuntimeError::ToolFailed(format!("flow.spawn: parse {}: {e}", path.display()))
     })?;
-    let Some(flow) = file.flows.iter().find(|f| f.name.name != "describe") else {
-        return Err(RuntimeError::ToolFailed(format!(
-            "flow.spawn: no entry flow in {} (all flows are describe())",
-            path.display()
-        )));
+    let flow = match &flow_name {
+        Some(name) => file
+            .flows
+            .iter()
+            .find(|f| f.name.name == *name)
+            .ok_or_else(|| {
+                let available: Vec<&str> =
+                    file.flows.iter().map(|f| f.name.name.as_str()).collect();
+                RuntimeError::ToolFailed(format!(
+                    "flow.spawn: flow `{name}` not found in {}. available: {}",
+                    path.display(),
+                    available.join(", ")
+                ))
+            })?,
+        None => file
+            .flows
+            .iter()
+            .find(|f| f.name.name != "describe")
+            .ok_or_else(|| {
+                RuntimeError::ToolFailed(format!(
+                    "flow.spawn: no entry flow in {} (all flows are describe())",
+                    path.display()
+                ))
+            })?,
     };
     let mut flow_args: Vec<(String, Value)> = Vec::new();
-    if let Some(first_param) = flow.params.first() {
-        flow_args.push((first_param.name.name.clone(), Value::Str(goal)));
+    if let Some(first_param) = flow.params.first()
+        && let Some(g) = &goal
+    {
+        flow_args.push((first_param.name.name.clone(), Value::Str(g.clone())));
     }
     for (key, value) in &args.named {
         if key == "flow" || key == "async" || key == "goal" {
@@ -541,17 +575,6 @@ async fn run_flow_agent(
         tr.finish(tid, ts);
     }
     out
-}
-
-fn extract_goal(args: &ToolArgs) -> Result<String, RuntimeError> {
-    match args.named("goal").or_else(|| args.positional.first()) {
-        Some(Value::Str(s)) if !s.trim().is_empty() => Ok(s.clone()),
-        Some(other) => Err(RuntimeError::TypeMismatch {
-            expected: "non-empty goal string".into(),
-            actual: other.kind_name().into(),
-        }),
-        None => Err(RuntimeError::MissingArg("flow.spawn.goal".into())),
-    }
 }
 
 fn extract_flow(args: &ToolArgs) -> Result<Option<String>, RuntimeError> {
