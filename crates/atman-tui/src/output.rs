@@ -2691,6 +2691,7 @@ pub fn render_workflow_panel_with_regions(
                 &mut pending_counter,
                 None,
                 0,
+                false,
             );
         }
         lines.push(Line::raw(""));
@@ -2965,11 +2966,6 @@ fn render_collapsed_workflow_card(
     let mut regions: Vec<NodeRegion> = Vec::new();
     let mut pending_counter: u8 = 0;
     let child_count = top_level.len();
-    let min_depth = visible_nodes
-        .iter()
-        .map(|(_, p)| p.len().saturating_sub(1))
-        .min()
-        .unwrap_or(0) as u16;
     for (i, node) in top_level.iter().enumerate() {
         let path = format!("{i}");
         let is_last = i + 1 == child_count;
@@ -2986,7 +2982,8 @@ fn render_collapsed_workflow_card(
             running,
             &mut pending_counter,
             Some(&visible_str),
-            min_depth,
+            0,
+            true,
         );
     }
     if body_lines.len() > max_body_rows {
@@ -3357,12 +3354,13 @@ fn append_workflow_node_boxed(
     pending_counter: &mut u8,
     visible_paths: Option<&std::collections::HashSet<String>>,
     depth_offset: u16,
+    fill_width: bool,
 ) {
     use atman_runtime::workflow::{ApprovalState, NodeStatus, WorkflowNodeKind};
     let t = crate::theme::theme();
     let depth = ancestor_last.len() as u16;
     let prefix_w = depth.saturating_sub(depth_offset) * INDENT_PER_DEPTH;
-    let prefix_w = if depth_offset > 0 {
+    let prefix_w = if fill_width {
         prefix_w.min(MAX_COLLAPSED_INDENT)
     } else {
         prefix_w
@@ -3450,7 +3448,7 @@ fn append_workflow_node_boxed(
     };
     let compact_content =
         3 + status_seg + kind_seg + crate::width::width(label.as_str()) + approval_seg + 2;
-    let compact_w = if depth_offset > 0 {
+    let compact_w = if fill_width {
         budget
     } else {
         compact_content.min(budget as usize) as u16
@@ -3513,6 +3511,7 @@ fn append_workflow_node_boxed(
             flow_running,
             pending_counter,
             depth_offset,
+            fill_width,
         );
         return;
     }
@@ -3538,6 +3537,7 @@ fn append_workflow_node_boxed(
             pending_counter,
             visible_paths,
             depth_offset,
+            fill_width,
         );
     }
 }
@@ -3555,10 +3555,11 @@ fn append_fanout_horizontal_boxed(
     flow_running: bool,
     pending_counter: &mut u8,
     depth_offset: u16,
+    fill_width: bool,
 ) {
     let branch_count = branches.len();
     let prefix_w = (ancestor_last.len() as u16).saturating_sub(depth_offset) * INDENT_PER_DEPTH;
-    let prefix_w = if depth_offset > 0 {
+    let prefix_w = if fill_width {
         prefix_w.min(MAX_COLLAPSED_INDENT)
     } else {
         prefix_w
@@ -3588,6 +3589,7 @@ fn append_fanout_horizontal_boxed(
             pending_counter,
             None,
             depth_offset,
+            fill_width,
         );
         per_branch_lines.push(b_lines);
         per_branch_regions.push(b_regions);
