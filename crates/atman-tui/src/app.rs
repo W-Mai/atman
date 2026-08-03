@@ -83,6 +83,16 @@ pub enum OutputItem {
     MermaidDiagram {
         source: String,
     },
+    SubAgentActivity {
+        handle: String,
+        goal: String,
+        child_run_id: String,
+        model: String,
+        status: String,
+        output: String,
+        iteration: u64,
+        done: bool,
+    },
 }
 
 impl OutputItem {
@@ -227,6 +237,7 @@ pub struct AppState {
     pub last_workflow_panel_idx: Option<usize>,
     pub workflow_run_to_panel: std::collections::HashMap<String, usize>,
     pub top_level_run_ids: std::collections::HashSet<String>,
+    pub sub_agent_run_ids: std::collections::HashMap<String, usize>,
     pub goal_scroll: u16,
     pub plans_scroll: u16,
     pub todos_scroll: u16,
@@ -995,7 +1006,12 @@ impl AppState {
 
     pub fn apply_stream_frame(&mut self, frame: StreamFrame) {
         match frame {
-            StreamFrame::ThinkingChunk { text, .. } => {
+            StreamFrame::ThinkingChunk { text, run_id, .. } => {
+                if let Some(rid) = &run_id
+                    && self.sub_agent_run_ids.contains_key(rid)
+                {
+                    return;
+                }
                 self.waiting_for_llm = false;
                 if let Some(OutputItem::Thinking { text: t, .. }) = self.items.last_mut() {
                     t.push_str(&text);
@@ -1012,7 +1028,20 @@ impl AppState {
                     self.streaming = true;
                 }
             }
-            StreamFrame::LlmChunk { text, .. } => {
+            StreamFrame::LlmChunk { text, run_id, .. } => {
+                if let Some(rid) = &run_id
+                    && let Some(&idx) = self.sub_agent_run_ids.get(rid)
+                {
+                    if let Some(OutputItem::SubAgentActivity { output, .. }) =
+                        self.items.get_mut(idx)
+                    {
+                        output.push_str(&text);
+                        self.items_version = self.items_version.wrapping_add(1);
+                    }
+                    self.streaming = true;
+                    self.reset_lag_state();
+                    return;
+                }
                 self.waiting_for_llm = false;
                 if let Some(OutputItem::Thinking { done, .. }) = self.items.last_mut()
                     && !*done
@@ -1057,7 +1086,12 @@ impl AppState {
                 self.items_version = self.items_version.wrapping_add(1);
                 self.waiting_for_llm = true;
             }
-            StreamFrame::LlmDone { .. } => {
+            StreamFrame::LlmDone { run_id, .. } => {
+                if let Some(rid) = &run_id
+                    && self.sub_agent_run_ids.contains_key(rid)
+                {
+                    return;
+                }
                 let mut changed = false;
                 for item in self.items.iter_mut().rev() {
                     let touched = match item {
@@ -1381,7 +1415,50 @@ impl AppState {
                 self.push_item(OutputItem::MermaidDiagram { source });
                 self.reset_lag_state();
             }
-            StreamFrame::SubAgentStarted { .. } | StreamFrame::SubAgentDone { .. } => {}
+            StreamFrame::SubAgentStarted {
+                handle,
+                goal,
+                child_run_id,
+                model,
+            } => {
+                let idx = self.items.len();
+                self.push_item(OutputItem::SubAgentActivity {
+                    handle: handle.clone(),
+                    goal,
+                    child_run_id: child_run_id.clone(),
+                    model,
+                    status: "running".into(),
+                    output: String::new(),
+                    iteration: 0,
+                    done: false,
+                });
+                self.sub_agent_run_ids.insert(child_run_id, idx);
+            }
+            StreamFrame::SubAgentDone {
+                handle,
+                status,
+                final_text,
+            } => {
+                for item in self.items.iter_mut() {
+                    if let OutputItem::SubAgentActivity {
+                        handle: h,
+                        status: s,
+                        output,
+                        done,
+                        ..
+                    } = item
+                        && h == &handle
+                    {
+                        *s = status.clone();
+                        if !final_text.is_empty() {
+                            *output = final_text.clone();
+                        }
+                        *done = true;
+                        break;
+                    }
+                }
+                self.items_version = self.items_version.wrapping_add(1);
+            }
             StreamFrame::Unknown => {}
         }
     }

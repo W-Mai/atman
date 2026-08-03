@@ -438,6 +438,26 @@ fn item_content_hash(
             11u8.hash(&mut h);
             str_fp(source).hash(&mut h);
         }
+        OutputItem::SubAgentActivity {
+            handle,
+            goal,
+            child_run_id,
+            model,
+            status,
+            output,
+            iteration,
+            done,
+        } => {
+            12u8.hash(&mut h);
+            str_fp(handle).hash(&mut h);
+            str_fp(goal).hash(&mut h);
+            str_fp(child_run_id).hash(&mut h);
+            str_fp(model).hash(&mut h);
+            str_fp(status).hash(&mut h);
+            str_fp(output).hash(&mut h);
+            iteration.hash(&mut h);
+            done.hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -456,6 +476,7 @@ enum ItemKind {
     CompactionSummary,
     DiffPreview,
     MermaidDiagram,
+    SubAgentActivity,
 }
 
 impl ItemKind {
@@ -473,6 +494,7 @@ impl ItemKind {
             OutputItem::CompactionSummary { .. } => Self::CompactionSummary,
             OutputItem::DiffPreview { .. } => Self::DiffPreview,
             OutputItem::MermaidDiagram { .. } => Self::MermaidDiagram,
+            OutputItem::SubAgentActivity { .. } => Self::SubAgentActivity,
         }
     }
 
@@ -1574,8 +1596,74 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         OutputItem::MermaidDiagram { source } => {
             render_mermaid_preview(source, ctx.panel_width, ctx.animation_frame)
         }
+        OutputItem::SubAgentActivity {
+            handle,
+            goal,
+            status,
+            output,
+            iteration,
+            done,
+            ..
+        } => render_sub_agent_activity(
+            handle,
+            goal,
+            status,
+            output,
+            *iteration,
+            *done,
+            ctx.panel_width,
+            ctx.animation_frame,
+        ),
     };
     lines.push(Line::from(Span::styled(String::new(), RESET)));
+    lines
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_sub_agent_activity(
+    handle: &str,
+    goal: &str,
+    status: &str,
+    output: &str,
+    iteration: u64,
+    done: bool,
+    panel_width: u16,
+    animation_frame: u32,
+) -> Vec<Line<'static>> {
+    let t = crate::theme::theme();
+    let bg: Color = t.code_bg.into();
+    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
+    let accent_style = Style::default().fg(t.accent.into()).bg(bg);
+
+    let icon = match status {
+        "ok" => "✓",
+        "err" => "✗",
+        "killed" => "⊘",
+        _ if done => "✓",
+        _ => spinner_char(animation_frame),
+    };
+    let iter_str = if done {
+        String::new()
+    } else {
+        format!(" iter {iteration}")
+    };
+    let title = format!("  {icon} {handle}{iter_str} · ");
+    let title_w = crate::width::width(title.as_str());
+    let goal_trunc =
+        crate::width::truncate(goal, (panel_width as usize).saturating_sub(title_w + 1));
+    let mut lines: Vec<Line<'static>> =
+        vec![Line::styled(format!("{title}{goal_trunc}"), accent_style)];
+
+    let last_lines: Vec<&str> = output
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .collect();
+    for line in last_lines.into_iter().rev() {
+        let trunc = crate::width::truncate(line, (panel_width as usize).saturating_sub(4));
+        lines.push(Line::styled(format!("   {trunc}"), body_style));
+    }
     lines
 }
 
