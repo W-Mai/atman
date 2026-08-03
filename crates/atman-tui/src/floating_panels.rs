@@ -1127,6 +1127,7 @@ fn render_panel_content(
                             false,
                             animation_frame,
                             render_width,
+                            crate::output::MAX_COLLAPSED_BODY_ROWS,
                         );
                         let max_scroll = (lines.len() as u16).saturating_sub(area.height);
                         let content_w = lines

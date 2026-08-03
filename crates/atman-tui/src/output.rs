@@ -523,6 +523,7 @@ pub fn render_item_with_regions(
             *cancelled,
             ctx.animation_frame,
             ctx.panel_width,
+            MAX_COLLAPSED_BODY_ROWS,
         )
     } else {
         let lines = render_item(item, ctx);
@@ -2506,6 +2507,7 @@ fn render_workflow_panel(
         cancelled,
         animation_frame,
         panel_width,
+        MAX_COLLAPSED_BODY_ROWS,
     )
     .0
 }
@@ -2517,6 +2519,7 @@ pub fn render_workflow_panel_with_regions(
     cancelled: bool,
     animation_frame: u32,
     panel_width: u16,
+    max_body_rows: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let t = crate::theme::theme();
     let count = count_workflow_nodes(&graph.root);
@@ -2550,7 +2553,13 @@ pub fn render_workflow_panel_with_regions(
         Span::styled(status_str, status_style),
     ]);
     if !panel_expanded {
-        return render_collapsed_workflow_card(graph, animation_frame, panel_width, running);
+        return render_collapsed_workflow_card(
+            graph,
+            animation_frame,
+            panel_width,
+            running,
+            max_body_rows,
+        );
     }
     let mut lines = vec![header];
     let mut regions: Vec<NodeRegion> = Vec::new();
@@ -2734,6 +2743,7 @@ fn render_collapsed_workflow_card(
     animation_frame: u32,
     panel_width: u16,
     running: bool,
+    max_body_rows: usize,
 ) -> (Vec<Line<'static>>, Vec<NodeRegion>) {
     let t = crate::theme::theme();
     let outer_width = panel_width.clamp(40, MAX_BOX_WIDTH);
@@ -2833,7 +2843,7 @@ fn render_collapsed_workflow_card(
         let top_level_count = visible_nodes.iter().filter(|(_, p)| p.len() == 1).count();
         let estimated_rows = top_level_count * 4;
         selected_paths = candidates;
-        if estimated_rows >= MAX_COLLAPSED_BODY_ROWS || count == ordered_pool.len() {
+        if estimated_rows >= max_body_rows || count == ordered_pool.len() {
             break;
         }
     }
@@ -2881,8 +2891,8 @@ fn render_collapsed_workflow_card(
             Some(&visible_str),
         );
     }
-    if body_lines.len() > MAX_COLLAPSED_BODY_ROWS {
-        let drain_count = body_lines.len() - MAX_COLLAPSED_BODY_ROWS;
+    if body_lines.len() > max_body_rows {
+        let drain_count = body_lines.len() - max_body_rows;
         body_lines.drain(..drain_count);
         regions.retain(|r| r.end_row > drain_count as u32);
         for r in regions.iter_mut() {
@@ -3152,7 +3162,7 @@ fn append_fanout_horizontal(
 
 const MAX_BOX_WIDTH: u16 = crate::layout::CONTENT_MAX_WIDTH;
 const INDENT_PER_DEPTH: u16 = 4;
-const MAX_COLLAPSED_BODY_ROWS: usize = 27;
+pub(crate) const MAX_COLLAPSED_BODY_ROWS: usize = 27;
 
 fn tree_prefix_spans(ancestor_last: &[bool], is_last: Option<bool>) -> Vec<Span<'static>> {
     let t = crate::theme::theme();
@@ -5104,7 +5114,8 @@ mod tests {
             turn_id: atman_runtime::event::TurnId::now(),
             root,
         };
-        let (lines, _regions) = render_collapsed_workflow_card(&graph, 0, 80, false);
+        let (lines, _regions) =
+            render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
         let total = lines.len();
         assert!(
             total <= 30,
@@ -5129,7 +5140,8 @@ mod tests {
             turn_id: atman_runtime::event::TurnId::now(),
             root,
         };
-        let (lines, _regions) = render_collapsed_workflow_card(&graph, 0, 80, false);
+        let (lines, _regions) =
+            render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
         let flat = flatten_lines(&lines);
         let tool_count = flat.matches("tool_").count();
         assert!(
@@ -5155,7 +5167,8 @@ mod tests {
             turn_id: atman_runtime::event::TurnId::now(),
             root,
         };
-        let (lines, regions) = render_collapsed_workflow_card(&graph, 0, 80, false);
+        let (lines, regions) =
+            render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
         let total = lines.len() as u32;
         for r in &regions {
             assert!(
@@ -5185,7 +5198,8 @@ mod tests {
             turn_id: atman_runtime::event::TurnId::now(),
             root,
         };
-        let (lines, _regions) = render_collapsed_workflow_card(&graph, 0, 80, false);
+        let (lines, _regions) =
+            render_collapsed_workflow_card(&graph, 0, 80, false, MAX_COLLAPSED_BODY_ROWS);
         let flat = flatten_lines(&lines);
         let old_pos = flat.find("old_tool").unwrap_or(usize::MAX);
         let new_pos = flat.find("new_tool").unwrap_or(0);
