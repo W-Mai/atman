@@ -197,6 +197,40 @@ pub enum StreamFrame {
     Unknown,
 }
 
+/// Extract the run_id (or flow_run_id) from any StreamFrame variant that carries one.
+/// Used to route frames to the correct sub-agent's entry / TUI item.
+pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
+    match frame {
+        StreamFrame::FlowStart { run_id, .. }
+        | StreamFrame::FlowNodeStart { run_id, .. }
+        | StreamFrame::FlowNodeEnd { run_id, .. }
+        | StreamFrame::FlowDone { run_id, .. }
+        | StreamFrame::FlowGraph { run_id, .. }
+        | StreamFrame::ToolNode { run_id, .. } => Some(run_id.as_str()),
+        StreamFrame::AssistantMsg {
+            flow_run_id: Some(rid),
+            ..
+        }
+        | StreamFrame::ToolResultMsg {
+            flow_run_id: Some(rid),
+            ..
+        }
+        | StreamFrame::LlmCallStats {
+            run_id: Some(rid), ..
+        } => Some(rid.as_str()),
+        StreamFrame::LlmChunk {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::ThinkingChunk {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::LlmDone {
+            run_id: Some(rid), ..
+        } => Some(rid.as_str()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -278,9 +278,87 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
     let entry_clone = Arc::clone(&entry);
     let ctx_clone = ctx.clone();
+    let parent_stream_tx = ctx.stream_tx.clone();
+    let child_run_id_str = child_run_id.0.to_string();
     tokio::spawn(async move {
-        let result =
-            run_flow_agent(&flow_ref, Some(entry_clone.goal.clone()), &args, &ctx_clone).await;
+        // Send SubAgentStarted so the TUI creates a SubAgentActivity item and
+        // registers child_run_id in sub_agent_run_ids for frame routing.
+        if let Some(tx) = &parent_stream_tx {
+            let _ = tx.send(crate::stream::StreamFrame::SubAgentStarted {
+                handle: entry_clone.handle.clone(),
+                goal: entry_clone.goal.clone(),
+                child_run_id: child_run_id_str.clone(),
+                model: entry_clone.model.clone(),
+            });
+        }
+
+        // Spawn a sidecar task that subscribes to the parent stream and mirrors
+        // run_id-matched frames into entry.{output, messages, iteration} so that
+        // flow.output / flow.status / floating-panel can observe sub-agent progress.
+        let mirror_handle = {
+            let entry = Arc::clone(&entry_clone);
+            let tx = parent_stream_tx.clone();
+            let run_id_filter = child_run_id_str.clone();
+            tokio::spawn(async move {
+                let Some(tx) = tx else { return };
+                let mut rx = tx.subscribe();
+                loop {
+                    match rx.recv().await {
+                        Ok(frame) => {
+                            let rid = crate::stream::frame_run_id(&frame);
+                            if rid != Some(run_id_filter.as_str()) {
+                                continue;
+                            }
+                            match &frame {
+                                crate::stream::StreamFrame::LlmChunk { text, .. } => {
+                                    entry.output.lock().unwrap().push_str(text);
+                                }
+                                crate::stream::StreamFrame::LlmDone { .. } => {
+                                    entry
+                                        .iteration
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    // Forward to entry's own AgentEvent stream so
+                                    // watch() can observe sub-agent output.
+                                    let out = entry.output.lock().unwrap().clone();
+                                    let _ = entry
+                                        .stream_tx
+                                        .send(AgentEvent::AssistantDone { text: out });
+                                }
+                                crate::stream::StreamFrame::AssistantMsg { message, .. }
+                                | crate::stream::StreamFrame::ToolResultMsg { message, .. } => {
+                                    let mut msgs = entry.messages.lock().unwrap();
+                                    msgs.push(message.clone());
+                                    if msgs.len() > 100 {
+                                        let start = msgs.len() - 100;
+                                        msgs.drain(..start);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
+                }
+            })
+        };
+
+        // Replace ctx.cancel with entry.cancel so flow.kill can actually cancel
+        // the sub-agent's flow execution.
+        let mut ctx_for_flow = ctx_clone;
+        ctx_for_flow.cancel = entry_clone.cancel.clone();
+
+        let result = run_flow_agent(
+            &flow_ref,
+            Some(entry_clone.goal.clone()),
+            &args,
+            &ctx_for_flow,
+        )
+        .await;
+
+        // Stop mirroring before we read final status — the stream may lag.
+        mirror_handle.abort();
+
         let status = match &result {
             Ok(Value::Str(s)) => AgentRunStatus::Ok {
                 ended_at: chrono::Utc::now(),
@@ -296,6 +374,20 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             },
         };
         *entry_clone.status.lock().unwrap() = status.clone();
+
+        // Send SubAgentDone so the TUI updates the SubAgentActivity item.
+        if let Some(tx) = &parent_stream_tx {
+            let final_text = match &status {
+                AgentRunStatus::Ok { final_text, .. } => final_text.clone(),
+                _ => String::new(),
+            };
+            let _ = tx.send(crate::stream::StreamFrame::SubAgentDone {
+                handle: entry_clone.handle.clone(),
+                status: status.kind_str().to_string(),
+                final_text,
+            });
+        }
+
         let _ = entry_clone.stream_tx.send(AgentEvent::Exited { status });
         if let (Some(tr), Some(tid)) = (&task_registry, &task_id) {
             let ts = match result {
