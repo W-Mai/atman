@@ -25,7 +25,7 @@ pub enum ValidationError {
 
 pub fn validate(flow: &FlowDecl, tools: &ToolRegistry) -> Result<(), Vec<ValidationError>> {
     let mut errors = Vec::new();
-    let mut scope: HashSet<String> = flow.params.iter().map(|(id, _)| id.name.clone()).collect();
+    let mut scope: HashSet<String> = flow.params.iter().map(|p| p.name.name.clone()).collect();
     let mut kinds: HashMap<String, &'static str> = HashMap::new();
     walk_stmts(&flow.body, &mut scope, &mut kinds, tools, &mut errors);
     if errors.is_empty() {

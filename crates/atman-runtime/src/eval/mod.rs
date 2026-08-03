@@ -1466,14 +1466,14 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
             for (i, arg) in args.iter().enumerate() {
                 let (param_name, value) = match arg {
                     Arg::Positional(e) => {
-                        let Some((pname, _)) = target.params.get(i) else {
+                        let Some(p) = target.params.get(i) else {
                             return Value::Err(RuntimeError::MissingArg(format!(
                                 "subflow({}): too many positional args",
                                 name.name
                             )));
                         };
                         let v = eval_expr(e, env, ctx).await;
-                        (pname.name.clone(), v)
+                        (p.name.name.clone(), v)
                     }
                     Arg::Named { name: n, value } => {
                         let v = eval_expr(value, env, ctx).await;

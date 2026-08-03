@@ -50,12 +50,16 @@ pub fn print_file(file: &File) -> String {
 
 fn write_flow(out: &mut String, flow: &FlowDecl) {
     write!(out, "flow {}(", flow.name.name).unwrap();
-    for (i, (name, ty)) in flow.params.iter().enumerate() {
+    for (i, p) in flow.params.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        write!(out, "{}: ", name.name).unwrap();
-        write_type(out, ty);
+        write!(out, "{}: ", p.name.name).unwrap();
+        write_type(out, &p.ty);
+        if let Some(default) = &p.default {
+            out.push_str(" = ");
+            write_expr(out, default, 0);
+        }
     }
     out.push(')');
     if let Some(ret) = &flow.ret {

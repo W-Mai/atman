@@ -1329,7 +1329,7 @@ fn resolve_slash_command(line: &str) -> Result<SlashCommandParsed> {
             )
         })?;
     let flow_name = flow.name.name.clone();
-    let params: Vec<String> = flow.params.iter().map(|(id, _)| id.name.clone()).collect();
+    let params: Vec<String> = flow.params.iter().map(|p| p.name.name.clone()).collect();
 
     let mut kv: Vec<(String, Value)> = Vec::new();
     let tokens = split_quoted_args(rest_raw);

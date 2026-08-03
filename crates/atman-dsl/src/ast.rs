@@ -257,9 +257,16 @@ pub enum WatchAction {
 }
 
 #[derive(Debug, Clone)]
+pub struct ParamDecl {
+    pub name: Ident,
+    pub ty: TypeExpr,
+    pub default: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FlowDecl {
     pub name: Ident,
-    pub params: Vec<(Ident, TypeExpr)>,
+    pub params: Vec<ParamDecl>,
     pub ret: Option<TypeExpr>,
     pub contract: Option<Contract>,
     pub body: Vec<Stmt>,

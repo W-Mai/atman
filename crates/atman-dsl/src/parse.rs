@@ -229,13 +229,19 @@ fn parse_contract(input: ParseStream) -> Result<Contract> {
     Ok(Contract { blocks })
 }
 
-fn parse_params(input: ParseStream) -> Result<Vec<(Ident, TypeExpr)>> {
+fn parse_params(input: ParseStream) -> Result<Vec<ParamDecl>> {
     let mut params = Vec::new();
     while !input.is_empty() {
         let name = to_ident(input.parse::<syn::Ident>()?);
         input.parse::<Token![:]>()?;
         let ty = parse_type(input)?;
-        params.push((name, ty));
+        let default = if input.peek(Token![=]) {
+            input.parse::<Token![=]>()?;
+            Some(parse_expr(input)?)
+        } else {
+            None
+        };
+        params.push(ParamDecl { name, ty, default });
         if input.is_empty() {
             break;
         }

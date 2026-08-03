@@ -1053,10 +1053,6 @@ pub async fn exec_flow_with_siblings(
     safety: Option<&crate::safety::SafetyConfig>,
     source_dir: Option<PathBuf>,
 ) -> Result<Value, RuntimeError> {
-    let mut env = Env::new();
-    for (name, value) in args {
-        env.bind(name, value);
-    }
     let ctx = EvalCtx {
         tools,
         tool_ctx,
@@ -1072,6 +1068,19 @@ pub async fn exec_flow_with_siblings(
         current_node_id: None,
         source_dir,
     };
+    let mut env = Env::new();
+    let provided: std::collections::HashSet<String> = args.iter().map(|(n, _)| n.clone()).collect();
+    for (name, value) in args {
+        env.bind(name, value);
+    }
+    for p in &flow.params {
+        if !provided.contains(&p.name.name) {
+            if let Some(default) = &p.default {
+                let val = crate::eval::eval_expr(default, &env, &ctx).await;
+                env.bind(p.name.name.clone(), val);
+            }
+        }
+    }
     match exec_stmts(&flow.body, &mut env, &ctx).await {
         StmtOutcome::Return(v) => Ok(v),
         StmtOutcome::Err(e) => Err(e),

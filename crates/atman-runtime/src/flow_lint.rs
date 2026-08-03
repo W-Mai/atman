@@ -37,14 +37,14 @@ pub fn lint_file(file: &File) -> Vec<LintHit> {
 fn lint_flow(flow: &FlowDecl, hits: &mut Vec<LintHit>) {
     let mut refs = HashSet::new();
     collect_ident_refs_stmts(&flow.body, &mut refs);
-    for (param, _) in &flow.params {
-        if !refs.contains(&param.name) {
+    for p in &flow.params {
+        if !refs.contains(&p.name.name) {
             hits.push(LintHit {
                 flow: flow.name.name.clone(),
                 rule: LintRule::UnusedFlowParam,
                 message: format!(
                     "parameter `{}` is declared but never referenced",
-                    param.name
+                    p.name.name
                 ),
             });
         }

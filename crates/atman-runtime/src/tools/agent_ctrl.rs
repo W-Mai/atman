@@ -759,7 +759,7 @@ async fn run_flow_agent(flow_ref: &str, goal: String, ctx: &ToolCtx) -> ToolResu
     let args = flow
         .params
         .first()
-        .map(|(ident, _)| vec![(ident.name.clone(), Value::Str(goal))])
+        .map(|p| vec![(p.name.name.clone(), Value::Str(goal))])
         .unwrap_or_default();
     let flows = file
         .flows
