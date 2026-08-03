@@ -421,6 +421,15 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     ]))
 }
 
+fn push_capped(messages: &Arc<Mutex<Vec<Message>>>, msg: Message) {
+    let mut msgs = messages.lock().unwrap();
+    msgs.push(msg);
+    if msgs.len() > 100 {
+        let start = msgs.len() - 100;
+        msgs.drain(..start);
+    }
+}
+
 async fn run_sub_agent_background(
     entry: Arc<AgentEntry>,
     args: ToolArgs,
@@ -447,6 +456,16 @@ async fn run_sub_agent_background(
     };
     let tool_specs = build_tool_specs(registry.as_ref(), tool_filter.as_deref());
     let model = pick_model(&args, &ctx);
+    let mut ctx = ctx;
+    ctx.flow_run_id = Some(child_run_id.clone());
+    if let Some(tx) = &ctx.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::SubAgentStarted {
+            handle: entry.handle.clone(),
+            goal: goal.clone(),
+            child_run_id: child_run_id.0.to_string(),
+            model: model.clone(),
+        });
+    }
     emit_child_flow_start(&ctx, &child_run_id, &goal);
     let turn = ctx
         .turn_id
@@ -457,6 +476,9 @@ async fn run_sub_agent_background(
     let mut failure_reason: Option<String> = None;
 
     for iter in 0..max_iter {
+        entry
+            .iteration
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if entry.cancel.is_cancelled() {
             failure_reason = Some("cancelled".into());
             break;
@@ -489,6 +511,7 @@ async fn run_sub_agent_background(
                 entry.output.lock().unwrap().push_str(&text);
                 let uses = extract_tool_uses(&am.message);
                 messages.push(am.message.clone());
+                push_capped(&entry.messages, am.message.clone());
                 emit_assistant_msg(&ctx, &child_run_id, &am.message);
                 if uses.is_empty() {
                     final_text = Some(text);
@@ -507,6 +530,7 @@ async fn run_sub_agent_background(
                     parts: tool_results,
                 };
                 emit_tool_result_msg(&ctx, &child_run_id, &combined);
+                push_capped(&entry.messages, combined.clone());
                 messages.push(combined);
             }
             Err(e) => {
@@ -540,6 +564,17 @@ async fn run_sub_agent_background(
         AgentRunStatus::Running { .. } => unreachable!(),
     };
     emit_child_flow_end(&ctx, &child_run_id, &flow_status);
+    let final_text = match &status {
+        AgentRunStatus::Ok { final_text, .. } => final_text.clone(),
+        _ => String::new(),
+    };
+    if let Some(tx) = &ctx.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::SubAgentDone {
+            handle: entry.handle.clone(),
+            status: status.kind_str().to_string(),
+            final_text,
+        });
+    }
     *entry.status.lock().unwrap() = status.clone();
     if let (Some(tr), Some(tid)) = (&task_registry, &task_id) {
         let ts = match &flow_status {
