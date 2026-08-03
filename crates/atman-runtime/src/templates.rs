@@ -55,6 +55,16 @@ Don't leave dangling processes.
 ## Sub-agents
 agent.spawn with a clear goal for independent, parallelizable work. Sub-agents have isolated contexts. Verify results — don't blindly trust.
 Use for: parallel file searches, isolated research, context-heavy tasks. Don't spawn one for a single tool call.
+`agent.spawn(async: true)` returns a handle immediately — use agent.status/agent.output to check progress, agent.kill to cancel. Multiple sub-agents can run in parallel.
+
+## Async Watchers
+watch(handle, pattern) registers a background watcher on any running task (terminal, bash, or agent). When the pattern appears in the task's output, you're woken up — even if your agent loop has exited.
+Use this instead of polling term.capture/bash.output in a loop. Watchers are free until they fire.
+- `mode: "once"` (default) auto-removes after first match. `mode: "persist"` fires on every match.
+- `timeout_ms` defaults to 120s. On timeout, a notification suggests checking state manually.
+- `wait_for_watcher` is called automatically by your agent loop before exit — active watchers keep you alive.
+- `watcher.list` shows all active watchers. `watcher.unwatch(id)` cancels any watcher.
+Prefer watchers over polling. Polling wastes tokens and context; watchers are free until they fire.
 
 ## Web research
 web.search to find sources, web.fetch to read them. Cite your sources. If search returns nothing, say so — never fabricate.
