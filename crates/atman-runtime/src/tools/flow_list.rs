@@ -17,11 +17,14 @@ impl Tool for FlowList {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "List all available .at flow files in ~/.config/atman/commands/. \
-             Each entry includes the flow name, file, description (from the \
-             describe() flow if present), and parameter list with types and \
-             default values. Use this to discover flows before calling \
-             flow.spawn.",
+            "List all .at flow files in ~/.config/atman/commands/ and every flow \
+             inside each file. Returns a list of file entries; each entry contains \
+             the file name, a file-level description (from the describe() flow if \
+             present), and a list of all flows with their names, ref strings, and \
+             parameters.\n\n\
+             Each flow's `ref` field gives the exact string to pass to flow.spawn's \
+             `flow` parameter (e.g. \"subagent.at@research_loop\"). Use this to \
+             discover flows and their parameter signatures before calling flow.spawn.",
         )
     }
 
@@ -54,10 +57,10 @@ impl Tool for FlowList {
             }
 
             entries.sort_by(|a, b| {
-                let name_a = match a {
+                let file_a = match a {
                     Value::Struct(fields) => fields
                         .iter()
-                        .find(|(k, _)| k == "name")
+                        .find(|(k, _)| k == "file")
                         .and_then(|(_, v)| {
                             if let Value::Str(s) = v {
                                 Some(s.clone())
@@ -68,10 +71,10 @@ impl Tool for FlowList {
                         .unwrap_or_default(),
                     _ => String::new(),
                 };
-                let name_b = match b {
+                let file_b = match b {
                     Value::Struct(fields) => fields
                         .iter()
-                        .find(|(k, _)| k == "name")
+                        .find(|(k, _)| k == "file")
                         .and_then(|(_, v)| {
                             if let Value::Str(s) = v {
                                 Some(s.clone())
@@ -82,7 +85,7 @@ impl Tool for FlowList {
                         .unwrap_or_default(),
                     _ => String::new(),
                 };
-                name_a.cmp(&name_b)
+                file_a.cmp(&file_b)
             });
 
             Ok(Value::List(entries))
@@ -98,42 +101,47 @@ fn scan_flow_file(path: &Path) -> Result<Value, RuntimeError> {
         RuntimeError::ToolFailed(format!("flow.list: parse {}: {e}", path.display()))
     })?;
 
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+
     let describe_flow = file.flows.iter().find(|f| f.name.name == "describe");
     let description = describe_flow
         .and_then(extract_return_string_literal)
         .unwrap_or_default();
 
-    let entry_flow = file.flows.iter().find(|f| f.name.name != "describe");
-    let (name, params) = if let Some(ef) = entry_flow {
-        let params: Vec<Value> = ef
-            .params
-            .iter()
-            .map(|p| {
-                Value::Struct(vec![
-                    ("name".into(), Value::Str(p.name.name.clone())),
-                    ("ty".into(), Value::Str(format!("{:?}", p.ty))),
-                    ("has_default".into(), Value::Bool(p.default.is_some())),
-                ])
-            })
-            .collect();
-        (ef.name.name.clone(), params)
-    } else {
-        (String::new(), Vec::new())
-    };
+    let flows: Vec<Value> = file
+        .flows
+        .iter()
+        .map(|f| {
+            let params: Vec<Value> = f
+                .params
+                .iter()
+                .map(|p| {
+                    Value::Struct(vec![
+                        ("name".into(), Value::Str(p.name.name.clone())),
+                        ("ty".into(), Value::Str(format!("{:?}", p.ty))),
+                        ("has_default".into(), Value::Bool(p.default.is_some())),
+                    ])
+                })
+                .collect();
+            Value::Struct(vec![
+                ("name".into(), Value::Str(f.name.name.clone())),
+                (
+                    "ref".into(),
+                    Value::Str(format!("{file_name}@{}", f.name.name)),
+                ),
+                ("params".into(), Value::List(params)),
+            ])
+        })
+        .collect();
 
     Ok(Value::Struct(vec![
-        ("name".into(), Value::Str(name)),
-        (
-            "file".into(),
-            Value::Str(
-                path.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            ),
-        ),
+        ("file".into(), Value::Str(file_name)),
         ("description".into(), Value::Str(description)),
-        ("params".into(), Value::List(params)),
+        ("flows".into(), Value::List(flows)),
     ]))
 }
 
