@@ -167,6 +167,7 @@ fn status_to_str(s: crate::task_registry::TaskStatus) -> &'static str {
     use crate::task_registry::TaskStatus;
     match s {
         TaskStatus::Running => "running",
+        TaskStatus::Killing => "killing",
         TaskStatus::Ok => "ok",
         TaskStatus::Err => "err",
         TaskStatus::Killed => "killed",

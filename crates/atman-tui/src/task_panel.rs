@@ -82,6 +82,7 @@ pub fn compute_task_panel_rect(area: Rect, show: bool, collapsed: bool) -> Optio
 fn status_icon(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Running => "◐",
+        TaskStatus::Killing => "◑",
         TaskStatus::Ok => "✓",
         TaskStatus::Err => "✗",
         TaskStatus::Killed => "⊘",

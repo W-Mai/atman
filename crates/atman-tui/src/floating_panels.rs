@@ -1652,6 +1652,7 @@ fn render_placeholder(f: &mut Frame, area: Rect, title: &str) {
 fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {
     match status {
         atman_runtime::TaskStatus::Running => "◐",
+        atman_runtime::TaskStatus::Killing => "◑",
         atman_runtime::TaskStatus::Ok => "✓",
         atman_runtime::TaskStatus::Err => "✗",
         atman_runtime::TaskStatus::Killed => "⊘",
@@ -1662,6 +1663,7 @@ fn status_color(status: atman_runtime::TaskStatus) -> Color {
     let t = crate::theme::theme();
     match status {
         atman_runtime::TaskStatus::Running => t.accent.into(),
+        atman_runtime::TaskStatus::Killing => t.warn.into(),
         atman_runtime::TaskStatus::Ok => t.success.into(),
         atman_runtime::TaskStatus::Err => t.error.into(),
         atman_runtime::TaskStatus::Killed => t.subtle_fg.into(),

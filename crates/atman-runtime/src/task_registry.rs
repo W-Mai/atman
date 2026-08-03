@@ -51,6 +51,7 @@ impl TaskKind {
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Running,
+    Killing,
     Ok,
     Err,
     Killed,
@@ -62,7 +63,7 @@ impl TaskStatus {
     }
 
     pub fn is_running(self) -> bool {
-        matches!(self, TaskStatus::Running)
+        matches!(self, TaskStatus::Running | TaskStatus::Killing)
     }
 }
 
@@ -248,17 +249,29 @@ impl TaskRegistry {
     }
 
     pub fn kill(&self, id: &TaskId) -> bool {
-        let inner = self.inner.lock().unwrap();
-        let Some(entry) = inner.get(id) else {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(entry) = inner.get_mut(id) else {
             return false;
         };
         if entry.snapshot.status.is_terminal() {
             return false;
         }
-        entry.cancel.cancel();
-        if let Some(hook) = &entry.kill_hook {
+        let old_status = entry.snapshot.status;
+        let kind = entry.snapshot.kind;
+        entry.snapshot.status = TaskStatus::Killing;
+        let cancel = entry.cancel.clone();
+        let hook = entry.kill_hook.clone();
+        drop(inner);
+        cancel.cancel();
+        if let Some(hook) = hook {
             hook();
         }
+        let _ = self.event_tx.send(TaskEvent::StatusChanged {
+            id: id.clone(),
+            kind,
+            old: old_status,
+            new: TaskStatus::Killing,
+        });
         true
     }
 
