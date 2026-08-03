@@ -1,9 +1,13 @@
+use std::collections::HashSet;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+use atman_runtime::message::Message;
+use atman_runtime::workflow::WorkflowGraph;
 use atman_runtime::{TaskKind, TaskSnapshot};
 
 use crate::app::OutputItem;
@@ -1111,11 +1115,25 @@ fn render_panel_content(
                         output,
                         iteration,
                         done,
+                        messages,
+                        workflow_graph,
                         ..
                     }) = item
                     {
                         render_sub_agent_panel(
-                            f, area, handle, goal, model, status, output, *iteration, *done,
+                            f,
+                            area,
+                            handle,
+                            goal,
+                            model,
+                            status,
+                            output,
+                            *iteration,
+                            *done,
+                            messages,
+                            workflow_graph,
+                            panel.scroll,
+                            animation_frame,
                         );
                     } else if let Some(snap) = snap {
                         render_task_meta(f, area, kind, snap);
@@ -1365,15 +1383,20 @@ fn render_sub_agent_panel(
     goal: &str,
     model: &str,
     status: &str,
-    output: &str,
+    _output: &str,
     iteration: u64,
     done: bool,
+    messages: &[Message],
+    workflow_graph: &WorkflowGraph,
+    scroll: u16,
+    animation_frame: u32,
 ) {
     let t = crate::theme::theme();
     let label_style = Style::default().fg(t.subtle_fg.into());
     let value_style = Style::default().fg(t.tinted_fg.into());
     let accent_style = Style::default().fg(t.accent.into());
 
+    // Section 1: Header table
     let icon = match status {
         "ok" => "✓",
         "err" => "✗",
@@ -1406,11 +1429,52 @@ fn render_sub_agent_panel(
     ]));
     lines.push(Line::from(""));
 
-    for line in output.lines() {
-        lines.push(Line::from(line.to_string()));
-    }
+    // Section 2: Workflow graph — reuse the same renderer as the main transcript
+    let expanded_nodes = HashSet::new();
+    let (wf_lines, _regions) = crate::output::render_workflow_panel_with_regions(
+        workflow_graph,
+        &expanded_nodes,
+        true,
+        false,
+        animation_frame,
+        area.width,
+        crate::output::MAX_COLLAPSED_BODY_ROWS,
+    );
+    lines.extend(wf_lines);
+    lines.push(Line::from(""));
 
-    f.render_widget(Paragraph::new(lines), area);
+    // Section 3: Sub-document flow — convert messages to OutputItems and
+    // reuse build_lines so the rendering is identical to the main transcript.
+    let items: Vec<OutputItem> = messages
+        .iter()
+        .map(|msg| match msg.role {
+            atman_runtime::message::MessageRole::User => OutputItem::UserTurn {
+                text: msg.text_concat(),
+            },
+            atman_runtime::message::MessageRole::Assistant => OutputItem::AssistantMd {
+                md: msg.text_concat(),
+                streaming: false,
+                retried: false,
+            },
+            _ => OutputItem::SystemNote {
+                text: msg.text_concat(),
+                level: crate::app::NoteLevel::Info,
+            },
+        })
+        .collect();
+
+    let empty_tools = HashSet::new();
+    let render_ctx = crate::output::RenderCtx {
+        expanded_tools: &empty_tools,
+        messages,
+        animation_frame,
+        panel_width: area.width,
+        hovered_thinking_idx: None,
+    };
+    let doc_lines = crate::output::build_lines(&items, &render_ctx);
+    lines.extend(doc_lines);
+
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 }
 
 fn render_task_meta(f: &mut Frame, area: Rect, kind: TaskKind, snap: &TaskSnapshot) {

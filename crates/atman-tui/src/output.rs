@@ -1599,19 +1599,19 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
         }
         OutputItem::SubAgentActivity {
             handle,
-            goal,
             status,
             output,
             iteration,
             done,
+            expanded,
             ..
         } => render_sub_agent_activity(
             handle,
-            goal,
             status,
             output,
             *iteration,
             *done,
+            *expanded,
             ctx.panel_width,
             ctx.animation_frame,
         ),
@@ -1623,20 +1623,15 @@ pub fn render_item(item: &OutputItem, ctx: &RenderCtx<'_>) -> Vec<Line<'static>>
 #[allow(clippy::too_many_arguments)]
 fn render_sub_agent_activity(
     handle: &str,
-    goal: &str,
     status: &str,
     output: &str,
     iteration: u64,
     done: bool,
+    expanded: bool,
     panel_width: u16,
     animation_frame: u32,
 ) -> Vec<Line<'static>> {
-    let t = crate::theme::theme();
-    let bg: Color = t.code_bg.into();
-    let body_style = Style::default().fg(t.subtle_fg.into()).bg(bg);
-    let accent_style = Style::default().fg(t.accent.into()).bg(bg);
-
-    let icon = match status {
+    let glyph = match status {
         "ok" => "✓",
         "err" => "✗",
         "killed" => "⊘",
@@ -1648,24 +1643,8 @@ fn render_sub_agent_activity(
     } else {
         format!(" iter {iteration}")
     };
-    let title = format!("  {icon} {handle}{iter_str} · ");
-    let title_w = crate::width::width(title.as_str());
-    let goal_trunc =
-        crate::width::truncate(goal, (panel_width as usize).saturating_sub(title_w + 1));
-    let mut lines: Vec<Line<'static>> =
-        vec![Line::styled(format!("{title}{goal_trunc}"), accent_style)];
-
-    let last_lines: Vec<&str> = output
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(3)
-        .collect();
-    for line in last_lines.into_iter().rev() {
-        let trunc = crate::width::truncate(line, (panel_width as usize).saturating_sub(4));
-        lines.push(Line::styled(format!("   {trunc}"), body_style));
-    }
-    lines
+    let label = format!("agent[{handle}]{iter_str}");
+    render_output_block(&label, glyph, output, expanded, panel_width)
 }
 
 fn render_mermaid_preview(
@@ -3949,13 +3928,11 @@ pub fn empty_hint<'a>() -> Paragraph<'a> {
         .wrap(Wrap { trim: true })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_bash(
-    handle: &str,
+fn render_output_block(
+    label: &str,
+    glyph: &str,
     output: &str,
-    done: bool,
     expanded: bool,
-    animation_frame: u32,
     panel_width: u16,
 ) -> Vec<Line<'static>> {
     let t = crate::theme::theme();
@@ -3969,17 +3946,6 @@ fn render_bash(
         .fg(t.meta_fg.into())
         .bg(bg)
         .add_modifier(Modifier::DIM);
-
-    let glyph = if done {
-        "✓"
-    } else {
-        spinner_char(animation_frame)
-    };
-    let label = if done {
-        format!("bash[{handle}]")
-    } else {
-        format!("bash[{handle}]…")
-    };
 
     let target = panel_width.max(20) as usize;
     let blank = Line::from(Span::styled(" ".repeat(target), body_style));
@@ -4046,6 +4012,28 @@ fn render_bash(
     }
     lines.push(blank);
     lines
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_bash(
+    handle: &str,
+    output: &str,
+    done: bool,
+    expanded: bool,
+    animation_frame: u32,
+    panel_width: u16,
+) -> Vec<Line<'static>> {
+    let glyph = if done {
+        "✓"
+    } else {
+        spinner_char(animation_frame)
+    };
+    let label = if done {
+        format!("bash[{handle}]")
+    } else {
+        format!("bash[{handle}]…")
+    };
+    render_output_block(&label, glyph, output, expanded, panel_width)
 }
 
 #[allow(clippy::too_many_arguments)]

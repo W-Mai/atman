@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use atman_runtime::message::Message;
 use atman_runtime::stream::CompactionPhase;
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::tools::term::TerminalScreen;
@@ -92,6 +93,8 @@ pub enum OutputItem {
         output: String,
         iteration: u64,
         done: bool,
+        expanded: bool,
+        messages: Vec<Message>,
         workflow_graph: WorkflowGraph,
     },
 }
@@ -1455,6 +1458,8 @@ impl AppState {
                     output: String::new(),
                     iteration: 0,
                     done: false,
+                    expanded: false,
+                    messages: Vec::new(),
                     workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
                 });
                 self.sub_agent_run_ids.insert(child_run_id, idx);
@@ -1512,10 +1517,22 @@ impl AppState {
     fn ensure_workflow_panel_and_apply(&mut self, frame: &StreamFrame) {
         if let Some(rid) = frame_run_id(frame)
             && let Some(&idx) = self.sub_agent_run_ids.get(rid)
-            && let Some(OutputItem::SubAgentActivity { workflow_graph, .. }) =
-                self.items.get_mut(idx)
+            && let Some(OutputItem::SubAgentActivity {
+                workflow_graph,
+                messages,
+                ..
+            }) = self.items.get_mut(idx)
         {
             workflow_graph.apply_stream_frame(frame);
+            if let StreamFrame::AssistantMsg { message, .. }
+            | StreamFrame::ToolResultMsg { message, .. } = frame
+            {
+                messages.push(message.clone());
+                if messages.len() > 100 {
+                    let start = messages.len() - 100;
+                    messages.drain(..start);
+                }
+            }
             self.items_version = self.items_version.wrapping_add(1);
             return;
         }
