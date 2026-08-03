@@ -103,7 +103,9 @@ pub enum OutputItem {
 impl OutputItem {
     pub fn handle(&self) -> Option<&str> {
         match self {
-            OutputItem::Terminal { handle, .. } | OutputItem::Bash { handle, .. } => Some(handle),
+            OutputItem::Terminal { handle, .. }
+            | OutputItem::Bash { handle, .. }
+            | OutputItem::SubAgentActivity { handle, .. } => Some(handle),
             _ => None,
         }
     }
@@ -403,6 +405,13 @@ impl AppState {
                         .map(|s| s.label.clone())
                         .unwrap_or_else(|| h.clone());
                     (atman_runtime::TaskKind::Bash, label, pw, ph)
+                }
+                OutputItem::SubAgentActivity { handle: h, .. } => {
+                    let label = snap
+                        .as_ref()
+                        .map(|s| s.label.clone())
+                        .unwrap_or_else(|| h.clone());
+                    (atman_runtime::TaskKind::Agent, label, 0, 0)
                 }
                 OutputItem::WorkflowPanel { .. } => {
                     let kind = snap

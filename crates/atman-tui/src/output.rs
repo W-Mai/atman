@@ -447,6 +447,8 @@ fn item_content_hash(
             output,
             iteration,
             done,
+            expanded,
+            expanded_nodes,
             ..
         } => {
             12u8.hash(&mut h);
@@ -458,6 +460,8 @@ fn item_content_hash(
             str_fp(output).hash(&mut h);
             iteration.hash(&mut h);
             done.hash(&mut h);
+            expanded.hash(&mut h);
+            expanded_nodes.len().hash(&mut h);
             if !done {
                 animation_frame.hash(&mut h);
             }

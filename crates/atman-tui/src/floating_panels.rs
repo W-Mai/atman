@@ -1140,7 +1140,7 @@ fn render_panel_content(
                             messages,
                             workflow_graph,
                             expanded_nodes,
-                            panel.scroll,
+                            &mut panel.scroll,
                             animation_frame,
                             hitmap_out,
                             item_idx.unwrap(),
@@ -1399,7 +1399,7 @@ fn render_sub_agent_panel(
     messages: &[Message],
     workflow_graph: &WorkflowGraph,
     expanded_nodes: &HashSet<String>,
-    scroll: u16,
+    scroll: &mut u16,
     animation_frame: u32,
     hitmap_out: &mut FloatingPanelHitmap,
     item_idx: usize,
@@ -1450,27 +1450,9 @@ fn render_sub_agent_panel(
         true,
         false,
         animation_frame,
-        area.width,
+        area.width.max(300),
         crate::output::MAX_COLLAPSED_BODY_ROWS,
     );
-    for r in &regions {
-        let row0 = area.y as u32 + r.start_row + wf_offset;
-        let row1 = area.y as u32 + r.end_row + wf_offset;
-        let col0 = area.x + r.col_start;
-        let col1 = area.x + r.col_end;
-        if col1 > col0 && row1 > row0 {
-            hitmap_out.workflow_node_rects.push((
-                item_idx,
-                r.path_key.clone(),
-                Rect {
-                    x: col0,
-                    y: row0 as u16,
-                    width: col1 - col0,
-                    height: (row1 - row0) as u16,
-                },
-            ));
-        }
-    }
     lines.extend(wf_lines);
     lines.push(Line::from(""));
 
@@ -1523,7 +1505,29 @@ fn render_sub_agent_panel(
     let doc_lines = crate::output::build_lines(&items, &render_ctx);
     lines.extend(doc_lines);
 
-    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
+    let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+    *scroll = (*scroll).min(max_scroll);
+
+    for r in &regions {
+        let row0 = area.y as u32 + (r.start_row + wf_offset).saturating_sub(*scroll as u32);
+        let row1 = area.y as u32 + (r.end_row + wf_offset).saturating_sub(*scroll as u32);
+        let col0 = area.x + r.col_start;
+        let col1 = area.x + r.col_end;
+        if col1 > col0 && row1 > row0 {
+            hitmap_out.workflow_node_rects.push((
+                item_idx,
+                r.path_key.clone(),
+                Rect {
+                    x: col0,
+                    y: row0 as u16,
+                    width: col1 - col0,
+                    height: (row1 - row0) as u16,
+                },
+            ));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), area);
 }
 
 fn render_task_meta(f: &mut Frame, area: Rect, kind: TaskKind, snap: &TaskSnapshot) {
