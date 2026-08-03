@@ -3304,6 +3304,7 @@ fn append_fanout_horizontal(
 const MAX_BOX_WIDTH: u16 = crate::layout::CONTENT_MAX_WIDTH;
 const INDENT_PER_DEPTH: u16 = 4;
 pub(crate) const MAX_COLLAPSED_BODY_ROWS: usize = 27;
+const MAX_COLLAPSED_INDENT: u16 = 12;
 
 fn tree_prefix_spans(ancestor_last: &[bool], is_last: Option<bool>) -> Vec<Span<'static>> {
     let t = crate::theme::theme();
@@ -3361,6 +3362,11 @@ fn append_workflow_node_boxed(
     let t = crate::theme::theme();
     let depth = ancestor_last.len() as u16;
     let prefix_w = depth.saturating_sub(depth_offset) * INDENT_PER_DEPTH;
+    let prefix_w = if depth_offset > 0 {
+        prefix_w.min(MAX_COLLAPSED_INDENT)
+    } else {
+        prefix_w
+    };
     let col0 = prefix_w;
     let budget = panel_width.saturating_sub(prefix_w).min(MAX_BOX_WIDTH);
     if budget < 8 {
@@ -3548,6 +3554,11 @@ fn append_fanout_horizontal_boxed(
 ) {
     let branch_count = branches.len();
     let prefix_w = (ancestor_last.len() as u16).saturating_sub(depth_offset) * INDENT_PER_DEPTH;
+    let prefix_w = if depth_offset > 0 {
+        prefix_w.min(MAX_COLLAPSED_INDENT)
+    } else {
+        prefix_w
+    };
     let col_width = panel_width
         .saturating_sub(prefix_w)
         .saturating_div(branch_count as u16);
