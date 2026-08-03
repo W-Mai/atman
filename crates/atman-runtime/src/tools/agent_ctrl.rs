@@ -69,7 +69,18 @@ impl crate::watch::Watchable for AgentEntry {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::watch::WatchResult> + Send>>
     {
         let stream_tx = self.stream_tx.clone();
+        let output = self.output.clone();
         Box::pin(async move {
+            {
+                let existing = output.lock().unwrap().clone();
+                if existing.find(&pattern).is_some() {
+                    return crate::watch::WatchResult::Matched {
+                        row: None,
+                        col: None,
+                        text: existing,
+                    };
+                }
+            }
             let mut rx = stream_tx.subscribe();
             loop {
                 tokio::select! {
@@ -84,7 +95,19 @@ impl crate::watch::Watchable for AgentEntry {
                                 };
                             }
                         }
-                        Ok(AgentEvent::Exited { .. }) | Err(_) => return crate::watch::WatchResult::SourceExited,
+                        Ok(AgentEvent::Exited { status }) => {
+                            if let AgentRunStatus::Ok { final_text, .. } = &status {
+                                if final_text.find(&pattern).is_some() {
+                                    return crate::watch::WatchResult::Matched {
+                                        row: None,
+                                        col: None,
+                                        text: final_text.clone(),
+                                    };
+                                }
+                            }
+                            return crate::watch::WatchResult::SourceExited;
+                        }
+                        Err(_) => return crate::watch::WatchResult::SourceExited,
                     }
                 }
             }
