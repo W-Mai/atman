@@ -846,7 +846,29 @@ pub fn compute_content_lines(
     items: &[crate::app::OutputItem],
 ) -> Vec<String> {
     match snap.kind {
-        TaskKind::Flow | TaskKind::Subflow | TaskKind::Agent | TaskKind::Dispatch => {
+        TaskKind::Agent => {
+            let item = items.iter().rev().find(|it| match it {
+                crate::app::OutputItem::SubAgentActivity { handle, .. } => {
+                    *handle == snap.source_handle
+                }
+                _ => false,
+            });
+            let mut found: Vec<String> = Vec::new();
+            if let Some(crate::app::OutputItem::SubAgentActivity { output, .. }) = item {
+                for line in output.lines().rev() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        found.push(trimmed.to_string());
+                        if found.len() >= 3 {
+                            break;
+                        }
+                    }
+                }
+                found.reverse();
+            }
+            found
+        }
+        TaskKind::Flow | TaskKind::Subflow | TaskKind::Dispatch => {
             let sub = activity_nodes
                 .iter()
                 .rev()
