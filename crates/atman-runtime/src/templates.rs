@@ -154,6 +154,138 @@ flow agent_loop(iteration: int) -> string {
 }
 "#;
 
+pub const SUBAGENT_AT: &str = r#"flow describe() -> string {
+    return "Sub-agent flows for isolated research, verification, implementation, and review. Entry: subagent(goal, role, model, max_iter). Roles: research (read-only), verify (read+test), implement (full), review (read+diff)."
+}
+
+flow subagent(goal: string, role: string = "research", model: string = "smart", max_iter: int = 20) -> string {
+    when role == "research" {
+        return subflow(research_loop, goal, model, max_iter, 0)
+    }
+    when role == "verify" {
+        return subflow(verify_loop, goal, model, max_iter, 0)
+    }
+    when role == "implement" {
+        return subflow(implement_loop, goal, model, max_iter, 0)
+    }
+    when role == "review" {
+        return subflow(review_loop, goal, model, max_iter, 0)
+    }
+    return subflow(research_loop, goal, model, max_iter, 0)
+}
+
+flow research_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
+    when iteration >= max_iter {
+        return "[sub-agent: max iterations reached]"
+    }
+    reply = llm {
+        model: model
+        context: session
+        system: @"../prompts/system.md" + "\n\n## Your role: research\nYou are a research sub-agent. Read code before answering. Cite file:line. Don't guess — if uncertain, say so. Return findings as structured text. Trace the full data flow before concluding."
+        cache: true
+        retry: 3
+        tools: [
+            fs.read, fs.list, fs.grep,
+            bash.spawn, bash.status, bash.output, bash.kill,
+            web.fetch, web.search,
+            git.diff, git.show, git.log, git.status,
+            memory.fetch_confessions,
+            plan.read
+        ]
+    }
+    tool_uses = extract_tool_uses(reply)
+    when is_empty(tool_uses) {
+        return text_concat(reply)
+    }
+    tool_results = dispatch_all(tool_uses)
+    session.push(tool_results)
+    return subflow(research_loop, goal, model, max_iter, iteration + 1)
+}
+
+flow verify_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
+    when iteration >= max_iter {
+        return "[sub-agent: max iterations reached]"
+    }
+    reply = llm {
+        model: model
+        context: session
+        system: @"../prompts/system.md" + "\n\n## Your role: verify\nYou are a verification sub-agent. Reproduce the issue with a test. Trace the full data flow. Confirm root cause before concluding. Don't patch symptoms."
+        cache: true
+        retry: 3
+        tools: [
+            fs.read, fs.list, fs.grep,
+            bash.spawn, bash.status, bash.output, bash.kill,
+            web.fetch, web.search,
+            git.diff, git.show, git.log, git.status,
+            test.run,
+            memory.fetch_confessions,
+            plan.read
+        ]
+    }
+    tool_uses = extract_tool_uses(reply)
+    when is_empty(tool_uses) {
+        return text_concat(reply)
+    }
+    tool_results = dispatch_all(tool_uses)
+    session.push(tool_results)
+    return subflow(verify_loop, goal, model, max_iter, iteration + 1)
+}
+
+flow implement_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
+    when iteration >= max_iter {
+        return "[sub-agent: max iterations reached]"
+    }
+    reply = llm {
+        model: model
+        context: session
+        system: @"../prompts/system.md" + "\n\n## Your role: implement\nYou are an implementation sub-agent. Make the minimal change. Run quality gate (fmt+clippy+test) before returning. Fix root causes, not symptoms. Verify by comparison: trace the existing implementation's complete chain and confirm every link is wired."
+        cache: true
+        retry: 3
+        tools: [
+            fs.read, fs.write, fs.edit, fs.list, fs.grep,
+            bash.spawn, bash.status, bash.output, bash.kill, bash.list,
+            test.run,
+            git.diff, git.show, git.log, git.status, git.add, git.commit,
+            hunk.review, hunk.apply, hunk.plan_edit,
+            memory.fetch_confessions,
+            plan.write, plan.read, plan.tick
+        ]
+    }
+    tool_uses = extract_tool_uses(reply)
+    when is_empty(tool_uses) {
+        return text_concat(reply)
+    }
+    tool_results = dispatch_all(tool_uses)
+    session.push(tool_results)
+    return subflow(implement_loop, goal, model, max_iter, iteration + 1)
+}
+
+flow review_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
+    when iteration >= max_iter {
+        return "[sub-agent: max iterations reached]"
+    }
+    reply = llm {
+        model: model
+        context: session
+        system: @"../prompts/system.md" + "\n\n## Your role: review\nYou are a review sub-agent. Trace the existing implementation's complete interaction chain. Compare against similar implementations. List every missing link. Don't approve until you've checked every link. Reading code finds gaps; running tests doesn't."
+        cache: true
+        retry: 3
+        tools: [
+            fs.read, fs.list, fs.grep,
+            git.diff, git.show, git.log, git.status,
+            memory.fetch_confessions
+        ]
+    }
+    tool_uses = extract_tool_uses(reply)
+    when is_empty(tool_uses) {
+        return text_concat(reply)
+    }
+    tool_results = dispatch_all(tool_uses)
+    session.push(tool_results)
+    return subflow(review_loop, goal, model, max_iter, iteration + 1)
+}
+"#;
+
 pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<PathBuf> {
     let commands_dir = config_dir.join("commands");
     std::fs::create_dir_all(&commands_dir)
