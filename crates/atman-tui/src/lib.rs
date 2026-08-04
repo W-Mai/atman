@@ -394,6 +394,23 @@ async fn run_frames(
 
     let _reader_guard = ReaderGuard(reader_shutdown);
     let mut update_check = tokio::spawn(check_latest_release());
+
+    // Fan-in merge: session broadcast (session-level frames) + each FlowRun's
+    // frame_tx (per-FlowRun frames). Forwarders are spawned on SubAgentStarted
+    // / root FlowStart so the TUI receives every frame through one channel.
+    let (merge_tx, mut merge_rx) = tokio::sync::mpsc::unbounded_channel::<StreamFrame>();
+    {
+        let fwd_tx = merge_tx.clone();
+        let mut srx = handle.stream_rx;
+        tokio::spawn(async move {
+            while let Ok(f) = srx.recv().await {
+                let _ = fwd_tx.send(f);
+            }
+        });
+    }
+    let frame_merge_tx = merge_tx.clone();
+    let session_for_sub = handle.session.clone();
+
     loop {
         app.tick_toasts();
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
@@ -1264,25 +1281,41 @@ async fn run_frames(
                     app.scroll_down(scroll_delta as u32);
                 }
             }
-            frame = handle.stream_rx.recv() => {
-                match frame {
-                    Ok(frame) => {
-                        app.apply_stream_frame(frame);
-                        let mut drained = 0u32;
-                        while drained < 256 {
-                            match handle.stream_rx.try_recv() {
-                                Ok(extra) => {
-                                    app.apply_stream_frame(extra);
-                                    drained += 1;
-                                }
-                                Err(_) => break,
+            frame = merge_rx.recv() => {
+                if let Some(frame) = frame {
+                    // Spawn per-FlowRun frame_tx forwarders when new FlowRuns appear.
+                    let new_handle: Option<String> = match &frame {
+                        StreamFrame::FlowStart { parent_run_id: None, .. } => {
+                            session_for_sub.as_ref().and_then(|s| s.current_root())
+                        }
+                        StreamFrame::SubAgentStarted { handle, .. } => Some(handle.clone()),
+                        _ => None,
+                    };
+                    if let Some(h) = new_handle
+                        && let Some(sess) = &session_for_sub
+                        && let Ok(entry) = sess.flow_registry.lookup(&h)
+                    {
+                        let tx = frame_merge_tx.clone();
+                        let mut rx = entry.frame_tx.subscribe();
+                        tokio::spawn(async move {
+                            while let Ok(f) = rx.recv().await {
+                                let _ = tx.send(f);
                             }
+                        });
+                    }
+                    app.apply_stream_frame(frame);
+                    let mut drained = 0u32;
+                    while drained < 256 {
+                        match merge_rx.try_recv() {
+                            Ok(extra) => {
+                                app.apply_stream_frame(extra);
+                                drained += 1;
+                            }
+                            Err(_) => break,
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        app.record_lag(n, std::time::Instant::now());
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                } else {
+                    break;
                 }
             }
             ev = recv_task_event(handle.task_event_rx.as_mut()) => {

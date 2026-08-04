@@ -562,10 +562,9 @@ async fn run_streaming_once<'a>(
         .as_ref()
         .map(|e| e.frame_tx.clone());
     let emit_frame = |frame: crate::stream::StreamFrame| {
-        if let Some(tx) = &stream_tx {
-            let _ = tx.send(frame.clone());
-        }
         if let Some(tx) = &frame_tx {
+            let _ = tx.send(frame);
+        } else if let Some(tx) = &stream_tx {
             let _ = tx.send(frame);
         }
     };
