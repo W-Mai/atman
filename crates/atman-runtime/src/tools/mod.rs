@@ -76,6 +76,7 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(agent_ctrl::AgentStatus));
     reg.register(Arc::new(agent_ctrl::AgentOutput));
     reg.register(Arc::new(agent_ctrl::AgentKill));
+    reg.register(Arc::new(agent_ctrl::FlowInterject));
     reg.register(Arc::new(form::FormAsk));
     reg.register(Arc::new(session::SessionPush));
     reg.register(Arc::new(sleep::Sleep));

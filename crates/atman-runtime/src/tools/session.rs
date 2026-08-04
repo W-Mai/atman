@@ -82,9 +82,7 @@ impl Tool for SessionPush {
                     });
                 }
                 handle.lock().unwrap().push(msg.clone());
-                // Cap ephemeral sub-agent segments (no session_runtime) at 100
-                // messages to bound memory; root (session_runtime Some) is
-                // unbounded — it persists via the event sink.
+                // Cap ephemeral sub-agent segments; root persists via event sink.
                 if ctx.session_runtime.is_none() && handle.lock().unwrap().len() > 100 {
                     let mut h = handle.lock().unwrap();
                     let start = h.len() - 100;

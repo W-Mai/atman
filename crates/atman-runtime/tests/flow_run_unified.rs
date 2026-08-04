@@ -1,4 +1,4 @@
-//! Tests for S2: root FlowRun unification.
+//! Root FlowRun unification tests.
 //!
 //! Verifies that when a flow runs with a session, the root is registered in
 //! the agent_registry (so flow.output("root") / flow.interject("root") work)
@@ -7,7 +7,10 @@
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::event::FlowRunId;
 use atman_runtime::session::Session;
+use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
+use atman_runtime::tools::agent_ctrl::{AgentRegistry, FlowInterject};
 use atman_runtime::{Executor, Value, tools};
 
 const SIMPLE_FLOW: &str = r#"flow t(n: Int) -> Int {
@@ -34,7 +37,7 @@ async fn root_flow_run_registered_in_agent_registry() {
         .unwrap();
     assert!(matches!(out, Value::Int(5)));
 
-    // Root should be registered as a FlowRun in the agent_registry.
+    // Root should be in agent_registry.
     let root = session.agent_registry.lookup("root");
     assert!(root.is_ok(), "root should be in agent_registry");
     let root = root.unwrap();
@@ -92,4 +95,31 @@ async fn no_session_no_root_registration() {
     assert!(matches!(out, Value::Int(5)));
     // No session → no current_root pointer to check, but agent_registry on
     // the executor's tool_ctx is None, so no root entry created.
+}
+
+#[tokio::test]
+async fn flow_interject_delivers_to_target_entry_channel() {
+    let registry = Arc::new(AgentRegistry::new());
+    let entry = registry.create_entry("sub_1".into(), "g".into(), "m".into(), FlowRunId::now());
+    let ctx = ToolCtx::new().with_agent_registry(registry);
+    let mut rx = entry.interjection_tx.subscribe();
+    let args = ToolArgs {
+        positional: vec![Value::Str("sub_1".into()), Value::Str("wake up".into())],
+        named: vec![],
+    };
+    FlowInterject.call(args, &ctx).await.unwrap();
+    let inj = rx.try_recv().expect("interjection should arrive");
+    assert_eq!(inj.text, "wake up");
+}
+
+#[tokio::test]
+async fn flow_interject_unknown_handle_errors() {
+    let registry = Arc::new(AgentRegistry::new());
+    let ctx = ToolCtx::new().with_agent_registry(registry);
+    let args = ToolArgs {
+        positional: vec![Value::Str("nope".into()), Value::Str("x".into())],
+        named: vec![],
+    };
+    let err = FlowInterject.call(args, &ctx).await.unwrap_err();
+    assert!(err.to_string().contains("not found"));
 }

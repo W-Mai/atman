@@ -585,14 +585,9 @@ pub struct HandleCompactResult {
     pub compacted_end: usize,
 }
 
-/// Compact a messages_handle (a `Arc<Mutex<Vec<Message>>>`) in place by
-/// replacing the computed range with a CompactSummary message. This is the
-/// data-layer compaction primitive — it operates on any FlowRun's message
-/// segment, independent of the session.
-///
-/// Returns `None` if the messages are under `budget` or no compactable range
-/// is found. The caller is expected to hold the FlowRun's `compact_lock` when
-/// invoking this (see `ToolCtx.compact_lock_handle`).
+/// Compact a messages_handle in place (data-layer primitive, operates on any
+/// FlowRun's segment). Returns `None` if under `budget` or no compactable
+/// range. Caller should hold the FlowRun's `compact_lock`.
 pub fn compact_messages_on_handle(
     handle: &std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
     summary: String,

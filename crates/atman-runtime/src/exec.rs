@@ -544,10 +544,17 @@ async fn run_streaming_once<'a>(
     rules: &WatchRules,
     ctx: &EvalCtx<'a>,
 ) -> StreamOutcome {
+    // Prefer the FlowRun's interjection channel; fall back to session-level.
     let mut inj_rx = ctx
-        .session_runtime
+        .tool_ctx
+        .agent_entry
         .as_ref()
-        .map(|s| s.subscribe_injections());
+        .map(|e| e.interjection_tx.subscribe())
+        .or_else(|| {
+            ctx.session_runtime
+                .as_ref()
+                .map(|s| s.subscribe_injections())
+        });
     let stream_tx = ctx.tool_ctx.stream_tx.clone();
     let model_name = req.model.clone();
     let run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
@@ -630,7 +637,11 @@ async fn run_streaming_once<'a>(
             }
             inj_msg = poll_injection(&mut inj_rx), if inj_rx.is_some() && l3_redirect.is_none() => {
                 if let Some(inj) = inj_msg
-                    && ctx.turn_id.as_ref().is_some_and(|t| &inj.turn_id == t)
+                    && (ctx.session_runtime.is_none()
+                        || ctx
+                            .turn_id
+                            .as_ref()
+                            .is_some_and(|t| &inj.turn_id == t))
                 {
                     match inj.level {
                         crate::injection::InjectionLevel::L1Nudge => {

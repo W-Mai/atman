@@ -170,17 +170,14 @@ impl Executor {
                     graph,
                 });
         }
-        // Ensure root's tool_ctx carries the session stream_tx so downstream
-        // emit sites (exec.rs / eval) can use tool_ctx.stream_tx uniformly
-        // without the session_runtime fallback.
+        // Root's tool_ctx carries session stream_tx so emit sites use
+        // tool_ctx.stream_tx uniformly.
         let mut tool_ctx = self.tool_ctx.clone();
         if let Some(sess) = session.as_ref() {
             tool_ctx.stream_tx = Some(sess.stream_tx());
-            // Register root as a FlowRun in the agent_registry so that
-            // flow.output("root") / flow.interject("root") work uniformly.
-            // Root keeps using the session's MessageStream for its llm context
-            // (branch2, windowed+compacted); the entry is for output accumulation
-            // and interjection addressing.
+            // Register root so flow.output/interject("root") work. Root's llm
+            // context stays on session MessageStream; entry is for output +
+            // interjection addressing.
             let root_entry = sess.agent_registry.create_entry(
                 "root".to_string(),
                 sess.goal().unwrap_or_else(|| flow.name.name.clone()),

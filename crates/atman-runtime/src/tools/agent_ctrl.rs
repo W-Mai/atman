@@ -59,10 +59,8 @@ pub struct AgentEntry {
     pub child_run_id: FlowRunId,
     pub model: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
-    /// Per-FlowRun compaction lock. Bound to this entry's messages_handle so
-    /// the sub-agent can compact its own segment independently of the root
-    /// session's compaction.
     pub compact_lock: Arc<tokio::sync::Mutex<()>>,
+    pub interjection_tx: tokio::sync::broadcast::Sender<crate::injection::Injection>,
 }
 
 impl crate::watch::Watchable for AgentEntry {
@@ -152,6 +150,7 @@ impl AgentRegistry {
             model,
             started_at: chrono::Utc::now(),
             compact_lock: Arc::new(tokio::sync::Mutex::new(())),
+            interjection_tx: tokio::sync::broadcast::channel(32).0,
         });
         self.entries
             .lock()
@@ -254,6 +253,10 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         _ => None,
     };
     let model = extract_string(&args, "model", 0).unwrap_or_else(|_| "smart".to_string());
+    let inherit_context = args
+        .named("inherit_context")
+        .map(|v| matches!(v, Value::Bool(true)))
+        .unwrap_or(false);
     let agent_registry = ctx.agent_registry.clone().ok_or_else(|| {
         RuntimeError::ToolFailed("flow.spawn: no agent registry available on ctx".into())
     })?;
@@ -268,6 +271,12 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         model,
         child_run_id.clone(),
     );
+    if inherit_context {
+        if let Some(parent) = &ctx.session_messages_handle {
+            let snapshot = parent.lock().unwrap().clone();
+            *entry.messages.lock().unwrap() = snapshot;
+        }
+    }
 
     let task_registry = ctx.task_registry.clone();
     let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
@@ -501,6 +510,49 @@ impl Tool for AgentKill {
     }
 }
 
+pub struct FlowInterject;
+impl Tool for FlowInterject {
+    fn name(&self) -> &str {
+        "flow.interject"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Two
+    }
+    fn approval_level(&self, _args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
+        ApprovalLevel::Approve
+    }
+    fn description(&self) -> Option<&str> {
+        Some(
+            "Interject a text message into a running FlowRun (root or sub-agent) by handle. \
+             The target receives it as an L1 nudge at the next chunk boundary. \
+             Use handle \"root\" to interject into the main agent.",
+        )
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {"type": "string", "description": "Target FlowRun handle (e.g. from flow.spawn return, or \"root\")."},
+                "text": {"type": "string", "description": "Interjection text."}
+            },
+            "required": ["handle", "text"]
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let handle = extract_string(&args, "handle", 0)?;
+            let text = extract_string(&args, "text", 1)?;
+            let reg = ctx.agent_registry.clone().ok_or_else(|| {
+                RuntimeError::ToolFailed("flow.interject: no agent registry".into())
+            })?;
+            let entry = reg.lookup(&handle)?;
+            let inj = crate::injection::Injection::new_pending(crate::event::TurnId::now(), text);
+            let _ = entry.interjection_tx.send(inj);
+            Ok(Value::Unit)
+        })
+    }
+}
+
 fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, RuntimeError> {
     let value = match args.named(name) {
         Some(v) => v,
@@ -595,18 +647,27 @@ async fn run_flow_agent(
     });
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
-    // Unify the sub-agent's message store: if an AgentEntry is bound (async
-    // spawn path), point session_messages_handle at entry.messages so there is
-    // ONE message segment per FlowRun. Sync
-    // flow.spawn has no entry, so give it a fresh ephemeral handle.
+    // One message segment per FlowRun: async shares entry.messages, sync gets
+    // a fresh ephemeral handle.
+    let inherit = args
+        .named("inherit_context")
+        .map(|v| matches!(v, Value::Bool(true)))
+        .unwrap_or(false);
     child_ctx.session_messages_handle = match &ctx.agent_entry {
         Some(entry) => Some(std::sync::Arc::clone(&entry.messages)),
-        None => Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))),
+        None => {
+            let handle: std::sync::Arc<std::sync::Mutex<Vec<_>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            if inherit {
+                if let Some(parent) = &ctx.session_messages_handle {
+                    *handle.lock().unwrap() = parent.lock().unwrap().clone();
+                }
+            }
+            Some(handle)
+        }
     };
-    // Sync flow.spawn path has no AgentEntry; give it a fresh compact_lock so
-    // session.push / compaction within the child don't deadlock on the parent's
-    // lock and the child can compact its own segment. Async path gets its
-    // lock from the entry (set in run_sub_agent_async).
+    // Sync path has no entry; fresh compact_lock avoids deadlocking on the
+    // parent's lock.
     if ctx.agent_entry.is_none() {
         child_ctx.compact_lock_handle = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())));
     }

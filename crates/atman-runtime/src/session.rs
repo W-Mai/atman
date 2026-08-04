@@ -115,9 +115,7 @@ pub struct Session {
     pub watch: WatchHub,
     pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
     pub agent_registry: std::sync::Arc<crate::tools::agent_ctrl::AgentRegistry>,
-    /// Pointer to the current root FlowRun's handle.
-    /// Set on each user turn when the root `agent(user_prompt)` FlowRun is spawned.
-    /// Sub-agents can interject into root via `flow.interject("root", ...)`.
+    /// Handle of the current root FlowRun; set per turn.
     current_root: std::sync::Mutex<Option<String>>,
     pub compaction: CompactionState,
     pub interactions: InteractionServices,
@@ -576,6 +574,9 @@ impl PersistedContextState {
     }
 
     fn save(&self, dir: &Path) {
+        if dir.as_os_str().is_empty() {
+            return;
+        }
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(Self::path(dir), &json);
         }
@@ -880,17 +881,14 @@ impl Session {
         self.watch.stream_tx.clone()
     }
 
-    /// Set the current root FlowRun handle.
     pub fn set_current_root(&self, handle: String) {
         *self.current_root.lock().unwrap() = Some(handle);
     }
 
-    /// Get the current root FlowRun handle, if any.
     pub fn current_root(&self) -> Option<String> {
         self.current_root.lock().unwrap().clone()
     }
 
-    /// Clear the current root pointer (called when the root FlowRun completes).
     pub fn clear_current_root(&self) {
         *self.current_root.lock().unwrap() = None;
     }
