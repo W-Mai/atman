@@ -175,6 +175,7 @@ impl Executor {
         let mut tool_ctx = self.tool_ctx.clone();
         if let Some(sess) = session.as_ref() {
             tool_ctx.stream_tx = Some(sess.stream_tx());
+            tool_ctx.session_messages_handle = Some(sess.messages_handle());
             // Register root so flow.output/interject("root") work. Root's llm
             // context stays on session MessageStream; entry is for output +
             // interjection addressing.
