@@ -123,3 +123,105 @@ async fn flow_interject_unknown_handle_errors() {
     let err = FlowInterject.call(args, &ctx).await.unwrap_err();
     assert!(err.to_string().contains("not found"));
 }
+
+#[tokio::test]
+async fn flow_interject_cancels_running_subagent_llm() {
+    use atman_runtime::providers::mock::MockProvider;
+    use atman_runtime::tool::{Tool, ToolRegistry};
+    use atman_runtime::tools::agent_ctrl::{
+        AgentSpawn, FlowInterject, FlowRegistry, FlowRunStatus,
+    };
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let commands_dir = tmp.path().join(".config").join("atman").join("commands");
+    std::fs::create_dir_all(&commands_dir).unwrap();
+    let flow_src = r#"flow describe() -> string { return "test" }
+flow test_flow(goal: string) -> string {
+    reply = llm {
+        model: "mock"
+        prompt: goal
+    }
+    return text_concat(reply)
+}
+"#;
+    let mut f = std::fs::File::create(commands_dir.join("test_interject.at")).unwrap();
+    f.write_all(flow_src.as_bytes()).unwrap();
+
+    let home = tmp.path().to_path_buf();
+    let old_home = std::env::var_os("HOME");
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+
+    let registry = Arc::new(FlowRegistry::new());
+    let mut providers = atman_runtime::provider::ProviderRegistry::new();
+    providers.register(Arc::new(
+        MockProvider::new("mock").with_fallback(atman_runtime::Value::Str("ok".into())),
+    ));
+    let mut tools = ToolRegistry::new();
+    atman_runtime::tools::register_tier_zero(&mut tools);
+
+    let ctx = ToolCtx::new()
+        .with_registry(Arc::new(tools))
+        .with_providers(Arc::new(providers))
+        .with_flow_registry(registry.clone());
+
+    let spawn_args = ToolArgs {
+        positional: vec![],
+        named: vec![
+            (
+                "flow".into(),
+                Value::Str("test_interject.at@test_flow".into()),
+            ),
+            (
+                "arguments".into(),
+                Value::Struct(vec![("goal".into(), Value::Str("test goal".into()))]),
+            ),
+        ],
+    };
+    let result = AgentSpawn.call(spawn_args, &ctx).await.unwrap();
+    let handle = match result {
+        Value::Struct(fields) => fields
+            .iter()
+            .find(|(k, _)| k == "handle")
+            .and_then(|(_, v)| {
+                if let Value::Str(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("expected handle"),
+        _ => panic!("expected struct with handle"),
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let interject_args = ToolArgs {
+        positional: vec![Value::Str(handle.clone()), Value::Str("stop now".into())],
+        named: vec![],
+    };
+    let _ = FlowInterject.call(interject_args, &ctx).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let entry = registry.lookup(&handle).unwrap();
+    let status = entry.status.lock().unwrap().clone();
+    let is_err = matches!(status, FlowRunStatus::Err { .. });
+    assert!(
+        is_err,
+        "sub-agent should be err after interjection, got: {:?}",
+        status
+    );
+
+    if let Some(old) = old_home {
+        unsafe {
+            std::env::set_var("HOME", old);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+    }
+}

@@ -616,6 +616,9 @@ async fn call_and_maybe_stream_inner(
     let stall_dur = std::time::Duration::from_secs(stall_secs);
     let stall_sleep = tokio::time::sleep(stall_dur);
     tokio::pin!(stall_sleep);
+    let mut inj_rx = agent_entry
+        .map(|e| e.interjection_tx.subscribe())
+        .or_else(|| session.map(|s| s.subscribe_injections()));
     let mark_first_token = |first: &mut Option<std::time::Instant>| {
         if first.is_none() {
             *first = Some(std::time::Instant::now());
@@ -626,6 +629,30 @@ async fn call_and_maybe_stream_inner(
             biased;
             _ = flow_cancel.cancelled() => {
                 return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
+            }
+            inj = async {
+                match inj_rx.as_mut() {
+                    Some(rx) => rx.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            }, if inj_rx.is_some() => {
+                if let Some(inj) = inj {
+                    match inj.level {
+                        crate::injection::InjectionLevel::L4HardStop => {
+                            flow_cancel.cancel();
+                            return Err(RuntimeError::Cancelled(
+                                "hard stop from interjection".into(),
+                            ));
+                        }
+                        _ => {
+                            flow_cancel.cancel();
+                            return Err(RuntimeError::Cancelled(format!(
+                                "interjected: {}",
+                                inj.text
+                            )));
+                        }
+                    }
+                }
             }
             ev = events.recv() => {
                 match ev {
