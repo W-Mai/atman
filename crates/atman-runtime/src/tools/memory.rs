@@ -151,12 +151,14 @@ impl Tool for MemoryRecentTurns {
                 ]));
             }
             // Main-agent path: delegate to HistoryStore.
-            let Some(store) = ctx.history_store.as_ref() else {
+            let Some(store) = ctx.history_store.clone() else {
                 return Err(RuntimeError::ToolFailed(
                     "memory.recent_turns: no history store on context".into(),
                 ));
             };
-            let (total, msgs) = store.recent(n)?;
+            let (total, msgs) = tokio::task::spawn_blocking(move || store.recent(n))
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("recent_turns: {e}")))??;
             if let Some(cb) = &ctx.on_memory_recent {
                 cb(msgs.len() as u16);
             }
@@ -773,7 +775,7 @@ impl Tool for MemoryHistorySearch {
                 Some(Value::Int(n)) if *n > 0 => (*n as usize).min(50),
                 _ => 10,
             };
-            let Some(store) = ctx.history_store.as_ref() else {
+            let Some(store) = ctx.history_store.clone() else {
                 return Err(RuntimeError::ToolFailed(
                     "memory.history.search: no history store on context".into(),
                 ));
@@ -782,7 +784,10 @@ impl Tool for MemoryHistorySearch {
                 HistoryScope::Project => crate::history_store::SearchScope::Project,
                 HistoryScope::Session => crate::history_store::SearchScope::Session,
             };
-            let result = store.search(&query, search_scope, limit)?;
+            let result =
+                tokio::task::spawn_blocking(move || store.search(&query, search_scope, limit))
+                    .await
+                    .map_err(|e| RuntimeError::ToolFailed(format!("history.search: {e}")))??;
             let hits: Vec<Value> = result
                 .hits
                 .into_iter()
@@ -868,7 +873,7 @@ impl Tool for MemoryHistoryRead {
                 ),
                 _ => None,
             };
-            let Some(store) = ctx.history_store.as_ref() else {
+            let Some(store) = ctx.history_store.clone() else {
                 return Err(RuntimeError::ToolFailed(
                     "memory.history.read: no history store on context".into(),
                 ));
@@ -879,7 +884,9 @@ impl Tool for MemoryHistoryRead {
                 limit,
                 role_filter,
             };
-            let page = store.read(query)?;
+            let page = tokio::task::spawn_blocking(move || store.read(query))
+                .await
+                .map_err(|e| RuntimeError::ToolFailed(format!("history.read: {e}")))??;
             let item_count = page.items.len();
             let items: Vec<Value> = page.items.into_iter().map(Value::Message).collect();
             let start = offset;
@@ -953,15 +960,19 @@ impl Tool for MemoryHistoryCount {
                 ),
                 _ => None,
             };
-            let Some(store) = ctx.history_store.as_ref() else {
+            let Some(store) = ctx.history_store.clone() else {
                 return Err(RuntimeError::ToolFailed(
                     "memory.history.count: no history store on context".into(),
                 ));
             };
-            let role_strs: Option<Vec<&str>> = role_filter
-                .as_ref()
-                .map(|rs| rs.iter().map(|s| s.as_str()).collect());
-            let total = store.count(&session_id, role_strs.as_deref())?;
+            let total = tokio::task::spawn_blocking(move || {
+                let role_refs: Option<Vec<&str>> = role_filter
+                    .as_ref()
+                    .map(|rs| rs.iter().map(|s| s.as_str()).collect());
+                store.count(&session_id, role_refs.as_deref())
+            })
+            .await
+            .map_err(|e| RuntimeError::ToolFailed(format!("history.count: {e}")))??;
             Ok(Value::Int(total as i64))
         })
     }
