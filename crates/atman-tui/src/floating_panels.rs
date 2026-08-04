@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -25,6 +25,7 @@ pub struct FloatingPanel {
     pub scroll: u16,
     pub h_scroll: u16,
     pub split: bool,
+    pub expanded_tools: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +148,7 @@ impl FloatingPanels {
             scroll: 0,
             h_scroll: 0,
             split: false,
+            expanded_tools: HashSet::new(),
         };
         self.panels.push(panel);
         self.focused = Some(id.to_string());
@@ -1137,6 +1139,7 @@ fn render_panel_content(
                             messages,
                             workflow_graph,
                             expanded_nodes,
+                            &panel.expanded_tools,
                             &mut panel.scroll,
                             animation_frame,
                             hitmap_out,
@@ -1393,6 +1396,7 @@ fn render_sub_agent_panel(
     messages: &[Message],
     workflow_graph: &WorkflowGraph,
     expanded_nodes: &HashSet<String>,
+    expanded_tools: &HashSet<String>,
     scroll: &mut u16,
     animation_frame: u32,
     hitmap_out: &mut FloatingPanelHitmap,
@@ -1450,47 +1454,26 @@ fn render_sub_agent_panel(
     lines.extend(wf_lines);
     lines.push(Line::from(""));
 
-    // Section 3: Sub-document flow — convert messages to OutputItems and
-    // reuse build_lines so the rendering is identical to the main transcript.
-    let items: Vec<OutputItem> = messages
-        .iter()
-        .map(|msg| match msg.role {
-            atman_runtime::message::MessageRole::User => OutputItem::UserTurn {
-                text: msg.text_concat(),
-            },
-            atman_runtime::message::MessageRole::Assistant => OutputItem::AssistantMd {
-                md: msg.text_concat(),
-                streaming: false,
-                retried: false,
-            },
-            atman_runtime::message::MessageRole::Tool => {
-                let content: String = msg
-                    .parts
-                    .iter()
-                    .filter_map(|p| {
-                        if let atman_runtime::message::MessagePart::ToolResult { content, .. } = p {
-                            Some(content.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                OutputItem::SystemNote {
-                    text: content,
-                    level: crate::app::NoteLevel::Info,
+    // Section 3: Sub-document flow — use flatten_message for proper OutputItem
+    // types (Bash/DiffPreview/Terminal with collapse support), identical to
+    // the main transcript rendering.
+    let mut tool_map: HashMap<String, String> = HashMap::new();
+    for msg in messages {
+        if matches!(msg.role, atman_runtime::message::MessageRole::Assistant) {
+            for part in &msg.parts {
+                if let atman_runtime::message::MessagePart::ToolUse { id, name, .. } = part {
+                    tool_map.insert(id.clone(), name.clone());
                 }
             }
-            _ => OutputItem::SystemNote {
-                text: msg.text_concat(),
-                level: crate::app::NoteLevel::Info,
-            },
-        })
-        .collect();
+        }
+    }
+    let mut items: Vec<OutputItem> = Vec::new();
+    for msg in messages {
+        crate::history::flatten_message(msg, &mut items, &tool_map);
+    }
 
-    let empty_tools = HashSet::new();
     let render_ctx = crate::output::RenderCtx {
-        expanded_tools: &empty_tools,
+        expanded_tools,
         messages,
         animation_frame,
         panel_width: area.width,
