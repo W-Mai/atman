@@ -109,9 +109,9 @@ pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, 
     Ok(envelopes
         .iter()
         .filter_map(|env| match &env.event {
-            crate::event::Event::UserMsg { message, .. }
-            | crate::event::Event::AssistantMsg { message, .. }
-            | crate::event::Event::ToolResultMsg { message, .. }
+            crate::event::Event::UserMsg { message, flow_run_id: None, .. }
+            | crate::event::Event::AssistantMsg { message, flow_run_id: None, .. }
+            | crate::event::Event::ToolResultMsg { message, flow_run_id: None, .. }
             | crate::event::Event::SystemMsg { message, .. } => Some((env.seq, message.clone())),
             _ => None,
         })
@@ -449,9 +449,9 @@ pub(crate) fn apply_envelope_to_messages(
     acc: &mut Vec<(u64, Message)>,
 ) {
     match &env.event {
-        crate::event::Event::UserMsg { message, .. }
-        | crate::event::Event::AssistantMsg { message, .. }
-        | crate::event::Event::ToolResultMsg { message, .. }
+        crate::event::Event::UserMsg { message, flow_run_id: None, .. }
+        | crate::event::Event::AssistantMsg { message, flow_run_id: None, .. }
+        | crate::event::Event::ToolResultMsg { message, flow_run_id: None, .. }
         | crate::event::Event::SystemMsg { message, .. } => {
             acc.push((env.seq, message.clone()));
         }

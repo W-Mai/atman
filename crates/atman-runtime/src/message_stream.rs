@@ -118,9 +118,9 @@ impl MessageStream {
         for ev in &events[acc.replayed..] {
             crate::projection::message_window::apply_envelope_to_messages(ev, &mut acc.compacted);
             match &ev.event {
-                crate::event::Event::UserMsg { message, .. }
-                | crate::event::Event::AssistantMsg { message, .. }
-                | crate::event::Event::ToolResultMsg { message, .. }
+                crate::event::Event::UserMsg { message, flow_run_id: None, .. }
+                | crate::event::Event::AssistantMsg { message, flow_run_id: None, .. }
+                | crate::event::Event::ToolResultMsg { message, flow_run_id: None, .. }
                 | crate::event::Event::SystemMsg { message, .. } => {
                     acc.full_raw.push((ev.seq, message.clone()));
                 }
