@@ -576,8 +576,11 @@ async fn call_and_maybe_stream(
     session: Option<&crate::session::Session>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     flow_run_id: Option<&crate::event::FlowRunId>,
+    agent_entry: Option<&std::sync::Arc<crate::tools::agent_ctrl::AgentEntry>>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let result = call_and_maybe_stream_inner(provider, req, session, stream_tx, flow_run_id).await;
+    let result =
+        call_and_maybe_stream_inner(provider, req, session, stream_tx, flow_run_id, agent_entry)
+            .await;
     if let (Some(sess), Err(RuntimeError::AttachmentError { reason })) = (session, &result) {
         let count = sess.record_attachment_degrade(reason);
         if count > 0 {
@@ -597,6 +600,7 @@ async fn call_and_maybe_stream_inner(
     session: Option<&crate::session::Session>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     flow_run_id: Option<&crate::event::FlowRunId>,
+    agent_entry: Option<&std::sync::Arc<crate::tools::agent_ctrl::AgentEntry>>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
     let stream_tx = stream_tx.or_else(|| session.map(|s| s.stream_tx()));
     let Some(stream_tx) = stream_tx else {
@@ -636,10 +640,13 @@ async fn call_and_maybe_stream_inner(
                         }
                         mark_first_token(&mut first_token_at);
                         let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
-                            text,
+                            text: text.clone(),
                             model: model_name.clone(),
                             run_id: run_id.clone(),
                         });
+                        if let Some(entry) = agent_entry {
+                            entry.output.lock().unwrap().push_str(&text);
+                        }
                         if stall_active {
                             stall_sleep
                                 .as_mut()
@@ -658,6 +665,17 @@ async fn call_and_maybe_stream_inner(
                             total_tokens,
                             run_id: run_id.clone(),
                         });
+                        if let Some(entry) = agent_entry {
+                            entry
+                                .iteration
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let out = entry.output.lock().unwrap().clone();
+                            let _ = entry
+                                .stream_tx
+                                .send(crate::tools::agent_ctrl::AgentEvent::AssistantDone {
+                                    text: out,
+                                });
+                        }
                     }
                     Ok(_) | Err(_) => {}
                 }
@@ -677,10 +695,13 @@ async fn call_and_maybe_stream_inner(
                             }
                             mark_first_token(&mut first_token_at);
                             let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
-                                text,
+                                text: text.clone(),
                                 model: model_name.clone(),
                                 run_id: run_id.clone(),
                             });
+                            if let Some(entry) = agent_entry {
+                                entry.output.lock().unwrap().push_str(&text);
+                            }
                         }
                         crate::event::NodeEvent::ThinkingChunk { text } => {
                             mark_first_token(&mut first_token_at);
@@ -694,6 +715,18 @@ async fn call_and_maybe_stream_inner(
                                 total_tokens,
                                 run_id: run_id.clone(),
                             });
+                            if let Some(entry) = agent_entry {
+                                entry.iteration.fetch_add(
+                                    1,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                                let out = entry.output.lock().unwrap().clone();
+                                let _ = entry
+                                    .stream_tx
+                                    .send(crate::tools::agent_ctrl::AgentEvent::AssistantDone {
+                                        text: out,
+                                    });
+                            }
                         }
                         _ => {}
                     }
@@ -891,16 +924,14 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 label: format!("branch[{i}]"),
                                 parent_node_id: parent_id.clone(),
                             });
-                            if let Some(session) = ctx.session_runtime.as_ref() {
-                                let _ = session.stream_tx().send(
-                                    crate::stream::StreamFrame::FlowNodeStart {
-                                        run_id: run_id.0.to_string(),
-                                        node_id: branch_id.clone(),
-                                        kind: crate::nodegraph::NodeKind::UserConfirm,
-                                        label: format!("branch[{i}]"),
-                                        parent_node_id: parent_id.clone(),
-                                    },
-                                );
+                            if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
+                                let _ = tx.send(crate::stream::StreamFrame::FlowNodeStart {
+                                    run_id: run_id.0.to_string(),
+                                    node_id: branch_id.clone(),
+                                    kind: crate::nodegraph::NodeKind::UserConfirm,
+                                    label: format!("branch[{i}]"),
+                                    parent_node_id: parent_id.clone(),
+                                });
                             }
                         }
                         ctx.with_node(branch_id)
@@ -926,17 +957,14 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             status: status.clone(),
                             output_preview: None,
                         });
-                        if let Some(session) = ctx.session_runtime.as_ref() {
-                            let _ =
-                                session
-                                    .stream_tx()
-                                    .send(crate::stream::StreamFrame::FlowNodeEnd {
-                                        run_id: run_id.0.to_string(),
-                                        node_id: bid.clone(),
-                                        status,
-                                        output_preview: None,
-                                        parent_node_id: parent_id.clone(),
-                                    });
+                        if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
+                            let _ = tx.send(crate::stream::StreamFrame::FlowNodeEnd {
+                                run_id: run_id.0.to_string(),
+                                node_id: bid.clone(),
+                                status,
+                                output_preview: None,
+                                parent_node_id: parent_id.clone(),
+                            });
                         }
                     }
                 }
@@ -1132,6 +1160,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         ctx.session_runtime.as_deref(),
                         ctx.tool_ctx.stream_tx.clone(),
                         ctx.flow_run_id.as_ref(),
+                        ctx.tool_ctx.agent_entry.as_ref(),
                     )
                     .await;
                     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -1180,23 +1209,22 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             node_id: ctx.current_node_id.clone(),
                         });
                     }
+                    let input_with_cache = input_with_cache_for_window(&usage);
+                    if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
+                        let _ = tx.send(crate::stream::StreamFrame::LlmCallStats {
+                            model: model.clone(),
+                            input_tokens: usage.input,
+                            output_tokens: usage.output,
+                            cache_read: usage.cached_input,
+                            cache_write: usage.cache_write,
+                            ttft_ms: ttft_ms.unwrap_or(0),
+                            tokens_per_second: tps.unwrap_or(0.0),
+                            wallclock_ms: elapsed_ms,
+                            run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+                            node_id: ctx.current_node_id.clone(),
+                        });
+                    }
                     if let Some(session) = ctx.session_runtime.as_ref() {
-                        let input_with_cache = input_with_cache_for_window(&usage);
-                        let _ =
-                            session
-                                .stream_tx()
-                                .send(crate::stream::StreamFrame::LlmCallStats {
-                                    model: model.clone(),
-                                    input_tokens: usage.input,
-                                    output_tokens: usage.output,
-                                    cache_read: usage.cached_input,
-                                    cache_write: usage.cache_write,
-                                    ttft_ms: ttft_ms.unwrap_or(0),
-                                    tokens_per_second: tps.unwrap_or(0.0),
-                                    wallclock_ms: elapsed_ms,
-                                    run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
-                                    node_id: ctx.current_node_id.clone(),
-                                });
                         session.record_llm_call(
                             &model,
                             input_with_cache,
@@ -1508,6 +1536,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                         parent_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
                         parent_node_id: ctx.current_node_id.clone(),
                     });
+            } else if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
+                let _ = tx.send(crate::stream::StreamFrame::FlowStart {
+                    run_id: sub_run_id.0.to_string(),
+                    flow_name: name.name.clone(),
+                    parent_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+                    parent_node_id: ctx.current_node_id.clone(),
+                });
             }
             let sub_ctx = EvalCtx {
                 flow_run_id: Some(sub_run_id.clone()),
@@ -1539,15 +1574,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     status,
                 });
             }
-            if let Some(session) = ctx.session_runtime.as_ref() {
-                let _ = session
-                    .stream_tx()
-                    .send(crate::stream::StreamFrame::FlowDone {
-                        run_id: sub_run_id.0.to_string(),
-                        flow_name: name.name.clone(),
-                        ok,
-                        cancelled,
-                    });
+            if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
+                let _ = tx.send(crate::stream::StreamFrame::FlowDone {
+                    run_id: sub_run_id.0.to_string(),
+                    flow_name: name.name.clone(),
+                    ok,
+                    cancelled,
+                });
             }
             result
         }
@@ -3121,7 +3154,7 @@ mod sanitize_tests {
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
         let result =
-            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None).await;
+            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None, None).await;
         match result {
             Err(RuntimeError::ToolFailed(msg)) => {
                 assert!(
@@ -3142,7 +3175,7 @@ mod sanitize_tests {
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
         let result =
-            call_and_maybe_stream(&provider, stall_req(2), None, Some(stream_tx), None).await;
+            call_and_maybe_stream(&provider, stall_req(2), None, Some(stream_tx), None, None).await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3160,7 +3193,7 @@ mod sanitize_tests {
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
         let result =
-            call_and_maybe_stream(&provider, stall_req(0), None, Some(stream_tx), None).await;
+            call_and_maybe_stream(&provider, stall_req(0), None, Some(stream_tx), None, None).await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3179,7 +3212,7 @@ mod sanitize_tests {
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
         let result =
-            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None).await;
+            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None, None).await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3197,7 +3230,7 @@ mod sanitize_tests {
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
         let result =
-            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None).await;
+            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None, None).await;
         assert!(
             matches!(&result, Err(RuntimeError::ToolFailed(msg)) if msg.contains("stall timeout")),
             "expected stall timeout, got: {result:?}"

@@ -107,6 +107,7 @@ pub struct ToolCtx {
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
     pub on_memory_recent: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
     pub history_store: Option<std::sync::Arc<dyn crate::history_store::HistoryStore>>,
+    pub agent_entry: Option<std::sync::Arc<crate::tools::agent_ctrl::AgentEntry>>,
 }
 
 impl ToolCtx {
@@ -309,6 +310,14 @@ impl ToolCtx {
         store: std::sync::Arc<dyn crate::history_store::HistoryStore>,
     ) -> Self {
         self.history_store = Some(store);
+        self
+    }
+
+    pub fn with_agent_entry(
+        mut self,
+        entry: std::sync::Arc<crate::tools::agent_ctrl::AgentEntry>,
+    ) -> Self {
+        self.agent_entry = Some(entry);
         self
     }
 

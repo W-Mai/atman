@@ -1546,6 +1546,22 @@ impl AppState {
     }
 
     fn ensure_workflow_panel_and_apply(&mut self, frame: &StreamFrame) {
+        // Subflow recursion creates a new run_id per iteration. If a FlowStart's
+        // parent_run_id is already mapped to a SubAgentActivity, chain the new
+        // run_id to the same item so subsequent LlmChunk/ThinkingChunk/etc.
+        // frames route to the sub-agent instead of the main document flow.
+        if let StreamFrame::FlowStart {
+            run_id,
+            parent_run_id: Some(parent_rid),
+            ..
+        } = frame
+        {
+            if self.sub_agent_run_ids.contains_key(run_id) {
+                // already mapped (e.g. subagent flow's own FlowStart)
+            } else if let Some(&idx) = self.sub_agent_run_ids.get(parent_rid) {
+                self.sub_agent_run_ids.insert(run_id.clone(), idx);
+            }
+        }
         if let Some(rid) = frame_run_id(frame)
             && let Some(&idx) = self.sub_agent_run_ids.get(rid)
             && let Some(OutputItem::SubAgentActivity {

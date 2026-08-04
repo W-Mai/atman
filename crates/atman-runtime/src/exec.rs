@@ -154,16 +154,19 @@ fn emit_flow_node_start(
             parent_node_id: parent_node_id.map(String::from),
         });
     }
-    if let Some(session) = ctx.session_runtime.as_ref() {
-        let _ = session
-            .stream_tx()
-            .send(crate::stream::StreamFrame::FlowNodeStart {
-                run_id: run_id.0.to_string(),
-                node_id: node_id.to_string(),
-                kind,
-                label,
-                parent_node_id: parent_node_id.map(String::from),
-            });
+    if let Some(tx) = ctx
+        .session_runtime
+        .as_ref()
+        .map(|s| s.stream_tx())
+        .or_else(|| ctx.tool_ctx.stream_tx.clone())
+    {
+        let _ = tx.send(crate::stream::StreamFrame::FlowNodeStart {
+            run_id: run_id.0.to_string(),
+            node_id: node_id.to_string(),
+            kind,
+            label,
+            parent_node_id: parent_node_id.map(String::from),
+        });
     }
 }
 
@@ -237,16 +240,19 @@ fn emit_flow_node_end(
             output_preview: preview_owned.clone(),
         });
     }
-    if let Some(session) = ctx.session_runtime.as_ref() {
-        let _ = session
-            .stream_tx()
-            .send(crate::stream::StreamFrame::FlowNodeEnd {
-                run_id: run_id.0.to_string(),
-                node_id: node_id.to_string(),
-                status,
-                output_preview: preview_owned,
-                parent_node_id: parent_node_id.map(String::from),
-            });
+    if let Some(tx) = ctx
+        .session_runtime
+        .as_ref()
+        .map(|s| s.stream_tx())
+        .or_else(|| ctx.tool_ctx.stream_tx.clone())
+    {
+        let _ = tx.send(crate::stream::StreamFrame::FlowNodeEnd {
+            run_id: run_id.0.to_string(),
+            node_id: node_id.to_string(),
+            status,
+            output_preview: preview_owned,
+            parent_node_id: parent_node_id.map(String::from),
+        });
     }
 }
 

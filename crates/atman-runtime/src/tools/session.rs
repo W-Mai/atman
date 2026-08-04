@@ -81,7 +81,15 @@ impl Tool for SessionPush {
                         message: msg.clone(),
                     });
                 }
-                handle.lock().unwrap().push(msg);
+                handle.lock().unwrap().push(msg.clone());
+                if let Some(entry) = &ctx.agent_entry {
+                    let mut msgs = entry.messages.lock().unwrap();
+                    msgs.push(msg);
+                    if msgs.len() > 100 {
+                        let start = msgs.len() - 100;
+                        msgs.drain(..start);
+                    }
+                }
             }
             Ok(Value::Unit)
         })

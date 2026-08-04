@@ -202,6 +202,7 @@ flow research_loop(goal: string, model: string, max_iter: int, iteration: int) -
             plan.read
         ]
     }
+    session.push(reply)
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         return text_concat(reply)
@@ -234,6 +235,7 @@ flow verify_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
             plan.read
         ]
     }
+    session.push(reply)
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         return text_concat(reply)
@@ -266,6 +268,7 @@ flow implement_loop(goal: string, model: string, max_iter: int, iteration: int) 
             plan.write, plan.read, plan.tick
         ]
     }
+    session.push(reply)
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         return text_concat(reply)
@@ -294,6 +297,7 @@ flow review_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
             memory.fetch_confessions
         ]
     }
+    session.push(reply)
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         return text_concat(reply)

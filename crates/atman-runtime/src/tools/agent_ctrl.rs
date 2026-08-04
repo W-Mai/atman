@@ -240,7 +240,7 @@ async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         _ => None,
     };
     let flow = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
-    run_flow_agent(&flow, goal, &args, ctx).await
+    run_flow_agent(&flow, goal, &args, ctx, FlowRunId::now()).await
 }
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
@@ -292,72 +292,21 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             });
         }
 
-        // Spawn a sidecar task that subscribes to the parent stream and mirrors
-        // run_id-matched frames into entry.{output, messages, iteration} so that
-        // flow.output / flow.status / floating-panel can observe sub-agent progress.
-        let mirror_handle = {
-            let entry = Arc::clone(&entry_clone);
-            let tx = parent_stream_tx.clone();
-            let run_id_filter = child_run_id_str.clone();
-            tokio::spawn(async move {
-                let Some(tx) = tx else { return };
-                let mut rx = tx.subscribe();
-                loop {
-                    match rx.recv().await {
-                        Ok(frame) => {
-                            let rid = crate::stream::frame_run_id(&frame);
-                            if rid != Some(run_id_filter.as_str()) {
-                                continue;
-                            }
-                            match &frame {
-                                crate::stream::StreamFrame::LlmChunk { text, .. } => {
-                                    entry.output.lock().unwrap().push_str(text);
-                                }
-                                crate::stream::StreamFrame::LlmDone { .. } => {
-                                    entry
-                                        .iteration
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    // Forward to entry's own AgentEvent stream so
-                                    // watch() can observe sub-agent output.
-                                    let out = entry.output.lock().unwrap().clone();
-                                    let _ = entry
-                                        .stream_tx
-                                        .send(AgentEvent::AssistantDone { text: out });
-                                }
-                                crate::stream::StreamFrame::AssistantMsg { message, .. }
-                                | crate::stream::StreamFrame::ToolResultMsg { message, .. } => {
-                                    let mut msgs = entry.messages.lock().unwrap();
-                                    msgs.push(message.clone());
-                                    if msgs.len() > 100 {
-                                        let start = msgs.len() - 100;
-                                        msgs.drain(..start);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    }
-                }
-            })
-        };
-
         // Replace ctx.cancel with entry.cancel so flow.kill can actually cancel
-        // the sub-agent's flow execution.
+        // the sub-agent's flow execution. Pass entry into ctx so the DSL runtime
+        // can write output/messages/iteration synchronously during LLM calls.
         let mut ctx_for_flow = ctx_clone;
         ctx_for_flow.cancel = entry_clone.cancel.clone();
+        ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
 
         let result = run_flow_agent(
             &flow_ref,
             Some(entry_clone.goal.clone()),
             &args,
             &ctx_for_flow,
+            child_run_id.clone(),
         )
         .await;
-
-        // Stop mirroring before we read final status — the stream may lag.
-        mirror_handle.abort();
 
         let status = match &result {
             Ok(Value::Str(s)) => AgentRunStatus::Ok {
@@ -563,6 +512,7 @@ async fn run_flow_agent(
     goal: Option<String>,
     args: &ToolArgs,
     ctx: &ToolCtx,
+    run_id: FlowRunId,
 ) -> ToolResult {
     let Some(registry) = ctx.registry.as_ref() else {
         return Err(RuntimeError::ToolFailed(
@@ -626,7 +576,6 @@ async fn run_flow_agent(
         .iter()
         .map(|flow| (flow.name.name.clone(), flow.clone()))
         .collect();
-    let run_id = FlowRunId::now();
     let task_id = ctx.task_registry.as_ref().map(|tr| {
         tr.register(
             crate::task_registry::TaskKind::Agent,
