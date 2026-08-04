@@ -1354,6 +1354,13 @@ impl Session {
         self.compaction
             .last_input_tokens
             .store(window_tokens, std::sync::atomic::Ordering::Relaxed);
+        // Sync the messages Vec (root's messages_handle) with the compacted
+        // windowed view so root's llm context via messages_handle respects
+        // compaction (branch2 retired → unified on messages_handle).
+        let window_owned = checkpoint_messages.to_vec();
+        if let Ok(mut vec) = self.messages.lock() {
+            *vec = window_owned;
+        }
         self.refresh_window_snapshot();
         self.sink.emit(Event::Checkpoint {
             session_id: self.id.to_string(),

@@ -12,7 +12,7 @@ pub struct LlmContext {
 pub fn build_llm_context(
     args: &LlmNodeArgs,
     context_mode: ContextMode,
-    session: Option<&std::sync::Arc<crate::session::Session>>,
+    _session: Option<&std::sync::Arc<crate::session::Session>>,
     session_messages_handle: Option<
         &std::sync::Arc<std::sync::Mutex<Vec<crate::message::Message>>>,
     >,
@@ -24,28 +24,17 @@ pub fn build_llm_context(
         let budget_text = msgs.last().map(|m| m.text_concat()).unwrap_or_default();
         (msgs, budget_text)
     } else if !matches!(context_mode, ContextMode::None)
-        && let Some(session) = session
+        && let Some(handle) = session_messages_handle
     {
         let mut history = match context_mode {
-            ContextMode::Session => session.messages().to_vec(),
+            ContextMode::Session => handle.lock().unwrap().clone(),
             ContextMode::SessionRecent(n) => {
-                let all = session.messages();
+                let all = handle.lock().unwrap().clone();
                 let start = all.len().saturating_sub(n);
                 all[start..].to_vec()
             }
             ContextMode::None => Vec::new(),
         };
-        let budget_text = args.prompt.clone().unwrap_or_default();
-        if let Some(p) = args.prompt.clone()
-            && !p.is_empty()
-        {
-            history.push(crate::message::Message::user_text(turn_id.clone(), p));
-        }
-        (history, budget_text)
-    } else if !matches!(context_mode, ContextMode::None)
-        && let Some(handle) = session_messages_handle
-    {
-        let mut history = handle.lock().unwrap().clone();
         let budget_text = args.prompt.clone().unwrap_or_default();
         if let Some(p) = args.prompt.clone()
             && !p.is_empty()
