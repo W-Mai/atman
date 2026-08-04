@@ -12,6 +12,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut tool_map: HashMap<String, String> = HashMap::new();
     let mut flow_dones: HashMap<String, (bool, bool)> = HashMap::new();
     let mut llm_models: HashMap<String, String> = HashMap::new();
+    let mut sub_agent_run_ids: HashSet<String> = HashSet::new();
     for entry in entries {
         match entry {
             TranscriptEntry::Message { message, .. } => {
@@ -28,6 +29,13 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 ..
             } => {
                 flow_dones.insert(run_id.clone(), (*ok, *cancelled));
+            }
+            TranscriptEntry::FlowStart {
+                run_id,
+                parent_run_id: Some(_),
+                ..
+            } => {
+                sub_agent_run_ids.insert(run_id.clone());
             }
             TranscriptEntry::LlmCall {
                 run_id: Some(rid),
@@ -117,7 +125,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 {
                     apply_message_to_workflow(graph, msg, flow_run_id.as_deref());
                 }
-                if let Some(rid) = flow_run_id {
+                if let Some(rid) = flow_run_id
+                    && sub_agent_run_ids.contains(rid.as_str())
+                {
                     if !sub_agent_indices.contains_key(rid.as_str()) {
                         let (ok, cancelled) = flow_dones
                             .get(rid.as_str())
