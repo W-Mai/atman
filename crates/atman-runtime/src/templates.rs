@@ -131,7 +131,7 @@ flow agent_loop(iteration: int) -> string {
             memory.recent_turns, memory.history.search, memory.history.read,
             memory.spec.status, memory.spec.update, memory.spec.deviate,
             plan.write, plan.read, plan.tick,
-            flow.spawn, flow.status, flow.output, flow.kill, flow.list, flow.check,
+            flow.spawn, flow.status, flow.output, flow.kill, flow.interject, flow.list, flow.check,
             form.ask,
             help.show,
             preview.push,
@@ -199,7 +199,8 @@ flow research_loop(goal: string, model: string, max_iter: int, iteration: int) -
             web.fetch, web.search,
             git.diff, git.show, git.log, git.status,
             memory.fetch_confessions,
-            plan.read
+            plan.read,
+            flow.spawn, flow.status, flow.output, flow.kill, flow.interject
         ]
     }
     session.push(reply)
@@ -232,7 +233,8 @@ flow verify_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
             git.diff, git.show, git.log, git.status,
             test.run,
             memory.fetch_confessions,
-            plan.read
+            plan.read,
+            flow.spawn, flow.status, flow.output, flow.kill, flow.interject
         ]
     }
     session.push(reply)
@@ -265,7 +267,8 @@ flow implement_loop(goal: string, model: string, max_iter: int, iteration: int) 
             git.diff, git.show, git.log, git.status, git.add, git.commit,
             hunk.review, hunk.apply, hunk.plan_edit,
             memory.fetch_confessions,
-            plan.write, plan.read, plan.tick
+            plan.write, plan.read, plan.tick,
+            flow.spawn, flow.status, flow.output, flow.kill, flow.interject
         ]
     }
     session.push(reply)
@@ -294,7 +297,8 @@ flow review_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
         tools: [
             fs.read, fs.list, fs.grep,
             git.diff, git.show, git.log, git.status,
-            memory.fetch_confessions
+            memory.fetch_confessions,
+            flow.spawn, flow.status, flow.output, flow.kill, flow.interject
         ]
     }
     session.push(reply)
