@@ -1282,6 +1282,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             return crate::provider::assistant_message_to_value(&am);
                         }
                         Err(e) => {
+                            if matches!(e, RuntimeError::Cancelled(_)) {
+                                return Value::Err(e);
+                            }
                             if is_context_overflow_error(&e)
                                 && can_rebuild_from_session
                                 && !compact_after_overflow_used
