@@ -59,6 +59,10 @@ pub struct AgentEntry {
     pub child_run_id: FlowRunId,
     pub model: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Per-FlowRun compaction lock. Bound to this entry's messages_handle so
+    /// the sub-agent can compact its own segment independently of the root
+    /// session's compaction.
+    pub compact_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl crate::watch::Watchable for AgentEntry {
@@ -147,6 +151,7 @@ impl AgentRegistry {
             child_run_id,
             model,
             started_at: chrono::Utc::now(),
+            compact_lock: Arc::new(tokio::sync::Mutex::new(())),
         });
         self.entries
             .lock()
@@ -295,9 +300,12 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         // Replace ctx.cancel with entry.cancel so flow.kill can actually cancel
         // the sub-agent's flow execution. Pass entry into ctx so the DSL runtime
         // can write output/messages/iteration synchronously during LLM calls.
+        // Bind the sub-agent's own compact_lock so it can compact its segment
+        // independently.
         let mut ctx_for_flow = ctx_clone;
         ctx_for_flow.cancel = entry_clone.cancel.clone();
         ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
+        ctx_for_flow.compact_lock_handle = Some(Arc::clone(&entry_clone.compact_lock));
 
         let result = run_flow_agent(
             &flow_ref,
@@ -589,6 +597,10 @@ async fn run_flow_agent(
     let mut child_ctx = sanitize_child_ctx(ctx);
     child_ctx.session_messages_handle =
         Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+    // Sync flow.spawn path has no AgentEntry; give it a fresh compact_lock so
+    // session.push / compaction within the child don't deadlock on the parent's
+    // lock and the child can compact its own segment.
+    child_ctx.compact_lock_handle = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())));
     let out = crate::exec::exec_flow_with_siblings(
         flow,
         flow_args,
