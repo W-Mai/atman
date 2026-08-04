@@ -119,6 +119,8 @@ pub enum Event {
     },
     UserMsg {
         turn_id: TurnId,
+        #[serde(default)]
+        flow_run_id: Option<FlowRunId>,
         message: crate::message::Message,
     },
     AssistantMsg {
@@ -645,6 +647,7 @@ mod tests {
             42,
             Event::UserMsg {
                 turn_id: TurnId::now(),
+                flow_run_id: None,
                 message: crate::message::Message::user_text(TurnId::now(), "hello"),
             },
         );

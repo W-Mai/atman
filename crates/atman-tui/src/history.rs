@@ -255,6 +255,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             TranscriptEntry::FlowGraph {
                 run_id, graph, ts, ..
             } => {
+                if spawned_set.contains(run_id.as_str()) {
+                    continue;
+                }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -274,6 +277,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 spawned: _,
                 ts,
             } => {
+                if spawned_set.contains(run_id.as_str()) {
+                    continue;
+                }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -295,6 +301,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 parent_node_id,
                 ts,
             } => {
+                if spawned_set.contains(run_id.as_str()) {
+                    continue;
+                }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -316,6 +325,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 output_preview,
                 ts,
             } => {
+                if spawned_set.contains(run_id.as_str()) {
+                    continue;
+                }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -338,6 +350,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 args_preview,
                 ts,
             } => {
+                if spawned_set.contains(run_id.as_str()) {
+                    continue;
+                }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -358,6 +373,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 cancelled,
                 ts,
             } => {
+                if spawned_set.contains(run_id.as_str()) {
+                    continue;
+                }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -381,6 +399,12 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 node_id,
                 ts,
             } => {
+                if run_id
+                    .as_ref()
+                    .is_some_and(|r| spawned_set.contains(&r.0.to_string()))
+                {
+                    continue;
+                }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
                     &mut out,
@@ -552,6 +576,23 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         },
                         *ts,
                     ),
+                    TranscriptEntry::Message {
+                        message,
+                        flow_run_id: Some(frid),
+                    } => {
+                        let frame = match message.role {
+                            MessageRole::Assistant => StreamFrame::AssistantMsg {
+                                flow_run_id: Some(frid.clone()),
+                                message: message.clone(),
+                            },
+                            MessageRole::Tool => StreamFrame::ToolResultMsg {
+                                flow_run_id: Some(frid.clone()),
+                                message: message.clone(),
+                            },
+                            _ => continue,
+                        };
+                        (frame, None)
+                    }
                     _ => continue,
                 };
                 if let Some(rid) = frame_run_id(&frame)
@@ -1311,10 +1352,28 @@ mod tests {
                 message: Message::user_text(TurnId::now(), "read Cargo.toml"),
                 flow_run_id: Some(research_run.clone()),
             },
+            // Sub-agent flow node (tool call)
+            TranscriptEntry::FlowNodeStart {
+                run_id: research_run.clone(),
+                node_id: "stmt_0".into(),
+                kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                    path: "fs.read".into(),
+                },
+                label: "fs.read".into(),
+                parent_node_id: None,
+                ts: None,
+            },
             // Sub-agent assistant message (flow_run_id = research_run)
             TranscriptEntry::Message {
                 message: Message::assistant_text(TurnId::now(), "Here are the findings..."),
                 flow_run_id: Some(research_run.clone()),
+            },
+            TranscriptEntry::FlowNodeEnd {
+                run_id: research_run.clone(),
+                node_id: "stmt_0".into(),
+                status: atman_runtime::event::FlowNodeStatus::Ok,
+                output_preview: Some("ok".into()),
+                ts: None,
             },
             // Sub-agent done
             TranscriptEntry::FlowDone {
@@ -1358,15 +1417,25 @@ mod tests {
                 messages,
                 goal,
                 status,
+                workflow_graph,
                 ..
-            } if child_run_id == &sub_run => Some((messages.len(), goal.clone(), status.clone())),
+            } if child_run_id == &sub_run => Some((
+                messages.len(),
+                goal.clone(),
+                status.clone(),
+                workflow_graph.root.len(),
+            )),
             _ => None,
         });
         assert!(sub_item.is_some(), "SubAgentActivity should be created");
-        let (msg_count, goal, status) = sub_item.unwrap();
+        let (msg_count, goal, status, graph_nodes) = sub_item.unwrap();
         assert_eq!(msg_count, 2, "should have 2 messages (user + assistant)");
         assert_eq!(goal, "read Cargo.toml", "goal from first user message");
         assert_eq!(status, "ok", "status from FlowDone");
+        assert!(
+            graph_nodes > 0,
+            "workflow_graph should have nodes after rebuild, got {graph_nodes}"
+        );
     }
 
     #[test]

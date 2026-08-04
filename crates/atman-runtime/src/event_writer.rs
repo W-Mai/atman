@@ -497,6 +497,7 @@ mod tests {
                 1,
                 Event::UserMsg {
                     turn_id: tid.clone(),
+                    flow_run_id: None,
                     message: Message::user_text(tid, "sqlite fts full text search"),
                 },
             ))

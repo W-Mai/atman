@@ -105,6 +105,7 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
     let event = match msg.role {
         MessageRole::User => Event::UserMsg {
             turn_id,
+            flow_run_id: ctx.flow_run_id.clone(),
             message: msg.clone(),
         },
         MessageRole::Assistant => Event::AssistantMsg {

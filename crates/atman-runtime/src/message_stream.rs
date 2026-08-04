@@ -180,6 +180,7 @@ mod tests {
         match ty {
             "user_msg" => Event::UserMsg {
                 turn_id: msg.turn_id.clone(),
+                flow_run_id: None,
                 message: msg.clone(),
             },
             "assistant_msg" => Event::AssistantMsg {
@@ -457,6 +458,7 @@ mod tests {
             2,
             Event::UserMsg {
                 turn_id: TurnId::now(),
+                flow_run_id: None,
                 message: user("latest user"),
             },
         ));
@@ -489,6 +491,7 @@ mod tests {
             10,
             Event::UserMsg {
                 turn_id: TurnId::now(),
+                flow_run_id: None,
                 message: user("new user before compact"),
             },
         ));
@@ -528,6 +531,7 @@ mod tests {
             14,
             Event::UserMsg {
                 turn_id: TurnId::now(),
+                flow_run_id: None,
                 message: user("after compact user"),
             },
         ));

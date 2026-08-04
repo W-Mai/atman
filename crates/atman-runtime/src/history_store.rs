@@ -606,6 +606,7 @@ mod tests {
             1,
             crate::event::Event::UserMsg {
                 turn_id: u1.turn_id.clone(),
+                flow_run_id: None,
                 message: u1,
             },
         );
@@ -655,6 +656,7 @@ mod tests {
                 i,
                 crate::event::Event::UserMsg {
                     turn_id: m.turn_id.clone(),
+                    flow_run_id: None,
                     message: m,
                 },
             );

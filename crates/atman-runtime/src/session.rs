@@ -1538,6 +1538,7 @@ impl AppendMessageCommand {
         let event = match msg.role {
             MessageRole::User => Event::UserMsg {
                 turn_id: msg.turn_id.clone(),
+                flow_run_id: self.flow_run_id.clone(),
                 message: msg.clone(),
             },
             MessageRole::Assistant => {
