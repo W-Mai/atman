@@ -152,6 +152,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     continue;
                 }
                 if matches!(msg.role, MessageRole::User)
+                    && flow_run_id.as_ref().is_none_or(|rid| find_spawned_root(rid).is_none())
                     && let Some(i) = current_workflow_idx.take()
                     && let Some(OutputItem::WorkflowPanel { ended_at, .. }) = out.get_mut(i)
                     && ended_at.is_none()
@@ -1756,5 +1757,56 @@ mod tests {
             "spawned flow nodes leaked into main workflow panels: {:?}",
             leaked
         );
+    }
+
+    #[test]
+    fn verify_a5e33999() {
+        let path = std::path::Path::new(
+            "/Users/w-mai/Library/Application Support/atman/sessions/a5e33999-0e74-40f8-82f2-5a489916bbeb/events.jsonl",
+        );
+        if !path.exists() {
+            eprintln!("skipping: session file not found");
+            return;
+        }
+        let entries =
+            atman_runtime::projection::message_window::replay_transcript_from(path).unwrap();
+        let out = flatten_transcript(&entries);
+
+        let wf_count = out
+            .iter()
+            .filter(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
+            .count();
+        let sub_count = out
+            .iter()
+            .filter(|it| matches!(it, OutputItem::SubAgentActivity { .. }))
+            .count();
+        eprintln!("WorkflowPanel count: {}", wf_count);
+        eprintln!("SubAgentActivity count: {}", sub_count);
+
+        for (i, item) in out.iter().enumerate() {
+            if let OutputItem::WorkflowPanel { graph, .. } = item {
+                let node_count = count_workflow_nodes(&graph.root);
+                let labels = collect_node_labels(&graph.root);
+                eprintln!(
+                    "  WF[{}] nodes={} labels={:?}",
+                    i,
+                    node_count,
+                    &labels[..labels.len().min(5)]
+                );
+            }
+        }
+
+        for (i, item) in out.iter().enumerate() {
+            if let OutputItem::SubAgentActivity {
+                handle, workflow_graph, status, ..
+            } = item
+            {
+                let node_count = count_workflow_nodes(&workflow_graph.root);
+                eprintln!(
+                    "  SUB[{}] handle={} nodes={} status={}",
+                    i, handle, node_count, status
+                );
+            }
+        }
     }
 }
