@@ -649,12 +649,47 @@ async fn call_and_maybe_stream_inner(
                 if let Some(entry) = agent_entry {
                     let pending: Vec<_> =
                         entry.pending_injections.lock().unwrap().drain(..).collect();
-                    if let Some(inj) = pending.into_iter().next() {
-                        flow_cancel.cancel();
-                        return Err(RuntimeError::Cancelled(format!(
-                            "interjected: {}",
-                            inj.text
-                        )));
+                    for inj in pending {
+                        match inj.level {
+                            crate::injection::InjectionLevel::L1Nudge => {
+                                entry.messages.lock().unwrap().push(
+                                    crate::message::Message::user_text(
+                                        crate::event::TurnId::now(),
+                                        format!("[interjection] {}", inj.text),
+                                    ),
+                                );
+                            }
+                            crate::injection::InjectionLevel::L4HardStop => {
+                                flow_cancel.cancel();
+                                return Err(RuntimeError::Cancelled(format!(
+                                    "hard stop: {}",
+                                    inj.text
+                                )));
+                            }
+                            crate::injection::InjectionLevel::L3Redirect => {
+                                flow_cancel.cancel();
+                                if let Some(target) = inj.redirect_target {
+                                    return Err(RuntimeError::Redirect(target));
+                                }
+                                return Err(RuntimeError::Cancelled(format!(
+                                    "redirect (no target): {}",
+                                    inj.text
+                                )));
+                            }
+                            crate::injection::InjectionLevel::L2CourseCorrect => {
+                                flow_cancel.cancel();
+                                entry.messages.lock().unwrap().push(
+                                    crate::message::Message::user_text(
+                                        crate::event::TurnId::now(),
+                                        format!("[course correct] {}", inj.text),
+                                    ),
+                                );
+                                return Err(RuntimeError::Cancelled(format!(
+                                    "course correct: {}",
+                                    inj.text
+                                )));
+                            }
+                        }
                     }
                 }
             }

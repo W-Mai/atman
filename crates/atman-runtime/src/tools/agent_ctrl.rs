@@ -535,7 +535,10 @@ impl Tool for FlowInterject {
     fn description(&self) -> Option<&str> {
         Some(
             "Interject a text message into a running FlowRun (root or sub-agent) by handle. \
-             The target receives it as an L1 nudge at the next chunk boundary. \
+             L1 (nudge): inject text into context, flow continues. \
+             L2 (course_correct): inject text, cancel current LLM call, flow continues with correction. \
+             L3 (redirect): cancel current LLM call, redirect to a different flow. \
+             L4 (hard_stop): kill the FlowRun immediately. \
              Use handle \"root\" to interject into the main agent.",
         )
     }
@@ -544,7 +547,9 @@ impl Tool for FlowInterject {
             "type": "object",
             "properties": {
                 "handle": {"type": "string", "description": "Target FlowRun handle (e.g. from flow.spawn return, or \"root\")."},
-                "text": {"type": "string", "description": "Interjection text."}
+                "text": {"type": "string", "description": "Interjection text."},
+                "level": {"type": "string", "enum": ["l1_nudge", "l2_course_correct", "l3_redirect", "l4_hard_stop"], "default": "l1_nudge", "description": "Interjection level."},
+                "redirect_target": {"type": "string", "description": "Required for L3 redirect: the flow to redirect to."}
             },
             "required": ["handle", "text"]
         })
@@ -553,11 +558,39 @@ impl Tool for FlowInterject {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
             let text = extract_string(&args, "text", 1)?;
+            let level_str = args
+                .named("level")
+                .and_then(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "l1_nudge".to_string());
+            let level = match level_str.as_str() {
+                "l2_course_correct" => crate::injection::InjectionLevel::L2CourseCorrect,
+                "l3_redirect" => crate::injection::InjectionLevel::L3Redirect,
+                "l4_hard_stop" => crate::injection::InjectionLevel::L4HardStop,
+                _ => crate::injection::InjectionLevel::L1Nudge,
+            };
+            let redirect_target = args.named("redirect_target").and_then(|v| {
+                if let Value::Str(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            });
             let reg = ctx.flow_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("flow.interject: no agent registry".into())
             })?;
             let entry = reg.lookup(&handle)?;
-            let inj = crate::injection::Injection::new_pending(crate::event::TurnId::now(), text);
+            let inj = crate::injection::Injection::with_level(
+                crate::event::TurnId::now(),
+                text,
+                level,
+                redirect_target,
+            );
             entry.pending_injections.lock().unwrap().push(inj);
             entry.injection_notify.notify_one();
             Ok(Value::Unit)
