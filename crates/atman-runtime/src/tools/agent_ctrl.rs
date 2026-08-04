@@ -61,6 +61,7 @@ pub struct FlowEntry {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub compact_lock: Arc<tokio::sync::Mutex<()>>,
     pub interjection_tx: tokio::sync::broadcast::Sender<crate::injection::Injection>,
+    pub frame_tx: tokio::sync::broadcast::Sender<crate::stream::StreamFrame>,
 }
 
 impl crate::watch::Watchable for FlowEntry {
@@ -151,6 +152,7 @@ impl FlowRegistry {
             started_at: chrono::Utc::now(),
             compact_lock: Arc::new(tokio::sync::Mutex::new(())),
             interjection_tx: tokio::sync::broadcast::channel(32).0,
+            frame_tx: tokio::sync::broadcast::channel(256).0,
         });
         self.entries
             .lock()

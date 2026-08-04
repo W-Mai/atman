@@ -556,6 +556,19 @@ async fn run_streaming_once<'a>(
                 .map(|s| s.subscribe_injections())
         });
     let stream_tx = ctx.tool_ctx.stream_tx.clone();
+    let frame_tx = ctx
+        .tool_ctx
+        .agent_entry
+        .as_ref()
+        .map(|e| e.frame_tx.clone());
+    let emit_frame = |frame: crate::stream::StreamFrame| {
+        if let Some(tx) = &stream_tx {
+            let _ = tx.send(frame.clone());
+        }
+        if let Some(tx) = &frame_tx {
+            let _ = tx.send(frame);
+        }
+    };
     let model_name = req.model.clone();
     let run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
     let stall_secs = req.stall_timeout_secs;
@@ -597,13 +610,11 @@ async fn run_streaming_once<'a>(
                         if let Some(session) = ctx.session_runtime.as_ref() {
                             session.mark_streamed();
                         }
-                        if let Some(tx) = &stream_tx {
-                            let _ = tx.send(crate::stream::StreamFrame::LlmChunk {
-                                text: text.clone(),
-                                model: model_name.clone(),
-                                run_id: run_id.clone(),
-                            });
-                        }
+                        emit_frame(crate::stream::StreamFrame::LlmChunk {
+                            text: text.clone(),
+                            model: model_name.clone(),
+                            run_id: run_id.clone(),
+                        });
                         state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
                         if stall_active {
                             stall_sleep
@@ -612,20 +623,16 @@ async fn run_streaming_once<'a>(
                         }
                     }
                     Ok(NodeEvent::ThinkingChunk { text }) => {
-                        if let Some(tx) = &stream_tx {
-                            let _ = tx.send(crate::stream::StreamFrame::ThinkingChunk {
-                                text,
-                                run_id: run_id.clone(),
-                            });
-                        }
+                        emit_frame(crate::stream::StreamFrame::ThinkingChunk {
+                            text,
+                            run_id: run_id.clone(),
+                        });
                     }
                     Ok(NodeEvent::LlmDone { total_tokens }) => {
-                        if let Some(tx) = &stream_tx {
-                            let _ = tx.send(crate::stream::StreamFrame::LlmDone {
-                                total_tokens,
-                                run_id: run_id.clone(),
-                            });
-                        }
+                        emit_frame(crate::stream::StreamFrame::LlmDone {
+                            total_tokens,
+                            run_id: run_id.clone(),
+                        });
                         state.on_done(total_tokens, started, rules, &cancel);
                     }
                     Ok(_) => {}
@@ -688,30 +695,24 @@ async fn run_streaming_once<'a>(
                 if let Some(session) = ctx.session_runtime.as_ref() {
                     session.mark_streamed();
                 }
-                if let Some(tx) = &stream_tx {
-                    let _ = tx.send(crate::stream::StreamFrame::LlmChunk {
-                        text: text.clone(),
-                        model: model_name.clone(),
-                        run_id: run_id.clone(),
-                    });
-                }
+                emit_frame(crate::stream::StreamFrame::LlmChunk {
+                    text: text.clone(),
+                    model: model_name.clone(),
+                    run_id: run_id.clone(),
+                });
                 state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
             }
             NodeEvent::ThinkingChunk { text } => {
-                if let Some(tx) = &stream_tx {
-                    let _ = tx.send(crate::stream::StreamFrame::ThinkingChunk {
-                        text,
-                        run_id: run_id.clone(),
-                    });
-                }
+                emit_frame(crate::stream::StreamFrame::ThinkingChunk {
+                    text,
+                    run_id: run_id.clone(),
+                });
             }
             NodeEvent::LlmDone { total_tokens } => {
-                if let Some(tx) = &stream_tx {
-                    let _ = tx.send(crate::stream::StreamFrame::LlmDone {
-                        total_tokens,
-                        run_id: run_id.clone(),
-                    });
-                }
+                emit_frame(crate::stream::StreamFrame::LlmDone {
+                    total_tokens,
+                    run_id: run_id.clone(),
+                });
                 state.on_done(total_tokens, started, rules, &cancel);
             }
             _ => {}
