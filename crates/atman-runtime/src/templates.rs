@@ -164,7 +164,7 @@ pub const SUBAGENT_AT: &str = r#"flow describe() -> string {
     return "Sub-agent flows for isolated research, verification, implementation, and review. Entry: subagent(goal, role, model, max_iter). Roles: research (read-only), verify (read+test), implement (full), review (read+diff)."
 }
 
-flow subagent(goal: string, role: string = "research", model: string = "smart", max_iter: int = 20) -> string {
+flow subagent(goal: string, role: string = "research", model: string = "smart", max_iter: int = 200) -> string {
     when role == "research" {
         return subflow(research_loop, goal, model, max_iter, 0)
     }
