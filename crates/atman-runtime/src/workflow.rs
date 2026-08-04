@@ -779,6 +779,43 @@ fn parse_branch_index(node_id: &str) -> Option<usize> {
     rest[..end].parse().ok()
 }
 
+/// Rebuild a full workflow tree from a session's event log. Replays every
+/// FlowStart / FlowNodeStart / FlowNodeEnd / FlowEnd / FlowGraph event through
+/// a fresh WorkflowGraph so the complete executor tree (root + subflows) is
+/// restored on session reopen.
+pub fn rebuild_workflow_tree(events: &[crate::event::Event]) -> WorkflowGraph {
+    let mut g = WorkflowGraph::new(crate::event::TurnId::now());
+    for ev in events {
+        g.apply_event(ev);
+    }
+    g
+}
+
+/// Rebuild a single FlowRun's message segment from the event log, filtered by
+/// run_id. Returns AssistantMsg + ToolResultMsg messages tagged with the given
+/// flow_run_id, in event order.
+pub fn rebuild_messages_for_run(
+    events: &[crate::event::Event],
+    run_id: &crate::event::FlowRunId,
+) -> Vec<crate::message::Message> {
+    events
+        .iter()
+        .filter_map(|ev| match ev {
+            crate::event::Event::AssistantMsg {
+                flow_run_id: Some(rid),
+                message,
+                ..
+            } if rid == run_id => Some(message.clone()),
+            crate::event::Event::ToolResultMsg {
+                flow_run_id: Some(rid),
+                message,
+                ..
+            } if rid == run_id => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,4 +958,77 @@ mod tests {
         });
         assert!(g.root.is_empty());
     }
+}
+
+#[test]
+fn rebuild_workflow_tree_restores_root_and_subflow() {
+    use crate::event::{Event, FlowRunId};
+    let root = FlowRunId::now();
+    let child = FlowRunId::now();
+    let events = vec![
+        Event::FlowStart {
+            run_id: root.clone(),
+            flow_name: "agent".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        },
+        Event::FlowNodeStart {
+            run_id: root.clone(),
+            node_id: "stmt_0".into(),
+            kind: crate::nodegraph::NodeKind::Llm { model: None },
+            label: "llm".into(),
+            parent_node_id: None,
+        },
+        Event::FlowStart {
+            run_id: child.clone(),
+            flow_name: "subagent".into(),
+            parent_run_id: Some(root.clone()),
+            parent_node_id: Some("stmt_0".into()),
+        },
+        Event::FlowEnd {
+            run_id: child.clone(),
+            flow_name: "subagent".into(),
+            status: crate::event::FlowStatus::Ok,
+        },
+        Event::FlowEnd {
+            run_id: root.clone(),
+            flow_name: "agent".into(),
+            status: crate::event::FlowStatus::Ok,
+        },
+    ];
+    let g = rebuild_workflow_tree(&events);
+    assert_eq!(g.root.len(), 1, "one root flow");
+    assert_eq!(g.root[0].id, root.0.to_string());
+    // subflow attaches under stmt_0 (or root if parent node not found)
+    assert!(!g.root[0].children.is_empty(), "subflow nested under root");
+}
+
+#[test]
+fn rebuild_messages_for_run_filters_by_run_id() {
+    use crate::event::{Event, FlowRunId, TurnId};
+    use crate::message::{Message, MessagePart, MessageRole};
+    let root = FlowRunId::now();
+    let child = FlowRunId::now();
+    let tid = TurnId::now();
+    let mk = |role, text, rid| Event::AssistantMsg {
+        turn_id: tid.clone(),
+        flow_run_id: Some(rid),
+        message: Message {
+            role,
+            parts: vec![MessagePart::Text { text }],
+            turn_id: tid.clone(),
+        },
+    };
+    let events = vec![
+        mk(MessageRole::Assistant, "root reply".into(), root.clone()),
+        mk(MessageRole::Assistant, "child reply".into(), child.clone()),
+        mk(MessageRole::Assistant, "root again".into(), root.clone()),
+    ];
+    let root_msgs = rebuild_messages_for_run(&events, &root);
+    assert_eq!(root_msgs.len(), 2);
+    assert_eq!(root_msgs[0].text_concat(), "root reply");
+    assert_eq!(root_msgs[1].text_concat(), "root again");
+    let child_msgs = rebuild_messages_for_run(&events, &child);
+    assert_eq!(child_msgs.len(), 1);
+    assert_eq!(child_msgs[0].text_concat(), "child reply");
 }
