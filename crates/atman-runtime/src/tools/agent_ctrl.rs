@@ -282,7 +282,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
     let task_id = task_registry.as_ref().map(|tr| {
         tr.register(
-            crate::task_registry::TaskKind::Agent,
+            crate::task_registry::TaskKind::Flow,
             goal.clone().unwrap_or_default(),
             handle.clone(),
             session_id,
@@ -638,7 +638,7 @@ async fn run_flow_agent(
         .collect();
     let task_id = ctx.task_registry.as_ref().map(|tr| {
         tr.register(
-            crate::task_registry::TaskKind::Agent,
+            crate::task_registry::TaskKind::Flow,
             flow.name.name.clone(),
             run_id.0.to_string(),
             ctx.session_id.clone().unwrap_or_else(|| "anon".into()),

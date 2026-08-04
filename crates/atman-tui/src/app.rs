@@ -411,7 +411,7 @@ impl AppState {
                         .as_ref()
                         .map(|s| s.label.clone())
                         .unwrap_or_else(|| h.clone());
-                    (atman_runtime::TaskKind::Agent, label, 0, 0)
+                    (atman_runtime::TaskKind::Flow, label, 0, 0)
                 }
                 OutputItem::WorkflowPanel { .. } => {
                     let kind = snap

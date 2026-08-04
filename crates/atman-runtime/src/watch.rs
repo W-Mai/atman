@@ -376,14 +376,9 @@ impl Tool for Watch {
                 crate::task_registry::TaskKind::Bash => WatchSource::Bash {
                     handle: handle.clone(),
                 },
-                crate::task_registry::TaskKind::Agent => WatchSource::Agent {
+                crate::task_registry::TaskKind::Flow => WatchSource::Agent {
                     handle: handle.clone(),
                 },
-                other => {
-                    return Err(RuntimeError::ToolFailed(format!(
-                        "watch: task kind {other:?} does not support output monitoring"
-                    )));
-                }
             };
 
             let watcher_id = watch_hub.register(
@@ -424,7 +419,7 @@ impl Tool for Watch {
                         watchable,
                     );
                 }
-                crate::task_registry::TaskKind::Agent => {
+                crate::task_registry::TaskKind::Flow => {
                     let reg = ctx.agent_registry.clone().ok_or_else(|| {
                         RuntimeError::ToolFailed("watch: agent registry not available".into())
                     })?;
@@ -439,7 +434,6 @@ impl Tool for Watch {
                         watchable,
                     );
                 }
-                _ => unreachable!(),
             }
 
             Ok(Value::Struct(vec![(

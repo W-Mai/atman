@@ -29,9 +29,6 @@ pub enum TaskKind {
     Bash,
     Terminal,
     Flow,
-    Subflow,
-    Agent,
-    Dispatch,
 }
 
 impl TaskKind {
@@ -40,9 +37,6 @@ impl TaskKind {
             TaskKind::Bash => "Bash",
             TaskKind::Terminal => "Terminal",
             TaskKind::Flow => "Flow",
-            TaskKind::Subflow => "Subflow",
-            TaskKind::Agent => "Agent",
-            TaskKind::Dispatch => "Dispatch",
         }
     }
 }

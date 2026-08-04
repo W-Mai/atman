@@ -306,14 +306,7 @@ pub fn render(
     row += 1;
 
     // --- Lower: Background tasks grouped by TaskKind ---
-    let kinds = [
-        TaskKind::Bash,
-        TaskKind::Terminal,
-        TaskKind::Flow,
-        TaskKind::Subflow,
-        TaskKind::Agent,
-        TaskKind::Dispatch,
-    ];
+    let kinds = [TaskKind::Bash, TaskKind::Terminal, TaskKind::Flow];
 
     let mut first_group = true;
     for kind in kinds {
@@ -846,15 +839,17 @@ pub fn compute_content_lines(
     items: &[crate::app::OutputItem],
 ) -> Vec<String> {
     match snap.kind {
-        TaskKind::Agent => {
+        TaskKind::Flow => {
+            // Async sub-agents (flow.spawn) appear as SubAgentActivity items;
+            // background flows appear as activity nodes. Try both.
             let item = items.iter().rev().find(|it| match it {
                 crate::app::OutputItem::SubAgentActivity { handle, .. } => {
                     *handle == snap.source_handle
                 }
                 _ => false,
             });
-            let mut found: Vec<String> = Vec::new();
             if let Some(crate::app::OutputItem::SubAgentActivity { output, .. }) = item {
+                let mut found: Vec<String> = Vec::new();
                 for line in output.lines().rev() {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
@@ -865,10 +860,8 @@ pub fn compute_content_lines(
                     }
                 }
                 found.reverse();
+                return found;
             }
-            found
-        }
-        TaskKind::Flow | TaskKind::Subflow | TaskKind::Dispatch => {
             let sub = activity_nodes
                 .iter()
                 .rev()

@@ -29,7 +29,7 @@ impl Tool for TaskList {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "List all background tasks (bash, terminal, flow, agent, subflow, dispatch). Returns array of {id, kind, label, status, elapsed_ms, source_handle}. Filter by kind/status. Default: running only; pass all=true to include completed.",
+            "List all background tasks (bash, terminal, flow). Returns array of {id, kind, label, status, elapsed_ms, source_handle}. Filter by kind/status. Default: running only; pass all=true to include completed.",
         )
     }
 
@@ -37,7 +37,7 @@ impl Tool for TaskList {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "description": "Filter by kind: bash|terminal|flow|subflow|agent|dispatch"},
+                "kind": {"type": "string", "description": "Filter by kind: bash|terminal|flow"},
                 "status": {"type": "string", "description": "Filter by status: running|ok|err|killed"},
                 "all": {"type": "boolean", "description": "Include completed tasks (default false)"}
             }
@@ -133,9 +133,6 @@ fn parse_kind(s: &str) -> Option<crate::task_registry::TaskKind> {
         "bash" => Some(TaskKind::Bash),
         "terminal" => Some(TaskKind::Terminal),
         "flow" => Some(TaskKind::Flow),
-        "subflow" => Some(TaskKind::Subflow),
-        "agent" => Some(TaskKind::Agent),
-        "dispatch" => Some(TaskKind::Dispatch),
         _ => None,
     }
 }
@@ -157,9 +154,6 @@ fn kind_to_str(k: crate::task_registry::TaskKind) -> &'static str {
         TaskKind::Bash => "bash",
         TaskKind::Terminal => "terminal",
         TaskKind::Flow => "flow",
-        TaskKind::Subflow => "subflow",
-        TaskKind::Agent => "agent",
-        TaskKind::Dispatch => "dispatch",
     }
 }
 

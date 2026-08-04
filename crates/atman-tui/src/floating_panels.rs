@@ -63,9 +63,6 @@ pub fn task_kind_icon(kind: TaskKind) -> &'static str {
         TaskKind::Bash => "$",
         TaskKind::Terminal => "▶",
         TaskKind::Flow => "⬡",
-        TaskKind::Agent => "✦",
-        TaskKind::Subflow => "↳",
-        TaskKind::Dispatch => "≡",
     }
 }
 
@@ -1102,7 +1099,7 @@ fn render_panel_content(
                         render_placeholder(f, area, &panel.title);
                     }
                 }
-                TaskKind::Agent => {
+                TaskKind::Flow => {
                     let item_idx = items
                         .iter()
                         .enumerate()
@@ -1145,27 +1142,22 @@ fn render_panel_content(
                             hitmap_out,
                             item_idx.unwrap(),
                         );
-                    } else if let Some(snap) = snap {
-                        render_task_meta(f, area, kind, snap);
-                    } else {
-                        render_placeholder(f, area, &panel.title);
-                    }
-                }
-                _ => {
-                    let wp_idx = items.iter().enumerate().rev().find(|(_, it)| {
-                        if let OutputItem::WorkflowPanel { graph, .. } = it {
-                            graph.root.iter().any(|node| {
-                                matches!(
-                                    &node.kind,
-                                    atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. }
-                                        if run_id == &panel.id
-                                )
-                            })
-                        } else {
-                            false
-                        }
-                    });
-                    if let Some((panel_idx, _)) = wp_idx
+                    } else if let Some((panel_idx, _)) =
+                        items.iter().enumerate().rev().find(|(_, it)| {
+                            if let OutputItem::WorkflowPanel { graph, .. } = it {
+                                graph.root.iter().any(|node| {
+                                    matches!(
+                                        &node.kind,
+                                        atman_runtime::workflow::WorkflowNodeKind::Flow {
+                                            run_id,
+                                            ..
+                                        } if run_id == &panel.id
+                                    )
+                                })
+                            } else {
+                                false
+                            }
+                        })
                         && let Some(OutputItem::WorkflowPanel {
                             graph,
                             expanded_nodes,
@@ -1214,6 +1206,8 @@ fn render_panel_content(
                         let p = ratatui::widgets::Paragraph::new(lines)
                             .scroll((panel.scroll, panel.h_scroll));
                         f.render_widget(p, area);
+                    } else if let Some(snap) = snap {
+                        render_task_meta(f, area, kind, snap);
                     } else {
                         render_placeholder(f, area, &panel.title);
                     }
