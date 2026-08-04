@@ -944,7 +944,7 @@ impl Tool for TermInput {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Send input to a terminal's PTY. Use `text` for literal text, or `key` for\nspecial keys (enter, tab, esc, backspace, up, down, left, right, ctrl+c,\nctrl+d, ctrl+z). Use key: \"enter\" to submit a command, not text: \"\\r\".",
+            "Send input to a terminal's PTY. Use `text` for literal text, `key` for\nspecial keys (enter, tab, esc, backspace, up, down, left, right, ctrl+c,\nctrl+d, ctrl+z), or `mouse` for mouse events. Use key: \"enter\" to\nsubmit a command, not text: \"\\r\". Mouse actions: click, double_click,\nlong_press, drag, press, release, move, scroll_up, scroll_down.\nUse term.find to locate text on screen before clicking.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -953,7 +953,24 @@ impl Tool for TermInput {
             "properties": {
                 "handle": {"type": "string"},
                 "text": {"type": "string", "description": "Literal text to write. Do NOT use \\r or \\n here — use key:\"enter\" instead."},
-                "key": {"type": "string", "enum": ["enter", "tab", "esc", "backspace", "up", "down", "left", "right", "ctrl+c", "ctrl+d", "ctrl+z"]}
+                "key": {"type": "string", "enum": ["enter", "tab", "esc", "backspace", "up", "down", "left", "right", "ctrl+c", "ctrl+d", "ctrl+z"]},
+                "mouse": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["click", "double_click", "long_press", "drag", "press", "release", "move", "scroll_up", "scroll_down"],
+                            "description": "click=press+release, double_click=two clicks, long_press=press+500ms+release, drag=press+move+release (needs x2,y2), move=hover, scroll_up/down=wheel"
+                        },
+                        "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
+                        "x": {"type": "integer", "description": "Column (0-indexed, same as term.find col)"},
+                        "y": {"type": "integer", "description": "Row (0-indexed, same as term.find row)"},
+                        "x2": {"type": "integer", "description": "End column for drag"},
+                        "y2": {"type": "integer", "description": "End row for drag"}
+                    },
+                    "required": ["action", "x", "y"],
+                    "description": "Mouse event. Coordinates are 0-indexed — pass term.find (col,row) directly."
+                }
             },
             "required": ["handle"]
         })
@@ -967,31 +984,47 @@ impl Tool for TermInput {
             let handle = extract_string(&args, "handle", 0)?;
             let text = extract_optional_string(&args, "text").unwrap_or_default();
             let key = extract_optional_string(&args, "key");
+            let mouse = args.named("mouse");
             let registry = ctx.term_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("term.input: registry not available".into())
             })?;
             let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
             let entry = registry.lookup(&handle, &session_id)?;
 
-            let mut payload = text.into_bytes();
+            // Build steps: (bytes, delay_after).
+            let mut steps: Vec<(Vec<u8>, std::time::Duration)> = Vec::new();
+            let mut first = text.into_bytes();
             if let Some(k) = &key {
-                payload.extend_from_slice(&key_to_bytes(k));
+                first.extend_from_slice(&key_to_bytes(k));
             }
-            if payload.is_empty() {
+            if !first.is_empty() {
+                steps.push((first, std::time::Duration::ZERO));
+            }
+            if let Some(m) = &mouse {
+                steps.extend(mouse_to_steps(m)?);
+            }
+            if steps.is_empty() {
                 return Err(RuntimeError::ToolFailed(
-                    "term.input: provide at least one of `text` or `key`".into(),
+                    "term.input: provide at least one of `text`, `key`, or `mouse`".into(),
                 ));
             }
 
-            let n = {
-                let mut w = entry.writer.lock().expect("writer poisoned");
-                w.write_all(&payload)
-                    .map_err(|e| RuntimeError::ToolFailed(format!("term.input write: {e}")))?;
-                payload.len()
-            };
+            let mut total = 0usize;
+            for (payload, delay) in steps {
+                if !payload.is_empty() {
+                    let mut w = entry.writer.lock().expect("writer poisoned");
+                    w.write_all(&payload)
+                        .map_err(|e| RuntimeError::ToolFailed(format!("term.input write: {e}")))?;
+                    total += payload.len();
+                    drop(w);
+                }
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
             Ok(Value::Struct(vec![
                 ("ok".into(), Value::Bool(true)),
-                ("bytes_written".into(), Value::Int(n as i64)),
+                ("bytes_written".into(), Value::Int(total as i64)),
             ]))
         })
     }
@@ -1012,6 +1045,146 @@ fn key_to_bytes(key: &str) -> Vec<u8> {
         "ctrl+z" => vec![0x1a],
         _ => Vec::new(),
     }
+}
+
+/// SGR mouse bytes. Input coords are 0-indexed (term.find convention);
+/// SGR protocol is 1-indexed so we +1 internally.
+fn sgr(btn: u32, action: &str, col0: i64, row0: i64) -> Vec<u8> {
+    let x = col0 + 1;
+    let y = row0 + 1;
+    match action {
+        "press" => format!("\x1b[<{btn};{x};{y}M").into_bytes(),
+        "release" => format!("\x1b[<{btn};{x};{y}m").into_bytes(),
+        "move" => format!("\x1b[<{btn};{x};{y}M", btn = btn + 32).into_bytes(),
+        _ => Vec::new(),
+    }
+}
+
+/// Build (bytes, delay) steps from a mouse parameter.
+/// Coords are 0-indexed — pass term.find (col, row) directly as (x, y).
+fn mouse_to_steps(val: &Value) -> Result<Vec<(Vec<u8>, std::time::Duration)>, RuntimeError> {
+    let fields = match val {
+        Value::Struct(f) => f,
+        _ => {
+            return Err(RuntimeError::ToolFailed(
+                "term.input: mouse must be an object".into(),
+            ));
+        }
+    };
+    let get_str = |name: &str| -> Result<&str, RuntimeError> {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| {
+                if let Value::Str(s) = v {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| RuntimeError::ToolFailed(format!("term.input: mouse.{name} missing")))
+    };
+    let get_int = |name: &str| -> Result<i64, RuntimeError> {
+        fields
+            .iter()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| {
+                if let Value::Int(i) = v {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| RuntimeError::ToolFailed(format!("term.input: mouse.{name} missing")))
+    };
+    let get_opt_int = |name: &str| -> Option<i64> {
+        fields.iter().find(|(k, _)| k == name).and_then(|(_, v)| {
+            if let Value::Int(i) = v {
+                Some(*i)
+            } else {
+                None
+            }
+        })
+    };
+
+    let action = get_str("action")?;
+    let button_str = get_opt_str(fields, "button").unwrap_or("left");
+    let x = get_int("x")?;
+    let y = get_int("y")?;
+    let btn: u32 = match button_str {
+        "left" => 0,
+        "middle" => 1,
+        "right" => 2,
+        _ => {
+            return Err(RuntimeError::ToolFailed(format!(
+                "term.input: mouse.button must be left/right/middle, got {button_str}"
+            )));
+        }
+    };
+
+    let z = std::time::Duration::ZERO;
+    let gap = std::time::Duration::from_millis(50);
+    let long = std::time::Duration::from_millis(500);
+
+    match action {
+        "press" => Ok(vec![(sgr(btn, "press", x, y), z)]),
+        "release" => Ok(vec![(sgr(btn, "release", x, y), z)]),
+        "click" => Ok(vec![
+            (sgr(btn, "press", x, y), z),
+            (sgr(btn, "release", x, y), z),
+        ]),
+        "double_click" => Ok(vec![
+            (sgr(btn, "press", x, y), z),
+            (sgr(btn, "release", x, y), gap),
+            (sgr(btn, "press", x, y), z),
+            (sgr(btn, "release", x, y), z),
+        ]),
+        "long_press" => Ok(vec![
+            (sgr(btn, "press", x, y), long),
+            (sgr(btn, "release", x, y), z),
+        ]),
+        "drag" => {
+            let x2 = get_opt_int("x2").ok_or_else(|| {
+                RuntimeError::ToolFailed("term.input: mouse.drag requires x2".into())
+            })?;
+            let y2 = get_opt_int("y2").ok_or_else(|| {
+                RuntimeError::ToolFailed("term.input: mouse.drag requires y2".into())
+            })?;
+            let mut steps = vec![(sgr(btn, "press", x, y), z)];
+            let dx = x2 - x;
+            let dy = y2 - y;
+            let n = dx.unsigned_abs().max(dy.unsigned_abs());
+            for i in 1..=n {
+                let cx = x + dx * i as i64 / n as i64;
+                let cy = y + dy * i as i64 / n as i64;
+                steps.push((sgr(btn, "move", cx, cy), z));
+            }
+            steps.push((sgr(btn, "release", x2, y2), z));
+            Ok(steps)
+        }
+        "move" => Ok(vec![(sgr(0, "move", x, y), z)]),
+        "scroll_up" => Ok(vec![(
+            format!("\x1b[<64;{};{}M", x + 1, y + 1).into_bytes(),
+            z,
+        )]),
+        "scroll_down" => Ok(vec![(
+            format!("\x1b[<65;{};{}M", x + 1, y + 1).into_bytes(),
+            z,
+        )]),
+        _ => Err(RuntimeError::ToolFailed(format!(
+            "term.input: mouse.action must be click/double_click/long_press/drag/press/release/move/scroll_up/scroll_down, got {action}"
+        ))),
+    }
+}
+
+fn get_opt_str<'a>(fields: &'a [(String, Value)], name: &'a str) -> Option<&'a str> {
+    fields.iter().find(|(k, _)| k == name).and_then(|(_, v)| {
+        if let Value::Str(s) = v {
+            Some(s.as_str())
+        } else {
+            None
+        }
+    })
 }
 
 pub struct TermCapture;
