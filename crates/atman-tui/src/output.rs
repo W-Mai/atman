@@ -2651,6 +2651,16 @@ pub fn render_workflow_panel_with_regions(
     }
     let mut lines = vec![header];
     let mut regions: Vec<NodeRegion> = Vec::new();
+    // Register header click region so the expanded panel can be collapsed
+    // by clicking the header (path_key="" triggers toggle_workflow_panel_expansion).
+    regions.push(NodeRegion {
+        panel_item_index: 0,
+        path_key: String::new(),
+        start_row: 0,
+        end_row: 1,
+        col_start: 0,
+        col_end: panel_width,
+    });
     let mut pending_counter: u8 = 0;
     let legacy = std::env::var_os("ATMAN_LEGACY_WORKFLOW").is_some();
     if panel_expanded {
