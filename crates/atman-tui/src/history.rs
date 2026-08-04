@@ -10,50 +10,18 @@ use crate::app::{NoteLevel, OutputItem};
 
 pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut tool_map: HashMap<String, String> = HashMap::new();
-    let mut flow_dones: HashMap<String, (bool, bool)> = HashMap::new();
-    let mut llm_models: HashMap<String, String> = HashMap::new();
-    let mut sub_agent_run_ids: HashSet<String> = HashSet::new();
     for entry in entries {
-        match entry {
-            TranscriptEntry::Message { message, .. } => {
-                for part in &message.parts {
-                    if let MessagePart::ToolUse { id, name, .. } = part {
-                        tool_map.insert(id.clone(), name.clone());
-                    }
+        if let TranscriptEntry::Message { message, .. } = entry {
+            for part in &message.parts {
+                if let MessagePart::ToolUse { id, name, .. } = part {
+                    tool_map.insert(id.clone(), name.clone());
                 }
             }
-            TranscriptEntry::FlowDone {
-                run_id,
-                ok,
-                cancelled,
-                ..
-            } => {
-                flow_dones.insert(run_id.clone(), (*ok, *cancelled));
-            }
-            TranscriptEntry::FlowStart {
-                run_id,
-                parent_run_id: Some(_),
-                ..
-            } => {
-                sub_agent_run_ids.insert(run_id.clone());
-            }
-            TranscriptEntry::LlmCall {
-                run_id: Some(rid),
-                model,
-                ..
-            } => {
-                llm_models
-                    .entry(rid.0.to_string())
-                    .or_insert_with(|| model.clone());
-            }
-            _ => {}
         }
     }
 
     let mut out: Vec<OutputItem> = Vec::new();
     let mut current_workflow_idx: Option<usize> = None;
-    let mut sub_agent_indices: HashMap<String, usize> = HashMap::new();
-    let mut sub_agent_messages: HashMap<String, Vec<Message>> = HashMap::new();
     let ensure_panel = |out: &mut Vec<OutputItem>, current: &mut Option<usize>| -> usize {
         if let Some(i) = *current {
             return i;
@@ -125,46 +93,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 {
                     apply_message_to_workflow(graph, msg, flow_run_id.as_deref());
                 }
-                if let Some(rid) = flow_run_id
-                    && sub_agent_run_ids.contains(rid.as_str())
-                {
-                    if !sub_agent_indices.contains_key(rid.as_str()) {
-                        let (ok, cancelled) = flow_dones
-                            .get(rid.as_str())
-                            .cloned()
-                            .unwrap_or((false, false));
-                        let status = if cancelled {
-                            "killed".into()
-                        } else if ok {
-                            "ok".into()
-                        } else {
-                            "running".into()
-                        };
-                        let model = llm_models.get(rid.as_str()).cloned().unwrap_or_default();
-                        out.push(OutputItem::SubAgentActivity {
-                            handle: rid.clone(),
-                            goal: String::new(),
-                            child_run_id: rid.clone(),
-                            model,
-                            status,
-                            output: String::new(),
-                            iteration: 0,
-                            done: flow_dones.contains_key(rid.as_str()),
-                            expanded: false,
-                            messages: Vec::new(),
-                            workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
-                            expanded_nodes: HashSet::new(),
-                            workflow_expanded: false,
-                        });
-                        sub_agent_indices.insert(rid.clone(), out.len() - 1);
-                    }
-                    sub_agent_messages
-                        .entry(rid.clone())
-                        .or_default()
-                        .push(msg.clone());
-                } else {
-                    flatten_message(msg, &mut out, &tool_map);
-                }
+                flatten_message(msg, &mut out, &tool_map);
             }
             TranscriptEntry::DiffPreview {
                 title,
@@ -379,30 +308,6 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 out.push(OutputItem::MermaidDiagram {
                     source: source.clone(),
                 });
-            }
-        }
-    }
-    // Fill in SubAgentActivity items with collected messages.
-    for (rid, msgs) in sub_agent_messages {
-        if let Some(&idx) = sub_agent_indices.get(&rid)
-            && let Some(OutputItem::SubAgentActivity {
-                messages,
-                output,
-                goal,
-                ..
-            }) = out.get_mut(idx)
-        {
-            *messages = msgs.clone();
-            *output = msgs
-                .iter()
-                .filter(|m| matches!(m.role, MessageRole::Assistant))
-                .map(|m| m.text_concat())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if goal.is_empty()
-                && let Some(first_user) = msgs.iter().find(|m| matches!(m.role, MessageRole::User))
-            {
-                *goal = first_user.text_concat();
             }
         }
     }
