@@ -343,12 +343,7 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
-    if let Some(tx) = ctx
-        .session_runtime
-        .as_ref()
-        .map(|s| s.stream_tx())
-        .or_else(|| ctx.tool_ctx.stream_tx.clone())
-    {
+    if let Some(tx) = ctx.tool_ctx.stream_tx.clone() {
         ctx_with_anchors = ctx_with_anchors.with_stream_tx(tx);
     }
     let ctx_with_anchors = if let Some(session) = ctx.session_runtime.as_ref() {

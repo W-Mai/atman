@@ -154,12 +154,7 @@ fn emit_flow_node_start(
             parent_node_id: parent_node_id.map(String::from),
         });
     }
-    if let Some(tx) = ctx
-        .session_runtime
-        .as_ref()
-        .map(|s| s.stream_tx())
-        .or_else(|| ctx.tool_ctx.stream_tx.clone())
-    {
+    if let Some(tx) = ctx.tool_ctx.stream_tx.clone() {
         let _ = tx.send(crate::stream::StreamFrame::FlowNodeStart {
             run_id: run_id.0.to_string(),
             node_id: node_id.to_string(),
@@ -240,12 +235,7 @@ fn emit_flow_node_end(
             output_preview: preview_owned.clone(),
         });
     }
-    if let Some(tx) = ctx
-        .session_runtime
-        .as_ref()
-        .map(|s| s.stream_tx())
-        .or_else(|| ctx.tool_ctx.stream_tx.clone())
-    {
+    if let Some(tx) = ctx.tool_ctx.stream_tx.clone() {
         let _ = tx.send(crate::stream::StreamFrame::FlowNodeEnd {
             run_id: run_id.0.to_string(),
             node_id: node_id.to_string(),
@@ -558,11 +548,7 @@ async fn run_streaming_once<'a>(
         .session_runtime
         .as_ref()
         .map(|s| s.subscribe_injections());
-    let stream_tx = ctx
-        .session_runtime
-        .as_ref()
-        .map(|s| s.stream_tx())
-        .or_else(|| ctx.tool_ctx.stream_tx.clone());
+    let stream_tx = ctx.tool_ctx.stream_tx.clone();
     let model_name = req.model.clone();
     let run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
     let stall_secs = req.stall_timeout_secs;

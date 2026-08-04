@@ -595,12 +595,21 @@ async fn run_flow_agent(
     });
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
-    child_ctx.session_messages_handle =
-        Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+    // Unify the sub-agent's message store: if an AgentEntry is bound (async
+    // spawn path), point session_messages_handle at entry.messages so there is
+    // ONE message segment per FlowRun. Sync
+    // flow.spawn has no entry, so give it a fresh ephemeral handle.
+    child_ctx.session_messages_handle = match &ctx.agent_entry {
+        Some(entry) => Some(std::sync::Arc::clone(&entry.messages)),
+        None => Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))),
+    };
     // Sync flow.spawn path has no AgentEntry; give it a fresh compact_lock so
     // session.push / compaction within the child don't deadlock on the parent's
-    // lock and the child can compact its own segment.
-    child_ctx.compact_lock_handle = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())));
+    // lock and the child can compact its own segment. Async path gets its
+    // lock from the entry (set in run_sub_agent_async).
+    if ctx.agent_entry.is_none() {
+        child_ctx.compact_lock_handle = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())));
+    }
     let out = crate::exec::exec_flow_with_siblings(
         flow,
         flow_args,

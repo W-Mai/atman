@@ -82,13 +82,13 @@ impl Tool for SessionPush {
                     });
                 }
                 handle.lock().unwrap().push(msg.clone());
-                if let Some(entry) = &ctx.agent_entry {
-                    let mut msgs = entry.messages.lock().unwrap();
-                    msgs.push(msg);
-                    if msgs.len() > 100 {
-                        let start = msgs.len() - 100;
-                        msgs.drain(..start);
-                    }
+                // Cap ephemeral sub-agent segments (no session_runtime) at 100
+                // messages to bound memory; root (session_runtime Some) is
+                // unbounded — it persists via the event sink.
+                if ctx.session_runtime.is_none() && handle.lock().unwrap().len() > 100 {
+                    let mut h = handle.lock().unwrap();
+                    let start = h.len() - 100;
+                    h.drain(..start);
                 }
             }
             Ok(Value::Unit)

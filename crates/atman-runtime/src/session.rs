@@ -115,6 +115,10 @@ pub struct Session {
     pub watch: WatchHub,
     pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
     pub agent_registry: std::sync::Arc<crate::tools::agent_ctrl::AgentRegistry>,
+    /// Pointer to the current root FlowRun's handle.
+    /// Set on each user turn when the root `agent(user_prompt)` FlowRun is spawned.
+    /// Sub-agents can interject into root via `flow.interject("root", ...)`.
+    current_root: std::sync::Mutex<Option<String>>,
     pub compaction: CompactionState,
     pub interactions: InteractionServices,
     injection_queue: Mutex<Vec<Injection>>,
@@ -656,6 +660,7 @@ impl Session {
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
+            current_root: std::sync::Mutex::new(None),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
@@ -758,6 +763,7 @@ impl Session {
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
+            current_root: std::sync::Mutex::new(None),
             compaction: {
                 let c = CompactionState::new();
                 if persisted.window_tokens > 0 {
@@ -809,6 +815,7 @@ impl Session {
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
+            current_root: std::sync::Mutex::new(None),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
@@ -871,6 +878,21 @@ impl Session {
 
     pub fn stream_tx(&self) -> broadcast::Sender<StreamFrame> {
         self.watch.stream_tx.clone()
+    }
+
+    /// Set the current root FlowRun handle.
+    pub fn set_current_root(&self, handle: String) {
+        *self.current_root.lock().unwrap() = Some(handle);
+    }
+
+    /// Get the current root FlowRun handle, if any.
+    pub fn current_root(&self) -> Option<String> {
+        self.current_root.lock().unwrap().clone()
+    }
+
+    /// Clear the current root pointer (called when the root FlowRun completes).
+    pub fn clear_current_root(&self) {
+        *self.current_root.lock().unwrap() = None;
     }
 
     pub fn stream_subscribe(&self) -> broadcast::Receiver<StreamFrame> {
