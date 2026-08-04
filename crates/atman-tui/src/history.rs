@@ -144,6 +144,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                             messages: Vec::new(),
                             workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
                             expanded_nodes: HashSet::new(),
+                            workflow_expanded: false,
                         });
                         sub_agent_indices.insert(rid.clone(), out.len() - 1);
                     }

@@ -97,6 +97,7 @@ pub enum OutputItem {
         messages: Vec<Message>,
         workflow_graph: WorkflowGraph,
         expanded_nodes: HashSet<String>,
+        workflow_expanded: bool,
     },
 }
 
@@ -731,10 +732,18 @@ impl AppState {
     }
 
     pub fn toggle_workflow_panel_expansion(&mut self, panel_index: usize) {
-        if let Some(OutputItem::WorkflowPanel { panel_expanded, .. }) =
-            self.items.get_mut(panel_index)
-        {
-            *panel_expanded = !*panel_expanded;
+        if let Some(item) = self.items.get_mut(panel_index) {
+            match item {
+                OutputItem::WorkflowPanel { panel_expanded, .. } => {
+                    *panel_expanded = !*panel_expanded;
+                }
+                OutputItem::SubAgentActivity {
+                    workflow_expanded, ..
+                } => {
+                    *workflow_expanded = !*workflow_expanded;
+                }
+                _ => return,
+            }
             self.expanded_version = self.expanded_version.wrapping_add(1);
         }
     }
@@ -1492,6 +1501,7 @@ impl AppState {
                     messages: Vec::new(),
                     workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
                     expanded_nodes: HashSet::new(),
+                    workflow_expanded: false,
                 });
                 self.sub_agent_run_ids.insert(child_run_id, idx);
             }

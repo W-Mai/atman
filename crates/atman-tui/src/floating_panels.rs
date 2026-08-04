@@ -1123,6 +1123,7 @@ fn render_panel_content(
                         messages,
                         workflow_graph,
                         expanded_nodes,
+                        workflow_expanded,
                         ..
                     }) = item
                     {
@@ -1139,6 +1140,7 @@ fn render_panel_content(
                             messages,
                             workflow_graph,
                             expanded_nodes,
+                            *workflow_expanded,
                             &panel.expanded_tools,
                             &mut panel.scroll,
                             animation_frame,
@@ -1396,6 +1398,7 @@ fn render_sub_agent_panel(
     messages: &[Message],
     workflow_graph: &WorkflowGraph,
     expanded_nodes: &HashSet<String>,
+    workflow_expanded: bool,
     expanded_tools: &HashSet<String>,
     scroll: &mut u16,
     animation_frame: u32,
@@ -1445,8 +1448,8 @@ fn render_sub_agent_panel(
     let (wf_lines, regions) = crate::output::render_workflow_panel_with_regions(
         workflow_graph,
         expanded_nodes,
-        true,
-        false,
+        workflow_expanded,
+        status == "killed",
         animation_frame,
         area.width.max(300),
         crate::output::MAX_COLLAPSED_BODY_ROWS,
