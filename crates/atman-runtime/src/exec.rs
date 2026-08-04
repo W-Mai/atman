@@ -547,11 +547,48 @@ async fn run_streaming_once<'a>(
     // Drain pending interjections from the tool-execution phase.
     if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
         let pending: Vec<_> = entry.pending_injections.lock().unwrap().drain(..).collect();
-        if let Some(inj) = pending.into_iter().next() {
-            return StreamOutcome::Done(Value::Err(RuntimeError::Cancelled(format!(
-                "interjected: {}",
-                inj.text
-            ))));
+        for inj in pending {
+            match inj.level {
+                crate::injection::InjectionLevel::L1Nudge => {
+                    entry
+                        .messages
+                        .lock()
+                        .unwrap()
+                        .push(crate::message::Message::user_text(
+                            crate::event::TurnId::now(),
+                            format!("[interjection] {}", inj.text),
+                        ));
+                }
+                crate::injection::InjectionLevel::L4HardStop => {
+                    return StreamOutcome::Done(Value::Err(RuntimeError::Cancelled(format!(
+                        "hard stop: {}",
+                        inj.text
+                    ))));
+                }
+                crate::injection::InjectionLevel::L3Redirect => {
+                    if let Some(target) = inj.redirect_target {
+                        return StreamOutcome::Done(Value::Err(RuntimeError::Redirect(target)));
+                    }
+                    return StreamOutcome::Done(Value::Err(RuntimeError::Cancelled(format!(
+                        "redirect (no target): {}",
+                        inj.text
+                    ))));
+                }
+                crate::injection::InjectionLevel::L2CourseCorrect => {
+                    entry
+                        .messages
+                        .lock()
+                        .unwrap()
+                        .push(crate::message::Message::user_text(
+                            crate::event::TurnId::now(),
+                            format!("[course correct] {}", inj.text),
+                        ));
+                    return StreamOutcome::Done(Value::Err(RuntimeError::Cancelled(format!(
+                        "course correct: {}",
+                        inj.text
+                    ))));
+                }
+            }
         }
     }
     let stream_tx = ctx.tool_ctx.stream_tx.clone();
@@ -650,12 +687,52 @@ async fn run_streaming_once<'a>(
                 if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
                     let pending: Vec<_> =
                         entry.pending_injections.lock().unwrap().drain(..).collect();
-                    if let Some(inj) = pending.into_iter().next() {
-                        cancel.cancel();
-                        break Err(RuntimeError::Cancelled(format!(
-                            "interjected: {}",
-                            inj.text
-                        )));
+                    for inj in &pending {
+                        if matches!(inj.level, crate::injection::InjectionLevel::L1Nudge) {
+                            entry.messages.lock().unwrap().push(
+                                crate::message::Message::user_text(
+                                    crate::event::TurnId::now(),
+                                    format!("[interjection] {}", inj.text),
+                                ),
+                            );
+                        }
+                    }
+                    if let Some(inj) = pending.iter().find(|i| {
+                        !matches!(i.level, crate::injection::InjectionLevel::L1Nudge)
+                    }) {
+                        match inj.level {
+                            crate::injection::InjectionLevel::L4HardStop => {
+                                cancel.cancel();
+                                break Err(RuntimeError::Cancelled(format!(
+                                    "hard stop: {}",
+                                    inj.text
+                                )));
+                            }
+                            crate::injection::InjectionLevel::L3Redirect => {
+                                cancel.cancel();
+                                if let Some(target) = &inj.redirect_target {
+                                    break Err(RuntimeError::Redirect(target.clone()));
+                                }
+                                break Err(RuntimeError::Cancelled(format!(
+                                    "redirect (no target): {}",
+                                    inj.text
+                                )));
+                            }
+                            crate::injection::InjectionLevel::L2CourseCorrect => {
+                                cancel.cancel();
+                                entry.messages.lock().unwrap().push(
+                                    crate::message::Message::user_text(
+                                        crate::event::TurnId::now(),
+                                        format!("[course correct] {}", inj.text),
+                                    ),
+                                );
+                                break Err(RuntimeError::Cancelled(format!(
+                                    "course correct: {}",
+                                    inj.text
+                                )));
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
