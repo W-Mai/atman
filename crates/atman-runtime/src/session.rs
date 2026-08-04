@@ -114,7 +114,7 @@ pub struct Session {
     pub turn: TurnState,
     pub watch: WatchHub,
     pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
-    pub agent_registry: std::sync::Arc<crate::tools::agent_ctrl::AgentRegistry>,
+    pub flow_registry: std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>,
     /// Handle of the current root FlowRun; set per turn.
     current_root: std::sync::Mutex<Option<String>>,
     pub compaction: CompactionState,
@@ -660,7 +660,7 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
-            agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
+            flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
             current_root: std::sync::Mutex::new(None),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
@@ -763,7 +763,7 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
-            agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
+            flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
             current_root: std::sync::Mutex::new(None),
             compaction: {
                 let c = CompactionState::new();
@@ -815,7 +815,7 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
-            agent_registry: std::sync::Arc::new(crate::tools::agent_ctrl::AgentRegistry::new()),
+            flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
             current_root: std::sync::Mutex::new(None),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),

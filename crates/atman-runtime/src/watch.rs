@@ -420,7 +420,7 @@ impl Tool for Watch {
                     );
                 }
                 crate::task_registry::TaskKind::Flow => {
-                    let reg = ctx.agent_registry.clone().ok_or_else(|| {
+                    let reg = ctx.flow_registry.clone().ok_or_else(|| {
                         RuntimeError::ToolFailed("watch: agent registry not available".into())
                     })?;
                     let entry = reg.lookup(&handle)?;

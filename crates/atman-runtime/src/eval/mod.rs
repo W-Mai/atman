@@ -330,7 +330,7 @@ async fn dispatch_tool_call<'a>(
             .with_session_messages_handle(session.messages_handle())
             .with_session_runtime(session.clone())
             .with_watch_hub(std::sync::Arc::clone(&session.watch_hub))
-            .with_agent_registry(std::sync::Arc::clone(&session.agent_registry))
+            .with_flow_registry(std::sync::Arc::clone(&session.flow_registry))
             .with_compact_lock_handle(session.compact_lock_handle())
     } else {
         ctx_with_anchors
@@ -571,7 +571,7 @@ async fn call_and_maybe_stream(
     session: Option<&crate::session::Session>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     flow_run_id: Option<&crate::event::FlowRunId>,
-    agent_entry: Option<&std::sync::Arc<crate::tools::agent_ctrl::AgentEntry>>,
+    agent_entry: Option<&std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
     let result =
         call_and_maybe_stream_inner(provider, req, session, stream_tx, flow_run_id, agent_entry)
@@ -595,7 +595,7 @@ async fn call_and_maybe_stream_inner(
     session: Option<&crate::session::Session>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     flow_run_id: Option<&crate::event::FlowRunId>,
-    agent_entry: Option<&std::sync::Arc<crate::tools::agent_ctrl::AgentEntry>>,
+    agent_entry: Option<&std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
     let stream_tx = stream_tx.or_else(|| session.map(|s| s.stream_tx()));
     let Some(stream_tx) = stream_tx else {
@@ -667,7 +667,7 @@ async fn call_and_maybe_stream_inner(
                             let out = entry.output.lock().unwrap().clone();
                             let _ = entry
                                 .stream_tx
-                                .send(crate::tools::agent_ctrl::AgentEvent::AssistantDone {
+                                .send(crate::tools::agent_ctrl::FlowEvent::AssistantDone {
                                     text: out,
                                 });
                         }
@@ -718,7 +718,7 @@ async fn call_and_maybe_stream_inner(
                                 let out = entry.output.lock().unwrap().clone();
                                 let _ = entry
                                     .stream_tx
-                                    .send(crate::tools::agent_ctrl::AgentEvent::AssistantDone {
+                                    .send(crate::tools::agent_ctrl::FlowEvent::AssistantDone {
                                         text: out,
                                     });
                             }

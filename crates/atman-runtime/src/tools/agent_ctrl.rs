@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 pub struct AgentSpawn;
 
 #[derive(Debug, Clone)]
-pub enum AgentRunStatus {
+pub enum FlowRunStatus {
     Running {
         started_at: chrono::DateTime<chrono::Utc>,
     },
@@ -26,7 +26,7 @@ pub enum AgentRunStatus {
     },
 }
 
-impl AgentRunStatus {
+impl FlowRunStatus {
     pub fn is_running(&self) -> bool {
         matches!(self, Self::Running { .. })
     }
@@ -42,18 +42,18 @@ impl AgentRunStatus {
 }
 
 #[derive(Debug, Clone)]
-pub enum AgentEvent {
+pub enum FlowEvent {
     AssistantDone { text: String },
-    Exited { status: AgentRunStatus },
+    Exited { status: FlowRunStatus },
 }
 
-pub struct AgentEntry {
+pub struct FlowEntry {
     pub handle: String,
     pub goal: String,
-    pub status: Arc<Mutex<AgentRunStatus>>,
+    pub status: Arc<Mutex<FlowRunStatus>>,
     pub output: Arc<Mutex<String>>,
     pub cancel: tokio_util::sync::CancellationToken,
-    pub stream_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    pub stream_tx: tokio::sync::broadcast::Sender<FlowEvent>,
     pub messages: Arc<Mutex<Vec<Message>>>,
     pub iteration: Arc<std::sync::atomic::AtomicU64>,
     pub child_run_id: FlowRunId,
@@ -63,7 +63,7 @@ pub struct AgentEntry {
     pub interjection_tx: tokio::sync::broadcast::Sender<crate::injection::Injection>,
 }
 
-impl crate::watch::Watchable for AgentEntry {
+impl crate::watch::Watchable for FlowEntry {
     fn watch_output(
         self: Arc<Self>,
         pattern: String,
@@ -88,7 +88,7 @@ impl crate::watch::Watchable for AgentEntry {
                 tokio::select! {
                     _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,
                     result = rx.recv() => match result {
-                        Ok(AgentEvent::AssistantDone { text }) => {
+                        Ok(FlowEvent::AssistantDone { text }) => {
                             if text.find(&pattern).is_some() {
                                 return crate::watch::WatchResult::Matched {
                                     row: None,
@@ -97,8 +97,8 @@ impl crate::watch::Watchable for AgentEntry {
                                 };
                             }
                         }
-                        Ok(AgentEvent::Exited { status }) => {
-                            if let AgentRunStatus::Ok { final_text, .. } = &status {
+                        Ok(FlowEvent::Exited { status }) => {
+                            if let FlowRunStatus::Ok { final_text, .. } = &status {
                                 if final_text.find(&pattern).is_some() {
                                     return crate::watch::WatchResult::Matched {
                                         row: None,
@@ -118,11 +118,11 @@ impl crate::watch::Watchable for AgentEntry {
 }
 
 #[derive(Default)]
-pub struct AgentRegistry {
-    entries: Mutex<std::collections::HashMap<String, Arc<AgentEntry>>>,
+pub struct FlowRegistry {
+    entries: Mutex<std::collections::HashMap<String, Arc<FlowEntry>>>,
 }
 
-impl AgentRegistry {
+impl FlowRegistry {
     pub fn new() -> Self {
         Self::default()
     }
@@ -133,12 +133,12 @@ impl AgentRegistry {
         goal: String,
         model: String,
         child_run_id: FlowRunId,
-    ) -> Arc<AgentEntry> {
+    ) -> Arc<FlowEntry> {
         let (stream_tx, _) = tokio::sync::broadcast::channel(64);
-        let entry = Arc::new(AgentEntry {
+        let entry = Arc::new(FlowEntry {
             handle: handle.clone(),
             goal,
-            status: Arc::new(Mutex::new(AgentRunStatus::Running {
+            status: Arc::new(Mutex::new(FlowRunStatus::Running {
                 started_at: chrono::Utc::now(),
             })),
             output: Arc::new(Mutex::new(String::new())),
@@ -159,7 +159,7 @@ impl AgentRegistry {
         entry
     }
 
-    pub fn lookup(&self, handle: &str) -> Result<Arc<AgentEntry>, RuntimeError> {
+    pub fn lookup(&self, handle: &str) -> Result<Arc<FlowEntry>, RuntimeError> {
         self.entries
             .lock()
             .unwrap()
@@ -257,7 +257,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         .named("inherit_context")
         .map(|v| matches!(v, Value::Bool(true)))
         .unwrap_or(false);
-    let agent_registry = ctx.agent_registry.clone().ok_or_else(|| {
+    let flow_registry = ctx.flow_registry.clone().ok_or_else(|| {
         RuntimeError::ToolFailed("flow.spawn: no agent registry available on ctx".into())
     })?;
 
@@ -265,7 +265,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
     let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
     let child_run_id = FlowRunId::now();
-    let entry = agent_registry.create_entry(
+    let entry = flow_registry.create_entry(
         handle.clone(),
         goal.clone().unwrap_or_default(),
         model,
@@ -326,15 +326,15 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         .await;
 
         let status = match &result {
-            Ok(Value::Str(s)) => AgentRunStatus::Ok {
+            Ok(Value::Str(s)) => FlowRunStatus::Ok {
                 ended_at: chrono::Utc::now(),
                 final_text: s.clone(),
             },
-            Ok(_) => AgentRunStatus::Ok {
+            Ok(_) => FlowRunStatus::Ok {
                 ended_at: chrono::Utc::now(),
                 final_text: String::new(),
             },
-            Err(e) => AgentRunStatus::Err {
+            Err(e) => FlowRunStatus::Err {
                 ended_at: chrono::Utc::now(),
                 message: e.to_string(),
             },
@@ -344,7 +344,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         // Send SubAgentDone so the TUI updates the SubAgentActivity item.
         if let Some(tx) = &parent_stream_tx {
             let final_text = match &status {
-                AgentRunStatus::Ok { final_text, .. } => final_text.clone(),
+                FlowRunStatus::Ok { final_text, .. } => final_text.clone(),
                 _ => String::new(),
             };
             let _ = tx.send(crate::stream::StreamFrame::SubAgentDone {
@@ -354,7 +354,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             });
         }
 
-        let _ = entry_clone.stream_tx.send(AgentEvent::Exited { status });
+        let _ = entry_clone.stream_tx.send(FlowEvent::Exited { status });
         if let (Some(tr), Some(tid)) = (&task_registry, &task_id) {
             let ts = match result {
                 Ok(_) => crate::task_registry::TaskStatus::Ok,
@@ -392,7 +392,7 @@ impl Tool for AgentStatus {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
             let reg = ctx
-                .agent_registry
+                .flow_registry
                 .clone()
                 .ok_or_else(|| RuntimeError::ToolFailed("flow.status: no agent registry".into()))?;
             let entry = reg.lookup(&handle)?;
@@ -403,7 +403,7 @@ impl Tool for AgentStatus {
                 ("status".into(), Value::Str(st.kind_str().into())),
                 ("goal".into(), Value::Str(goal)),
             ];
-            if let AgentRunStatus::Err { message, .. } = &st {
+            if let FlowRunStatus::Err { message, .. } = &st {
                 fields.push(("error".into(), Value::Str(message.clone())));
             }
             Ok(Value::Struct(fields))
@@ -459,7 +459,7 @@ impl Tool for AgentOutput {
                 .unwrap_or(4096)
                 .max(1) as usize;
             let reg = ctx
-                .agent_registry
+                .flow_registry
                 .clone()
                 .ok_or_else(|| RuntimeError::ToolFailed("flow.output: no agent registry".into()))?;
             let entry = reg.lookup(&handle)?;
@@ -500,7 +500,7 @@ impl Tool for AgentKill {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
             let reg = ctx
-                .agent_registry
+                .flow_registry
                 .clone()
                 .ok_or_else(|| RuntimeError::ToolFailed("flow.kill: no agent registry".into()))?;
             let entry = reg.lookup(&handle)?;
@@ -542,7 +542,7 @@ impl Tool for FlowInterject {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
             let text = extract_string(&args, "text", 1)?;
-            let reg = ctx.agent_registry.clone().ok_or_else(|| {
+            let reg = ctx.flow_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("flow.interject: no agent registry".into())
             })?;
             let entry = reg.lookup(&handle)?;

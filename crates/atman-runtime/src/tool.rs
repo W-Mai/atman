@@ -99,7 +99,7 @@ pub struct ToolCtx {
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
     pub term_registry: Option<std::sync::Arc<crate::tools::term::TermRegistry>>,
     pub watch_hub: Option<std::sync::Arc<crate::watch::WatchHub>>,
-    pub agent_registry: Option<std::sync::Arc<crate::tools::agent_ctrl::AgentRegistry>>,
+    pub flow_registry: Option<std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>>,
     pub task_registry: Option<crate::task_registry::TaskRegistry>,
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,
@@ -107,7 +107,7 @@ pub struct ToolCtx {
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
     pub on_memory_recent: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
     pub history_store: Option<std::sync::Arc<dyn crate::history_store::HistoryStore>>,
-    pub agent_entry: Option<std::sync::Arc<crate::tools::agent_ctrl::AgentEntry>>,
+    pub agent_entry: Option<std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
 }
 
 impl ToolCtx {
@@ -272,11 +272,11 @@ impl ToolCtx {
         self
     }
 
-    pub fn with_agent_registry(
+    pub fn with_flow_registry(
         mut self,
-        registry: std::sync::Arc<crate::tools::agent_ctrl::AgentRegistry>,
+        registry: std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>,
     ) -> Self {
-        self.agent_registry = Some(registry);
+        self.flow_registry = Some(registry);
         self
     }
 
@@ -315,7 +315,7 @@ impl ToolCtx {
 
     pub fn with_agent_entry(
         mut self,
-        entry: std::sync::Arc<crate::tools::agent_ctrl::AgentEntry>,
+        entry: std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>,
     ) -> Self {
         self.agent_entry = Some(entry);
         self

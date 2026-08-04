@@ -178,7 +178,7 @@ impl Executor {
             // Register root so flow.output/interject("root") work. Root's llm
             // context stays on session MessageStream; entry is for output +
             // interjection addressing.
-            let root_entry = sess.agent_registry.create_entry(
+            let root_entry = sess.flow_registry.create_entry(
                 "root".to_string(),
                 sess.goal().unwrap_or_else(|| flow.name.name.clone()),
                 String::new(),
