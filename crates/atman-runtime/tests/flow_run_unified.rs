@@ -225,3 +225,133 @@ flow test_flow(goal: string) -> string {
         }
     }
 }
+
+#[tokio::test]
+async fn l1_nudge_text_appears_in_entry_messages() {
+    use atman_runtime::Value;
+    use atman_runtime::providers::mock::MockProvider;
+    use atman_runtime::tool::{Tool, ToolRegistry};
+    use atman_runtime::tools::agent_ctrl::{AgentSpawn, FlowRegistry};
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let commands_dir = tmp.path().join(".config").join("atman").join("commands");
+    std::fs::create_dir_all(&commands_dir).unwrap();
+    let flow_src = r#"flow describe() -> string { return "test" }
+flow test_flow(goal: string) -> string {
+    session.push(message.user(goal))
+    reply = llm { model: "mock", context: session }
+    return text_concat(reply)
+}
+"#;
+    let mut f = std::fs::File::create(commands_dir.join("test_l1.at")).unwrap();
+    f.write_all(flow_src.as_bytes()).unwrap();
+
+    let home = tmp.path().to_path_buf();
+    let old_home = std::env::var_os("HOME");
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+
+    let registry = Arc::new(FlowRegistry::new());
+    atman_runtime::model_registry::register_model_entries(vec![(
+        "mock".to_string(),
+        atman_runtime::model_registry::ModelEntry {
+            model: "mock".to_string(),
+            provider: Some("mock".to_string()),
+            api_key: None,
+            base_url: None,
+            context_budget: Some(100000),
+            compact_threshold_ratio: None,
+            thinking: Some(false),
+            max_tokens: None,
+            enabled: Some(true),
+            discovered: false,
+        },
+    )]);
+    let mut providers = atman_runtime::provider::ProviderRegistry::new();
+    providers.register(Arc::new(
+        MockProvider::new("mock")
+            .with_fallback(Value::Str("done".into()))
+            .with_chunk_delay(std::time::Duration::from_millis(50)),
+    ));
+    let mut tools = ToolRegistry::new();
+    atman_runtime::tools::register_tier_zero(&mut tools);
+
+    let (stream_tx, _) = tokio::sync::broadcast::channel::<atman_runtime::stream::StreamFrame>(256);
+    let ctx = ToolCtx::new()
+        .with_registry(Arc::new(tools))
+        .with_providers(Arc::new(providers))
+        .with_flow_registry(registry.clone())
+        .with_stream_tx(stream_tx);
+
+    let spawn_args = ToolArgs {
+        positional: vec![],
+        named: vec![
+            ("flow".into(), Value::Str("test_l1.at@test_flow".into())),
+            (
+                "arguments".into(),
+                Value::Struct(vec![("goal".into(), Value::Str("hello".into()))]),
+            ),
+        ],
+    };
+    let result = AgentSpawn.call(spawn_args, &ctx).await.unwrap();
+    let handle = match result {
+        Value::Struct(fields) => fields
+            .iter()
+            .find(|(k, _)| k == "handle")
+            .and_then(|(_, v)| {
+                if let Value::Str(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("expected handle"),
+        _ => panic!("expected struct"),
+    };
+
+    // Push an L1 nudge.
+    let inj = atman_runtime::injection::Injection::new_pending(
+        atman_runtime::event::TurnId::now(),
+        String::from("NUDGE: check config"),
+    );
+    let entry = registry.lookup(&handle).unwrap();
+    entry.pending_injections.lock().unwrap().push(inj);
+    entry.injection_notify.notify_one();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Check sub-agent status first.
+    let entry = registry.lookup(&handle).unwrap();
+    let status = entry.status.lock().unwrap().clone();
+    let pending_count = entry.pending_injections.lock().unwrap().len();
+    let msgs = entry.messages.lock().unwrap();
+    let has_nudge = msgs
+        .iter()
+        .any(|m| m.text_concat().contains("NUDGE: check config"));
+    assert!(
+        has_nudge,
+        "L1 nudge text should be in entry.messages, got: {:?}, pending: {}, status: {:?}",
+        msgs.iter().map(|m| m.text_concat()).collect::<Vec<_>>(),
+        pending_count,
+        status
+    );
+
+    // Verify pending_injections is empty (drained).
+    let pending = entry.pending_injections.lock().unwrap();
+    assert!(
+        pending.is_empty(),
+        "pending_injections should be empty after drain"
+    );
+
+    if let Some(old) = old_home {
+        unsafe {
+            std::env::set_var("HOME", old);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+    }
+}
