@@ -6,6 +6,7 @@ fn make_flow_start() -> Event {
         flow_name: "t".into(),
         parent_run_id: None,
         parent_node_id: None,
+        spawned: false,
     }
 }
 

@@ -828,6 +828,7 @@ mod tests {
             flow_name: name.into(),
             parent_run_id: None,
             parent_node_id: None,
+            spawned: false,
         }
     }
 
@@ -837,6 +838,7 @@ mod tests {
             flow_name: name.into(),
             parent_run_id: Some(parent),
             parent_node_id: Some(parent_node.into()),
+            spawned: false,
         }
     }
 
@@ -971,6 +973,7 @@ fn rebuild_workflow_tree_restores_root_and_subflow() {
             flow_name: "agent".into(),
             parent_run_id: None,
             parent_node_id: None,
+            spawned: false,
         },
         Event::FlowNodeStart {
             run_id: root.clone(),
@@ -984,6 +987,7 @@ fn rebuild_workflow_tree_restores_root_and_subflow() {
             flow_name: "subagent".into(),
             parent_run_id: Some(root.clone()),
             parent_node_id: Some("stmt_0".into()),
+            spawned: false,
         },
         Event::FlowEnd {
             run_id: child.clone(),

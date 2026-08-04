@@ -409,6 +409,7 @@ mod tests {
                     flow_name: format!("flow_{i}"),
                     parent_run_id: None,
                     parent_node_id: None,
+                    spawned: false,
                 },
             ))
             .unwrap();
@@ -448,6 +449,7 @@ mod tests {
                     flow_name: format!("flow_{i}"),
                     parent_run_id: None,
                     parent_node_id: None,
+                    spawned: false,
                 },
             ))
             .unwrap();

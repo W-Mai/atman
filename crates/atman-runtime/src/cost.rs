@@ -170,6 +170,7 @@ mod tests {
                 flow_name: "t".into(),
                 parent_run_id: None,
                 parent_node_id: None,
+                spawned: false,
             },
             ok_call("m", "p", 5, 5),
             Event::FlowEnd {

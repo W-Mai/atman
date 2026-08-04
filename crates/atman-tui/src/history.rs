@@ -6,22 +6,94 @@ use atman_runtime::message::{Message, MessagePart, MessageRole};
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::workflow::WorkflowGraph;
 
-use crate::app::{NoteLevel, OutputItem};
+use crate::app::{NoteLevel, OutputItem, frame_run_id};
 
 pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut tool_map: HashMap<String, String> = HashMap::new();
+    // First pass: build tool_map + collect FlowStart parent links + FlowDone status
+    // for transitive closure of spawned flows.
+    let mut flow_parents: HashMap<String, Option<String>> = HashMap::new();
+    let mut spawned_roots: HashSet<String> = HashSet::new();
+    let mut flow_dones: HashMap<String, (bool, bool)> = HashMap::new();
+    let mut llm_models: HashMap<String, String> = HashMap::new();
     for entry in entries {
-        if let TranscriptEntry::Message { message, .. } = entry {
-            for part in &message.parts {
-                if let MessagePart::ToolUse { id, name, .. } = part {
-                    tool_map.insert(id.clone(), name.clone());
+        match entry {
+            TranscriptEntry::Message { message, .. } => {
+                for part in &message.parts {
+                    if let MessagePart::ToolUse { id, name, .. } = part {
+                        tool_map.insert(id.clone(), name.clone());
+                    }
                 }
             }
+            TranscriptEntry::FlowStart {
+                run_id,
+                parent_run_id,
+                spawned,
+                ..
+            } => {
+                flow_parents.insert(run_id.clone(), parent_run_id.clone());
+                if *spawned {
+                    spawned_roots.insert(run_id.clone());
+                }
+            }
+            TranscriptEntry::FlowDone {
+                run_id,
+                ok,
+                cancelled,
+                ..
+            } => {
+                flow_dones.insert(run_id.clone(), (*ok, *cancelled));
+            }
+            TranscriptEntry::LlmCall {
+                run_id: Some(rid),
+                model,
+                ..
+            } => {
+                llm_models
+                    .entry(rid.0.to_string())
+                    .or_insert_with(|| model.clone());
+            }
+            _ => {}
         }
     }
+    // Transitive closure: any flow whose parent is in the spawned set is also
+    // part of a spawned sub-agent (covers recursive subflow calls like
+    // research_loop → research_loop).
+    let mut spawned_set = spawned_roots.clone();
+    loop {
+        let mut changed = false;
+        for (rid, parent) in &flow_parents {
+            if !spawned_set.contains(rid.as_str())
+                && parent
+                    .as_ref()
+                    .is_some_and(|p| spawned_set.contains(p.as_str()))
+            {
+                spawned_set.insert(rid.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // For a given flow_run_id, find the nearest spawned ancestor (the sub-agent
+    // root). This groups all messages from a sub-agent's recursive subflows
+    // (e.g. research_loop → research_loop) under one SubAgentActivity item.
+    let find_spawned_root = |rid: &str| -> Option<String> {
+        let mut current = Some(rid.to_string());
+        while let Some(cur) = current {
+            if spawned_roots.contains(&cur) {
+                return Some(cur);
+            }
+            current = flow_parents.get(&cur).cloned().flatten();
+        }
+        None
+    };
 
     let mut out: Vec<OutputItem> = Vec::new();
     let mut current_workflow_idx: Option<usize> = None;
+    let mut sub_agent_indices: HashMap<String, usize> = HashMap::new();
+    let mut sub_agent_messages: HashMap<String, Vec<Message>> = HashMap::new();
     let ensure_panel = |out: &mut Vec<OutputItem>, current: &mut Option<usize>| -> usize {
         if let Some(i) = *current {
             return i;
@@ -93,7 +165,44 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 {
                     apply_message_to_workflow(graph, msg, flow_run_id.as_deref());
                 }
-                flatten_message(msg, &mut out, &tool_map);
+                if let Some(rid) = flow_run_id
+                    && let Some(root_id) = find_spawned_root(rid)
+                {
+                    if !sub_agent_indices.contains_key(&root_id) {
+                        let (ok, cancelled) =
+                            flow_dones.get(&root_id).cloned().unwrap_or((false, false));
+                        let status = if cancelled {
+                            "killed".into()
+                        } else if ok {
+                            "ok".into()
+                        } else {
+                            "running".into()
+                        };
+                        let model = llm_models.get(&root_id).cloned().unwrap_or_default();
+                        out.push(OutputItem::SubAgentActivity {
+                            handle: root_id.clone(),
+                            goal: String::new(),
+                            child_run_id: root_id.clone(),
+                            model,
+                            status,
+                            output: String::new(),
+                            iteration: 0,
+                            done: flow_dones.contains_key(&root_id),
+                            expanded: false,
+                            messages: Vec::new(),
+                            workflow_graph: WorkflowGraph::new(atman_runtime::event::TurnId::now()),
+                            expanded_nodes: HashSet::new(),
+                            workflow_expanded: false,
+                        });
+                        sub_agent_indices.insert(root_id.clone(), out.len() - 1);
+                    }
+                    sub_agent_messages
+                        .entry(root_id)
+                        .or_default()
+                        .push(msg.clone());
+                } else {
+                    flatten_message(msg, &mut out, &tool_map);
+                }
             }
             TranscriptEntry::DiffPreview {
                 title,
@@ -162,6 +271,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 flow_name,
                 parent_run_id,
                 parent_node_id,
+                spawned: _,
                 ts,
             } => {
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
@@ -308,6 +418,147 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 out.push(OutputItem::MermaidDiagram {
                     source: source.clone(),
                 });
+            }
+        }
+    }
+    // Fill in SubAgentActivity items with collected messages.
+    for (root_id, msgs) in sub_agent_messages {
+        if let Some(&idx) = sub_agent_indices.get(&root_id)
+            && let Some(OutputItem::SubAgentActivity {
+                messages,
+                output,
+                goal,
+                workflow_graph,
+                ..
+            }) = out.get_mut(idx)
+        {
+            *messages = msgs.clone();
+            *output = msgs
+                .iter()
+                .filter(|m| matches!(m.role, MessageRole::Assistant))
+                .map(|m| m.text_concat())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if goal.is_empty()
+                && let Some(first_user) = msgs.iter().find(|m| matches!(m.role, MessageRole::User))
+            {
+                *goal = first_user.text_concat();
+            }
+            // Rebuild workflow_graph from transcript entries belonging to this
+            // sub-agent (identified by transitive closure of spawned flows).
+            for entry in entries {
+                let (frame, ts) = match entry {
+                    TranscriptEntry::FlowStart {
+                        run_id,
+                        flow_name,
+                        parent_run_id,
+                        parent_node_id,
+                        ts,
+                        ..
+                    } => (
+                        StreamFrame::FlowStart {
+                            run_id: run_id.clone(),
+                            flow_name: flow_name.clone(),
+                            parent_run_id: parent_run_id.clone(),
+                            parent_node_id: parent_node_id.clone(),
+                        },
+                        *ts,
+                    ),
+                    TranscriptEntry::FlowNodeStart {
+                        run_id,
+                        node_id,
+                        kind,
+                        label,
+                        parent_node_id,
+                        ts,
+                    } => (
+                        StreamFrame::FlowNodeStart {
+                            run_id: run_id.clone(),
+                            node_id: node_id.clone(),
+                            kind: kind.clone(),
+                            label: label.clone(),
+                            parent_node_id: parent_node_id.clone(),
+                        },
+                        *ts,
+                    ),
+                    TranscriptEntry::FlowNodeEnd {
+                        run_id,
+                        node_id,
+                        status,
+                        output_preview,
+                        ts,
+                    } => (
+                        StreamFrame::FlowNodeEnd {
+                            run_id: run_id.clone(),
+                            node_id: node_id.clone(),
+                            status: status.clone(),
+                            output_preview: output_preview.clone(),
+                            parent_node_id: None,
+                        },
+                        *ts,
+                    ),
+                    TranscriptEntry::ToolNode {
+                        run_id,
+                        parent_node_id,
+                        tool_use_id,
+                        tool_name,
+                        args_preview,
+                        ts,
+                    } => (
+                        StreamFrame::ToolNode {
+                            run_id: run_id.clone(),
+                            parent_node_id: parent_node_id.clone(),
+                            tool_use_id: tool_use_id.clone(),
+                            tool: tool_name.clone(),
+                            args_preview: args_preview.clone(),
+                        },
+                        *ts,
+                    ),
+                    TranscriptEntry::FlowDone {
+                        run_id,
+                        ok,
+                        cancelled,
+                        ts,
+                    } => (
+                        StreamFrame::FlowDone {
+                            run_id: run_id.clone(),
+                            flow_name: String::new(),
+                            ok: *ok,
+                            cancelled: *cancelled,
+                        },
+                        *ts,
+                    ),
+                    TranscriptEntry::LlmCall {
+                        model,
+                        usage,
+                        wallclock_ms,
+                        ttft_ms,
+                        tokens_per_second,
+                        run_id,
+                        node_id,
+                        ts,
+                    } => (
+                        StreamFrame::LlmCallStats {
+                            model: model.clone(),
+                            input_tokens: usage.input,
+                            output_tokens: usage.output,
+                            cache_read: usage.cached_input,
+                            cache_write: usage.cache_write,
+                            ttft_ms: ttft_ms.unwrap_or(0),
+                            tokens_per_second: tokens_per_second.unwrap_or(0.0),
+                            wallclock_ms: *wallclock_ms,
+                            run_id: run_id.as_ref().map(|r| r.0.to_string()),
+                            node_id: node_id.clone(),
+                        },
+                        *ts,
+                    ),
+                    _ => continue,
+                };
+                if let Some(rid) = frame_run_id(&frame)
+                    && find_spawned_root(rid) == Some(root_id.clone())
+                {
+                    workflow_graph.apply_stream_frame_at(&frame, ts);
+                }
             }
         }
     }
@@ -1003,6 +1254,166 @@ mod tests {
         assert!(
             out.is_empty(),
             "unknown tool without error should not produce an item"
+        );
+    }
+
+    #[test]
+    fn replay_routes_spawned_messages_to_sub_agent_activity() {
+        let root_run = "root-run-001".to_string();
+        let loop_run = "loop-run-001".to_string();
+        let sub_run = "sub-run-001".to_string();
+        let research_run = "research-run-001".to_string();
+
+        let entries = vec![
+            // Root agent starts (spawned=false)
+            TranscriptEntry::FlowStart {
+                run_id: root_run.clone(),
+                flow_name: "agent".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+                ts: None,
+            },
+            // Root's agent_loop subflow (spawned=false, parent=root)
+            TranscriptEntry::FlowStart {
+                run_id: loop_run.clone(),
+                flow_name: "agent_loop".into(),
+                parent_run_id: Some(root_run.clone()),
+                parent_node_id: Some("1".into()),
+                spawned: false,
+                ts: None,
+            },
+            // Root assistant message (flow_run_id = loop_run)
+            TranscriptEntry::Message {
+                message: Message::assistant_text(TurnId::now(), "I will spawn a sub-agent."),
+                flow_run_id: Some(loop_run.clone()),
+            },
+            // Sub-agent spawned via flow.spawn (spawned=true, parent=loop_run)
+            TranscriptEntry::FlowStart {
+                run_id: sub_run.clone(),
+                flow_name: "subagent".into(),
+                parent_run_id: Some(loop_run.clone()),
+                parent_node_id: Some("7".into()),
+                spawned: true,
+                ts: None,
+            },
+            // Sub-agent's research_loop subflow (spawned=false, parent=sub_run)
+            TranscriptEntry::FlowStart {
+                run_id: research_run.clone(),
+                flow_name: "research_loop".into(),
+                parent_run_id: Some(sub_run.clone()),
+                parent_node_id: Some("7".into()),
+                spawned: false,
+                ts: None,
+            },
+            // Sub-agent user message (flow_run_id = research_run)
+            TranscriptEntry::Message {
+                message: Message::user_text(TurnId::now(), "read Cargo.toml"),
+                flow_run_id: Some(research_run.clone()),
+            },
+            // Sub-agent assistant message (flow_run_id = research_run)
+            TranscriptEntry::Message {
+                message: Message::assistant_text(TurnId::now(), "Here are the findings..."),
+                flow_run_id: Some(research_run.clone()),
+            },
+            // Sub-agent done
+            TranscriptEntry::FlowDone {
+                run_id: sub_run.clone(),
+                ok: true,
+                cancelled: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowDone {
+                run_id: research_run.clone(),
+                ok: true,
+                cancelled: false,
+                ts: None,
+            },
+        ];
+
+        let out = flatten_transcript(&entries);
+
+        // Root agent message should be in the main document flow
+        let has_root_text = out.iter().any(|it| match it {
+            OutputItem::AssistantMd { md, .. } => md.contains("spawn a sub-agent"),
+            _ => false,
+        });
+        assert!(has_root_text, "root agent message should be in main flow");
+
+        // Sub-agent messages should NOT be in the main document flow
+        let has_sub_text = out.iter().any(|it| match it {
+            OutputItem::AssistantMd { md, .. } => md.contains("findings"),
+            OutputItem::UserTurn { text } => text.contains("Cargo.toml"),
+            _ => false,
+        });
+        assert!(
+            !has_sub_text,
+            "sub-agent messages should NOT leak into main flow"
+        );
+
+        // SubAgentActivity item should exist
+        let sub_item = out.iter().find_map(|it| match it {
+            OutputItem::SubAgentActivity {
+                child_run_id,
+                messages,
+                goal,
+                status,
+                ..
+            } if child_run_id == &sub_run => Some((messages.len(), goal.clone(), status.clone())),
+            _ => None,
+        });
+        assert!(sub_item.is_some(), "SubAgentActivity should be created");
+        let (msg_count, goal, status) = sub_item.unwrap();
+        assert_eq!(msg_count, 2, "should have 2 messages (user + assistant)");
+        assert_eq!(goal, "read Cargo.toml", "goal from first user message");
+        assert_eq!(status, "ok", "status from FlowDone");
+    }
+
+    #[test]
+    fn replay_does_not_route_root_subflow_to_sub_agent() {
+        // Regression: root agent's agent_loop subflow has parent_run_id set,
+        // but spawned=false. Its messages must stay in the main flow.
+        let root_run = "root-002".to_string();
+        let loop_run = "loop-002".to_string();
+
+        let entries = vec![
+            TranscriptEntry::FlowStart {
+                run_id: root_run.clone(),
+                flow_name: "agent".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowStart {
+                run_id: loop_run.clone(),
+                flow_name: "agent_loop".into(),
+                parent_run_id: Some(root_run.clone()),
+                parent_node_id: Some("1".into()),
+                spawned: false,
+                ts: None,
+            },
+            TranscriptEntry::Message {
+                message: Message::assistant_text(TurnId::now(), "working on it"),
+                flow_run_id: Some(loop_run.clone()),
+            },
+        ];
+
+        let out = flatten_transcript(&entries);
+
+        // Should be in main flow, not SubAgentActivity
+        let has_text = out.iter().any(|it| match it {
+            OutputItem::AssistantMd { md, .. } => md.contains("working on it"),
+            _ => false,
+        });
+        assert!(has_text, "root subflow message should be in main flow");
+
+        let has_sub = out
+            .iter()
+            .any(|it| matches!(it, OutputItem::SubAgentActivity { .. }));
+        assert!(
+            !has_sub,
+            "should not create SubAgentActivity for root subflow"
         );
     }
 }

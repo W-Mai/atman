@@ -1637,6 +1637,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     flow_name: name.name.clone(),
                     parent_run_id: ctx.flow_run_id.clone(),
                     parent_node_id: ctx.current_node_id.clone(),
+                    spawned: false,
                 });
             }
             if let Some(session) = ctx.session_runtime.as_ref() {

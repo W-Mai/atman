@@ -314,7 +314,7 @@ pub struct AppState {
     last_lag_count: u64,
 }
 
-fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
+pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
     match frame {
         StreamFrame::FlowStart { run_id, .. }
         | StreamFrame::FlowNodeStart { run_id, .. }

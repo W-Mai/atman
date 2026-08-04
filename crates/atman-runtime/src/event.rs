@@ -90,6 +90,8 @@ pub enum Event {
         flow_name: String,
         parent_run_id: Option<FlowRunId>,
         parent_node_id: Option<String>,
+        #[serde(default)]
+        spawned: bool,
     },
     FlowEnd {
         run_id: FlowRunId,
@@ -475,6 +477,7 @@ mod tests {
             flow_name: "child".into(),
             parent_run_id: Some(parent.clone()),
             parent_node_id: Some("stmt_3".into()),
+            spawned: false,
         };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["type"], "flow_start");

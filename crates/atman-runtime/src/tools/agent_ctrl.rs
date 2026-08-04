@@ -821,6 +821,7 @@ fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
             flow_name: flow_name.into(),
             parent_run_id: parent_run_id.clone(),
             parent_node_id: parent_node_id.clone(),
+            spawned: true,
         });
     }
     if let Some(tx) = &ctx.stream_tx {

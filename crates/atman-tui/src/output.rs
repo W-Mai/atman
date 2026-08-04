@@ -1663,7 +1663,7 @@ fn render_sub_agent_activity(
     } else {
         format!(" iter {iteration}")
     };
-    let label = format!("agent[{handle}]{iter_str}");
+    let label = format!("flow[{handle}]{iter_str}");
     render_output_block(&label, glyph, output, expanded, panel_width)
 }
 

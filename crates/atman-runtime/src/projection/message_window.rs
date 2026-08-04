@@ -41,6 +41,7 @@ pub enum TranscriptEntry {
         flow_name: String,
         parent_run_id: Option<String>,
         parent_node_id: Option<String>,
+        spawned: bool,
         ts: Option<chrono::DateTime<chrono::Utc>>,
     },
     FlowNodeStart {
@@ -298,12 +299,14 @@ pub fn replay_transcript_from(path: &Path) -> Result<Vec<TranscriptEntry>, Sessi
                 let flow_name = v["flow_name"].as_str().unwrap_or("").to_string();
                 let parent_run_id = v["parent_run_id"].as_str().map(String::from);
                 let parent_node_id = v["parent_node_id"].as_str().map(String::from);
+                let spawned = v.get("spawned").and_then(|s| s.as_bool()).unwrap_or(false);
                 let ts = parse_ts(v);
                 out.push(TranscriptEntry::FlowStart {
                     run_id,
                     flow_name,
                     parent_run_id,
                     parent_node_id,
+                    spawned,
                     ts,
                 });
             }

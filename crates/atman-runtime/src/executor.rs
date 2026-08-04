@@ -146,6 +146,7 @@ impl Executor {
             flow_name: flow.name.name.clone(),
             parent_run_id: None,
             parent_node_id: None,
+            spawned: false,
         });
         if let Some(sess) = session.as_ref() {
             let _ = sess
