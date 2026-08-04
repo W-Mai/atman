@@ -211,11 +211,16 @@ impl Tool for AgentSpawn {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "flow": {"type": "string"},
-                "async": {"type": "boolean", "default": true}
+                "flow": {"type": "string", "description": "Flow reference (e.g. \"subagent.at@subagent\")."},
+                "arguments": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Target flow parameters as key-value pairs. You MUST call flow.list first to discover the flow's description and parameter signatures (names, types, required/optional), then construct this object accordingly. Example: arguments={\"goal\":\"read Cargo.toml\",\"role\":\"research\"}"
+                },
+                "async": {"type": "boolean", "default": true, "description": "If true (default), run in background and return a handle. If false, block until done."},
+                "inherit_context": {"type": "boolean", "default": false, "description": "If true, seed the sub-agent's context with a snapshot of the parent's messages."}
             },
-            "required": ["flow"],
-            "additionalProperties": true
+            "required": ["flow"]
         })
     }
 
@@ -241,20 +246,27 @@ impl Tool for AgentSpawn {
 }
 
 async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
-    let goal = match args.named("goal") {
-        Some(Value::Str(s)) => Some(s.clone()),
-        _ => None,
-    };
     let flow = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
-    run_flow_agent(&flow, goal, &args, ctx, FlowRunId::now()).await
+    run_flow_agent(&flow, &args, ctx, FlowRunId::now()).await
 }
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
-    let goal = match args.named("goal") {
-        Some(Value::Str(s)) => Some(s.clone()),
-        _ => None,
+    // Extract flow params from the `arguments` object (generic, no hardcoded param names).
+    let arg_fields: Vec<(String, Value)> = match args.named("arguments") {
+        Some(Value::Struct(fields)) => fields.clone(),
+        _ => Vec::new(),
     };
-    let model = extract_string(&args, "model", 0).unwrap_or_else(|_| "smart".to_string());
+    // Use the first string-typed argument as a display label for the FlowEntry.
+    let display_label = arg_fields
+        .iter()
+        .find_map(|(_, v)| {
+            if let Value::Str(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
     let inherit_context = args
         .named("inherit_context")
         .map(|v| matches!(v, Value::Bool(true)))
@@ -269,8 +281,8 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let child_run_id = FlowRunId::now();
     let entry = flow_registry.create_entry(
         handle.clone(),
-        goal.clone().unwrap_or_default(),
-        model,
+        display_label,
+        String::new(),
         child_run_id.clone(),
     );
     if inherit_context {
@@ -285,7 +297,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let task_id = task_registry.as_ref().map(|tr| {
         tr.register(
             crate::task_registry::TaskKind::Flow,
-            goal.clone().unwrap_or_default(),
+            entry.goal.clone(),
             handle.clone(),
             session_id,
             entry.cancel.clone(),
@@ -318,14 +330,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
         ctx_for_flow.compact_lock_handle = Some(Arc::clone(&entry_clone.compact_lock));
 
-        let result = run_flow_agent(
-            &flow_ref,
-            Some(entry_clone.goal.clone()),
-            &args,
-            &ctx_for_flow,
-            child_run_id.clone(),
-        )
-        .await;
+        let result = run_flow_agent(&flow_ref, &args, &ctx_for_flow, child_run_id.clone()).await;
 
         let status = match &result {
             Ok(Value::Str(s)) => FlowRunStatus::Ok {
@@ -571,7 +576,6 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
 
 async fn run_flow_agent(
     flow_ref: &str,
-    goal: Option<String>,
     args: &ToolArgs,
     ctx: &ToolCtx,
     run_id: FlowRunId,
@@ -619,17 +623,27 @@ async fn run_flow_agent(
                 ))
             })?,
     };
+    // Extract flow params from the `arguments` object — generic, matches by
+    // param name, no hardcoded param names.
     let mut flow_args: Vec<(String, Value)> = Vec::new();
-    if let Some(first_param) = flow.params.first()
-        && let Some(g) = &goal
-    {
-        flow_args.push((first_param.name.name.clone(), Value::Str(g.clone())));
+    if let Some(Value::Struct(fields)) = args.named("arguments") {
+        for (key, value) in fields {
+            if key == "flow" || key == "async" || key == "inherit_context" {
+                continue;
+            }
+            if flow.params.iter().any(|p| p.name.name == *key) {
+                flow_args.push((key.clone(), value.clone()));
+            }
+        }
     }
+    // Backward compat: top-level named args (pre-arguments schema).
     for (key, value) in &args.named {
-        if key == "flow" || key == "async" || key == "goal" {
+        if key == "flow" || key == "async" || key == "inherit_context" || key == "arguments" {
             continue;
         }
-        if flow.params.iter().any(|p| p.name.name == *key) {
+        if flow.params.iter().any(|p| p.name.name == *key)
+            && !flow_args.iter().any(|(k, _)| k == key)
+        {
             flow_args.push((key.clone(), value.clone()));
         }
     }
