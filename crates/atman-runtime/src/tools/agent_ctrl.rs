@@ -61,6 +61,8 @@ pub struct FlowEntry {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub compact_lock: Arc<tokio::sync::Mutex<()>>,
     pub interjection_tx: tokio::sync::broadcast::Sender<crate::injection::Injection>,
+    pub pending_injections: Arc<std::sync::Mutex<Vec<crate::injection::Injection>>>,
+    pub injection_notify: Arc<tokio::sync::Notify>,
     pub frame_tx: tokio::sync::broadcast::Sender<crate::stream::StreamFrame>,
 }
 
@@ -152,6 +154,8 @@ impl FlowRegistry {
             started_at: chrono::Utc::now(),
             compact_lock: Arc::new(tokio::sync::Mutex::new(())),
             interjection_tx: tokio::sync::broadcast::channel(32).0,
+            pending_injections: Arc::new(std::sync::Mutex::new(Vec::new())),
+            injection_notify: Arc::new(tokio::sync::Notify::new()),
             frame_tx: tokio::sync::broadcast::channel(256).0,
         });
         self.entries
@@ -554,7 +558,8 @@ impl Tool for FlowInterject {
             })?;
             let entry = reg.lookup(&handle)?;
             let inj = crate::injection::Injection::new_pending(crate::event::TurnId::now(), text);
-            let _ = entry.interjection_tx.send(inj);
+            entry.pending_injections.lock().unwrap().push(inj);
+            entry.injection_notify.notify_waiters();
             Ok(Value::Unit)
         })
     }

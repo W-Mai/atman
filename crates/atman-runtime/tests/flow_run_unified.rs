@@ -102,14 +102,14 @@ async fn flow_interject_delivers_to_target_entry_channel() {
     let registry = Arc::new(FlowRegistry::new());
     let entry = registry.create_entry("sub_1".into(), "g".into(), "m".into(), FlowRunId::now());
     let ctx = ToolCtx::new().with_flow_registry(registry);
-    let mut rx = entry.interjection_tx.subscribe();
     let args = ToolArgs {
         positional: vec![Value::Str("sub_1".into()), Value::Str("wake up".into())],
         named: vec![],
     };
     FlowInterject.call(args, &ctx).await.unwrap();
-    let inj = rx.try_recv().expect("interjection should arrive");
-    assert_eq!(inj.text, "wake up");
+    let pending = entry.pending_injections.lock().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].text, "wake up");
 }
 
 #[tokio::test]

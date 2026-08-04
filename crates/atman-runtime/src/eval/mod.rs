@@ -616,9 +616,18 @@ async fn call_and_maybe_stream_inner(
     let stall_dur = std::time::Duration::from_secs(stall_secs);
     let stall_sleep = tokio::time::sleep(stall_dur);
     tokio::pin!(stall_sleep);
-    let mut inj_rx = agent_entry
-        .map(|e| e.interjection_tx.subscribe())
-        .or_else(|| session.map(|s| s.subscribe_injections()));
+    // Drain pending interjections from the tool-execution phase (when no
+    // subscriber was active on the broadcast channel).
+    if let Some(entry) = agent_entry {
+        let pending: Vec<_> = entry.pending_injections.lock().unwrap().drain(..).collect();
+        if let Some(inj) = pending.into_iter().next() {
+            flow_cancel.cancel();
+            return Err(RuntimeError::Cancelled(format!(
+                "interjected: {}",
+                inj.text
+            )));
+        }
+    }
     let mark_first_token = |first: &mut Option<std::time::Instant>| {
         if first.is_none() {
             *first = Some(std::time::Instant::now());
@@ -630,27 +639,22 @@ async fn call_and_maybe_stream_inner(
             _ = flow_cancel.cancelled() => {
                 return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
             }
-            inj = async {
-                match inj_rx.as_mut() {
-                    Some(rx) => rx.recv().await.ok(),
-                    None => std::future::pending().await,
+            _ = async {
+                if let Some(entry) = agent_entry {
+                    entry.injection_notify.notified().await;
+                } else {
+                    std::future::pending::<()>().await;
                 }
-            }, if inj_rx.is_some() => {
-                if let Some(inj) = inj {
-                    match inj.level {
-                        crate::injection::InjectionLevel::L4HardStop => {
-                            flow_cancel.cancel();
-                            return Err(RuntimeError::Cancelled(
-                                "hard stop from interjection".into(),
-                            ));
-                        }
-                        _ => {
-                            flow_cancel.cancel();
-                            return Err(RuntimeError::Cancelled(format!(
-                                "interjected: {}",
-                                inj.text
-                            )));
-                        }
+            }, if agent_entry.is_some() => {
+                if let Some(entry) = agent_entry {
+                    let pending: Vec<_> =
+                        entry.pending_injections.lock().unwrap().drain(..).collect();
+                    if let Some(inj) = pending.into_iter().next() {
+                        flow_cancel.cancel();
+                        return Err(RuntimeError::Cancelled(format!(
+                            "interjected: {}",
+                            inj.text
+                        )));
                     }
                 }
             }
