@@ -1485,4 +1485,276 @@ mod tests {
             "should not create SubAgentActivity for root subflow"
         );
     }
+
+    #[test]
+    fn spawned_flow_events_do_not_leak_to_main_workflow_panel() {
+        let root_run = "root-003".to_string();
+        let loop_run = "loop-003".to_string();
+        let sub_run = "sub-003".to_string();
+        let research_run = "research-003".to_string();
+
+        let entries = vec![
+            TranscriptEntry::FlowStart {
+                run_id: root_run.clone(),
+                flow_name: "agent".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowStart {
+                run_id: loop_run.clone(),
+                flow_name: "agent_loop".into(),
+                parent_run_id: Some(root_run.clone()),
+                parent_node_id: Some("1".into()),
+                spawned: false,
+                ts: None,
+            },
+            // Root's tool node — should appear in main workflow panel
+            TranscriptEntry::FlowNodeStart {
+                run_id: loop_run.clone(),
+                node_id: "stmt_0".into(),
+                kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                    path: "fs.read".into(),
+                },
+                label: "fs.read".into(),
+                parent_node_id: None,
+                ts: None,
+            },
+            TranscriptEntry::FlowNodeEnd {
+                run_id: loop_run.clone(),
+                node_id: "stmt_0".into(),
+                status: atman_runtime::event::FlowNodeStatus::Ok,
+                output_preview: Some("ok".into()),
+                ts: None,
+            },
+            // Sub-agent spawned
+            TranscriptEntry::FlowStart {
+                run_id: sub_run.clone(),
+                flow_name: "subagent".into(),
+                parent_run_id: Some(loop_run.clone()),
+                parent_node_id: Some("7".into()),
+                spawned: true,
+                ts: None,
+            },
+            TranscriptEntry::FlowStart {
+                run_id: research_run.clone(),
+                flow_name: "research_loop".into(),
+                parent_run_id: Some(sub_run.clone()),
+                parent_node_id: Some("7".into()),
+                spawned: false,
+                ts: None,
+            },
+            // Sub-agent's tool node — should NOT appear in main workflow panel
+            TranscriptEntry::FlowNodeStart {
+                run_id: research_run.clone(),
+                node_id: "stmt_0".into(),
+                kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                    path: "fs.grep".into(),
+                },
+                label: "fs.grep".into(),
+                parent_node_id: None,
+                ts: None,
+            },
+            TranscriptEntry::ToolNode {
+                run_id: research_run.clone(),
+                parent_node_id: "stmt_0".into(),
+                tool_use_id: "tool_001".into(),
+                tool_name: "fs.grep".into(),
+                args_preview: "pattern".into(),
+                ts: None,
+            },
+            TranscriptEntry::FlowNodeEnd {
+                run_id: research_run.clone(),
+                node_id: "stmt_0".into(),
+                status: atman_runtime::event::FlowNodeStatus::Ok,
+                output_preview: Some("ok".into()),
+                ts: None,
+            },
+            // Sub-agent message
+            TranscriptEntry::Message {
+                message: Message::user_text(TurnId::now(), "read Cargo.toml"),
+                flow_run_id: Some(research_run.clone()),
+            },
+            TranscriptEntry::Message {
+                message: Message::assistant_text(TurnId::now(), "found it"),
+                flow_run_id: Some(research_run.clone()),
+            },
+            TranscriptEntry::FlowDone {
+                run_id: research_run.clone(),
+                ok: true,
+                cancelled: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowDone {
+                run_id: sub_run.clone(),
+                ok: true,
+                cancelled: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowDone {
+                run_id: loop_run.clone(),
+                ok: true,
+                cancelled: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowDone {
+                run_id: root_run.clone(),
+                ok: true,
+                cancelled: false,
+                ts: None,
+            },
+        ];
+
+        let out = flatten_transcript(&entries);
+
+        // Main workflow panel should exist
+        let wf_panel = out.iter().find_map(|it| match it {
+            OutputItem::WorkflowPanel { graph, .. } => Some(graph.clone()),
+            _ => None,
+        });
+        assert!(wf_panel.is_some(), "main workflow panel should exist");
+        let graph = wf_panel.unwrap();
+
+        // Main panel should have the ROOT's tool node (fs.read)
+        let root_node_count = count_workflow_nodes(&graph.root);
+        assert!(
+            root_node_count > 0,
+            "main panel should have root's nodes, got {root_node_count}"
+        );
+
+        // SubAgentActivity should exist with its own workflow graph
+        let sub_graph = out.iter().find_map(|it| match it {
+            OutputItem::SubAgentActivity {
+                child_run_id,
+                workflow_graph,
+                ..
+            } if child_run_id == &sub_run => Some(workflow_graph.clone()),
+            _ => None,
+        });
+        assert!(sub_graph.is_some(), "SubAgentActivity should exist");
+        let sub_graph = sub_graph.unwrap();
+        let sub_node_count = count_workflow_nodes(&sub_graph.root);
+        assert!(
+            sub_node_count > 0,
+            "SubAgentActivity graph should have nodes, got {sub_node_count}"
+        );
+
+        // CRITICAL: main panel should NOT have the sub-agent's tool node (fs.grep)
+        // Check by looking at the main panel's node labels
+        let main_labels = collect_node_labels(&graph.root);
+        assert!(
+            main_labels.iter().any(|l| l.contains("fs.read")),
+            "main panel should have fs.read node"
+        );
+        assert!(
+            !main_labels.iter().any(|l| l.contains("fs.grep")),
+            "main panel should NOT have fs.grep node (sub-agent's tool), found: {main_labels:?}"
+        );
+    }
+
+    fn count_workflow_nodes(nodes: &[atman_runtime::workflow::WorkflowNode]) -> usize {
+        let mut count = nodes.len();
+        for node in nodes {
+            count += count_workflow_nodes(&node.children);
+        }
+        count
+    }
+
+    fn collect_node_labels(nodes: &[atman_runtime::workflow::WorkflowNode]) -> Vec<String> {
+        let mut labels = Vec::new();
+        for node in nodes {
+            labels.push(node.label.clone());
+            labels.extend(collect_node_labels(&node.children));
+        }
+        labels
+    }
+
+    fn collect_leaked_flow_nodes(
+        nodes: &[atman_runtime::workflow::WorkflowNode],
+        spawned_run_ids: &HashSet<String>,
+        leaked: &mut Vec<String>,
+    ) {
+        for node in nodes {
+            if let atman_runtime::workflow::WorkflowNodeKind::Flow { run_id, .. } = &node.kind {
+                if spawned_run_ids.contains(run_id) {
+                    leaked.push(run_id.clone());
+                }
+            }
+            collect_leaked_flow_nodes(&node.children, spawned_run_ids, leaked);
+        }
+    }
+
+    #[test]
+    fn verify_real_session_63ae6ed0() {
+        let path = std::path::Path::new(
+            "/Users/w-mai/Library/Application Support/atman/sessions/63ae6ed0-77da-486e-9246-38c53875b32a/events.jsonl",
+        );
+        if !path.exists() {
+            eprintln!("skipping: session file not found");
+            return;
+        }
+        let entries =
+            atman_runtime::projection::message_window::replay_transcript_from(path).unwrap();
+        let out = flatten_transcript(&entries);
+
+        let sub_items: Vec<_> = out
+            .iter()
+            .filter_map(|it| match it {
+                OutputItem::SubAgentActivity {
+                    handle,
+                    workflow_graph,
+                    status,
+                    ..
+                } => Some((handle.clone(), workflow_graph.root.len(), status.clone())),
+                _ => None,
+            })
+            .collect();
+
+        eprintln!("=== SubAgentActivity items: {}", sub_items.len());
+        for (handle, nodes, status) in &sub_items {
+            eprintln!("  handle={} nodes={} status={}", handle, nodes, status);
+        }
+
+        // Check main workflow panel for sub-agent nodes
+        let main_panels: Vec<_> = out
+            .iter()
+            .filter_map(|it| match it {
+                OutputItem::WorkflowPanel { graph, .. } => Some(count_workflow_nodes(&graph.root)),
+                _ => None,
+            })
+            .collect();
+        eprintln!(
+            "=== Main workflow panels: {}, node counts: {:?}",
+            main_panels.len(),
+            main_panels
+        );
+
+        assert!(!sub_items.is_empty(), "should have SubAgentActivity items");
+        for (handle, nodes, status) in &sub_items {
+            assert!(
+                *nodes > 0,
+                "SubAgentActivity {} should have nodes, got {}",
+                handle,
+                nodes
+            );
+            assert_eq!(status, "ok", "SubAgentActivity {} should be done", handle);
+        }
+
+        // CRITICAL: verify no main workflow panel contains a Flow node
+        // whose run_id is in the spawned set (would mean spawned events leaked)
+        let spawned_run_ids: HashSet<String> =
+            sub_items.iter().map(|(h, _, _)| h.clone()).collect();
+        let mut leaked: Vec<String> = Vec::new();
+        for item in &out {
+            if let OutputItem::WorkflowPanel { graph, .. } = item {
+                collect_leaked_flow_nodes(&graph.root, &spawned_run_ids, &mut leaked);
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "spawned flow nodes leaked into main workflow panels: {:?}",
+            leaked
+        );
+    }
 }

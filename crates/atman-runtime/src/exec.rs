@@ -143,9 +143,7 @@ fn emit_flow_node_start(
         return;
     };
     let (kind, label) = stmt_to_node_kind_label(stmt);
-    if let Some(sink) = ctx.events
-        && ctx.session_runtime.is_some()
-    {
+    if let Some(sink) = ctx.events {
         sink.emit(crate::event::Event::FlowNodeStart {
             run_id: run_id.clone(),
             node_id: node_id.to_string(),
@@ -225,9 +223,7 @@ fn emit_flow_node_end(
         _ => crate::event::FlowNodeStatus::Ok,
     };
     let preview_owned = output_preview.map(String::from);
-    if let Some(sink) = ctx.events
-        && ctx.session_runtime.is_some()
-    {
+    if let Some(sink) = ctx.events {
         sink.emit(crate::event::Event::FlowNodeEnd {
             run_id: run_id.clone(),
             node_id: node_id.to_string(),
