@@ -559,7 +559,7 @@ impl Tool for FlowInterject {
             let entry = reg.lookup(&handle)?;
             let inj = crate::injection::Injection::new_pending(crate::event::TurnId::now(), text);
             entry.pending_injections.lock().unwrap().push(inj);
-            entry.injection_notify.notify_waiters();
+            entry.injection_notify.notify_one();
             Ok(Value::Unit)
         })
     }

@@ -544,17 +544,16 @@ async fn run_streaming_once<'a>(
     rules: &WatchRules,
     ctx: &EvalCtx<'a>,
 ) -> StreamOutcome {
-    // Prefer the FlowRun's interjection channel; fall back to session-level.
-    let mut inj_rx = ctx
-        .tool_ctx
-        .agent_entry
-        .as_ref()
-        .map(|e| e.interjection_tx.subscribe())
-        .or_else(|| {
-            ctx.session_runtime
-                .as_ref()
-                .map(|s| s.subscribe_injections())
-        });
+    // Drain pending interjections from the tool-execution phase.
+    if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
+        let pending: Vec<_> = entry.pending_injections.lock().unwrap().drain(..).collect();
+        if let Some(inj) = pending.into_iter().next() {
+            return StreamOutcome::Done(Value::Err(RuntimeError::Cancelled(format!(
+                "interjected: {}",
+                inj.text
+            ))));
+        }
+    }
     let stream_tx = ctx.tool_ctx.stream_tx.clone();
     let frame_tx = ctx
         .tool_ctx
@@ -591,9 +590,9 @@ async fn run_streaming_once<'a>(
     tokio::pin!(elapsed_sleep);
     let started = std::time::Instant::now();
 
-    let mut l1_nudge: Option<String> = None;
-    let mut l2_correction: Option<String> = None;
-    let mut l3_redirect: Option<String> = None;
+    let l1_nudge: Option<String> = None;
+    let l2_correction: Option<String> = None;
+    let l3_redirect: Option<String> = None;
     let mut events_closed = false;
     let final_result = loop {
         tokio::select! {
@@ -641,31 +640,22 @@ async fn run_streaming_once<'a>(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 }
             }
-            inj_msg = poll_injection(&mut inj_rx), if inj_rx.is_some() && l3_redirect.is_none() => {
-                if let Some(inj) = inj_msg
-                    && (ctx.session_runtime.is_none()
-                        || ctx
-                            .turn_id
-                            .as_ref()
-                            .is_some_and(|t| &inj.turn_id == t))
-                {
-                    match inj.level {
-                        crate::injection::InjectionLevel::L1Nudge => {
-                            cancel.cancel();
-                            l1_nudge = Some(inj.text.clone());
-                        }
-                        crate::injection::InjectionLevel::L2CourseCorrect => {
-                            cancel.cancel();
-                            l2_correction = Some(inj.text.clone());
-                        }
-                        crate::injection::InjectionLevel::L3Redirect => {
-                            cancel.cancel();
-                            l3_redirect = inj.redirect_target.clone();
-                        }
-                        crate::injection::InjectionLevel::L4HardStop => {
-                            cancel.cancel();
-                            break Err(RuntimeError::Cancelled("hard stop from user".into()));
-                        }
+            _ = async {
+                if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
+                    entry.injection_notify.notified().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if ctx.tool_ctx.agent_entry.is_some() && l3_redirect.is_none() => {
+                if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
+                    let pending: Vec<_> =
+                        entry.pending_injections.lock().unwrap().drain(..).collect();
+                    if let Some(inj) = pending.into_iter().next() {
+                        cancel.cancel();
+                        break Err(RuntimeError::Cancelled(format!(
+                            "interjected: {}",
+                            inj.text
+                        )));
                     }
                 }
             }
@@ -753,19 +743,6 @@ async fn run_streaming_once<'a>(
         ))),
         Ok(am) => StreamOutcome::Done(crate::provider::assistant_message_to_value(&am)),
         Err(e) => StreamOutcome::Done(Value::Err(e)),
-    }
-}
-
-async fn poll_injection(
-    rx: &mut Option<tokio::sync::broadcast::Receiver<crate::injection::Injection>>,
-) -> Option<crate::injection::Injection> {
-    let rx = rx.as_mut()?;
-    loop {
-        match rx.recv().await {
-            Ok(inj) => return Some(inj),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(_) => return None,
-        }
     }
 }
 
