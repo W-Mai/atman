@@ -55,7 +55,7 @@ pub struct WatchEvent {
     pub timeout: Duration,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum WatchResult {
     Matched {
         row: Option<u16>,
@@ -424,6 +424,7 @@ impl Tool for Watch {
                         watcher_id.clone(),
                         source,
                         pattern,
+                        mode,
                         Duration::from_millis(timeout_ms),
                         watchable,
                     );
@@ -439,6 +440,7 @@ impl Tool for Watch {
                         watcher_id.clone(),
                         source,
                         pattern,
+                        mode,
                         Duration::from_millis(timeout_ms),
                         watchable,
                     );
@@ -454,6 +456,7 @@ impl Tool for Watch {
                         watcher_id.clone(),
                         source,
                         pattern,
+                        mode,
                         Duration::from_millis(timeout_ms),
                         watchable,
                     );
@@ -473,6 +476,7 @@ fn spawn_watcher(
     wid: WatcherId,
     source: WatchSource,
     pattern: String,
+    mode: WatchMode,
     timeout: Duration,
     watchable: Arc<dyn Watchable>,
 ) {
@@ -480,8 +484,29 @@ fn spawn_watcher(
     let w = Arc::clone(&watchable);
     let pat = pattern.clone();
     tokio::spawn(async move {
-        let result = tokio::time::timeout(timeout, w.watch_output(pat, cancel)).await;
-        handle_watch_result(hub, wid, source, pattern, timeout, result).await;
+        loop {
+            let result = tokio::time::timeout(
+                timeout,
+                Arc::clone(&w).watch_output(pat.clone(), cancel.clone()),
+            )
+            .await;
+            let matched = matches!(result, Ok(WatchResult::Matched { .. }));
+            handle_watch_result(
+                Arc::clone(&hub),
+                wid.clone(),
+                source.clone(),
+                pattern.clone(),
+                timeout,
+                result,
+            )
+            .await;
+            if !matched || mode == WatchMode::Once {
+                break;
+            }
+        }
+        if mode == WatchMode::Persist {
+            hub.unregister(&wid);
+        }
     });
 }
 
@@ -908,5 +933,194 @@ mod tests {
         assert!(text.contains("already exited"));
         assert!(text.contains("a1"));
         assert!(text.contains("done"));
+    }
+
+    struct ScriptedWatchable {
+        results: Vec<WatchResult>,
+        idx: Mutex<usize>,
+    }
+
+    impl Watchable for ScriptedWatchable {
+        fn watch_output(
+            self: Arc<Self>,
+            _pattern: String,
+            _cancel: CancellationToken,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WatchResult> + Send>> {
+            let mut idx = self.idx.lock().unwrap();
+            let i = *idx;
+            *idx += 1;
+            let result = self
+                .results
+                .get(i)
+                .cloned()
+                .unwrap_or(WatchResult::SourceExited);
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                result
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn persist_watcher_fires_on_every_match_then_cleans_up() {
+        let hub = Arc::new(WatchHub::new());
+        let wid = hub.register(
+            WatchSource::Bash {
+                handle: "b1".into(),
+            },
+            "done".into(),
+            WatchMode::Persist,
+            Duration::from_secs(10),
+        );
+        let watchable: Arc<dyn Watchable> = Arc::new(ScriptedWatchable {
+            results: vec![
+                WatchResult::Matched {
+                    row: None,
+                    col: Some(0),
+                    text: "done".into(),
+                },
+                WatchResult::Matched {
+                    row: None,
+                    col: Some(4),
+                    text: "done".into(),
+                },
+                WatchResult::SourceExited,
+            ],
+            idx: Mutex::new(0),
+        });
+        spawn_watcher(
+            Arc::clone(&hub),
+            wid,
+            WatchSource::Bash {
+                handle: "b1".into(),
+            },
+            "done".into(),
+            WatchMode::Persist,
+            Duration::from_secs(10),
+            watchable,
+        );
+
+        let e1 = hub
+            .wait_for_event(Duration::from_secs(2))
+            .await
+            .expect("first match event");
+        assert!(!e1.exited && !e1.timed_out, "first event should be a match");
+        let e2 = hub
+            .wait_for_event(Duration::from_secs(2))
+            .await
+            .expect("second match event");
+        assert!(
+            !e2.exited && !e2.timed_out,
+            "second event should be a match"
+        );
+        let e3 = hub
+            .wait_for_event(Duration::from_secs(2))
+            .await
+            .expect("exited event");
+        assert!(e3.exited, "third event should be source-exited");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !hub.has_active_watchers(),
+            "persist watcher must be removed after source exits"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_watcher_timeout_removes_watcher() {
+        struct NeverMatch;
+        impl Watchable for NeverMatch {
+            fn watch_output(
+                self: Arc<Self>,
+                _pattern: String,
+                cancel: CancellationToken,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WatchResult> + Send>>
+            {
+                Box::pin(async move {
+                    cancel.cancelled().await;
+                    WatchResult::Cancelled
+                })
+            }
+        }
+
+        let hub = Arc::new(WatchHub::new());
+        let wid = hub.register(
+            WatchSource::Bash {
+                handle: "b1".into(),
+            },
+            "done".into(),
+            WatchMode::Persist,
+            Duration::from_millis(50),
+        );
+        spawn_watcher(
+            Arc::clone(&hub),
+            wid,
+            WatchSource::Bash {
+                handle: "b1".into(),
+            },
+            "done".into(),
+            WatchMode::Persist,
+            Duration::from_millis(50),
+            Arc::new(NeverMatch) as Arc<dyn Watchable>,
+        );
+
+        let evt = hub
+            .wait_for_event(Duration::from_secs(2))
+            .await
+            .expect("timeout event");
+        assert!(evt.timed_out, "should receive a timeout event");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !hub.has_active_watchers(),
+            "persist watcher must be removed after timeout, not linger forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_watcher_stops_on_cancel() {
+        struct NeverMatch;
+        impl Watchable for NeverMatch {
+            fn watch_output(
+                self: Arc<Self>,
+                _pattern: String,
+                cancel: CancellationToken,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = WatchResult> + Send>>
+            {
+                Box::pin(async move {
+                    cancel.cancelled().await;
+                    WatchResult::Cancelled
+                })
+            }
+        }
+
+        let hub = Arc::new(WatchHub::new());
+        let wid = hub.register(
+            WatchSource::Bash {
+                handle: "b1".into(),
+            },
+            "done".into(),
+            WatchMode::Persist,
+            Duration::from_secs(10),
+        );
+        spawn_watcher(
+            Arc::clone(&hub),
+            wid.clone(),
+            WatchSource::Bash {
+                handle: "b1".into(),
+            },
+            "done".into(),
+            WatchMode::Persist,
+            Duration::from_secs(10),
+            Arc::new(NeverMatch) as Arc<dyn Watchable>,
+        );
+
+        hub.unregister(&wid);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !hub.has_active_watchers(),
+            "persist watcher must stop and be removed when cancelled"
+        );
     }
 }
