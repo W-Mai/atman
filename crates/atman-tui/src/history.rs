@@ -152,7 +152,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     continue;
                 }
                 if matches!(msg.role, MessageRole::User)
-                    && flow_run_id.as_ref().is_none_or(|rid| find_spawned_root(rid).is_none())
+                    && flow_run_id
+                        .as_ref()
+                        .is_none_or(|rid| find_spawned_root(rid).is_none())
                     && let Some(i) = current_workflow_idx.take()
                     && let Some(OutputItem::WorkflowPanel { ended_at, .. }) = out.get_mut(i)
                     && ended_at.is_none()
@@ -1798,7 +1800,10 @@ mod tests {
 
         for (i, item) in out.iter().enumerate() {
             if let OutputItem::SubAgentActivity {
-                handle, workflow_graph, status, ..
+                handle,
+                workflow_graph,
+                status,
+                ..
             } = item
             {
                 let node_count = count_workflow_nodes(&workflow_graph.root);
