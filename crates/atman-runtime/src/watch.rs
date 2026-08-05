@@ -6,6 +6,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
+use crate::message::Message;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
 
@@ -580,7 +581,10 @@ impl Tool for WaitForWatcher {
                 RuntimeError::ToolFailed("wait_for_watcher: watch hub not available".into())
             })?;
             match hub.wait_for_event(Duration::from_millis(timeout_ms)).await {
-                Some(evt) => Ok(Value::Str(format_watch_event_text(&evt))),
+                Some(evt) => Ok(Value::Message(Message::system_text(
+                    ctx.turn_id.clone().unwrap_or_else(crate::event::TurnId::now),
+                    format_watch_event_text(&evt),
+                ))),
                 None => Ok(Value::Unit),
             }
         })

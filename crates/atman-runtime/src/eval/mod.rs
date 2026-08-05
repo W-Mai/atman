@@ -1362,6 +1362,9 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                 )
                                 .await;
                             }
+                            if !matches!(context_mode, ContextMode::None) {
+                                return Value::Message(am.message.clone());
+                            }
                             return crate::provider::assistant_message_to_value(&am);
                         }
                         Err(e) => {
