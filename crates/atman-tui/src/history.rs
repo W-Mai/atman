@@ -613,6 +613,12 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 *e = Some(Instant::now());
             }
         }
+        if let OutputItem::SubAgentActivity { done, status, .. } = item {
+            if !*done {
+                *done = true;
+                *status = "interrupted".into();
+            }
+        }
     }
     dedup_by_handle(&mut out);
     out
@@ -1104,6 +1110,50 @@ mod tests {
         assert!(
             panel.is_some(),
             "orphan panel without FlowDone must be closed on restore"
+        );
+    }
+
+    #[test]
+    fn flatten_transcript_marks_orphan_sub_agent_as_interrupted() {
+        let root_run = "root-001".to_string();
+        let sub_run = "sub-001".to_string();
+
+        let entries = vec![
+            TranscriptEntry::FlowStart {
+                run_id: root_run.clone(),
+                flow_name: "agent".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowStart {
+                run_id: sub_run.clone(),
+                flow_name: "subagent".into(),
+                parent_run_id: Some(root_run.clone()),
+                parent_node_id: Some("1".into()),
+                spawned: true,
+                ts: None,
+            },
+            TranscriptEntry::Message {
+                message: Message::user_text(TurnId::now(), "do research"),
+                flow_run_id: Some(sub_run.clone()),
+            },
+            // No FlowDone for sub_run — simulates crash/restart mid-subflow
+        ];
+
+        let out = flatten_transcript(&entries);
+        let sub = out
+            .iter()
+            .find_map(|it| match it {
+                OutputItem::SubAgentActivity { done, status, .. } => Some((*done, status.clone())),
+                _ => None,
+            })
+            .expect("SubAgentActivity item");
+        assert!(sub.0, "orphan sub-agent must be marked done on restore");
+        assert_eq!(
+            sub.1, "interrupted",
+            "orphan sub-agent status must be 'interrupted'"
         );
     }
 

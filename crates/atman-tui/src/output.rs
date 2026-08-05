@@ -1655,6 +1655,7 @@ fn render_sub_agent_activity(
         "ok" => "✓",
         "err" => "✗",
         "killed" => "⊘",
+        "interrupted" => "⚠",
         _ if done => "✓",
         _ => spinner_char(animation_frame),
     };

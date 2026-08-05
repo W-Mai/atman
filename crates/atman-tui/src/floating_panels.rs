@@ -1571,6 +1571,7 @@ fn render_sub_agent_panel(
         "ok" => "✓",
         "err" => "✗",
         "killed" => "⊘",
+        "interrupted" => "⚠",
         _ if done => "✓",
         _ => "◐",
     };
