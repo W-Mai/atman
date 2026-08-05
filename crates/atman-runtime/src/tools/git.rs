@@ -54,6 +54,7 @@ impl Tool for GitDiff {
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(out.body.clone()),
+                    run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
                 });
             }
             Ok(Value::Struct(vec![

@@ -5151,22 +5151,26 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         handle: bash_handle.clone(),
         kind: "stdout".into(),
         line: "$ cargo test --workspace\n".into(),
+        run_id: None,
     });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let _ = tx.send(StreamFrame::BashChunk {
         handle: bash_handle.clone(),
         kind: "stdout".into(),
         line: "    Finished test [unoptimized + debuginfo] target(s) in 0.52s\n".into(),
+        run_id: None,
     });
     let _ = tx.send(StreamFrame::BashChunk {
         handle: bash_handle.clone(),
         kind: "stdout".into(),
         line: "     Running unittests src/lib.rs\n".into(),
+        run_id: None,
     });
     let _ = tx.send(StreamFrame::BashChunk {
         handle: bash_handle.clone(),
         kind: "stdout".into(),
         line: "running 258 tests\ntest result: ok. 258 passed; 0 failed\n".into(),
+        run_id: None,
     });
 
     // 2. Terminal task with screen
@@ -5212,6 +5216,7 @@ async fn preview_scene_floating_panel(session: std::sync::Arc<Session>) {
         bytes: vec![],
         screen: Some(screen),
         state: atman_runtime::tools::term::TermStateSnapshot::Running,
+        run_id: None,
     });
 
     // 3. Flow with activity nodes

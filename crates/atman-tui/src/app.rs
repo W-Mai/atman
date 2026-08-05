@@ -1325,7 +1325,13 @@ impl AppState {
                 bytes,
                 screen,
                 state: _,
+                run_id,
             } => {
+                if let Some(rid) = &run_id
+                    && self.sub_agent_run_ids.contains_key(rid)
+                {
+                    return;
+                }
                 self.waiting_for_llm = false;
                 if self.scroll_offset >= self.max_scroll_offset() {
                     self.follow_tail = true;
@@ -1371,7 +1377,12 @@ impl AppState {
                     self.reset_lag_state();
                 }
             }
-            StreamFrame::TerminalExited { handle, .. } => {
+            StreamFrame::TerminalExited { handle, run_id, .. } => {
+                if let Some(rid) = &run_id
+                    && self.sub_agent_run_ids.contains_key(rid)
+                {
+                    return;
+                }
                 if let Some(idx) = self.find_item_by_handle(&handle) {
                     if let Some(OutputItem::Terminal { done, .. }) = self.items.get_mut(idx) {
                         *done = true;
@@ -1379,7 +1390,17 @@ impl AppState {
                     }
                 }
             }
-            StreamFrame::BashChunk { handle, kind, line } => {
+            StreamFrame::BashChunk {
+                handle,
+                kind,
+                line,
+                run_id,
+            } => {
+                if let Some(rid) = &run_id
+                    && self.sub_agent_run_ids.contains_key(rid)
+                {
+                    return;
+                }
                 self.waiting_for_llm = false;
                 if self.scroll_offset >= self.max_scroll_offset() {
                     self.follow_tail = true;
@@ -1411,7 +1432,12 @@ impl AppState {
                     self.reset_lag_state();
                 }
             }
-            StreamFrame::BashExited { handle, .. } => {
+            StreamFrame::BashExited { handle, run_id, .. } => {
+                if let Some(rid) = &run_id
+                    && self.sub_agent_run_ids.contains_key(rid)
+                {
+                    return;
+                }
                 if let Some(idx) = self.find_item_by_handle(&handle) {
                     if let Some(OutputItem::Bash { done, .. }) = self.items.get_mut(idx) {
                         *done = true;
@@ -1424,7 +1450,13 @@ impl AppState {
                 old_content,
                 new_content,
                 unified_diff,
+                run_id,
             } => {
+                if let Some(rid) = &run_id
+                    && self.sub_agent_run_ids.contains_key(rid)
+                {
+                    return;
+                }
                 self.push_item(OutputItem::DiffPreview {
                     title,
                     old_content,
@@ -2790,6 +2822,7 @@ mod terminal_stream_tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            run_id: None,
         });
         assert_eq!(app.items.len(), 1);
         match &app.items[0] {
@@ -2813,12 +2846,14 @@ mod terminal_stream_tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            run_id: None,
         });
         app.apply_stream_frame(StreamFrame::TerminalChunk {
             handle: "term_s_0".into(),
             bytes: b" world".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            run_id: None,
         });
         assert_eq!(app.items.len(), 1, "should update existing, not create new");
         match &app.items[0] {
@@ -2840,14 +2875,93 @@ mod terminal_stream_tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen),
             state: TermStateSnapshot::Running,
+            run_id: None,
         });
         app.apply_stream_frame(StreamFrame::TerminalExited {
             handle: "term_s_0".into(),
             exit_code: Some(0),
+            run_id: None,
         });
         match &app.items[0] {
             OutputItem::Terminal { done, .. } => assert!(*done),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn sub_agent_tool_frames_do_not_mutate_main_document_items() {
+        let mut app = AppState::new("s".into(), None);
+        let screen = dummy_screen();
+        app.apply_stream_frame(StreamFrame::SubAgentStarted {
+            handle: "agent_1".into(),
+            goal: "check".into(),
+            child_run_id: "child_run".into(),
+            model: "m".into(),
+        });
+        app.apply_stream_frame(StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: b"main".to_vec(),
+            screen: Some(screen.clone()),
+            state: TermStateSnapshot::Running,
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::BashChunk {
+            handle: "bg_s_0".into(),
+            kind: "stdout".into(),
+            line: "main\n".into(),
+            run_id: None,
+        });
+
+        let baseline = app.items.len();
+        app.apply_stream_frame(StreamFrame::TerminalChunk {
+            handle: "term_s_0".into(),
+            bytes: b"sub".to_vec(),
+            screen: Some(screen),
+            state: TermStateSnapshot::Running,
+            run_id: Some("child_run".into()),
+        });
+        app.apply_stream_frame(StreamFrame::TerminalExited {
+            handle: "term_s_0".into(),
+            exit_code: Some(0),
+            run_id: Some("child_run".into()),
+        });
+        app.apply_stream_frame(StreamFrame::BashChunk {
+            handle: "bg_s_0".into(),
+            kind: "stdout".into(),
+            line: "sub\n".into(),
+            run_id: Some("child_run".into()),
+        });
+        app.apply_stream_frame(StreamFrame::BashExited {
+            handle: "bg_s_0".into(),
+            exit_code: Some(0),
+            run_id: Some("child_run".into()),
+        });
+        app.apply_stream_frame(StreamFrame::DiffPreview {
+            title: "sub diff".into(),
+            old_content: None,
+            new_content: None,
+            unified_diff: Some("diff".into()),
+            run_id: Some("child_run".into()),
+        });
+
+        assert_eq!(app.items.len(), baseline);
+        match &app.items[1] {
+            OutputItem::Terminal {
+                accumulated_bytes,
+                done,
+                ..
+            } => {
+                assert_eq!(accumulated_bytes, b"main");
+                assert!(!*done);
+            }
+            _ => panic!("expected Terminal item"),
+        }
+        match &app.items[2] {
+            OutputItem::Bash { output, done, .. } => {
+                assert_eq!(output, "main\n");
+                assert!(!*done);
+            }
+            _ => panic!("expected Bash item"),
         }
     }
 
@@ -2921,6 +3035,7 @@ mod terminal_e2e_tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen.clone()),
             state: TermStateSnapshot::Running,
+            run_id: None,
         });
 
         let cache_key = LayoutKey {

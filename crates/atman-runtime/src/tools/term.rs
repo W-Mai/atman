@@ -370,6 +370,7 @@ impl TermRegistry {
         label: String,
         cancel: tokio_util::sync::CancellationToken,
         events: Option<crate::event::EventSink>,
+        flow_run_id: Option<String>,
     ) -> Result<(TermHandle, Arc<TermEntry>), RuntimeError> {
         let handle = self.next_handle(&session_id);
         let handle_str = handle.to_string();
@@ -448,6 +449,7 @@ impl TermRegistry {
                 task_registry,
                 task_id,
                 events,
+                flow_run_id,
             );
         });
         *entry.reader_task.lock().expect("reader_task poisoned") = Some(join);
@@ -475,6 +477,7 @@ fn run_reader_loop(
     task_registry: Option<crate::task_registry::TaskRegistry>,
     task_id: Option<crate::task_registry::TaskId>,
     events_sink: Option<crate::event::EventSink>,
+    flow_run_id: Option<String>,
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
     let mut last_screen: Option<TerminalScreen> = None;
@@ -508,6 +511,7 @@ fn run_reader_loop(
                         bytes: chunk.to_vec(),
                         screen: tui_screen,
                         state: st.to_snapshot(),
+                        run_id: flow_run_id.clone(),
                     });
                 }
             }
@@ -547,7 +551,11 @@ fn run_reader_loop(
 
     let _ = stream_tx.send(TermStreamEvent::Exited { exit_code });
     if let Some(tx) = &tui_stream_tx {
-        let _ = tx.send(crate::stream::StreamFrame::TerminalExited { handle, exit_code });
+        let _ = tx.send(crate::stream::StreamFrame::TerminalExited {
+            handle,
+            exit_code,
+            run_id: flow_run_id,
+        });
     }
 
     if let (Some(tr), Some(tid)) = (task_registry, task_id) {
@@ -744,6 +752,7 @@ async fn spawn_impl(
             tc.child_token()
         },
         ctx.events.clone(),
+        ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
     )?;
 
     let state = entry.current_state();

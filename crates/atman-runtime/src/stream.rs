@@ -150,25 +150,35 @@ pub enum StreamFrame {
         bytes: Vec<u8>,
         screen: Option<crate::tools::term::TerminalScreen>,
         state: crate::tools::term::TermStateSnapshot,
+        #[serde(default)]
+        run_id: Option<String>,
     },
     TerminalExited {
         handle: String,
         exit_code: Option<i32>,
+        #[serde(default)]
+        run_id: Option<String>,
     },
     BashChunk {
         handle: String,
         kind: String,
         line: String,
+        #[serde(default)]
+        run_id: Option<String>,
     },
     BashExited {
         handle: String,
         exit_code: Option<i32>,
+        #[serde(default)]
+        run_id: Option<String>,
     },
     DiffPreview {
         title: String,
         old_content: Option<String>,
         new_content: Option<String>,
         unified_diff: Option<String>,
+        #[serde(default)]
+        run_id: Option<String>,
     },
     CompactionSummary {
         phase: CompactionPhase,
@@ -225,6 +235,21 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
             run_id: Some(rid), ..
         }
         | StreamFrame::LlmDone {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::TerminalChunk {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::TerminalExited {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::BashChunk {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::BashExited {
+            run_id: Some(rid), ..
+        }
+        | StreamFrame::DiffPreview {
             run_id: Some(rid), ..
         } => Some(rid.as_str()),
         _ => None,
@@ -299,6 +324,7 @@ mod tests {
             bytes: b"hi".to_vec(),
             screen: Some(screen),
             state: crate::tools::term::TermStateSnapshot::Running,
+            run_id: None,
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: StreamFrame = serde_json::from_str(&json).unwrap();
@@ -308,9 +334,11 @@ mod tests {
                 bytes,
                 screen,
                 state,
+                run_id,
             } => {
                 assert_eq!(handle, "term_s_0");
                 assert_eq!(bytes, b"hi");
+                assert!(run_id.is_none());
                 let screen = screen.expect("screen should be Some");
                 assert_eq!(screen.rows, 2);
                 assert_eq!(screen.cols, 3);
@@ -330,11 +358,14 @@ mod tests {
         let f = StreamFrame::TerminalExited {
             handle: "term_s_1".into(),
             exit_code: Some(0),
+            run_id: None,
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: StreamFrame = serde_json::from_str(&json).unwrap();
         match back {
-            StreamFrame::TerminalExited { handle, exit_code } => {
+            StreamFrame::TerminalExited {
+                handle, exit_code, ..
+            } => {
                 assert_eq!(handle, "term_s_1");
                 assert_eq!(exit_code, Some(0));
             }

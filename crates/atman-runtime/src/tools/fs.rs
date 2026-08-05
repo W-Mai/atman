@@ -227,6 +227,7 @@ impl Tool for FsWrite {
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(diff_patch.clone()),
+                    run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
                 });
             }
             Ok(Value::Struct(vec![
@@ -410,6 +411,7 @@ impl Tool for FsEdit {
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(diff_patch.clone()),
+                    run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
                 });
             }
             let replaced = if replace_all { match_lines.len() } else { 1 };

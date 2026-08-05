@@ -79,6 +79,7 @@ impl Tool for GitLog {
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(preview_diff.clone()),
+                    run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
                 });
             }
 
@@ -140,6 +141,7 @@ impl Tool for GitShow {
                     old_content: None,
                     new_content: None,
                     unified_diff: Some(body.clone()),
+                    run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
                 });
             }
             Ok(Value::Struct(vec![
