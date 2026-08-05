@@ -51,6 +51,7 @@ pub struct WatchEvent {
     pub text: String,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub timed_out: bool,
+    pub exited: bool,
     pub timeout: Duration,
 }
 
@@ -192,11 +193,11 @@ impl WatchHub {
     }
 
     pub async fn wait_for_event(&self, timeout: Duration) -> Option<WatchEvent> {
-        if !self.has_active_watchers() {
-            return None;
-        }
         if let Some(evt) = self.pending_events.lock().unwrap().pop() {
             return Some(evt);
+        }
+        if !self.has_active_watchers() {
+            return None;
         }
         let _ = tokio::time::timeout(timeout, self.notify.notified()).await;
         self.pending_events.lock().unwrap().pop()
@@ -230,10 +231,26 @@ pub async fn handle_watch_result(
                 text,
                 timestamp: chrono::Utc::now(),
                 timed_out: false,
+                exited: false,
                 timeout,
             });
         }
-        Ok(WatchResult::SourceExited) | Ok(WatchResult::Cancelled) => {
+        Ok(WatchResult::SourceExited) => {
+            hub.enqueue_event(WatchEvent {
+                watcher_id: wid.clone(),
+                source,
+                pattern,
+                row: None,
+                col: None,
+                text: String::new(),
+                timestamp: chrono::Utc::now(),
+                timed_out: false,
+                exited: true,
+                timeout,
+            });
+            hub.unregister(&wid);
+        }
+        Ok(WatchResult::Cancelled) => {
             hub.unregister(&wid);
         }
         Err(_) => {
@@ -246,6 +263,7 @@ pub async fn handle_watch_result(
                 text: String::new(),
                 timestamp: chrono::Utc::now(),
                 timed_out: true,
+                exited: false,
                 timeout,
             });
         }
@@ -255,7 +273,12 @@ pub async fn handle_watch_result(
 pub fn format_watch_event_text(evt: &WatchEvent) -> String {
     let kind = evt.source.kind_str();
     let handle = evt.source.handle();
-    if evt.timed_out {
+    if evt.exited {
+        format!(
+            "[watcher {}] {} '{}' has already exited. Pattern '{}' will never match.",
+            evt.watcher_id, kind, handle, evt.pattern
+        )
+    } else if evt.timed_out {
         format!(
             "[watcher {}] {} '{}' pattern '{}' not detected in {}s. \
              Consider using {}.capture or {}.output to check current state.",
@@ -582,7 +605,9 @@ impl Tool for WaitForWatcher {
             })?;
             match hub.wait_for_event(Duration::from_millis(timeout_ms)).await {
                 Some(evt) => Ok(Value::Message(Message::system_text(
-                    ctx.turn_id.clone().unwrap_or_else(crate::event::TurnId::now),
+                    ctx.turn_id
+                        .clone()
+                        .unwrap_or_else(crate::event::TurnId::now),
                     format_watch_event_text(&evt),
                 ))),
                 None => Ok(Value::Unit),
@@ -700,6 +725,7 @@ mod tests {
             text: "done".into(),
             timestamp: chrono::Utc::now(),
             timed_out: false,
+            exited: false,
             timeout: Duration::from_secs(10),
         });
         assert!(
@@ -730,6 +756,7 @@ mod tests {
             text: "done".into(),
             timestamp: chrono::Utc::now(),
             timed_out: false,
+            exited: false,
             timeout: Duration::from_secs(10),
         });
         assert!(
@@ -751,6 +778,7 @@ mod tests {
             text: "$ ls".into(),
             timestamp: chrono::Utc::now(),
             timed_out: false,
+            exited: false,
             timeout: Duration::from_secs(120),
         };
         let text = format_watch_event_text(&evt);
@@ -773,6 +801,7 @@ mod tests {
             text: String::new(),
             timestamp: chrono::Utc::now(),
             timed_out: true,
+            exited: false,
             timeout: Duration::from_secs(120),
         };
         let text = format_watch_event_text(&evt);
@@ -809,10 +838,75 @@ mod tests {
             text: "$ ".into(),
             timestamp: chrono::Utc::now(),
             timed_out: false,
+            exited: false,
             timeout: Duration::from_secs(10),
         });
         let evt = hub.wait_for_event(Duration::from_millis(100)).await;
         assert!(evt.is_some());
         assert_eq!(evt.unwrap().pattern, "$ ");
+    }
+
+    #[tokio::test]
+    async fn wait_for_event_returns_source_exited_event() {
+        // When a watcher's source exits, handle_watch_result enqueues a WatchEvent
+        // with exited=true and unregisters the watcher. wait_for_event must still
+        // return that event even though no watchers remain active.
+        let hub = Arc::new(WatchHub::new());
+        let wid = hub.register(
+            WatchSource::Agent {
+                handle: "a1".into(),
+            },
+            "done".into(),
+            WatchMode::Once,
+            Duration::from_secs(10),
+        );
+        // Simulate source-exited: enqueue event then unregister (mirrors handle_watch_result)
+        hub.enqueue_event(WatchEvent {
+            watcher_id: wid.clone(),
+            source: WatchSource::Agent {
+                handle: "a1".into(),
+            },
+            pattern: "done".into(),
+            row: None,
+            col: None,
+            text: String::new(),
+            timestamp: chrono::Utc::now(),
+            timed_out: false,
+            exited: true,
+            timeout: Duration::from_secs(10),
+        });
+        hub.unregister(&wid);
+        assert!(!hub.has_active_watchers());
+        // Must still return the pending exited event despite no active watchers
+        let evt = hub.wait_for_event(Duration::from_millis(100)).await;
+        assert!(
+            evt.is_some(),
+            "exited event must be consumable via wait_for_event"
+        );
+        let evt = evt.unwrap();
+        assert!(evt.exited);
+        assert_eq!(evt.pattern, "done");
+    }
+
+    #[test]
+    fn format_event_text_exited_includes_already_exited() {
+        let evt = WatchEvent {
+            watcher_id: "w_xyz".into(),
+            source: WatchSource::Agent {
+                handle: "a1".into(),
+            },
+            pattern: "done".into(),
+            row: None,
+            col: None,
+            text: String::new(),
+            timestamp: chrono::Utc::now(),
+            timed_out: false,
+            exited: true,
+            timeout: Duration::from_secs(120),
+        };
+        let text = format_watch_event_text(&evt);
+        assert!(text.contains("already exited"));
+        assert!(text.contains("a1"));
+        assert!(text.contains("done"));
     }
 }

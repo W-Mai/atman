@@ -830,8 +830,27 @@ impl crate::watch::Watchable for TermEntry {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::watch::WatchResult> + Send>>
     {
         let stream_tx = self.stream_tx.clone();
+        let state = self.state.clone();
+        let parser = self.parser.clone();
         Box::pin(async move {
+            // Subscribe BEFORE checking state — closes the TOCTOU window where
+            // the terminal exits between the check and subscribe().
             let mut rx = stream_tx.subscribe();
+            {
+                let st = state.lock().unwrap().clone();
+                if !st.is_running() {
+                    let p = parser.lock().unwrap();
+                    let screen = snapshot_screen(&p);
+                    if let Some((r, c)) = find_pattern_on_screen(&screen, &pattern) {
+                        return crate::watch::WatchResult::Matched {
+                            row: Some(r),
+                            col: Some(c),
+                            text: pattern,
+                        };
+                    }
+                    return crate::watch::WatchResult::SourceExited;
+                }
+            }
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,

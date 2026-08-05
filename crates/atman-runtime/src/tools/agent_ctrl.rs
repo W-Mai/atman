@@ -75,6 +75,7 @@ impl crate::watch::Watchable for FlowEntry {
     {
         let stream_tx = self.stream_tx.clone();
         let output = self.output.clone();
+        let status = self.status.clone();
         Box::pin(async move {
             {
                 let existing = output.lock().unwrap().clone();
@@ -86,7 +87,25 @@ impl crate::watch::Watchable for FlowEntry {
                     };
                 }
             }
+            // Subscribe BEFORE checking status — if the source exits between
+            // subscribe and the status check, the broadcast event arrives via rx.
+            // If it exits before subscribe, the status check catches it.
             let mut rx = stream_tx.subscribe();
+            {
+                let st = status.lock().unwrap().clone();
+                if !st.is_running() {
+                    if let FlowRunStatus::Ok { final_text, .. } = &st {
+                        if final_text.find(&pattern).is_some() {
+                            return crate::watch::WatchResult::Matched {
+                                row: None,
+                                col: None,
+                                text: final_text.clone(),
+                            };
+                        }
+                    }
+                    return crate::watch::WatchResult::SourceExited;
+                }
+            }
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return crate::watch::WatchResult::Cancelled,
