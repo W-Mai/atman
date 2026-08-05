@@ -690,15 +690,6 @@ async fn run_flow_agent(
         .iter()
         .map(|flow| (flow.name.name.clone(), flow.clone()))
         .collect();
-    let task_id = ctx.task_registry.as_ref().map(|tr| {
-        tr.register(
-            crate::task_registry::TaskKind::Flow,
-            flow.name.name.clone(),
-            run_id.0.to_string(),
-            ctx.session_id.clone().unwrap_or_else(|| "anon".into()),
-            ctx.cancel.clone(),
-        )
-    });
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
     // One message segment per FlowRun: async shares entry.messages, sync gets
@@ -748,14 +739,6 @@ async fn run_flow_agent(
         },
     };
     emit_child_flow_end(ctx, &run_id, &status);
-    if let (Some(tr), Some(tid)) = (ctx.task_registry.as_ref(), &task_id) {
-        let ts = match &status {
-            FlowStatus::Ok => crate::task_registry::TaskStatus::Ok,
-            FlowStatus::Cancelled => crate::task_registry::TaskStatus::Killed,
-            FlowStatus::Errored { .. } => crate::task_registry::TaskStatus::Err,
-        };
-        tr.finish(tid, ts);
-    }
     out
 }
 
