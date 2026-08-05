@@ -26,6 +26,28 @@ pub struct FloatingPanel {
     pub h_scroll: u16,
     pub split: bool,
     pub expanded_tools: HashSet<String>,
+    pub render_cache: Option<PanelRenderCache>,
+}
+
+/// Cached render output for sub-agent / workflow floating panels.
+/// On a cache hit we skip workflow graph traversal, flatten_message, and
+/// build_lines — just draw the stored lines and recompute hitmap rects from
+/// the stored regions using the *current* scroll/area.
+#[derive(Clone, Debug)]
+pub struct PanelRenderCache {
+    items_version: u64,
+    expanded_version: u64,
+    width: u16,
+    /// None when the panel is done/idle → cache survives across frames.
+    /// Some(frame) when running → invalidated every animation tick.
+    animation_frame: Option<u32>,
+    messages_len: usize,
+    workflow_expanded: bool,
+    expanded_tools_len: usize,
+
+    lines: Vec<Line<'static>>,
+    regions: Vec<crate::output::NodeRegion>,
+    wf_offset: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +171,7 @@ impl FloatingPanels {
             h_scroll: 0,
             split: false,
             expanded_tools: HashSet::new(),
+            render_cache: None,
         };
         self.panels.push(panel);
         self.focused = Some(id.to_string());
@@ -346,6 +369,8 @@ pub fn render(
     mcp_selected: usize,
     hovered_mcp_row: &Option<String>,
     mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
+    items_version: u64,
+    expanded_version: u64,
 ) -> FloatingPanelHitmap {
     let mut all_hitmap = FloatingPanelHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
@@ -607,6 +632,8 @@ pub fn render(
                 mcp_selected,
                 hovered_mcp_row,
                 mcp_browser,
+                items_version,
+                expanded_version,
             );
             all_hitmap
                 .history_row_rects
@@ -884,6 +911,8 @@ fn render_panel_content(
     mcp_selected: usize,
     hovered_mcp_row: &Option<String>,
     mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
+    items_version: u64,
+    expanded_version: u64,
 ) {
     let _hovered_btn = hovered_btn;
     if area.height == 0 || area.width == 0 {
@@ -1146,6 +1175,9 @@ fn render_panel_content(
                             animation_frame,
                             hitmap_out,
                             item_idx.unwrap(),
+                            items_version,
+                            expanded_version,
+                            &mut panel.render_cache,
                         );
                     } else if let Some((panel_idx, _)) =
                         items.iter().enumerate().rev().find(|(_, it)| {
@@ -1170,47 +1202,116 @@ fn render_panel_content(
                         }) = items.get(panel_idx)
                     {
                         let render_width = area.width.max(300);
-                        let (lines, regions) = crate::output::render_workflow_panel_with_regions(
-                            graph,
-                            expanded_nodes,
-                            true,
-                            false,
-                            animation_frame,
-                            render_width,
-                            crate::output::MAX_COLLAPSED_BODY_ROWS,
-                        );
-                        let max_scroll = (lines.len() as u16).saturating_sub(area.height);
-                        let content_w = lines
-                            .iter()
-                            .map(|l| crate::width::spans_width(&l.spans))
-                            .max()
-                            .unwrap_or(0) as u16;
-                        let max_h_scroll = content_w.saturating_sub(area.width);
-                        panel.scroll = panel.scroll.min(max_scroll);
-                        panel.h_scroll = panel.h_scroll.min(max_h_scroll);
-                        let scroll = panel.scroll;
-                        let h_scroll = panel.h_scroll;
-                        for r in &regions {
-                            let row0 = area.y as u32 + r.start_row.saturating_sub(scroll as u32);
-                            let row1 = area.y as u32 + r.end_row.saturating_sub(scroll as u32);
-                            let col0 = area.x + r.col_start.saturating_sub(h_scroll);
-                            let col1 = area.x + r.col_end.saturating_sub(h_scroll);
-                            if col1 > col0 && row1 > row0 {
-                                hitmap_out.workflow_node_rects.push((
-                                    panel_idx,
-                                    r.path_key.clone(),
-                                    Rect {
-                                        x: col0,
-                                        y: row0 as u16,
-                                        width: col1.saturating_sub(col0),
-                                        height: (row1.saturating_sub(row0)) as u16,
-                                    },
-                                ));
+                        let wf_running = workflow_graph_is_running(graph);
+                        let cache_af = if wf_running {
+                            Some(animation_frame)
+                        } else {
+                            None
+                        };
+
+                        let cache_hit = panel.render_cache.as_ref().is_some_and(|cache| {
+                            cache.items_version == items_version
+                                && cache.expanded_version == expanded_version
+                                && cache.width == area.width
+                                && cache.animation_frame == cache_af
+                                && cache.workflow_expanded
+                        });
+
+                        if cache_hit {
+                            let cache = panel.render_cache.as_ref().unwrap();
+                            let max_scroll = (cache.lines.len() as u16).saturating_sub(area.height);
+                            let content_w = cache
+                                .lines
+                                .iter()
+                                .map(|l| crate::width::spans_width(&l.spans))
+                                .max()
+                                .unwrap_or(0) as u16;
+                            let max_h_scroll = content_w.saturating_sub(area.width);
+                            panel.scroll = panel.scroll.min(max_scroll);
+                            panel.h_scroll = panel.h_scroll.min(max_h_scroll);
+                            let scroll = panel.scroll;
+                            let h_scroll = panel.h_scroll;
+                            for r in &cache.regions {
+                                let row0 =
+                                    area.y as u32 + r.start_row.saturating_sub(scroll as u32);
+                                let row1 = area.y as u32 + r.end_row.saturating_sub(scroll as u32);
+                                let col0 = area.x + r.col_start.saturating_sub(h_scroll);
+                                let col1 = area.x + r.col_end.saturating_sub(h_scroll);
+                                if col1 > col0 && row1 > row0 {
+                                    hitmap_out.workflow_node_rects.push((
+                                        panel_idx,
+                                        r.path_key.clone(),
+                                        Rect {
+                                            x: col0,
+                                            y: row0 as u16,
+                                            width: col1.saturating_sub(col0),
+                                            height: (row1.saturating_sub(row0)) as u16,
+                                        },
+                                    ));
+                                }
                             }
+                            let p = ratatui::widgets::Paragraph::new(cache.lines.clone())
+                                .scroll((panel.scroll, panel.h_scroll));
+                            f.render_widget(p, area);
+                        } else {
+                            let (lines, regions) =
+                                crate::output::render_workflow_panel_with_regions(
+                                    graph,
+                                    expanded_nodes,
+                                    true,
+                                    false,
+                                    animation_frame,
+                                    render_width,
+                                    crate::output::MAX_COLLAPSED_BODY_ROWS,
+                                );
+                            let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+                            let content_w = lines
+                                .iter()
+                                .map(|l| crate::width::spans_width(&l.spans))
+                                .max()
+                                .unwrap_or(0) as u16;
+                            let max_h_scroll = content_w.saturating_sub(area.width);
+                            panel.scroll = panel.scroll.min(max_scroll);
+                            panel.h_scroll = panel.h_scroll.min(max_h_scroll);
+                            let scroll = panel.scroll;
+                            let h_scroll = panel.h_scroll;
+                            for r in &regions {
+                                let row0 =
+                                    area.y as u32 + r.start_row.saturating_sub(scroll as u32);
+                                let row1 = area.y as u32 + r.end_row.saturating_sub(scroll as u32);
+                                let col0 = area.x + r.col_start.saturating_sub(h_scroll);
+                                let col1 = area.x + r.col_end.saturating_sub(h_scroll);
+                                if col1 > col0 && row1 > row0 {
+                                    hitmap_out.workflow_node_rects.push((
+                                        panel_idx,
+                                        r.path_key.clone(),
+                                        Rect {
+                                            x: col0,
+                                            y: row0 as u16,
+                                            width: col1.saturating_sub(col0),
+                                            height: (row1.saturating_sub(row0)) as u16,
+                                        },
+                                    ));
+                                }
+                            }
+
+                            panel.render_cache = Some(PanelRenderCache {
+                                items_version,
+                                expanded_version,
+                                width: area.width,
+                                animation_frame: cache_af,
+                                messages_len: 0,
+                                workflow_expanded: true,
+                                expanded_tools_len: 0,
+                                lines: lines.clone(),
+                                regions: regions.clone(),
+                                wf_offset: 0,
+                            });
+
+                            let p = ratatui::widgets::Paragraph::new(lines)
+                                .scroll((panel.scroll, panel.h_scroll));
+                            f.render_widget(p, area);
                         }
-                        let p = ratatui::widgets::Paragraph::new(lines)
-                            .scroll((panel.scroll, panel.h_scroll));
-                        f.render_widget(p, area);
                     } else if let Some(snap) = snap {
                         render_task_meta(f, area, kind, snap);
                     } else {
@@ -1227,6 +1328,18 @@ pub struct FloatingPanelHitmap {
     pub history_row_rects: Vec<(String, Rect)>,
     pub workflow_node_rects: Vec<(usize, String, Rect)>,
     pub mcp_row_rects: Vec<(String, Rect)>,
+}
+
+/// Check if any node in the workflow graph is still running or pending.
+/// Used to decide whether to invalidate the render cache on animation ticks.
+fn workflow_graph_is_running(graph: &WorkflowGraph) -> bool {
+    use atman_runtime::workflow::{NodeStatus, WorkflowNode};
+    fn walk(nodes: &[WorkflowNode]) -> bool {
+        nodes.iter().any(|n| {
+            matches!(n.status, NodeStatus::Running | NodeStatus::Pending) || walk(&n.children)
+        })
+    }
+    walk(&graph.root)
 }
 
 fn task_summary_line(snap: &TaskSnapshot, items: &[OutputItem]) -> String {
@@ -1404,7 +1517,50 @@ fn render_sub_agent_panel(
     animation_frame: u32,
     hitmap_out: &mut FloatingPanelHitmap,
     item_idx: usize,
+    items_version: u64,
+    expanded_version: u64,
+    render_cache: &mut Option<PanelRenderCache>,
 ) {
+    let cache_af = if done { None } else { Some(animation_frame) };
+
+    if render_cache.as_ref().is_some_and(|cache| {
+        cache.items_version == items_version
+            && cache.expanded_version == expanded_version
+            && cache.width == area.width
+            && cache.animation_frame == cache_af
+            && cache.messages_len == messages.len()
+            && cache.workflow_expanded == workflow_expanded
+            && cache.expanded_tools_len == expanded_tools.len()
+    }) {
+        let cache = render_cache.as_ref().unwrap();
+        let max_scroll = (cache.lines.len() as u16).saturating_sub(area.height);
+        *scroll = (*scroll).min(max_scroll);
+        for r in &cache.regions {
+            let row0 =
+                area.y as u32 + (r.start_row + cache.wf_offset).saturating_sub(*scroll as u32);
+            let row1 = area.y as u32 + (r.end_row + cache.wf_offset).saturating_sub(*scroll as u32);
+            let col0 = area.x + r.col_start;
+            let col1 = area.x + r.col_end;
+            if col1 > col0 && row1 > row0 {
+                hitmap_out.workflow_node_rects.push((
+                    item_idx,
+                    r.path_key.clone(),
+                    Rect {
+                        x: col0,
+                        y: row0 as u16,
+                        width: col1 - col0,
+                        height: (row1 - row0) as u16,
+                    },
+                ));
+            }
+        }
+        f.render_widget(
+            Paragraph::new(cache.lines.clone()).scroll((*scroll, 0)),
+            area,
+        );
+        return;
+    }
+
     let t = crate::theme::theme();
     let label_style = Style::default().fg(t.subtle_fg.into());
     let value_style = Style::default().fg(t.tinted_fg.into());
@@ -1506,6 +1662,19 @@ fn render_sub_agent_panel(
             ));
         }
     }
+
+    *render_cache = Some(PanelRenderCache {
+        items_version,
+        expanded_version,
+        width: area.width,
+        animation_frame: cache_af,
+        messages_len: messages.len(),
+        workflow_expanded,
+        expanded_tools_len: expanded_tools.len(),
+        lines: lines.clone(),
+        regions: regions.clone(),
+        wf_offset,
+    });
 
     f.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), area);
 }

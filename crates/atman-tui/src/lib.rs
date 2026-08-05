@@ -3803,6 +3803,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
                 resources: &app.mcp_resources_cache,
                 prompts: &app.mcp_prompts_cache,
             },
+            app.items_version,
+            app.expanded_version,
         );
     } else {
         app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();
