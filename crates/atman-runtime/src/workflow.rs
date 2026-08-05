@@ -1014,9 +1014,9 @@ fn rebuild_messages_for_run_filters_by_run_id() {
     let root = FlowRunId::now();
     let child = FlowRunId::now();
     let tid = TurnId::now();
-    let mk = |role, text, rid| Event::AssistantMsg {
+    let mk = |role, text, rid: Option<FlowRunId>| Event::AssistantMsg {
         turn_id: tid.clone(),
-        flow_run_id: Some(rid),
+        flow_run_id: rid,
         message: Message {
             role,
             parts: vec![MessagePart::Text { text }],
@@ -1024,14 +1024,18 @@ fn rebuild_messages_for_run_filters_by_run_id() {
         },
     };
     let events = vec![
-        mk(MessageRole::Assistant, "root reply".into(), root.clone()),
-        mk(MessageRole::Assistant, "child reply".into(), child.clone()),
-        mk(MessageRole::Assistant, "root again".into(), root.clone()),
+        mk(MessageRole::Assistant, "root reply".into(), None),
+        mk(
+            MessageRole::Assistant,
+            "child reply".into(),
+            Some(child.clone()),
+        ),
+        mk(MessageRole::Assistant, "root again".into(), None),
     ];
+    // Root agent messages are tagged None (restored via envelope, not per-run rebuild);
+    // only sub-agent (child) messages carry Some(run_id) and are picked up here.
     let root_msgs = rebuild_messages_for_run(&events, &root);
-    assert_eq!(root_msgs.len(), 2);
-    assert_eq!(root_msgs[0].text_concat(), "root reply");
-    assert_eq!(root_msgs[1].text_concat(), "root again");
+    assert_eq!(root_msgs.len(), 0);
     let child_msgs = rebuild_messages_for_run(&events, &child);
     assert_eq!(child_msgs.len(), 1);
     assert_eq!(child_msgs[0].text_concat(), "child reply");

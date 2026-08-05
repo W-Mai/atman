@@ -75,9 +75,14 @@ impl Tool for SessionPush {
                     ctx.session_dir.as_deref(),
                 );
                 emit_message_event(ctx, &msg);
+                let flow_run_id = if ctx.session_runtime.is_some() {
+                    None
+                } else {
+                    ctx.flow_run_id.as_ref().map(|r| r.0.to_string())
+                };
                 if let Some(tx) = &ctx.stream_tx {
                     let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
-                        flow_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+                        flow_run_id,
                         message: msg.clone(),
                     });
                 }
@@ -102,20 +107,25 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
     let msg =
         crate::tools::tool_output::maybe_truncate_tool_message(msg, ctx.session_dir.as_deref());
     let turn_id = ctx.turn_id.clone().unwrap_or_else(TurnId::now);
+    let flow_run_id = if ctx.session_runtime.is_some() {
+        None
+    } else {
+        ctx.flow_run_id.clone()
+    };
     let event = match msg.role {
         MessageRole::User => Event::UserMsg {
             turn_id,
-            flow_run_id: ctx.flow_run_id.clone(),
+            flow_run_id,
             message: msg.clone(),
         },
         MessageRole::Assistant => Event::AssistantMsg {
             turn_id,
-            flow_run_id: ctx.flow_run_id.clone(),
+            flow_run_id,
             message: msg.clone(),
         },
         MessageRole::Tool => Event::ToolResultMsg {
             turn_id,
-            flow_run_id: ctx.flow_run_id.clone(),
+            flow_run_id,
             message: msg.clone(),
         },
         MessageRole::System => Event::SystemMsg {

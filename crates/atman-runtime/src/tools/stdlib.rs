@@ -1312,14 +1312,23 @@ fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) {
     };
     let msg =
         crate::tools::tool_output::maybe_truncate_tool_message(msg, ctx.session_dir.as_deref());
+    let flow_run_id = if ctx.session_runtime.is_some() {
+        None
+    } else {
+        ctx.flow_run_id.clone()
+    };
     sink.emit(crate::event::Event::ToolResultMsg {
         turn_id: msg.turn_id.clone(),
-        flow_run_id: ctx.flow_run_id.clone(),
+        flow_run_id,
         message: msg.clone(),
     });
     if let Some(tx) = &ctx.stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
-            flow_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+            flow_run_id: if ctx.session_runtime.is_some() {
+                None
+            } else {
+                ctx.flow_run_id.as_ref().map(|r| r.0.to_string())
+            },
             message: msg.clone(),
         });
     }

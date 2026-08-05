@@ -1353,7 +1353,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                                     drop(compact_guard.take());
                                 }
                                 let _append_compact_guard = session.acquire_compact_lock().await;
-                                session.append_message(am.message.clone(), ctx.flow_run_id.clone());
+                                session.append_message(am.message.clone(), None);
                                 drop(_append_compact_guard);
                                 crate::compaction::start_auto_compact(
                                     session.clone(),
