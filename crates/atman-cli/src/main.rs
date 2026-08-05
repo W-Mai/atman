@@ -956,7 +956,14 @@ async fn cmd_session_search(
     println!("{hdr_sid:<12} {hdr_seq:>6} {hdr_kind:<20} {hdr_ts:<20} snippet");
     for (ts, sid, seq, kind, snippet) in hits {
         let short_sid: String = sid.chars().take(8).collect();
-        let short_ts = ts.chars().take(19).collect::<String>();
+        let short_ts = chrono::DateTime::parse_from_rfc3339(&ts)
+            .ok()
+            .map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            })
+            .unwrap_or_else(|| ts.chars().take(19).collect::<String>());
         let short_kind: String = kind.chars().take(20).collect();
         println!("{short_sid:<12} {seq:>6} {short_kind:<20} {short_ts:<20} {snippet}");
     }

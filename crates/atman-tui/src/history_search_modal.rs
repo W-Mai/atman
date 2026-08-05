@@ -351,7 +351,14 @@ fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchM
         .iter()
         .map(|hit| {
             let sid_short: String = hit.session_id.chars().take(8).collect();
-            let ts_short: String = hit.ts.chars().take(19).collect();
+            let ts_short: String = chrono::DateTime::parse_from_rfc3339(&hit.ts)
+                .ok()
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%dT%H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_else(|| hit.ts.chars().take(19).collect());
             let snippet: String = hit.snippet.chars().take(80).collect();
             let mut spans = vec![
                 Span::styled(

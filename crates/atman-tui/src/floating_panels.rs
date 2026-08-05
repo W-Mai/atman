@@ -1393,7 +1393,10 @@ fn format_started_at(snap: &TaskSnapshot) -> String {
     if let Some(ts) = snap.id.0.get_timestamp() {
         let (secs, _nanos) = ts.to_unix();
         if let Some(dt) = chrono::DateTime::from_timestamp(secs as i64, 0) {
-            return dt.format("%H:%M:%S").to_string();
+            return dt
+                .with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string();
         }
     }
     "--:--:--".to_string()
