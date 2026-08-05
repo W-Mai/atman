@@ -3528,11 +3528,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     let input_buf_lines = total_input_lines.min(12);
     let bottom_rect =
         layout::compute_input_rect(l.transcript, input_buf_lines.min(u16::MAX as u32) as u16);
-    let content_w = layout::input_content_width(l.transcript.width);
-    let cursor_row =
-        crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u32;
-    let visible_rows = input_buf_lines.max(3);
-    let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
     let startup_slot = if startup_active {
         let recent = match app.items.first() {
             Some(crate::app::OutputItem::StartupCard { recent, .. }) => recent.clone(),
@@ -3570,6 +3565,11 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     } else {
         bottom_rect
     };
+    let content_w = (input_rect.width.saturating_sub(layout::INPUT_H_OVERHEAD)) as usize;
+    let cursor_row =
+        crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u32;
+    let visible_rows = input_buf_lines.max(3);
+    let scroll_row = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
     let approvals_rect = layout::compute_approvals_rect(l.transcript, input_rect, approvals_rows);
     app.input_rect = Some(input_rect);
     f.render_widget(

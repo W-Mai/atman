@@ -1,20 +1,11 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use std::collections::VecDeque;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::ModeColorExt;
-
-pub fn cursor_display_row(input: &str, cursor: usize) -> u16 {
-    let clamped = cursor.min(input.len());
-    input[..clamped].matches('\n').count() as u16
-}
-
-pub fn cursor_display_col(input: &str, cursor: usize) -> u16 {
-    let clamped = cursor.min(input.len());
-    let head = &input[..clamped];
-    let last_line = head.rsplit('\n').next().unwrap_or("");
-    crate::width::width(last_line) as u16
-}
 
 pub fn input_paragraph<'a>(
     input: &'a str,
@@ -75,200 +66,167 @@ pub fn input_paragraph<'a>(
         .scroll((scroll_row, 0))
 }
 
-pub fn display_line_count(input: &str) -> usize {
-    input.split('\n').count()
-}
-
-pub fn display_width(input: &str) -> usize {
-    input
-        .split('\n')
-        .map(crate::width::width)
-        .max()
-        .unwrap_or(0)
-}
-
-pub fn wrapped_line_count(input: &str, content_width: usize) -> usize {
-    if content_width == 0 {
-        return input.split('\n').count().max(1);
-    }
-    let mut total = 0usize;
-    for row in input.split('\n') {
-        if row.is_empty() {
-            total += 1;
-            continue;
-        }
-        let mut cur_w = 0usize;
-        let mut rows_in_line = 1usize;
-        for (_, cw) in crate::width::graphemes(row) {
-            if cur_w + cw > content_width {
-                rows_in_line += 1;
-                cur_w = cw;
-            } else {
-                cur_w += cw;
-            }
-        }
-        total += rows_in_line;
-    }
-    total.max(1)
-}
-
 #[derive(Debug, Clone)]
 struct WrappedLine {
     byte_range: (usize, usize),
 }
 
-/// Split input into visual lines matching ratatui's `Wrap { trim: false }`.
+const NBSP: &str = "\u{00a0}";
+const ZWSP: &str = "\u{200b}";
+
+fn cell_width(g: &str) -> u16 {
+    if g.len() == 1 {
+        if g.as_bytes()[0].is_ascii_control() {
+            return 0;
+        }
+        return 1;
+    }
+    let w = UnicodeWidthStr::width(g) as u16;
+    w + g
+        .chars()
+        .filter(|c| matches!(*c, '\u{FF9E}' | '\u{FF9F}'))
+        .count() as u16
+}
+
+fn is_ws(g: &str) -> bool {
+    g == ZWSP || (g.chars().all(char::is_whitespace) && g != NBSP)
+}
+
 fn compute_wrapped_lines(input: &str, content_width: usize) -> Vec<WrappedLine> {
-    let cw = content_width.max(1);
+    let max_w = content_width.max(1) as u16;
     let mut lines: Vec<WrappedLine> = Vec::new();
+
+    if input.is_empty() {
+        lines.push(WrappedLine { byte_range: (0, 0) });
+        return lines;
+    }
+
     let mut byte_offset = 0usize;
 
     for logical in input.split('\n') {
         let logical_start = byte_offset;
-        if logical.is_empty() {
-            lines.push(WrappedLine {
-                byte_range: (logical_start, logical_start),
-            });
-            byte_offset += 1;
-            continue;
-        }
-        let segments = segment_logical_line(logical);
-        if segments.is_empty() {
-            lines.push(WrappedLine {
-                byte_range: (logical_start, logical_start),
-            });
-            byte_offset += logical.len() + 1;
-            continue;
-        }
-        let mut cur_row_start = logical_start;
-        let mut cur_width: usize = 0;
-        for seg in &segments {
-            let seg_abs_start = logical_start + seg.rel_start;
-            let seg_width = crate::width::width(seg.text);
-            if seg.is_space {
-                cur_width += seg_width;
-            } else if cur_width == 0 {
-                if seg_width <= cw {
-                    cur_width = seg_width;
-                } else {
-                    let sub_lines = char_break_word(seg.text, seg_abs_start, cw);
-                    for (i, sub) in sub_lines.iter().enumerate() {
-                        if i > 0 || cur_width > 0 {
-                            lines.push(WrappedLine {
-                                byte_range: (cur_row_start, sub.byte_range.0),
-                            });
-                            cur_row_start = sub.byte_range.0;
-                        }
-                        cur_width = sub.width;
-                    }
+        let logical_end = logical_start + logical.len();
+        let lines_before = lines.len();
+
+        // State mirrors ratatui WordWrapper::process_input (trim=false)
+        let mut line_start: Option<usize> = None;
+        let mut line_end = logical_start;
+        let mut line_width: u16 = 0;
+        let mut word_start: Option<usize> = None;
+        let mut word_end = logical_start;
+        let mut word_width: u16 = 0;
+        let mut ws_q: VecDeque<(usize, usize, u16)> = VecDeque::new();
+        let mut ws_width: u16 = 0;
+        let mut non_ws_prev = false;
+
+        for (g_off, g) in logical.grapheme_indices(true) {
+            let g_bs = logical_start + g_off;
+            let g_be = g_bs + g.len();
+
+            if g.contains(char::is_control) {
+                continue;
+            }
+
+            let gw = cell_width(g);
+            let g_ws = is_ws(g);
+
+            if gw > max_w {
+                continue;
+            }
+
+            let word_found = non_ws_prev && g_ws;
+            let untrimmed_overflow = line_start.is_none() && word_width + ws_width + gw > max_w;
+
+            if word_found || untrimmed_overflow {
+                if line_start.is_none() {
+                    line_start = ws_q.front().map(|&(s, _, _)| s).or(word_start);
                 }
-            } else {
-                if cur_width + seg_width <= cw {
-                    cur_width += seg_width;
-                } else {
-                    lines.push(WrappedLine {
-                        byte_range: (cur_row_start, seg_abs_start),
-                    });
-                    cur_row_start = seg_abs_start;
-                    cur_width = 0;
-                    if seg_width <= cw {
-                        cur_width = seg_width;
-                    } else {
-                        let sub_lines = char_break_word(seg.text, seg_abs_start, cw);
-                        for sub in &sub_lines {
-                            if cur_width > 0 {
-                                lines.push(WrappedLine {
-                                    byte_range: (cur_row_start, sub.byte_range.0),
-                                });
-                                cur_row_start = sub.byte_range.0;
-                            }
-                            cur_width = sub.width;
-                        }
-                    }
+                if !ws_q.is_empty() {
+                    line_end = ws_q.back().unwrap().1;
+                    line_width += ws_width;
+                    ws_q.clear();
+                    ws_width = 0;
+                }
+                if word_start.is_some() {
+                    line_end = word_end;
+                    line_width += word_width;
+                    word_start = None;
+                    word_width = 0;
                 }
             }
+
+            let line_full = line_width >= max_w;
+            let pending_word_overflow = gw > 0 && line_width + ws_width + word_width >= max_w;
+
+            if line_full || pending_word_overflow {
+                let start = line_start.unwrap_or(line_end);
+                lines.push(WrappedLine {
+                    byte_range: (start, line_end),
+                });
+
+                let mut remaining = max_w.saturating_sub(line_width);
+                line_width = 0;
+                line_start = None;
+                line_end = g_bs;
+
+                while let Some(&(_, _, w)) = ws_q.front() {
+                    if w > remaining {
+                        break;
+                    }
+                    remaining -= w;
+                    ws_width -= w;
+                    ws_q.pop_front();
+                }
+
+                if g_ws && ws_q.is_empty() {
+                    non_ws_prev = false;
+                    continue;
+                }
+            }
+
+            if g_ws {
+                ws_q.push_back((g_bs, g_be, gw));
+                ws_width += gw;
+            } else {
+                if word_start.is_none() {
+                    word_start = Some(g_bs);
+                }
+                word_end = g_be;
+                word_width += gw;
+            }
+
+            non_ws_prev = !g_ws;
         }
-        let logical_end = logical_start + logical.len();
-        if cur_row_start < logical_end || cur_width > 0 {
+
+        // Flush remaining for this logical line
+        if line_start.is_none() {
+            line_start = ws_q.front().map(|&(s, _, _)| s).or(word_start);
+        }
+        if !ws_q.is_empty() {
+            line_end = ws_q.back().unwrap().1;
+        }
+        if word_start.is_some() {
+            line_end = word_end;
+        }
+
+        if let Some(ls) = line_start {
             lines.push(WrappedLine {
-                byte_range: (cur_row_start, logical_end),
+                byte_range: (ls, line_end),
+            });
+        } else if lines.len() == lines_before {
+            lines.push(WrappedLine {
+                byte_range: (logical_start, logical_start),
             });
         }
-        byte_offset = logical_start + logical.len() + 1;
+
+        byte_offset = logical_end + 1; // +1 for '\n'
     }
+
+    if lines.is_empty() {
+        lines.push(WrappedLine { byte_range: (0, 0) });
+    }
+
     lines
-}
-
-/// Tokenize a logical line into word and space segments.
-fn segment_logical_line(logical: &str) -> Vec<LineSegment<'_>> {
-    let mut segs = Vec::new();
-    let bytes = logical.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        // Collect non-space run (word).
-        let word_start = i;
-        while i < bytes.len() && bytes[i] != b' ' {
-            i += 1;
-        }
-        if i > word_start {
-            segs.push(LineSegment {
-                rel_start: word_start,
-                text: &logical[word_start..i],
-                is_space: false,
-            });
-        }
-        // Collect space run.
-        let space_start = i;
-        while i < bytes.len() && bytes[i] == b' ' {
-            i += 1;
-        }
-        if i > space_start {
-            segs.push(LineSegment {
-                rel_start: space_start,
-                text: &logical[space_start..i],
-                is_space: true,
-            });
-        }
-    }
-    segs
-}
-
-/// Break a single word that is wider than `cw` into sub-lines at
-/// character boundaries. Returns a list of (byte_range_abs, width).
-fn char_break_word(word: &str, abs_base: usize, cw: usize) -> Vec<SubLine> {
-    let mut out = Vec::new();
-    let mut cur_start = 0usize;
-    let mut cur_width = 0usize;
-    for (char_offset, _g, gw) in crate::width::grapheme_indices(word) {
-        if cur_width + gw > cw && cur_width > 0 {
-            out.push(SubLine {
-                byte_range: (abs_base + cur_start, abs_base + char_offset),
-                width: cur_width,
-            });
-            cur_start = char_offset;
-            cur_width = gw;
-        } else {
-            cur_width += gw;
-        }
-    }
-    if cur_start < word.len() || cur_width > 0 {
-        out.push(SubLine {
-            byte_range: (abs_base + cur_start, abs_base + word.len()),
-            width: cur_width,
-        });
-    }
-    out
-}
-
-struct LineSegment<'a> {
-    rel_start: usize,
-    text: &'a str,
-    is_space: bool,
-}
-
-struct SubLine {
-    byte_range: (usize, usize),
-    width: usize,
 }
 
 /// Given a visual (row, col) from a mouse click, compute the byte offset
@@ -291,7 +249,8 @@ pub fn cursor_from_wrapped(
     let slice = &input[line.byte_range.0..line.byte_range.1];
     let mut byte_offset = line.byte_range.0;
     let mut used: usize = 0;
-    for (g, gw) in crate::width::graphemes(slice) {
+    for g in slice.graphemes(true) {
+        let gw = cell_width(g) as usize;
         if used + gw > visual_col {
             break;
         }
@@ -332,21 +291,20 @@ pub fn wrapped_cursor_col(input: &str, cursor: usize, content_width: usize) -> u
     for line in &lines {
         if cursor >= line.byte_range.0 && cursor < line.byte_range.1 {
             let slice = &input[line.byte_range.0..cursor];
-            return crate::width::width(slice);
+            return slice.graphemes(true).map(cell_width).sum::<u16>() as usize;
         }
     }
-    // Cursor in a gap (at `\n`) or past all lines — return full line width.
     for line in lines.iter().rev() {
         if cursor >= line.byte_range.1 {
-            return crate::width::width(&input[line.byte_range.0..line.byte_range.1]);
+            return input[line.byte_range.0..line.byte_range.1]
+                .graphemes(true)
+                .map(cell_width)
+                .sum::<u16>() as usize;
         }
     }
     0
 }
 
-/// Total number of visual lines after word-wrap, matching ratatui's
-/// `Wrap { trim: false }`. Replaces `wrapped_line_count` for scroll
-// calculations.
 pub fn visual_line_count(input: &str, content_width: usize) -> usize {
     compute_wrapped_lines(input, content_width).len().max(1)
 }
@@ -800,7 +758,7 @@ mod tests {
         let mut ed = InputEditor::default();
         ed.insert_str("line1\nline2\nline3");
         assert_eq!(ed.buf(), "line1\nline2\nline3");
-        assert_eq!(display_line_count(ed.buf()), 3);
+        assert_eq!(ed.buf().split('\n').count(), 3);
     }
 
     #[test]
@@ -810,7 +768,7 @@ mod tests {
         ed.insert_newline();
         ed.insert_str("bye");
         assert_eq!(ed.buf(), "hi\nbye");
-        assert_eq!(display_line_count(ed.buf()), 2);
+        assert_eq!(ed.buf().split('\n').count(), 2);
     }
 
     #[test]
@@ -958,45 +916,6 @@ mod tests {
         // 你(2) 好(2) w(1) → display col 5 lands right before 'o'.
         ed.set_cursor_by_display(0, 5);
         assert_eq!(&ed.buf()[..ed.cursor()], "你好w");
-    }
-
-    #[test]
-    fn display_width_handles_cjk() {
-        assert_eq!(display_width("hello"), 5);
-        assert_eq!(display_width("你好"), 4);
-        assert_eq!(display_width("a\n你好"), 4);
-    }
-
-    #[test]
-    fn wrapped_line_count_short_fits() {
-        assert_eq!(wrapped_line_count("hello", 50), 1);
-    }
-
-    #[test]
-    fn wrapped_line_count_wraps_long_ascii() {
-        let s = "aaaaa bbbbb ccccc ddddd eeeee fffff ggggg hhhhh";
-        let n = wrapped_line_count(s, 10);
-        assert!(n > 1, "should wrap: {n}");
-    }
-
-    #[test]
-    fn wrapped_line_count_wraps_cjk() {
-        let s = "读取文件内容并做分析的一个非常长的中文标题名称";
-        let n = wrapped_line_count(s, 10);
-        assert!(n > 1, "CJK should wrap: {n}");
-    }
-
-    #[test]
-    fn wrapped_line_count_preserves_newlines() {
-        let s = "line one\nline two\nline three";
-        let n = wrapped_line_count(s, 50);
-        assert_eq!(n, 3);
-    }
-
-    #[test]
-    fn wrapped_line_count_empty_row_counts() {
-        assert_eq!(wrapped_line_count("a\n\nb", 50), 3);
-        assert_eq!(wrapped_line_count("", 50), 1);
     }
 
     #[test]
