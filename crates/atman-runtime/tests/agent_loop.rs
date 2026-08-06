@@ -5,6 +5,7 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{Event, EventSink, NodeEvent, Observable, TurnId};
 use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::model_registry::{ModelConfig, ModelEntry};
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::tool::BoxFut;
 use atman_runtime::{Executor, Value, tools};
@@ -104,6 +105,25 @@ impl Provider for ScriptedAgentProvider {
     }
 }
 
+fn register_scripted_model() {
+    let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
+        .lock()
+        .unwrap();
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "scripted".into(),
+            ModelEntry {
+                model: "scripted".into(),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    });
+}
+
 fn agent_source() -> &'static str {
     r#"
 flow agent(user_prompt: string) -> string {
@@ -134,6 +154,7 @@ flow agent_loop(messages: list, iteration: int) -> string {
 
 #[tokio::test(flavor = "current_thread")]
 async fn agent_flow_dispatches_tool_use_and_returns_final_text() {
+    register_scripted_model();
     let dir = tempfile::tempdir().unwrap();
     let readme = dir.path().join("hello.txt");
     tokio::fs::write(&readme, "world of atman").await.unwrap();
@@ -203,6 +224,7 @@ async fn agent_flow_dispatches_tool_use_and_returns_final_text() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn agent_flow_hits_max_iterations_when_llm_keeps_calling_tools() {
+    register_scripted_model();
     let provider = Arc::new(ScriptedAgentProvider::new(
         (0..10)
             .map(|i| AgentTurn::ToolUse {

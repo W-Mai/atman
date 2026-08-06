@@ -17,6 +17,7 @@ pub enum PaletteEntryId {
     ToggleSidebar,
     ManageProviders,
     ManageAliases,
+    SwitchModel,
     ManageMcp,
     SetTrustMode,
     SetModeTheme,
@@ -120,6 +121,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Manage Aliases...",
         hint: "Add, edit, and remove model aliases",
         keyword: "aliases alias model rename",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::SwitchModel,
+        group: "Providers",
+        label: "Switch Model",
+        hint: "Change the active model for this session",
+        keyword: "model switch change gpt claude glm deepseek",
     },
     PaletteEntry {
         id: PaletteEntryId::ManageMcp,

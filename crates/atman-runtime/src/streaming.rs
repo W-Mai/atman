@@ -1072,7 +1072,10 @@ mod tests {
             stream_rx.recv().await.unwrap(),
             StreamFrame::LlmChunk { .. }
         ));
-        assert!(frame_rx.try_recv().is_err(), "fallback must not receive when primary is set");
+        assert!(
+            frame_rx.try_recv().is_err(),
+            "fallback must not receive when primary is set"
+        );
 
         let provider = ScriptProvider::new(vec![vec![Step::Chunk("x", 1), Step::Done(1)]]);
         let (frame_tx, mut frame_rx) = broadcast::channel(16);

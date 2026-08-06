@@ -10,10 +10,22 @@ use crate::session_meta::fingerprint_from_root;
 // project stores — lives in the platform's data location so it doesn't
 // pollute dotfile repos.
 pub fn data_dir() -> Result<PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Ok(dir) = std::env::var("ATMAN_TEST_DATA_DIR") {
+        let p = PathBuf::from(dir);
+        std::fs::create_dir_all(&p).ok();
+        return Ok(p);
+    }
     resolve_data_dir(EnvOs::current())
 }
 
 pub fn config_dir() -> Result<PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Ok(dir) = std::env::var("ATMAN_TEST_CONFIG_DIR") {
+        let p = PathBuf::from(dir);
+        std::fs::create_dir_all(&p).ok();
+        return Ok(p);
+    }
     resolve_config_dir(EnvOs::current())
 }
 

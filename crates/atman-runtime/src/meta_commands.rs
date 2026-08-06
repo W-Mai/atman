@@ -43,6 +43,12 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
+        name: "model",
+        desc: "switch active model",
+        usage: ":model",
+        aliases: &[],
+    },
+    MetaCommand {
         name: "outside",
         desc: "cycle outside behavior in eager (deny/approve/allow)",
         usage: ":outside",

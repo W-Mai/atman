@@ -38,6 +38,12 @@ pub struct ModelConfig {
 
 static MODEL_CONFIG: RwLock<Option<ModelConfig>> = RwLock::new(None);
 
+/// Serializes tests that mutate the global model registry.
+///
+/// This stays available in integration tests so they can avoid racing the
+/// shared `MODEL_CONFIG` state.
+pub static MODEL_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Model IDs discovered from OAuth providers (e.g. Codex).
 static DISCOVERED_MODELS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 
@@ -150,9 +156,15 @@ pub fn all_provider_groups() -> Vec<ProviderGroup> {
 
 pub fn resolve_alias(name: &str) -> String {
     if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
-        if let Some(entry) = cfg.aliases.get(name) {
-            return entry.model.clone();
+        let mut current = name.to_string();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(entry) = cfg.aliases.get(&current) {
+            if !seen.insert(current.clone()) {
+                break;
+            }
+            current = entry.model.clone();
         }
+        return current;
     }
     name.to_string()
 }
@@ -257,7 +269,9 @@ fn write_config_toml(text: &str) -> anyhow::Result<()> {
     let dir = crate::storage::config_dir().map_err(|e| anyhow::anyhow!("config dir: {e}"))?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("config.toml");
-    std::fs::write(&path, text)?;
+    let tmp = dir.join(".config.toml.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
@@ -357,6 +371,53 @@ pub fn add_alias_to_config(alias: &str, model: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn upsert_model_config(
+    name: &str,
+    provider: &str,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+    context_budget: u64,
+    thinking: bool,
+) -> anyhow::Result<()> {
+    let text = read_config_toml().unwrap_or_default();
+    let mut raw: toml::Value = if text.trim().is_empty() {
+        toml::Value::Table(toml::value::Table::new())
+    } else {
+        toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse config.toml: {e}"))?
+    };
+    let models = raw
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("config.toml is not a table"))?
+        .entry("models")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    if let Some(table) = models.as_table_mut() {
+        let mut entry = toml::value::Table::new();
+        entry.insert(
+            "provider".to_string(),
+            toml::Value::String(provider.to_string()),
+        );
+        if let Some(key) = api_key {
+            entry.insert("api_key".to_string(), toml::Value::String(key.to_string()));
+        }
+        if let Some(url) = base_url {
+            entry.insert("base_url".to_string(), toml::Value::String(url.to_string()));
+        }
+        entry.insert(
+            "context_budget".to_string(),
+            toml::Value::Integer(context_budget as i64),
+        );
+        if thinking {
+            entry.insert("thinking".to_string(), toml::Value::Boolean(true));
+        }
+        entry.insert("enabled".to_string(), toml::Value::Boolean(true));
+        table.insert(name.to_string(), toml::Value::Table(entry));
+    }
+    let new_text = toml::to_string_pretty(&raw).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+    write_config_toml(&new_text)?;
+    reload_from_text(&new_text);
+    Ok(())
+}
+
 pub fn remove_alias_from_config(alias: &str) -> anyhow::Result<()> {
     let text = read_config_toml().unwrap_or_default();
     let mut raw: toml::Value = toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse: {e}"))?;
@@ -389,6 +450,132 @@ pub fn update_alias_in_config(
     write_config_toml(&new_text)?;
     reload_from_text(&new_text);
     Ok(())
+}
+
+// ── Provider presets + first-run detection ──
+
+pub struct ProviderPreset {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub base_url: &'static str,
+    pub provider_type: &'static str,
+    pub models: &'static [ProviderPresetModel],
+    pub key_url: Option<&'static str>,
+    pub needs_api_key: bool,
+}
+
+pub struct ProviderPresetModel {
+    pub id: &'static str,
+    pub description: &'static str,
+    pub context_budget: u64,
+}
+
+pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
+    ProviderPreset {
+        name: "DeepSeek",
+        description: "Recommended — cheap, smart, supports thinking",
+        base_url: "https://api.deepseek.com/v1",
+        provider_type: "openai-compat",
+        models: &[
+            ProviderPresetModel {
+                id: "deepseek-chat",
+                description: "Fast & capable",
+                context_budget: 64000,
+            },
+            ProviderPresetModel {
+                id: "deepseek-reasoner",
+                description: "Thinking mode",
+                context_budget: 64000,
+            },
+        ],
+        key_url: Some("https://platform.deepseek.com"),
+        needs_api_key: true,
+    },
+    ProviderPreset {
+        name: "OpenAI",
+        description: "GPT-4o / GPT-4o-mini",
+        base_url: "https://api.openai.com/v1",
+        provider_type: "openai",
+        models: &[
+            ProviderPresetModel {
+                id: "gpt-4o",
+                description: "Most capable",
+                context_budget: 128000,
+            },
+            ProviderPresetModel {
+                id: "gpt-4o-mini",
+                description: "Fast & cheap",
+                context_budget: 128000,
+            },
+        ],
+        key_url: Some("https://platform.openai.com/api-keys"),
+        needs_api_key: true,
+    },
+    ProviderPreset {
+        name: "Anthropic",
+        description: "Claude models",
+        base_url: "https://api.anthropic.com",
+        provider_type: "anthropic",
+        models: &[ProviderPresetModel {
+            id: "claude-sonnet-4-20250514",
+            description: "Claude Sonnet 4",
+            context_budget: 200000,
+        }],
+        key_url: Some("https://console.anthropic.com/settings/keys"),
+        needs_api_key: true,
+    },
+    ProviderPreset {
+        name: "ZhipuAI",
+        description: "GLM models",
+        base_url: "https://open.bigmodel.cn/api/paas/v4",
+        provider_type: "openai-compat",
+        models: &[
+            ProviderPresetModel {
+                id: "glm-4-flash",
+                description: "Fast & free tier",
+                context_budget: 128000,
+            },
+            ProviderPresetModel {
+                id: "glm-4",
+                description: "Capable",
+                context_budget: 128000,
+            },
+        ],
+        key_url: Some("https://open.bigmodel.cn/usercenter/apikeys"),
+        needs_api_key: true,
+    },
+    ProviderPreset {
+        name: "Ollama",
+        description: "Local models, no API key needed",
+        base_url: "http://localhost:11434/v1",
+        provider_type: "openai-compat",
+        models: &[],
+        key_url: None,
+        needs_api_key: false,
+    },
+    ProviderPreset {
+        name: "Custom",
+        description: "Bring your own base_url + API key",
+        base_url: "",
+        provider_type: "openai-compat",
+        models: &[],
+        key_url: None,
+        needs_api_key: true,
+    },
+];
+
+pub fn is_first_run() -> bool {
+    let models = all_model_entries();
+    let has_configured = models.iter().any(|(_, e)| {
+        e.api_key.as_deref().is_some_and(|k| !k.is_empty())
+            && e.provider.is_some()
+            && e.context_budget.unwrap_or(0) > 0
+    });
+    let smart_resolves = {
+        let resolved = resolve_alias("smart");
+        resolved != "smart" && models.iter().any(|(n, _)| *n == resolved)
+    };
+    !has_configured || !smart_resolves
 }
 
 #[cfg(test)]

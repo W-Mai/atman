@@ -36,6 +36,10 @@ pub struct PersistedUiState {
     pub panel_sizes: std::collections::HashMap<String, (u16, u16)>,
     #[serde(default)]
     pub task_panel_collapsed: bool,
+    #[serde(default)]
+    pub onboarding_skipped: bool,
+    #[serde(default)]
+    pub hints_dismissed: bool,
 }
 
 impl Default for PersistedUiState {
@@ -55,6 +59,8 @@ impl Default for PersistedUiState {
             sidebar_lower_collapsed: false,
             panel_sizes: std::collections::HashMap::new(),
             task_panel_collapsed: false,
+            onboarding_skipped: false,
+            hints_dismissed: false,
         }
     }
 }
@@ -115,6 +121,8 @@ impl PersistedUiState {
             sidebar_lower_collapsed: app.sidebar_lower_collapsed,
             panel_sizes: app.panel_sizes.clone(),
             task_panel_collapsed: app.task_panel_collapsed,
+            onboarding_skipped: app.onboarding_skipped,
+            hints_dismissed: app.hints_dismissed,
         }
     }
 
@@ -134,6 +142,8 @@ impl PersistedUiState {
         app.sidebar_lower_collapsed = self.sidebar_lower_collapsed;
         app.panel_sizes = self.panel_sizes.clone();
         app.task_panel_collapsed = self.task_panel_collapsed;
+        app.onboarding_skipped = self.onboarding_skipped;
+        app.hints_dismissed = self.hints_dismissed;
     }
 }
 

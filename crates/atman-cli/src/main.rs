@@ -1876,7 +1876,7 @@ async fn cmd_repl_once(
                                 thinking,
                                 Some(enabled),
                             ) {
-                                let _ = std::fs::write(&path, &updated);
+                                let _ = write_config_toml(&updated);
                                 let text = std::fs::read_to_string(&path).unwrap_or_default();
                                 if let Some(mc) = parse_model_config(&text) {
                                     atman_runtime::model_registry::set_model_config(mc);
@@ -1911,7 +1911,7 @@ async fn cmd_repl_once(
                                 thinking,
                                 Some(enabled),
                             ) {
-                                let _ = std::fs::write(&path, &updated);
+                                let _ = write_config_toml(&updated);
                                 let text = std::fs::read_to_string(&path).unwrap_or_default();
                                 if let Some(mc) = parse_model_config(&text) {
                                     atman_runtime::model_registry::set_model_config(mc);
@@ -1924,6 +1924,20 @@ async fn cmd_repl_once(
                     }
                     atman_tui::TuiControl::OpenAliasManager { .. } => {
                         // handled internally in the TUI — no-op here
+                    }
+                    atman_tui::TuiControl::OnboardingInit => {
+                        if let Ok(dir) = config_dir() {
+                            let _ = crate::init::init_config_dir_with_mode(&dir, None);
+                        }
+                    }
+                    atman_tui::TuiControl::SwitchModel { model } => {
+                        if let Err(e) = atman_runtime::model_registry::update_alias_in_config("smart", "smart", &model) {
+                            eprintln!("failed to switch model: {e}");
+                        }
+                        load_model_config_from_disk();
+                        let _ = session_for_ctrl.stream_tx().send(atman_runtime::stream::StreamFrame::Note(
+                            format!("model switched: smart → {model}"),
+                        ));
                     }
                     atman_tui::TuiControl::RefreshProviderModels { provider_id } => {
                         let tx = cmd_tx_for_models.clone();
@@ -2146,6 +2160,7 @@ async fn cmd_repl_once(
             flow_names: flow_names.clone(),
             session: Some(std::sync::Arc::clone(&session)),
             startup_intro: intro.clone(),
+            onboarding_recommended: atman_runtime::model_registry::is_first_run(),
             trust: atman_daemon::bootstrap::load_trust_config(config_dir().ok().as_deref()),
             task_registry: executor.tool_ctx.task_registry.clone(),
             boot_toasts: boot_notifications
@@ -2234,6 +2249,13 @@ async fn cmd_repl_once(
                         reporter.info(
                             "[atman] :mode-theme — switch display theme (available in TUI mode)",
                         );
+                    }
+                }
+                "model" => {
+                    if let Some(tx) = cmd_tx_for_repl.as_ref() {
+                        let _ = tx.send(atman_tui::TuiCommand::OpenModelPicker);
+                    } else {
+                        reporter.info(format!("current model: {}", session.last_model()));
                     }
                 }
                 "outside" => {
@@ -3795,7 +3817,9 @@ fn write_config_toml(text: &str) -> Result<()> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("config.toml");
-    std::fs::write(&path, text)?;
+    let tmp = dir.join(".config.toml.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 

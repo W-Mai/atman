@@ -943,7 +943,7 @@ pub fn line_with_right_pad(
 const STARTUP_INPUT_SLOT_ROWS: u16 = 8;
 const STARTUP_INPUT_SLOT_PAD: u16 = 1;
 const STARTUP_INPUT_MAX_WIDTH: u16 = 72;
-const STARTUP_BANNER: &[&str] = &[
+pub const STARTUP_BANNER: &[&str] = &[
     "      ⢀⡤⣾⢿⡿⢿⡿⣷⢤⡀                                           ",
     "     ⢠⢯⢎⠞⡵⠚⠓⢮⠳⡱⡽⡄                                          ",
     "     ⡟⡏⡏⣀⣳⣀⣀⣞⣀⡰⢹⢻    ████████╗███╗   ███╗ █████╗ ███╗   ██╗",

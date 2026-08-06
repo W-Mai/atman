@@ -24,6 +24,8 @@ pub mod highlight;
 pub mod history;
 pub mod history_search_modal;
 pub mod mcp_manager;
+pub mod model_picker;
+pub mod onboarding;
 
 pub mod floating_panels;
 pub mod input;
@@ -169,6 +171,10 @@ pub enum TuiControl {
     OpenAliasManager {
         model: Option<String>,
     },
+    OnboardingInit,
+    SwitchModel {
+        model: String,
+    },
     RefreshProviderModels {
         provider_id: String,
     },
@@ -209,6 +215,7 @@ pub enum TuiCommand {
     OpenSessionSwitcher,
     OpenTrustModePicker,
     OpenThemePicker,
+    OpenModelPicker,
     CycleOutside,
     ProviderModelsUpdated,
     ProviderTestResult((String, bool)),
@@ -254,6 +261,7 @@ pub struct TuiHandle {
     pub flow_names: Vec<(String, String)>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub startup_intro: Option<app::StartupIntro>,
+    pub onboarding_recommended: bool,
     pub trust: atman_runtime::trust::TrustConfig,
     pub task_registry: Option<atman_runtime::TaskRegistry>,
     /// Toasts collected during boot, to be pushed to app on start.
@@ -286,6 +294,7 @@ impl TuiHandle {
             flow_names: Vec::new(),
             session: Some(session),
             startup_intro: None,
+            onboarding_recommended: false,
             trust: atman_runtime::trust::TrustConfig::default(),
             task_registry: None,
             boot_toasts: Vec::new(),
@@ -328,6 +337,12 @@ async fn run_frames(
     }
     let ui_state = crate::states::PersistedUiState::load();
     ui_state.apply(&mut app);
+    if handle.onboarding_recommended && !app.onboarding_skipped {
+        app.onboarding_open = true;
+        if let Some(tx) = handle.control_tx.as_ref() {
+            let _ = tx.send(TuiControl::OnboardingInit);
+        }
+    }
     app.startup_intro = handle.startup_intro.take();
     // Reset started_at so the 300ms fade begins now, not when the
     // switch was requested (which may have been seconds ago).
@@ -1468,6 +1483,9 @@ async fn run_frames(
                         TuiCommand::OpenThemePicker => {
                             app.theme_picker_open = true;
                         }
+                        TuiCommand::OpenModelPicker => {
+                            app.model_picker.open();
+                        }
                         TuiCommand::CycleOutside => {
                             if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
                                 app.trust.outside = app.trust.outside.next();
@@ -2221,6 +2239,9 @@ fn dispatch_palette_entry(
         PaletteEntryId::ManageAliases => {
             app.alias_manager.toggle();
         }
+        PaletteEntryId::SwitchModel => {
+            app.model_picker.open();
+        }
         PaletteEntryId::ManageMcp => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
             app.floating_panels.open(
@@ -2962,12 +2983,69 @@ fn handle_key(
         app.alias_manager.handle_key(&action, control_tx);
         return;
     }
+    if app.model_picker.open {
+        app.model_picker.handle_key(&action);
+        if let Some(model) = app.model_picker.picked.take() {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::SwitchModel {
+                    model: model.clone(),
+                });
+            }
+            app.context.model = model.clone();
+            app.push_toast(
+                format!("model switched to {model}"),
+                app::NoteLevel::Success,
+                std::time::Duration::from_secs(3),
+                app::ToastPosition::TopRight,
+            );
+        }
+        return;
+    }
+    if app.onboarding_open {
+        match app.onboarding.handle_key(&action) {
+            crate::onboarding::OnboardingEvent::None => {}
+            crate::onboarding::OnboardingEvent::Completed => {
+                app.onboarding_open = false;
+                app.hints_dismissed = false;
+                app.save_ui_state();
+                app.push_toast(
+                    "Setup complete — smart model configured".to_string(),
+                    app::NoteLevel::Success,
+                    std::time::Duration::from_secs(4),
+                    app::ToastPosition::TopRight,
+                );
+            }
+            crate::onboarding::OnboardingEvent::Skipped => {
+                app.onboarding_open = false;
+                app.onboarding_skipped = true;
+                app.save_ui_state();
+                app.push_toast(
+                    "You can configure atman in ~/.config/atman/config.toml".to_string(),
+                    app::NoteLevel::Warn,
+                    std::time::Duration::from_secs(5),
+                    app::ToastPosition::TopRight,
+                );
+            }
+        }
+        return;
+    }
     if app.palette.open {
         handle_palette_key(&action, app, control_tx);
         return;
     }
     if let KeyAction::OpenCommandPalette = action {
         app.palette.open();
+        return;
+    }
+    if matches!(action, KeyAction::Char('x'))
+        && matches!(
+            app.items.first(),
+            Some(crate::app::OutputItem::StartupCard { .. })
+        )
+        && !app.hints_dismissed
+    {
+        app.hints_dismissed = true;
+        app.save_ui_state();
         return;
     }
     if let Some(crate::app::OutputItem::StartupCard { recent, .. }) = app.items.first() {
@@ -3934,6 +4012,14 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.popup.is_open() {
         completion::render_popup(f, input_rect, &app.popup);
     }
+    if startup_active && !app.onboarding_open && !app.hints_dismissed {
+        render_startup_hints(
+            f,
+            l.transcript,
+            input_rect,
+            atman_runtime::model_registry::is_first_run(),
+        );
+    }
     render_pulse_bar(
         f,
         input_rect,
@@ -3956,6 +4042,12 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     if app.provider_manager.open {
         crate::provider_manager::render(f, area, &app.provider_manager);
+    }
+    if app.model_picker.open {
+        crate::model_picker::render(f, area, &app.model_picker, &app.context.model);
+    }
+    if app.onboarding_open {
+        crate::onboarding::render(f, area, &app.onboarding);
     }
     if app.alias_manager.open {
         crate::alias_manager::render(f, area, &app.alias_manager);
@@ -3992,6 +4084,56 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
     }
+}
+
+fn render_startup_hints(
+    f: &mut ratatui::Frame,
+    transcript: ratatui::layout::Rect,
+    input_rect: ratatui::layout::Rect,
+    missing_provider: bool,
+) {
+    let theme = crate::theme::theme();
+    let width = input_rect.width.min(58);
+    let height = 4;
+    let y = input_rect
+        .y
+        .saturating_add(input_rect.height)
+        .saturating_add(1);
+    if y.saturating_add(height) > transcript.y.saturating_add(transcript.height) {
+        return;
+    }
+    let rect = ratatui::layout::Rect {
+        x: input_rect.x + input_rect.width.saturating_sub(width) / 2,
+        y,
+        width,
+        height,
+    };
+    f.render_widget(ratatui::widgets::Clear, rect);
+    let msg = if missing_provider {
+        "⚠ No provider configured — run atman config or use Manage Providers"
+    } else {
+        "💡 Type a message and press Enter · Shift+Enter newline · /help for cmds"
+    };
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(ratatui::style::Style::default().fg(theme.accent.into()));
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
+            ratatui::text::Span::raw(" "),
+            ratatui::text::Span::styled(
+                msg,
+                ratatui::style::Style::default().fg(theme.meta_fg.into()),
+            ),
+            ratatui::text::Span::styled(
+                "   [x]",
+                ratatui::style::Style::default().fg(theme.meta_fg.into()),
+            ),
+        ]))
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: true }),
+        rect,
+    );
 }
 
 fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {

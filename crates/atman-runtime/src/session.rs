@@ -1060,6 +1060,24 @@ impl Session {
         self.watch.context.borrow().model.clone()
     }
 
+    pub fn set_current_model(&self, model: impl Into<String>) {
+        let model = model.into();
+        let budget = crate::model_registry::model_info(&model).context_budget;
+        self.watch.context.send_modify(|snap| {
+            snap.model = model.clone();
+            if budget > 0 {
+                snap.window_budget = budget;
+            }
+        });
+        let snap = self.watch.context.borrow();
+        PersistedContextState {
+            model,
+            window_tokens: snap.window_tokens,
+            window_budget: snap.window_budget,
+        }
+        .save(&self.dir);
+    }
+
     pub fn update_mcp_server(&self, status: crate::mcp::McpServerStatus) {
         self.watch.context.send_modify(|snap| {
             if let Some(existing) = snap.mcp_servers.iter_mut().find(|s| s.name == status.name) {

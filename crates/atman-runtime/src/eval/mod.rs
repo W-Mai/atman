@@ -2494,9 +2494,24 @@ mod tests {
         use crate::providers::mock::MockProvider;
         use std::sync::Arc;
 
+        {
+            let _lock = crate::model_registry::MODEL_CONFIG_LOCK.lock().unwrap();
+            crate::model_registry::set_model_config(crate::model_registry::ModelConfig {
+                models: std::collections::HashMap::from([(
+                    "mock".into(),
+                    crate::model_registry::ModelEntry {
+                        model: "mock".into(),
+                        context_budget: Some(8_192),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            });
+        }
+
         let mut providers = crate::provider::ProviderRegistry::new();
         providers.register(Arc::new(MockProvider::new("mock").with_model(
-            "claude-opus-4.7",
+            "mock",
             Value::Struct(vec![("severity".into(), Value::Str("info".into()))]),
         )));
         let tools = ToolRegistry::new();
@@ -2520,7 +2535,7 @@ mod tests {
 
         let src = r#"flow t() {
     return llm {
-        model: "claude-opus-4.7"
+        model: "mock"
         prompt: "review please"
         input: 1
     }
