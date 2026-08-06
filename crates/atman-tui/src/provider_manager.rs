@@ -46,6 +46,20 @@ enum ProviderFocus {
     ModelList,
 }
 
+#[derive(Debug, Clone)]
+enum AddProviderKind {
+    Preset(usize),
+    OAuth(atman_runtime::auth_store::ProviderKind),
+    Custom,
+}
+
+#[derive(Debug, Clone)]
+struct AddProviderOption {
+    label: &'static str,
+    description: &'static str,
+    kind: AddProviderKind,
+}
+
 #[derive(Default)]
 pub struct ProviderManager {
     pub open: bool,
@@ -56,13 +70,10 @@ pub struct ProviderManager {
     pub open_alias_model: Option<String>,
     pub refresh_just_triggered: bool,
     pub test_just_triggered: bool,
+    pub add_just_completed: bool,
     show_add: bool,
     focus: ProviderFocus,
-    kinds: Vec<(
-        &'static str,
-        &'static str,
-        atman_runtime::auth_store::ProviderKind,
-    )>,
+    add_options: Vec<AddProviderOption>,
     kind_selected: usize,
     name_editor: InputEditor,
     name_focused: bool,
@@ -167,34 +178,44 @@ impl ProviderManager {
         self.groups = atman_runtime::model_registry::all_provider_groups();
     }
 
-    fn open_add(&mut self) {
+    pub fn open_add(&mut self) {
+        self.open = true;
         self.show_add = true;
         self.editing_provider = None;
-        self.kinds = vec![
-            (
-                "Codex",
-                "ChatGPT Plus/Pro OAuth",
-                atman_runtime::auth_store::ProviderKind::Codex,
-            ),
-            (
-                "Claude",
-                "Anthropic OAuth",
-                atman_runtime::auth_store::ProviderKind::AnthropicOauth,
-            ),
-            (
-                "GitHub Copilot",
-                "GitHub OAuth",
-                atman_runtime::auth_store::ProviderKind::GitHubCopilot,
-            ),
-            (
-                "Custom",
-                "API Key / OpenAI-compatible",
-                atman_runtime::auth_store::ProviderKind::Custom,
-            ),
-        ];
+        self.in_form = false;
+        self.name_focused = false;
+        self.add_options = atman_runtime::model_registry::PROVIDER_PRESETS
+            .iter()
+            .enumerate()
+            .map(|(i, preset)| AddProviderOption {
+                label: preset.name,
+                description: preset.description,
+                kind: AddProviderKind::Preset(i),
+            })
+            .chain([
+                AddProviderOption {
+                    label: "Claude OAuth",
+                    description: "Anthropic OAuth",
+                    kind: AddProviderKind::OAuth(
+                        atman_runtime::auth_store::ProviderKind::AnthropicOauth,
+                    ),
+                },
+                AddProviderOption {
+                    label: "GitHub Copilot",
+                    description: "GitHub OAuth",
+                    kind: AddProviderKind::OAuth(
+                        atman_runtime::auth_store::ProviderKind::GitHubCopilot,
+                    ),
+                },
+                AddProviderOption {
+                    label: "Custom",
+                    description: "API Key / OpenAI-compatible",
+                    kind: AddProviderKind::Custom,
+                },
+            ])
+            .collect();
         self.kind_selected = 0;
         self.name_editor = InputEditor::default();
-        self.name_focused = false;
     }
 
     fn open_edit(&mut self, name: &str) {
@@ -483,6 +504,58 @@ impl ProviderManager {
         }
     }
 
+    fn open_custom_form(&mut self) {
+        self.in_form = true;
+        self.form_field = 0;
+        self.name_editor = InputEditor::default();
+        self.api_key_editor = InputEditor::default();
+        self.base_url_editor = InputEditor::default();
+        let mut pt_ed = InputEditor::default();
+        pt_ed.insert_str("openai-compat");
+        self.provider_type_editor = pt_ed;
+        self.context_budget_editor = InputEditor::default();
+        self.max_tokens_editor = InputEditor::default();
+        let mut th_ed = InputEditor::default();
+        th_ed.insert_str("false");
+        self.thinking_editor = th_ed;
+        let mut en_ed = InputEditor::default();
+        en_ed.insert_str("true");
+        self.enabled_editor = en_ed;
+    }
+
+    fn open_preset_form(&mut self, preset_idx: usize) {
+        let Some(preset) = atman_runtime::model_registry::PROVIDER_PRESETS.get(preset_idx) else {
+            return;
+        };
+        self.open_custom_form();
+        let mut name_ed = InputEditor::default();
+        name_ed.insert_str(preset.name);
+        self.name_editor = name_ed;
+        let mut pt_ed = InputEditor::default();
+        pt_ed.insert_str(preset.provider_type);
+        self.provider_type_editor = pt_ed;
+        let mut url_ed = InputEditor::default();
+        url_ed.insert_str(preset.base_url);
+        self.base_url_editor = url_ed;
+        if let Some(model) = preset.models.first() {
+            let mut ctx_ed = InputEditor::default();
+            ctx_ed.insert_str(&model.context_budget.to_string());
+            self.context_budget_editor = ctx_ed;
+            let mut th_ed = InputEditor::default();
+            th_ed.insert_str(
+                if model.description.to_ascii_lowercase().contains("thinking") {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+            self.thinking_editor = th_ed;
+        }
+        if !preset.needs_api_key {
+            self.form_field = 4;
+        }
+    }
+
     fn test_form(
         &mut self,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
@@ -602,30 +675,35 @@ impl ProviderManager {
                     self.show_add = false;
                 }
                 KeyAction::Submit => {
-                    let kind = self.kinds[self.kind_selected].2.clone();
-                    if kind == atman_runtime::auth_store::ProviderKind::Custom {
-                        self.in_form = true;
-                        self.form_field = 0;
-                        self.name_editor = InputEditor::default();
-                        self.api_key_editor = InputEditor::default();
-                        self.base_url_editor = InputEditor::default();
-                        let mut pt_ed = InputEditor::default();
-                        pt_ed.insert_str("openai-compat");
-                        self.provider_type_editor = pt_ed;
-                        self.context_budget_editor = InputEditor::default();
-                        self.max_tokens_editor = InputEditor::default();
-                        let mut th_ed = InputEditor::default();
-                        th_ed.insert_str("false");
-                        self.thinking_editor = th_ed;
-                        let mut en_ed = InputEditor::default();
-                        en_ed.insert_str("true");
-                        self.enabled_editor = en_ed;
-                    } else {
-                        let (label, _, _) = self.kinds[self.kind_selected];
-                        let mut ed = InputEditor::default();
-                        ed.insert_str(label);
-                        self.name_editor = ed;
-                        self.name_focused = true;
+                    let Some(option) = self.add_options.get(self.kind_selected).cloned() else {
+                        return;
+                    };
+                    match option.kind {
+                        AddProviderKind::Preset(idx) => {
+                            let preset = &atman_runtime::model_registry::PROVIDER_PRESETS[idx];
+                            if preset.provider_type == "codex" {
+                                if let Some(tx) = control_tx {
+                                    let _ = tx.send(crate::TuiControl::AuthLogin {
+                                        kind: atman_runtime::auth_store::ProviderKind::Codex,
+                                        name: preset.name.to_string(),
+                                    });
+                                }
+                                self.show_add = false;
+                                self.open = false;
+                                self.add_just_completed = true;
+                            } else {
+                                self.open_preset_form(idx);
+                            }
+                        }
+                        AddProviderKind::OAuth(kind) => {
+                            let mut ed = InputEditor::default();
+                            ed.insert_str(option.label);
+                            self.name_editor = ed;
+                            self.name_focused = true;
+                            self.add_options[self.kind_selected].kind =
+                                AddProviderKind::OAuth(kind);
+                        }
+                        AddProviderKind::Custom => self.open_custom_form(),
                     }
                 }
                 KeyAction::HistoryUp | KeyAction::Char('k') => {
@@ -634,7 +712,7 @@ impl ProviderManager {
                     }
                 }
                 KeyAction::HistoryDown | KeyAction::Char('j') => {
-                    if self.kind_selected + 1 < self.kinds.len() {
+                    if self.kind_selected + 1 < self.add_options.len() {
                         self.kind_selected += 1;
                     }
                 }
@@ -661,7 +739,7 @@ impl ProviderManager {
             self.enabled_editor.buf().trim().to_lowercase().as_str(),
             "true" | "1" | "yes" | "on"
         );
-        if name.is_empty() || api_key.is_empty() || base_url.is_empty() {
+        if name.is_empty() || base_url.is_empty() {
             return;
         }
         let provider_type = if provider_type.is_empty() {
@@ -697,6 +775,7 @@ impl ProviderManager {
         self.show_add = false;
         self.in_form = false;
         self.editing_provider = None;
+        self.add_just_completed = true;
     }
 
     fn commit_add(
@@ -707,12 +786,26 @@ impl ProviderManager {
         if name.is_empty() {
             return;
         }
-        let kind = self.kinds[self.kind_selected].2.clone();
+        let Some(option) = self.add_options.get(self.kind_selected).cloned() else {
+            return;
+        };
+        let kind = match option.kind {
+            AddProviderKind::OAuth(kind) => kind,
+            AddProviderKind::Preset(idx)
+                if atman_runtime::model_registry::PROVIDER_PRESETS[idx].provider_type
+                    == "codex" =>
+            {
+                atman_runtime::auth_store::ProviderKind::Codex
+            }
+            _ => return,
+        };
         if let Some(tx) = control_tx {
             let _ = tx.send(crate::TuiControl::AuthLogin { kind, name });
         }
         self.show_add = false;
+        self.open = false;
         self.name_focused = false;
+        self.add_just_completed = true;
     }
 }
 
@@ -1038,7 +1131,7 @@ fn render_add_dialog(
         cursor_pos = Some((x, y));
         lines.push(Line::from("Enter to confirm, Esc to cancel"));
     } else {
-        for (i, (label, desc, _)) in mgr.kinds.iter().enumerate() {
+        for (i, option) in mgr.add_options.iter().enumerate() {
             let style = if i == mgr.kind_selected {
                 Style::default()
                     .fg(theme.accent.into())
@@ -1047,7 +1140,7 @@ fn render_add_dialog(
                 Style::default()
             };
             lines.push(Line::from(Span::styled(
-                format!(" {} — {}", label, desc),
+                format!(" {} — {}", option.label, option.description),
                 style,
             )));
         }

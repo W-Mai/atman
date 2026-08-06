@@ -2959,6 +2959,12 @@ fn handle_key(
         if let Some(model) = app.provider_manager.open_alias_model.take() {
             app.alias_manager.open_form_with_model(&model);
         }
+        if app.provider_manager.add_just_completed {
+            app.provider_manager.add_just_completed = false;
+            if app.onboarding_open {
+                app.onboarding.provider_added();
+            }
+        }
         if app.provider_manager.refresh_just_triggered {
             app.provider_manager.refresh_just_triggered = false;
             app.push_toast(
@@ -3004,6 +3010,9 @@ fn handle_key(
     if app.onboarding_open {
         match app.onboarding.handle_key(&action) {
             crate::onboarding::OnboardingEvent::None => {}
+            crate::onboarding::OnboardingEvent::OpenProviderManager => {
+                app.provider_manager.open_add();
+            }
             crate::onboarding::OnboardingEvent::Completed => {
                 app.onboarding_open = false;
                 app.hints_dismissed = false;
@@ -3986,7 +3995,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     );
     let raw_row = crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
     let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
-    if !intro_active {
+    if !intro_active && !app.onboarding_open && !app.provider_manager.open {
         let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
         let inner_y = input_rect.y.saturating_add(1);
         let mut placed = false;
@@ -4040,14 +4049,14 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.session_switcher.open {
         session_switcher::render(f, area, &app.session_switcher);
     }
+    if app.onboarding_open {
+        crate::onboarding::render(f, area, &app.onboarding);
+    }
     if app.provider_manager.open {
         crate::provider_manager::render(f, area, &app.provider_manager);
     }
     if app.model_picker.open {
         crate::model_picker::render(f, area, &app.model_picker, &app.context.model);
-    }
-    if app.onboarding_open {
-        crate::onboarding::render(f, area, &app.onboarding);
     }
     if app.alias_manager.open {
         crate::alias_manager::render(f, area, &app.alias_manager);

@@ -1931,13 +1931,17 @@ async fn cmd_repl_once(
                         }
                     }
                     atman_tui::TuiControl::SwitchModel { model } => {
-                        if let Err(e) = atman_runtime::model_registry::update_alias_in_config("smart", "smart", &model) {
+                        if let Err(e) = atman_runtime::model_registry::update_alias_in_config(
+                            "smart", "smart", &model,
+                        ) {
                             eprintln!("failed to switch model: {e}");
                         }
                         load_model_config_from_disk();
-                        let _ = session_for_ctrl.stream_tx().send(atman_runtime::stream::StreamFrame::Note(
-                            format!("model switched: smart → {model}"),
-                        ));
+                        let _ = session_for_ctrl.stream_tx().send(
+                            atman_runtime::stream::StreamFrame::Note(format!(
+                                "model switched: smart → {model}"
+                            )),
+                        );
                     }
                     atman_tui::TuiControl::RefreshProviderModels { provider_id } => {
                         let tx = cmd_tx_for_models.clone();

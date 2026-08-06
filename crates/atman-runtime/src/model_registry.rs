@@ -474,18 +474,18 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "DeepSeek",
         description: "Recommended — cheap, smart, supports thinking",
-        base_url: "https://api.deepseek.com/v1",
+        base_url: "https://api.deepseek.com",
         provider_type: "openai-compat",
         models: &[
             ProviderPresetModel {
-                id: "deepseek-chat",
+                id: "deepseek-v4-flash",
                 description: "Fast & capable",
-                context_budget: 64000,
+                context_budget: 1000000,
             },
             ProviderPresetModel {
-                id: "deepseek-reasoner",
+                id: "deepseek-v4-pro",
                 description: "Thinking mode",
-                context_budget: 64000,
+                context_budget: 1000000,
             },
         ],
         key_url: Some("https://platform.deepseek.com"),
@@ -529,18 +529,11 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         description: "GLM models",
         base_url: "https://open.bigmodel.cn/api/paas/v4",
         provider_type: "openai-compat",
-        models: &[
-            ProviderPresetModel {
-                id: "glm-4-flash",
-                description: "Fast & free tier",
-                context_budget: 128000,
-            },
-            ProviderPresetModel {
-                id: "glm-4",
-                description: "Capable",
-                context_budget: 128000,
-            },
-        ],
+        models: &[ProviderPresetModel {
+            id: "glm-5.2",
+            description: "GLM 5.2",
+            context_budget: 1000000,
+        }],
         key_url: Some("https://open.bigmodel.cn/usercenter/apikeys"),
         needs_api_key: true,
     },
@@ -554,13 +547,13 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         needs_api_key: false,
     },
     ProviderPreset {
-        name: "Custom",
-        description: "Bring your own base_url + API key",
-        base_url: "",
-        provider_type: "openai-compat",
+        name: "Codex",
+        description: "ChatGPT Plus/Pro OAuth",
+        base_url: "https://chatgpt.com/backend-api/codex",
+        provider_type: "codex",
         models: &[],
         key_url: None,
-        needs_api_key: true,
+        needs_api_key: false,
     },
 ];
 

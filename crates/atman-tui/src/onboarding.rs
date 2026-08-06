@@ -3,21 +3,17 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::input::InputEditor;
 use crate::keys::KeyAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingStep {
     ProviderSelect,
-    ApiKeyEntry,
     ModelSelect,
 }
 
 pub struct OnboardingState {
     pub step: OnboardingStep,
-    pub selected_provider: usize,
     pub selected_model: usize,
-    pub input: InputEditor,
     pub error: Option<String>,
 }
 
@@ -25,9 +21,7 @@ impl Default for OnboardingState {
     fn default() -> Self {
         Self {
             step: OnboardingStep::ProviderSelect,
-            selected_provider: 0,
             selected_model: 0,
-            input: InputEditor::default(),
             error: None,
         }
     }
@@ -35,6 +29,7 @@ impl Default for OnboardingState {
 
 pub enum OnboardingEvent {
     None,
+    OpenProviderManager,
     Completed,
     Skipped,
 }
@@ -44,94 +39,29 @@ impl OnboardingState {
         self.error = None;
         match self.step {
             OnboardingStep::ProviderSelect => self.handle_provider_key(action),
-            OnboardingStep::ApiKeyEntry => self.handle_input_key(action),
             OnboardingStep::ModelSelect => self.handle_model_key(action),
         }
     }
 
-    fn handle_provider_key(&mut self, action: &KeyAction) -> OnboardingEvent {
-        let presets = atman_runtime::model_registry::PROVIDER_PRESETS;
-        match action {
-            KeyAction::Char('q') | KeyAction::Quit => OnboardingEvent::Skipped,
-            KeyAction::HistoryUp | KeyAction::Char('k') => {
-                self.selected_provider = self
-                    .selected_provider
-                    .checked_sub(1)
-                    .unwrap_or(presets.len().saturating_sub(1));
-                OnboardingEvent::None
-            }
-            KeyAction::HistoryDown | KeyAction::Char('j') => {
-                self.selected_provider = (self.selected_provider + 1) % presets.len().max(1);
-                OnboardingEvent::None
-            }
-            KeyAction::Submit => {
-                self.step = OnboardingStep::ApiKeyEntry;
-                self.input = InputEditor::default();
-                let preset = &presets[self.selected_provider.min(presets.len() - 1)];
-                if !preset.needs_api_key && !preset.base_url.is_empty() {
-                    self.input.insert_str(preset.base_url);
-                }
-                OnboardingEvent::None
-            }
-            _ => OnboardingEvent::None,
-        }
+    pub fn provider_added(&mut self) {
+        self.step = OnboardingStep::ModelSelect;
+        self.selected_model = 0;
     }
 
-    fn handle_input_key(&mut self, action: &KeyAction) -> OnboardingEvent {
+    fn handle_provider_key(&mut self, action: &KeyAction) -> OnboardingEvent {
         match action {
-            KeyAction::Escape => {
-                self.step = OnboardingStep::ProviderSelect;
-                OnboardingEvent::None
-            }
-            KeyAction::Backspace => {
-                self.input.backspace();
-                OnboardingEvent::None
-            }
-            KeyAction::CursorLeft => {
-                self.input.move_left();
-                OnboardingEvent::None
-            }
-            KeyAction::CursorRight => {
-                self.input.move_right();
-                OnboardingEvent::None
-            }
-            KeyAction::CursorHome => {
-                self.input.move_home();
-                OnboardingEvent::None
-            }
-            KeyAction::CursorEnd => {
-                self.input.move_end();
-                OnboardingEvent::None
-            }
-            KeyAction::Char(c) => {
-                self.input.insert_char(*c);
-                OnboardingEvent::None
-            }
-            KeyAction::Submit => {
-                let preset =
-                    &atman_runtime::model_registry::PROVIDER_PRESETS[self.selected_provider];
-                if preset.needs_api_key && self.input.buf().trim().is_empty() {
-                    self.error = Some("API key is required for this provider".to_string());
-                    return OnboardingEvent::None;
-                }
-                if preset.models.is_empty() {
-                    self.error = Some("Custom/Ollama model catalog is empty for now — use Manage Providers after setup".to_string());
-                    return OnboardingEvent::None;
-                }
-                self.step = OnboardingStep::ModelSelect;
-                self.selected_model = 0;
-                OnboardingEvent::None
-            }
+            KeyAction::Char('q') | KeyAction::Quit => OnboardingEvent::Skipped,
+            KeyAction::Submit => OnboardingEvent::OpenProviderManager,
             _ => OnboardingEvent::None,
         }
     }
 
     fn handle_model_key(&mut self, action: &KeyAction) -> OnboardingEvent {
-        let preset = &atman_runtime::model_registry::PROVIDER_PRESETS[self.selected_provider];
-        let len = preset.models.len();
+        let models = selectable_models();
+        let len = models.len();
         match action {
             KeyAction::Escape => {
-                self.step = OnboardingStep::ApiKeyEntry;
+                self.step = OnboardingStep::ProviderSelect;
                 OnboardingEvent::None
             }
             KeyAction::HistoryUp | KeyAction::Char('k') if len > 0 => {
@@ -142,34 +72,43 @@ impl OnboardingState {
                 self.selected_model = (self.selected_model + 1) % len;
                 OnboardingEvent::None
             }
-            KeyAction::Submit if len > 0 => match self.write_config() {
+            KeyAction::Submit if len > 0 => match self.write_config(&models) {
                 Ok(()) => OnboardingEvent::Completed,
                 Err(e) => {
                     self.error = Some(format!("setup failed: {e}"));
                     OnboardingEvent::None
                 }
             },
+            KeyAction::Submit => {
+                self.error = Some("Add a provider first".to_string());
+                OnboardingEvent::None
+            }
             _ => OnboardingEvent::None,
         }
     }
 
-    fn write_config(&self) -> anyhow::Result<()> {
-        let preset = &atman_runtime::model_registry::PROVIDER_PRESETS[self.selected_provider];
-        let model = &preset.models[self.selected_model];
-        atman_runtime::model_registry::upsert_model_config(
-            &format!("{}/{}", preset.name.to_ascii_lowercase(), model.id),
-            preset.provider_type,
-            preset.needs_api_key.then(|| self.input.buf().trim()),
-            Some(preset.base_url),
-            model.context_budget,
-            model.description.to_ascii_lowercase().contains("thinking"),
-        )?;
-        atman_runtime::model_registry::add_alias_to_config(
-            "smart",
-            &format!("{}/{}", preset.name.to_ascii_lowercase(), model.id),
-        )?;
+    fn write_config(&self, models: &[String]) -> anyhow::Result<()> {
+        let model = models
+            .get(self.selected_model)
+            .ok_or_else(|| anyhow::anyhow!("no model selected"))?;
+        atman_runtime::model_registry::add_alias_to_config("smart", model)?;
         Ok(())
     }
+}
+
+fn selectable_models() -> Vec<String> {
+    let mut models: Vec<String> = atman_runtime::model_registry::all_model_entries()
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            if entry.enabled != Some(false) && entry.context_budget.unwrap_or(0) > 0 {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    models.sort();
+    models
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
@@ -201,7 +140,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),
+            Constraint::Length(10),
             Constraint::Min(0),
             Constraint::Length(2),
         ])
@@ -229,14 +168,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     );
 
     match state.step {
-        OnboardingStep::ProviderSelect => render_provider_step(f, rows[1], state),
-        OnboardingStep::ApiKeyEntry => render_input_step(f, rows[1], state),
+        OnboardingStep::ProviderSelect => render_provider_step(f, rows[1]),
         OnboardingStep::ModelSelect => render_model_step(f, rows[1], state),
     }
 
     let footer = state.error.as_deref().unwrap_or(match state.step {
-        OnboardingStep::ProviderSelect => "↑↓/j/k navigate · Enter select · q skip",
-        OnboardingStep::ApiKeyEntry => "Enter confirm · Esc back",
+        OnboardingStep::ProviderSelect => "Enter add provider · q skip",
         OnboardingStep::ModelSelect => "↑↓/j/k navigate · Enter finish · Esc back",
     });
     let style = if state.error.is_some() {
@@ -250,70 +187,18 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     );
 }
 
-fn render_provider_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
+fn render_provider_step(f: &mut ratatui::Frame, area: Rect) {
     let theme = crate::theme::theme();
-    let presets = atman_runtime::model_registry::PROVIDER_PRESETS;
-    let items: Vec<ListItem> = presets
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let style = if i == state.selected_provider {
-                Style::default()
-                    .fg(theme.accent.into())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" {}", p.name), style),
-                Span::styled(
-                    format!(" — {}", p.description),
-                    Style::default().fg(theme.meta_fg.into()),
-                ),
-            ]))
-        })
-        .collect();
-    let mut list_state = ListState::default().with_selected(Some(state.selected_provider));
-    f.render_widget(
-        Paragraph::new("1. Choose your provider"),
-        Rect { height: 1, ..area },
-    );
-    let list_area = Rect {
-        y: area.y + 2,
-        height: area.height.saturating_sub(2),
-        ..area
-    };
-    f.render_stateful_widget(List::new(items), list_area, &mut list_state);
-}
-
-fn render_input_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
-    let theme = crate::theme::theme();
-    let preset = &atman_runtime::model_registry::PROVIDER_PRESETS[state.selected_provider];
-    let title = if preset.needs_api_key {
-        "2. Enter API key"
-    } else {
-        "2. Confirm base URL"
-    };
-    let help = preset.key_url.unwrap_or(preset.base_url);
-    let display = if preset.needs_api_key {
-        mask_secret(state.input.buf())
-    } else {
-        state.input.buf().to_string()
-    };
     let lines = vec![
-        Line::from(title),
-        Line::from(Span::styled(
-            format!("Provider: {}", preset.name),
-            Style::default().fg(theme.meta_fg.into()),
-        )),
-        Line::from(Span::styled(
-            format!("Get one at: {help}"),
-            Style::default().fg(theme.meta_fg.into()),
-        )),
+        Line::from("1. Add a provider"),
         Line::from(""),
         Line::from(Span::styled(
-            format!("  {display}"),
-            Style::default().fg(theme.accent.into()),
+            "Press Enter to open Provider Manager.",
+            Style::default().fg(theme.tinted_fg.into()),
+        )),
+        Line::from(Span::styled(
+            "The setup flow uses the same provider presets and form as Manage Providers.",
+            Style::default().fg(theme.meta_fg.into()),
         )),
     ];
     f.render_widget(
@@ -324,12 +209,11 @@ fn render_input_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState
 
 fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let theme = crate::theme::theme();
-    let preset = &atman_runtime::model_registry::PROVIDER_PRESETS[state.selected_provider];
-    let items: Vec<ListItem> = preset
-        .models
+    let models = selectable_models();
+    let items: Vec<ListItem> = models
         .iter()
         .enumerate()
-        .map(|(i, m)| {
+        .map(|(i, model)| {
             let style = if i == state.selected_model {
                 Style::default()
                     .fg(theme.accent.into())
@@ -337,10 +221,14 @@ fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState
             } else {
                 Style::default()
             };
+            let info = atman_runtime::model_registry::model_info(model);
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {}", m.id), style),
+                Span::styled(format!(" {model}"), style),
                 Span::styled(
-                    format!(" — {}", m.description),
+                    format!(
+                        " — {}",
+                        atman_runtime::humanize::format_count(info.context_budget)
+                    ),
                     Style::default().fg(theme.meta_fg.into()),
                 ),
             ]))
@@ -356,7 +244,14 @@ fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState
         height: area.height.saturating_sub(4),
         ..area
     };
-    f.render_stateful_widget(List::new(items), list_area, &mut list_state);
+    if items.is_empty() {
+        f.render_widget(
+            Paragraph::new("No configured models found. Press Esc and add a provider first."),
+            list_area,
+        );
+    } else {
+        f.render_stateful_widget(List::new(items), list_area, &mut list_state);
+    }
     let note_area = Rect {
         y: area.y + area.height.saturating_sub(2),
         height: 2,
@@ -366,14 +261,4 @@ fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState
         Paragraph::new("This will be set as your smart model."),
         note_area,
     );
-}
-
-fn mask_secret(s: &str) -> String {
-    if s.is_empty() {
-        "sk-…".to_string()
-    } else if s.len() <= 6 {
-        "*".repeat(s.len())
-    } else {
-        format!("{}{}", &s[..3], "*".repeat(s.len().saturating_sub(3)))
-    }
 }
