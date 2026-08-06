@@ -26,11 +26,11 @@ name = "atman"
 path = "src/main.rs"
 
 [dependencies]
-atman-dsl      = { path = "../atman-dsl", version = "1.5.0" }
-atman-runtime  = { path = "../atman-runtime", version = "1.5.0" }
-atman-daemon   = { path = "../atman-daemon", version = "1.5.0" }
-atman-proto    = { path = "../atman-proto", version = "1.5.0" }
-atman-tui      = { path = "../atman-tui", version = "1.5.0" }
+atman-dsl      = { path = "../atman-dsl", version = "1.6.0" }
+atman-runtime  = { path = "../atman-runtime", version = "1.6.0" }
+atman-daemon   = { path = "../atman-daemon", version = "1.6.0" }
+atman-proto    = { path = "../atman-proto", version = "1.6.0" }
+atman-tui      = { path = "../atman-tui", version = "1.6.0" }
 reqwest.workspace      = true
 chrono.workspace       = true
 futures.workspace      = true

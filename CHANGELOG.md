@@ -4,6 +4,32 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [1.6.0] — 2026-08-06
+
+Context restoration fix, LLM streaming unification, input wrapping accuracy, and sub-agent reliability improvements. Session restore no longer loses 99% of conversation history. The two duplicated LLM streaming code paths are merged into a single `LlmStream` object. Input box wrapping matches ratatui's renderer exactly via a faithful WordWrapper port.
+
+---
+
+### 🐛 Fixes
+
+- **Context restoration data loss** — root agent messages were tagged `flow_run_id: Some(...)` at write sites, causing `apply_envelope_to_messages` to filter them out on `--continue` restart. Only user messages survived (99.9% data loss). Fixed by tagging root agent messages with `None` at all three write sites.
+- **Input box wrap/cursor mismatch** — the self-written `compute_wrapped_lines` diverged from ratatui's `WordWrapper` in 72% of cases. Replaced with a faithful port of ratatui's `WordWrapper::process_input` state machine. Cursor row/col, click mapping, scroll, and input box height now match rendering exactly.
+- **Startup page cursor stuck** — `content_w` was derived from `transcript.width` but the startup overlay uses a narrower rect (max 72 cols). Fixed by computing `content_w` from the actual `input_rect.width`.
+- **Watch persist mode stalls** — persist watcher fired once then stayed in `WatchHub` forever, causing `wait_for_watcher` to spin 30s on every call. Fixed by looping `watch_output` for persist mode.
+- **Sub-agent bash output leaks** — `BashChunk`, `BashExited`, `TerminalChunk`, `TerminalExited`, and `DiffPreview` stream frames lacked `run_id`, so sub-agent tool output appeared in the main document flow. Added `run_id: Option<String>` to all five variants; TUI drops frames owned by sub-agents.
+- **History timestamps not localized** — `format_started_at` and history search modal displayed UTC time without timezone conversion. Fixed with `chrono::Local`.
+- **CLI stdout pollution** — `notify!` with `location = Log` was ignored by `CliSink`, causing session path and token rotation messages to contaminate machine-readable stdout. Fixed by routing `Log` to stderr.
+- **Tokio worker stack overflow** — subflow recursion could overflow the default 2MB stack. Increased worker stack size.
+- **Orphan SubAgentActivity on restore** — sub-agents that were still running when the session was saved appeared as active after restore. Now marked as interrupted.
+- **Floating panel re-render on idle** — panels were re-rendered every frame even when content hadn't changed. Added render output cache.
+
+### ♻️ Refactoring
+
+- **Unified LLM streaming** — `call_and_maybe_stream_inner` (eval) and `run_streaming_once` (exec) merged into a single `LlmStream` object in `streaming.rs`. Interjection draining, stall timer, stream frame emission, and L2 restart are now in one place. `StreamOutcome` enum simplified. 12 automated tests cover all paths.
+- **Sub-agent retry increased** — `retry: 3` → `retry: 12` in all four subagent flow templates (research/verify/implement/review), matching the main `agent_loop`. Sub-agents no longer die on transient stall timeouts.
+
+---
+
 ## [1.5.0] — 2026-08-22
 
 Sidebar redesign, MCP complete support, built-in help tool, and table auto-wrap. The right sidebar is rebuilt as two independent panels matching the left task panel's visual language. MCP gains full protocol support (resources, prompts, sampling, SSE, notifications) with a TUI manager panel and CLI commands. A docstring-driven `help.show` tool provides version-synced help content.

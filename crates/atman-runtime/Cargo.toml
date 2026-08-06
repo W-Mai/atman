@@ -14,7 +14,7 @@ categories = ["development-tools", "asynchronous"]
 
 [dependencies]
 axum.workspace = true
-atman-dsl        = { path = "../atman-dsl", version = "1.5.0" }
+atman-dsl        = { path = "../atman-dsl", version = "1.6.0" }
 anyhow.workspace   = true
 documented = "0.10"
 sha2 = "0.10"
