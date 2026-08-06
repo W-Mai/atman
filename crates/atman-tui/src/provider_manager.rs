@@ -3,6 +3,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+const PROVIDER_TYPES: &[&str] = &["anthropic", "openai-compat"];
+
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
 
@@ -625,6 +627,40 @@ impl ProviderManager {
                         self.form_field - 1
                     };
                 }
+                KeyAction::CursorLeft if self.form_field == 1 => {
+                    let current = self.provider_type_editor.buf().trim();
+                    let idx = PROVIDER_TYPES.iter().position(|t| *t == current).unwrap_or(0);
+                    let new_idx = if idx == 0 { PROVIDER_TYPES.len() - 1 } else { idx - 1 };
+                    let mut ed = InputEditor::default();
+                    ed.insert_str(PROVIDER_TYPES[new_idx]);
+                    self.provider_type_editor = ed;
+                }
+                KeyAction::CursorRight if self.form_field == 1 => {
+                    let current = self.provider_type_editor.buf().trim();
+                    let idx = PROVIDER_TYPES.iter().position(|t| *t == current).unwrap_or(0);
+                    let new_idx = (idx + 1) % PROVIDER_TYPES.len();
+                    let mut ed = InputEditor::default();
+                    ed.insert_str(PROVIDER_TYPES[new_idx]);
+                    self.provider_type_editor = ed;
+                }
+                KeyAction::Backspace if self.form_field == 1 => {}
+                KeyAction::Char(_) if self.form_field == 1 => {}
+                KeyAction::CursorLeft if self.form_field == 7 => {
+                    let current = self.enabled_editor.buf().trim();
+                    let new = if current == "true" { "false" } else { "true" };
+                    let mut ed = InputEditor::default();
+                    ed.insert_str(new);
+                    self.enabled_editor = ed;
+                }
+                KeyAction::CursorRight if self.form_field == 7 => {
+                    let current = self.enabled_editor.buf().trim();
+                    let new = if current == "true" { "false" } else { "true" };
+                    let mut ed = InputEditor::default();
+                    ed.insert_str(new);
+                    self.enabled_editor = ed;
+                }
+                KeyAction::Backspace if self.form_field == 7 => {}
+                KeyAction::Char(_) if self.form_field == 7 => {}
                 KeyAction::Backspace => {
                     editor.backspace();
                 }
