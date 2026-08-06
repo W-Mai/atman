@@ -140,7 +140,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(10),
+            Constraint::Length(9),
+            Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(2),
         ])
@@ -167,66 +168,156 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
         rows[0],
     );
 
+    f.render_widget(Paragraph::new(""), rows[1]);
+
     match state.step {
-        OnboardingStep::ProviderSelect => render_provider_step(f, rows[1]),
-        OnboardingStep::ModelSelect => render_model_step(f, rows[1], state),
+        OnboardingStep::ProviderSelect => render_provider_step(f, rows[2]),
+        OnboardingStep::ModelSelect => render_model_step(f, rows[2], state),
     }
 
-    let footer = state.error.as_deref().unwrap_or(match state.step {
-        OnboardingStep::ProviderSelect => "Enter add provider · q skip",
-        OnboardingStep::ModelSelect => "↑↓/j/k navigate · Enter finish · Esc back",
-    });
-    let style = if state.error.is_some() {
-        Style::default().fg(theme.error.into())
+    let footer = if let Some(error) = state.error.as_deref() {
+        Line::from(Span::styled(error, Style::default().fg(theme.error.into())))
     } else {
-        Style::default().fg(theme.meta_fg.into())
+        match state.step {
+            OnboardingStep::ProviderSelect => Line::from(vec![
+                key_span("Enter"),
+                help_span(" add provider  "),
+                key_span("q"),
+                help_span(" skip"),
+            ]),
+            OnboardingStep::ModelSelect => Line::from(vec![
+                key_span("↑↓/j/k"),
+                help_span(" navigate  "),
+                key_span("Enter"),
+                help_span(" finish  "),
+                key_span("Esc"),
+                help_span(" back"),
+            ]),
+        }
     };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(footer, style))).wrap(Wrap { trim: true }),
-        rows[2],
+        Paragraph::new(footer)
+            .wrap(Wrap { trim: true })
+            .alignment(ratatui::layout::Alignment::Right),
+        rows[3],
     );
 }
 
 fn render_provider_step(f: &mut ratatui::Frame, area: Rect) {
     let theme = crate::theme::theme();
-    let lines = vec![
-        Line::from("1. Add a provider"),
-        Line::from(""),
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let intro = vec![
         Line::from(Span::styled(
-            "Press Enter to open Provider Manager.",
-            Style::default().fg(theme.tinted_fg.into()),
+            "1. Add a provider",
+            Style::default()
+                .fg(theme.tinted_fg.into())
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "The setup flow uses the same provider presets and form as Manage Providers.",
+            "Use the same presets and API key form as Provider Manager.",
             Style::default().fg(theme.meta_fg.into()),
         )),
     ];
+    f.render_widget(Paragraph::new(intro), rows[0]);
+
+    let actions = vec![
+        ListItem::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Enter", selected_button_style()),
+            Span::styled(
+                "  Add provider",
+                Style::default().fg(theme.tinted_fg.into()),
+            ),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("q", idle_button_style()),
+            Span::styled(
+                "      Skip for now",
+                Style::default().fg(theme.meta_fg.into()),
+            ),
+        ])),
+    ];
+    let mut state = ListState::default().with_selected(Some(0));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border.into()))
+        .title(" Actions ");
+    f.render_stateful_widget(
+        List::new(actions)
+            .block(block)
+            .highlight_style(selected_button_style()),
+        rows[2],
+        &mut state,
+    );
+
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
-        area,
+        Paragraph::new(Line::from(vec![
+            help_span("Next, choose the model that becomes "),
+            Span::styled("smart", Style::default().fg(theme.accent.into())),
+            help_span("."),
+        ]))
+        .alignment(ratatui::layout::Alignment::Center),
+        rows[3],
     );
 }
 
 fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let theme = crate::theme::theme();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let intro = vec![
+        Line::from(Span::styled(
+            "2. Choose your default model",
+            Style::default()
+                .fg(theme.tinted_fg.into())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "This model will be saved as the smart alias.",
+            Style::default().fg(theme.meta_fg.into()),
+        )),
+    ];
+    f.render_widget(Paragraph::new(intro), rows[0]);
+
     let models = selectable_models();
     let items: Vec<ListItem> = models
         .iter()
         .enumerate()
         .map(|(i, model)| {
-            let style = if i == state.selected_model {
+            let selected = i == state.selected_model;
+            let style = if selected {
                 Style::default()
                     .fg(theme.accent.into())
+                    .bg(theme.highlight_bg.into())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                Style::default().fg(theme.tinted_fg.into())
             };
             let info = atman_runtime::model_registry::model_info(model);
+            let prefix = if selected { "›" } else { " " };
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {model}"), style),
+                Span::styled(format!(" {prefix} {model}"), style),
                 Span::styled(
                     format!(
-                        " — {}",
+                        "  {} ctx",
                         atman_runtime::humanize::format_count(info.context_budget)
                     ),
                     Style::default().fg(theme.meta_fg.into()),
@@ -234,31 +325,76 @@ fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState
             ]))
         })
         .collect();
-    let mut list_state = ListState::default().with_selected(Some(state.selected_model));
-    f.render_widget(
-        Paragraph::new("3. Choose your default model"),
-        Rect { height: 1, ..area },
-    );
-    let list_area = Rect {
-        y: area.y + 2,
-        height: area.height.saturating_sub(4),
-        ..area
+    let selected = if items.is_empty() {
+        None
+    } else {
+        Some(state.selected_model.min(items.len().saturating_sub(1)))
     };
+    let mut list_state = ListState::default().with_selected(selected);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border.into()))
+        .title(" Models ");
     if items.is_empty() {
         f.render_widget(
-            Paragraph::new("No configured models found. Press Esc and add a provider first."),
-            list_area,
+            Paragraph::new(Line::from(vec![
+                help_span("No configured models found. "),
+                key_span("Esc"),
+                help_span(" back to add a provider."),
+            ]))
+            .block(block)
+            .wrap(Wrap { trim: true }),
+            rows[2],
         );
     } else {
-        f.render_stateful_widget(List::new(items), list_area, &mut list_state);
+        f.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_style(selected_button_style()),
+            rows[2],
+            &mut list_state,
+        );
     }
-    let note_area = Rect {
-        y: area.y + area.height.saturating_sub(2),
-        height: 2,
-        ..area
-    };
+
     f.render_widget(
-        Paragraph::new("This will be set as your smart model."),
-        note_area,
+        Paragraph::new(Line::from(vec![
+            key_span("Enter"),
+            help_span(" saves "),
+            Span::styled("smart", Style::default().fg(theme.accent.into())),
+            help_span(" for future runs."),
+        ]))
+        .alignment(ratatui::layout::Alignment::Center),
+        rows[3],
     );
+}
+
+fn key_span(text: &'static str) -> Span<'static> {
+    let theme = crate::theme::theme();
+    Span::styled(
+        format!(" {text} "),
+        Style::default()
+            .fg(theme.accent.into())
+            .bg(theme.panel_bg.into())
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn help_span(text: &'static str) -> Span<'static> {
+    let theme = crate::theme::theme();
+    Span::styled(text, Style::default().fg(theme.subtle_fg.into()))
+}
+
+fn selected_button_style() -> Style {
+    let theme = crate::theme::theme();
+    Style::default()
+        .fg(theme.accent.into())
+        .bg(theme.highlight_bg.into())
+        .add_modifier(Modifier::BOLD)
+}
+
+fn idle_button_style() -> Style {
+    let theme = crate::theme::theme();
+    Style::default()
+        .fg(theme.meta_fg.into())
+        .bg(theme.panel_bg.into())
 }

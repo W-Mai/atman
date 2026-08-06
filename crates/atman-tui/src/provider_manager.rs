@@ -1079,7 +1079,11 @@ fn render_add_dialog(
             ("Thinking", mgr.thinking_editor.buf()),
             ("Enabled", mgr.enabled_editor.buf()),
         ];
+        let mut y = inner.y;
         for (i, (label, val)) in fields.iter().enumerate() {
+            if y >= inner.bottom() {
+                break;
+            }
             let active = i == mgr.form_field;
             let style = if active {
                 Style::default()
@@ -1088,38 +1092,91 @@ fn render_add_dialog(
             } else {
                 Style::default().fg(theme.tinted_fg.into())
             };
-            lines.push(Line::from(Span::styled(format!(" {label}:"), style)));
             let display_val = if *label == "API Key" && !val.is_empty() {
                 "•".repeat(val.len().min(20))
             } else {
                 (*val).to_string()
             };
-            let val_line = Line::from(Span::styled(
-                format!("  {display_val}"),
-                Style::default().fg(theme.tinted_fg.into()),
-            ));
-            if active {
-                let cur_buf = match i {
-                    0 => mgr.name_editor.buf(),
-                    1 => mgr.provider_type_editor.buf(),
-                    2 => mgr.api_key_editor.buf(),
-                    3 => mgr.base_url_editor.buf(),
-                    4 => mgr.context_budget_editor.buf(),
-                    5 => mgr.max_tokens_editor.buf(),
-                    6 => mgr.thinking_editor.buf(),
-                    _ => mgr.enabled_editor.buf(),
+            if *label == "API Key" && inner.bottom().saturating_sub(y) >= 3 {
+                let input_rect = Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 3,
                 };
-                let y = inner.y + (lines.len() as u16);
-                let x = inner.x + 2 + cur_buf.len() as u16;
-                cursor_pos = Some((x, y));
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(if active {
+                        Style::default().fg(theme.accent.into())
+                    } else {
+                        Style::default().fg(theme.border.into())
+                    })
+                    .title(Span::styled(" API Key ", style));
+                let input_inner = block.inner(input_rect);
+                f.render_widget(block, input_rect);
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        display_val.clone(),
+                        Style::default().fg(theme.tinted_fg.into()),
+                    ))),
+                    input_inner,
+                );
+                if active {
+                    cursor_pos = Some((
+                        input_inner.x + display_val.len().min(input_inner.width as usize) as u16,
+                        input_inner.y,
+                    ));
+                }
+                y = y.saturating_add(3);
+                continue;
             }
-            lines.push(val_line);
+
+            let label_rect = Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(format!(" {label}:"), style))),
+                label_rect,
+            );
+            y = y.saturating_add(1);
+            if y >= inner.bottom() {
+                break;
+            }
+            let value_rect = Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("  {display_val}"),
+                    Style::default().fg(theme.tinted_fg.into()),
+                ))),
+                value_rect,
+            );
+            if active {
+                cursor_pos = Some((inner.x + 2 + display_val.len() as u16, y));
+            }
+            y = y.saturating_add(1);
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Tab/Shift+Tab cycle · t:test · Enter:save · Esc:cancel",
-            Style::default().fg(theme.subtle_fg.into()),
-        )));
+        if y < inner.bottom() {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "Tab/Shift+Tab cycle · t:test · Enter:save · Esc:cancel",
+                    Style::default().fg(theme.subtle_fg.into()),
+                ))),
+                Rect {
+                    x: inner.x,
+                    y: inner.bottom().saturating_sub(1),
+                    width: inner.width,
+                    height: 1,
+                },
+            );
+        }
     } else if mgr.name_focused {
         lines.push(Line::from("Name:"));
         lines.push(Line::from(Span::styled(
@@ -1131,22 +1188,75 @@ fn render_add_dialog(
         cursor_pos = Some((x, y));
         lines.push(Line::from("Enter to confirm, Esc to cancel"));
     } else {
-        for (i, option) in mgr.add_options.iter().enumerate() {
-            let style = if i == mgr.kind_selected {
+        let items: Vec<ListItem> = mgr
+            .add_options
+            .iter()
+            .enumerate()
+            .map(|(i, option)| {
+                let selected = i == mgr.kind_selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(theme.accent.into())
+                        .bg(theme.highlight_bg.into())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.tinted_fg.into())
+                };
+                let prefix = if selected { "›" } else { " " };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {prefix} {}", option.label), style),
+                    Span::styled(
+                        format!("  {}", option.description),
+                        Style::default().fg(theme.meta_fg.into()),
+                    ),
+                ]))
+            })
+            .collect();
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border.into()))
+            .title(" Providers ");
+        let mut state = ListState::default().with_selected(Some(mgr.kind_selected));
+        f.render_stateful_widget(
+            List::new(items).block(block).highlight_style(
                 Style::default()
                     .fg(theme.accent.into())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(
-                format!(" {} — {}", option.label, option.description),
-                style,
-            )));
-        }
-        lines.push(Line::from("Enter to select, Esc to cancel"));
+                    .bg(theme.highlight_bg.into())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            rows[0],
+            &mut state,
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " Enter ",
+                    Style::default()
+                        .fg(theme.accent.into())
+                        .bg(theme.panel_bg.into())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" select  ", Style::default().fg(theme.subtle_fg.into())),
+                Span::styled(
+                    " Esc ",
+                    Style::default()
+                        .fg(theme.accent.into())
+                        .bg(theme.panel_bg.into())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" cancel", Style::default().fg(theme.subtle_fg.into())),
+            ]))
+            .alignment(ratatui::layout::Alignment::Right),
+            rows[1],
+        );
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    if !mgr.in_form && (mgr.name_focused || mgr.add_options.is_empty()) {
+        f.render_widget(Paragraph::new(lines), inner);
+    }
     if let Some((x, y)) = cursor_pos {
         f.set_cursor_position((x, y));
     }
