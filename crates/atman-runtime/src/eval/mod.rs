@@ -5,6 +5,7 @@ use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
 use crate::env::Env;
 use crate::error::RuntimeError;
+use crate::streaming::{emit_stream_event, handle_pending_injections};
 use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
@@ -616,59 +617,8 @@ async fn call_and_maybe_stream_inner(
     let stall_dur = std::time::Duration::from_secs(stall_secs);
     let stall_sleep = tokio::time::sleep(stall_dur);
     tokio::pin!(stall_sleep);
-    // Drain pending interjections from the tool-execution phase (when no
-    // subscriber was active on the broadcast channel).
     if let Some(entry) = agent_entry {
-        let pending: Vec<_> = entry.pending_injections.lock().unwrap().drain(..).collect();
-        for inj in &pending {
-            if matches!(inj.level, crate::injection::InjectionLevel::L1Nudge) {
-                entry
-                    .messages
-                    .lock()
-                    .unwrap()
-                    .push(crate::message::Message::user_text(
-                        crate::event::TurnId::now(),
-                        format!("[interjection] {}", inj.text),
-                    ));
-            }
-        }
-        if let Some(inj) = pending
-            .iter()
-            .find(|i| !matches!(i.level, crate::injection::InjectionLevel::L1Nudge))
-        {
-            match inj.level {
-                crate::injection::InjectionLevel::L4HardStop => {
-                    flow_cancel.cancel();
-                    return Err(RuntimeError::Cancelled(format!("hard stop: {}", inj.text)));
-                }
-                crate::injection::InjectionLevel::L3Redirect => {
-                    flow_cancel.cancel();
-                    if let Some(target) = &inj.redirect_target {
-                        return Err(RuntimeError::Redirect(target.clone()));
-                    }
-                    return Err(RuntimeError::Cancelled(format!(
-                        "redirect (no target): {}",
-                        inj.text
-                    )));
-                }
-                crate::injection::InjectionLevel::L2CourseCorrect => {
-                    flow_cancel.cancel();
-                    entry
-                        .messages
-                        .lock()
-                        .unwrap()
-                        .push(crate::message::Message::user_text(
-                            crate::event::TurnId::now(),
-                            format!("[course correct] {}", inj.text),
-                        ));
-                    return Err(RuntimeError::Cancelled(format!(
-                        "course correct: {}",
-                        inj.text
-                    )));
-                }
-                _ => {}
-            }
-        }
+        handle_pending_injections(entry, &flow_cancel)?;
     }
     let mark_first_token = |first: &mut Option<std::time::Instant>| {
         if first.is_none() {
@@ -688,71 +638,29 @@ async fn call_and_maybe_stream_inner(
                     std::future::pending::<()>().await;
                 }
             }, if agent_entry.is_some() => {
-                if let Some(entry) = agent_entry {
-                    let pending: Vec<_> =
-                        entry.pending_injections.lock().unwrap().drain(..).collect();
-                    for inj in &pending {
-                        if matches!(inj.level, crate::injection::InjectionLevel::L1Nudge) {
-                            entry.messages.lock().unwrap().push(
-                                crate::message::Message::user_text(
-                                    crate::event::TurnId::now(),
-                                    format!("[interjection] {}", inj.text),
-                                ),
-                            );
-                        }
-                    }
-                    if let Some(inj) = pending
-                        .iter()
-                        .find(|i| !matches!(i.level, crate::injection::InjectionLevel::L1Nudge))
-                    {
-                        match inj.level {
-                            crate::injection::InjectionLevel::L4HardStop => {
-                                flow_cancel.cancel();
-                                return Err(RuntimeError::Cancelled(format!(
-                                    "hard stop: {}",
-                                    inj.text
-                                )));
-                            }
-                            crate::injection::InjectionLevel::L3Redirect => {
-                                flow_cancel.cancel();
-                                if let Some(target) = &inj.redirect_target {
-                                    return Err(RuntimeError::Redirect(target.clone()));
-                                }
-                                return Err(RuntimeError::Cancelled(format!(
-                                    "redirect (no target): {}",
-                                    inj.text
-                                )));
-                            }
-                            crate::injection::InjectionLevel::L2CourseCorrect => {
-                                flow_cancel.cancel();
-                                entry.messages.lock().unwrap().push(
-                                    crate::message::Message::user_text(
-                                        crate::event::TurnId::now(),
-                                        format!("[course correct] {}", inj.text),
-                                    ),
-                                );
-                                return Err(RuntimeError::Cancelled(format!(
-                                    "course correct: {}",
-                                    inj.text
-                                )));
-                            }
-                            _ => {}
-                        }
-                    }
+                if let Some(entry) = agent_entry
+                    && let Err(err) = handle_pending_injections(entry, &flow_cancel)
+                {
+                    return Err(err);
                 }
             }
             ev = events.recv() => {
                 match ev {
-                    Ok(crate::event::NodeEvent::LlmChunk { text, .. }) => {
+                    Ok(crate::event::NodeEvent::LlmChunk { text, cumulative_tokens }) => {
                         if let Some(session) = session {
                             session.mark_streamed();
                         }
                         mark_first_token(&mut first_token_at);
-                        let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
-                            text: text.clone(),
-                            model: model_name.clone(),
-                            run_id: run_id.clone(),
-                        });
+                        emit_stream_event(
+                            crate::event::NodeEvent::LlmChunk {
+                                text: text.clone(),
+                                cumulative_tokens,
+                            },
+                            &model_name,
+                            run_id.as_deref(),
+                            Some(&stream_tx),
+                            None,
+                        );
                         if let Some(entry) = agent_entry {
                             entry.output.lock().unwrap().push_str(&text);
                         }
@@ -764,16 +672,22 @@ async fn call_and_maybe_stream_inner(
                     }
                     Ok(crate::event::NodeEvent::ThinkingChunk { text }) => {
                         mark_first_token(&mut first_token_at);
-                        let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk {
-                            text,
-                            run_id: run_id.clone(),
-                        });
+                        emit_stream_event(
+                            crate::event::NodeEvent::ThinkingChunk { text },
+                            &model_name,
+                            run_id.as_deref(),
+                            Some(&stream_tx),
+                            None,
+                        );
                     }
                     Ok(crate::event::NodeEvent::LlmDone { total_tokens }) => {
-                        let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone {
-                            total_tokens,
-                            run_id: run_id.clone(),
-                        });
+                        emit_stream_event(
+                            crate::event::NodeEvent::LlmDone { total_tokens },
+                            &model_name,
+                            run_id.as_deref(),
+                            Some(&stream_tx),
+                            None,
+                        );
                         if let Some(entry) = agent_entry {
                             entry
                                 .iteration
@@ -820,10 +734,13 @@ async fn call_and_maybe_stream_inner(
                             });
                         }
                         crate::event::NodeEvent::LlmDone { total_tokens } => {
-                            let _ = stream_tx.send(crate::stream::StreamFrame::LlmDone {
-                                total_tokens,
-                                run_id: run_id.clone(),
-                            });
+                            emit_stream_event(
+                                crate::event::NodeEvent::LlmDone { total_tokens },
+                                &model_name,
+                                run_id.as_deref(),
+                                Some(&stream_tx),
+                                None,
+                            );
                             if let Some(entry) = agent_entry {
                                 entry.iteration.fetch_add(
                                     1,
@@ -1368,7 +1285,10 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                             return crate::provider::assistant_message_to_value(&am);
                         }
                         Err(e) => {
-                            if matches!(e, RuntimeError::Cancelled(_)) {
+                            if matches!(
+                                e,
+                                RuntimeError::Cancelled(_) | RuntimeError::L2Restart { .. }
+                            ) {
                                 return Value::Err(e);
                             }
                             if is_context_overflow_error(&e)

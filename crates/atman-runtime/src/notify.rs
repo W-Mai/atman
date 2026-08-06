@@ -249,6 +249,10 @@ impl NotifySink for CliSink {
             }
         );
         let line = format!("{}{}", prefix, note.message);
+        if matches!(note.location, NotifyLocation::Log) {
+            eprintln!("{line}");
+            return;
+        }
         match note.level {
             NotifyLevel::Error | NotifyLevel::Warn => eprintln!("{line}"),
             NotifyLevel::Info | NotifyLevel::Success | NotifyLevel::Debug => println!("{line}"),

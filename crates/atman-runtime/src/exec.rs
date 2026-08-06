@@ -7,6 +7,7 @@ use crate::error::RuntimeError;
 use crate::eval::{EvalCtx, eval_expr};
 use crate::event::NodeEvent;
 use crate::provider::LlmRequest;
+use crate::streaming::{emit_stream_event, handle_pending_injections};
 use crate::tool::{BoxFut, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
@@ -534,77 +535,63 @@ enum StreamOutcome {
     },
 }
 
+fn injection_error_to_restart(
+    err: RuntimeError,
+    partial_output: String,
+    partial_tokens: u64,
+) -> Result<StreamOutcome, RuntimeError> {
+    match err {
+        RuntimeError::Redirect(target) => Ok(StreamOutcome::Restart {
+            level: crate::injection::InjectionLevel::L3Redirect,
+            text: String::new(),
+            redirect_target: Some(target),
+            partial_output,
+            partial_tokens,
+        }),
+        RuntimeError::L2Restart {
+            correction_text,
+            partial_output: fallback_output,
+            partial_tokens: fallback_tokens,
+        } => Ok(StreamOutcome::Restart {
+            level: crate::injection::InjectionLevel::L2CourseCorrect,
+            text: correction_text,
+            redirect_target: None,
+            partial_output: if partial_output.is_empty() {
+                fallback_output
+            } else {
+                partial_output
+            },
+            partial_tokens: partial_tokens.max(fallback_tokens),
+        }),
+        other => Err(other),
+    }
+}
+
 async fn run_streaming_once<'a>(
     provider: &dyn crate::provider::Provider,
     req: LlmRequest,
     rules: &WatchRules,
     ctx: &EvalCtx<'a>,
 ) -> StreamOutcome {
-    // Drain pending interjections from the tool-execution phase.
-    if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
-        let pending: Vec<_> = entry.pending_injections.lock().unwrap().drain(..).collect();
-        for inj in pending {
-            match inj.level {
-                crate::injection::InjectionLevel::L1Nudge => {
-                    entry
-                        .messages
-                        .lock()
-                        .unwrap()
-                        .push(crate::message::Message::user_text(
-                            crate::event::TurnId::now(),
-                            format!("[interjection] {}", inj.text),
-                        ));
-                }
-                crate::injection::InjectionLevel::L4HardStop => {
-                    return StreamOutcome::Done(Value::Err(RuntimeError::Cancelled(format!(
-                        "hard stop: {}",
-                        inj.text
-                    ))));
-                }
-                crate::injection::InjectionLevel::L3Redirect => {
-                    if let Some(target) = inj.redirect_target {
-                        return StreamOutcome::Done(Value::Err(RuntimeError::Redirect(target)));
-                    }
-                    return StreamOutcome::Done(Value::Err(RuntimeError::Cancelled(format!(
-                        "redirect (no target): {}",
-                        inj.text
-                    ))));
-                }
-                crate::injection::InjectionLevel::L2CourseCorrect => {
-                    entry
-                        .messages
-                        .lock()
-                        .unwrap()
-                        .push(crate::message::Message::user_text(
-                            crate::event::TurnId::now(),
-                            format!("[course correct] {}", inj.text),
-                        ));
-                    return StreamOutcome::Done(Value::Err(RuntimeError::Cancelled(format!(
-                        "course correct: {}",
-                        inj.text
-                    ))));
-                }
-            }
-        }
-    }
     let stream_tx = ctx.tool_ctx.stream_tx.clone();
     let frame_tx = ctx
         .tool_ctx
         .agent_entry
         .as_ref()
         .map(|e| e.frame_tx.clone());
-    let emit_frame = |frame: crate::stream::StreamFrame| {
-        if let Some(tx) = &frame_tx {
-            let _ = tx.send(frame);
-        } else if let Some(tx) = &stream_tx {
-            let _ = tx.send(frame);
-        }
-    };
     let model_name = req.model.clone();
     let run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
     let stall_secs = req.stall_timeout_secs;
     let obs = provider.call_streaming(req);
     let cancel = obs.cancel.clone();
+    if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref()
+        && let Err(err) = handle_pending_injections(entry, &cancel)
+    {
+        return match injection_error_to_restart(err, String::new(), 0) {
+            Ok(outcome) => outcome,
+            Err(err) => StreamOutcome::Done(Value::Err(err)),
+        };
+    }
     let mut events = obs.events;
     let output = obs.output;
     tokio::pin!(output);
@@ -623,9 +610,6 @@ async fn run_streaming_once<'a>(
     tokio::pin!(elapsed_sleep);
     let started = std::time::Instant::now();
 
-    let l1_nudge: Option<String> = None;
-    let l2_correction: Option<String> = None;
-    let l3_redirect: Option<String> = None;
     let mut events_closed = false;
     let final_result = loop {
         tokio::select! {
@@ -641,11 +625,13 @@ async fn run_streaming_once<'a>(
                         if let Some(session) = ctx.session_runtime.as_ref() {
                             session.mark_streamed();
                         }
-                        emit_frame(crate::stream::StreamFrame::LlmChunk {
-                            text: text.clone(),
-                            model: model_name.clone(),
-                            run_id: run_id.clone(),
-                        });
+                        emit_stream_event(
+                            NodeEvent::LlmChunk { text: text.clone(), cumulative_tokens },
+                            &model_name,
+                            run_id.as_deref(),
+                            stream_tx.as_ref(),
+                            frame_tx.as_ref(),
+                        );
                         state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
                         if stall_active {
                             stall_sleep
@@ -654,16 +640,22 @@ async fn run_streaming_once<'a>(
                         }
                     }
                     Ok(NodeEvent::ThinkingChunk { text }) => {
-                        emit_frame(crate::stream::StreamFrame::ThinkingChunk {
-                            text,
-                            run_id: run_id.clone(),
-                        });
+                        emit_stream_event(
+                            NodeEvent::ThinkingChunk { text },
+                            &model_name,
+                            run_id.as_deref(),
+                            stream_tx.as_ref(),
+                            frame_tx.as_ref(),
+                        );
                     }
                     Ok(NodeEvent::LlmDone { total_tokens }) => {
-                        emit_frame(crate::stream::StreamFrame::LlmDone {
-                            total_tokens,
-                            run_id: run_id.clone(),
-                        });
+                        emit_stream_event(
+                            NodeEvent::LlmDone { total_tokens },
+                            &model_name,
+                            run_id.as_deref(),
+                            stream_tx.as_ref(),
+                            frame_tx.as_ref(),
+                        );
                         state.on_done(total_tokens, started, rules, &cancel);
                     }
                     Ok(_) => {}
@@ -679,57 +671,11 @@ async fn run_streaming_once<'a>(
                 } else {
                     std::future::pending::<()>().await;
                 }
-            }, if ctx.tool_ctx.agent_entry.is_some() && l3_redirect.is_none() => {
-                if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
-                    let pending: Vec<_> =
-                        entry.pending_injections.lock().unwrap().drain(..).collect();
-                    for inj in &pending {
-                        if matches!(inj.level, crate::injection::InjectionLevel::L1Nudge) {
-                            entry.messages.lock().unwrap().push(
-                                crate::message::Message::user_text(
-                                    crate::event::TurnId::now(),
-                                    format!("[interjection] {}", inj.text),
-                                ),
-                            );
-                        }
-                    }
-                    if let Some(inj) = pending.iter().find(|i| {
-                        !matches!(i.level, crate::injection::InjectionLevel::L1Nudge)
-                    }) {
-                        match inj.level {
-                            crate::injection::InjectionLevel::L4HardStop => {
-                                cancel.cancel();
-                                break Err(RuntimeError::Cancelled(format!(
-                                    "hard stop: {}",
-                                    inj.text
-                                )));
-                            }
-                            crate::injection::InjectionLevel::L3Redirect => {
-                                cancel.cancel();
-                                if let Some(target) = &inj.redirect_target {
-                                    break Err(RuntimeError::Redirect(target.clone()));
-                                }
-                                break Err(RuntimeError::Cancelled(format!(
-                                    "redirect (no target): {}",
-                                    inj.text
-                                )));
-                            }
-                            crate::injection::InjectionLevel::L2CourseCorrect => {
-                                cancel.cancel();
-                                entry.messages.lock().unwrap().push(
-                                    crate::message::Message::user_text(
-                                        crate::event::TurnId::now(),
-                                        format!("[course correct] {}", inj.text),
-                                    ),
-                                );
-                                break Err(RuntimeError::Cancelled(format!(
-                                    "course correct: {}",
-                                    inj.text
-                                )));
-                            }
-                            _ => {}
-                        }
-                    }
+            }, if ctx.tool_ctx.agent_entry.is_some() => {
+                if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref()
+                    && let Err(err) = handle_pending_injections(entry, &cancel)
+                {
+                    break Err(err);
                 }
             }
             _ = &mut elapsed_sleep, if elapsed_active && state.abort_reason.is_none() => {
@@ -757,56 +703,39 @@ async fn run_streaming_once<'a>(
                 if let Some(session) = ctx.session_runtime.as_ref() {
                     session.mark_streamed();
                 }
-                emit_frame(crate::stream::StreamFrame::LlmChunk {
-                    text: text.clone(),
-                    model: model_name.clone(),
-                    run_id: run_id.clone(),
-                });
+                emit_stream_event(
+                    NodeEvent::LlmChunk {
+                        text: text.clone(),
+                        cumulative_tokens,
+                    },
+                    &model_name,
+                    run_id.as_deref(),
+                    stream_tx.as_ref(),
+                    frame_tx.as_ref(),
+                );
                 state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
             }
             NodeEvent::ThinkingChunk { text } => {
-                emit_frame(crate::stream::StreamFrame::ThinkingChunk {
-                    text,
-                    run_id: run_id.clone(),
-                });
+                emit_stream_event(
+                    NodeEvent::ThinkingChunk { text },
+                    &model_name,
+                    run_id.as_deref(),
+                    stream_tx.as_ref(),
+                    frame_tx.as_ref(),
+                );
             }
             NodeEvent::LlmDone { total_tokens } => {
-                emit_frame(crate::stream::StreamFrame::LlmDone {
-                    total_tokens,
-                    run_id: run_id.clone(),
-                });
+                emit_stream_event(
+                    NodeEvent::LlmDone { total_tokens },
+                    &model_name,
+                    run_id.as_deref(),
+                    stream_tx.as_ref(),
+                    frame_tx.as_ref(),
+                );
                 state.on_done(total_tokens, started, rules, &cancel);
             }
             _ => {}
         }
-    }
-
-    if let Some(redirect) = l3_redirect {
-        return StreamOutcome::Restart {
-            level: crate::injection::InjectionLevel::L3Redirect,
-            text: String::new(),
-            redirect_target: Some(redirect),
-            partial_output: state.text_captured.clone(),
-            partial_tokens: state.tokens_seen,
-        };
-    }
-    if let Some(correction) = l2_correction {
-        return StreamOutcome::Restart {
-            level: crate::injection::InjectionLevel::L2CourseCorrect,
-            text: correction,
-            redirect_target: None,
-            partial_output: state.text_captured.clone(),
-            partial_tokens: state.tokens_seen,
-        };
-    }
-    if let Some(nudge) = l1_nudge {
-        return StreamOutcome::Restart {
-            level: crate::injection::InjectionLevel::L1Nudge,
-            text: nudge,
-            redirect_target: None,
-            partial_output: state.text_captured.clone(),
-            partial_tokens: state.tokens_seen,
-        };
     }
 
     let mut abort_reason = state.abort_reason;
@@ -815,7 +744,12 @@ async fn run_streaming_once<'a>(
             abort_reason.take().unwrap_or_default(),
         ))),
         Ok(am) => StreamOutcome::Done(crate::provider::assistant_message_to_value(&am)),
-        Err(e) => StreamOutcome::Done(Value::Err(e)),
+        Err(e) => {
+            match injection_error_to_restart(e, state.text_captured.clone(), state.tokens_seen) {
+                Ok(outcome) => outcome,
+                Err(err) => StreamOutcome::Done(Value::Err(err)),
+            }
+        }
     }
 }
 

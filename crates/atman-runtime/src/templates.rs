@@ -192,7 +192,7 @@ flow research_loop(goal: string, model: string, max_iter: int, iteration: int) -
         context: session
         system: @"../prompts/system.md" + "\n\n## Your role: research\nYou are a research sub-agent. Read code before answering. Cite file:line. Don't guess — if uncertain, say so. Return findings as structured text. Trace the full data flow before concluding."
         cache: true
-        retry: 3
+        retry: 12
         tools: [
             fs.read, fs.list, fs.grep,
             bash.spawn, bash.status, bash.output, bash.kill,
@@ -225,7 +225,7 @@ flow verify_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
         context: session
         system: @"../prompts/system.md" + "\n\n## Your role: verify\nYou are a verification sub-agent. Reproduce the issue with a test. Trace the full data flow. Confirm root cause before concluding. Don't patch symptoms."
         cache: true
-        retry: 3
+        retry: 12
         tools: [
             fs.read, fs.list, fs.grep,
             bash.spawn, bash.status, bash.output, bash.kill,
@@ -259,7 +259,7 @@ flow implement_loop(goal: string, model: string, max_iter: int, iteration: int) 
         context: session
         system: @"../prompts/system.md" + "\n\n## Your role: implement\nYou are an implementation sub-agent. Make the minimal change. Run quality gate (fmt+clippy+test) before returning. Fix root causes, not symptoms. Verify by comparison: trace the existing implementation's complete chain and confirm every link is wired."
         cache: true
-        retry: 3
+        retry: 12
         tools: [
             fs.read, fs.write, fs.edit, fs.list, fs.grep,
             bash.spawn, bash.status, bash.output, bash.kill, bash.list,
@@ -293,7 +293,7 @@ flow review_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
         context: session
         system: @"../prompts/system.md" + "\n\n## Your role: review\nYou are a review sub-agent. Trace the existing implementation's complete interaction chain. Compare against similar implementations. List every missing link. Don't approve until you've checked every link. Reading code finds gaps; running tests doesn't."
         cache: true
-        retry: 3
+        retry: 12
         tools: [
             fs.read, fs.list, fs.grep,
             git.diff, git.show, git.log, git.status,

@@ -48,6 +48,7 @@ pub mod session;
 pub mod session_meta;
 pub mod storage;
 pub mod stream;
+pub(crate) mod streaming;
 pub mod task_registry;
 pub mod templates;
 pub mod tool;

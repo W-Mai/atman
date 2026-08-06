@@ -557,6 +557,7 @@ async fn cmd_daemon_rotate_token() -> Result<()> {
     println!("{}", cfg.auth_token);
     atman_runtime::notify!(
         success,
+        location = Log,
         "new token written to {}. restart daemon with `atman daemon start`.",
         cfg_path.display()
     );
@@ -601,7 +602,13 @@ async fn cmd_run(
     });
 
     if let Some(path) = session.events_path() {
-        atman_runtime::notify!(info, "session={} events={}", session.id(), path.display());
+        atman_runtime::notify!(
+            info,
+            location = Log,
+            "session={} events={}",
+            session.id(),
+            path.display()
+        );
     }
 
     load_model_config_from_disk();
