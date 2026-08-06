@@ -5,9 +5,8 @@ use atman_dsl::ast::{CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, 
 use crate::env::Env;
 use crate::error::RuntimeError;
 use crate::eval::{EvalCtx, eval_expr};
-use crate::event::NodeEvent;
 use crate::provider::LlmRequest;
-use crate::streaming::{emit_stream_event, handle_pending_injections};
+use crate::streaming::{LlmStream, WarnRule, WatchRules};
 use crate::tool::{BoxFut, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
@@ -452,454 +451,46 @@ async fn eval_bind_with_watches(
         ))));
     };
 
-    let rules = collect_watch_rules(watches);
-    let mut restart_count = 0u32;
-    let mut correction: Option<String> = None;
-    let mut prior_partial: Option<String> = None;
-    loop {
-        let mut messages = Vec::with_capacity(3);
-        if let Some(partial) = &prior_partial {
-            messages.push(crate::message::Message::assistant_text(
-                ctx.turn_id
-                    .clone()
-                    .unwrap_or_else(crate::event::TurnId::now),
-                format!("[partial output before user correction]\n{partial}"),
-            ));
-        }
-        if let Some(corr) = &correction {
-            messages.push(crate::provider::user_text_message(format!(
-                "<user_correction>{corr}</user_correction>\n\n{prompt}"
-            )));
-        } else {
-            messages.push(crate::provider::user_text_message(prompt.clone()));
-        }
-        let req = LlmRequest {
-            model: model.clone(),
-            messages,
-            system: None,
-            input: input.clone(),
-            schema: None,
-            cache_prompt,
-            tools: Vec::new(),
-            thinking_enabled: false,
-            stall_timeout_secs: 120,
-        };
-        let outcome = run_streaming_once(provider.as_ref(), req, &rules, ctx).await;
-        match outcome {
-            StreamOutcome::Restart {
-                level: crate::injection::InjectionLevel::L3Redirect,
-                redirect_target: Some(target),
-                ..
-            } => {
-                return Ok(Value::Err(RuntimeError::Redirect(target)));
-            }
-            StreamOutcome::Restart {
-                text: correction_text,
-                partial_output,
-                partial_tokens,
-                ..
-            } if restart_count < 3 => {
-                if let Some(sink) = ctx.events {
-                    sink.emit(crate::event::Event::LlmPartialCall {
-                        turn_id: ctx.turn_id.clone(),
-                        flow_run_id: ctx.flow_run_id.clone(),
-                        model: model.clone(),
-                        provider: provider.name().to_string(),
-                        tokens_before_abort: partial_tokens,
-                        restart_reason: "l2_course_correct".to_string(),
-                    });
-                }
-                restart_count += 1;
-                correction = Some(correction_text);
-                prior_partial = Some(partial_output);
-                continue;
-            }
-            StreamOutcome::Restart { .. } => {
-                return Ok(Value::Err(RuntimeError::ToolFailed(
-                    "l2 restart exhausted 3x, giving up".into(),
-                )));
-            }
-            StreamOutcome::Done(value) => return Ok(value),
-        }
-    }
-}
-
-enum StreamOutcome {
-    Done(Value),
-    Restart {
-        level: crate::injection::InjectionLevel,
-        text: String,
-        redirect_target: Option<String>,
-        partial_output: String,
-        partial_tokens: u64,
-    },
-}
-
-fn injection_error_to_restart(
-    err: RuntimeError,
-    partial_output: String,
-    partial_tokens: u64,
-) -> Result<StreamOutcome, RuntimeError> {
-    match err {
-        RuntimeError::Redirect(target) => Ok(StreamOutcome::Restart {
-            level: crate::injection::InjectionLevel::L3Redirect,
-            text: String::new(),
-            redirect_target: Some(target),
-            partial_output,
-            partial_tokens,
-        }),
-        RuntimeError::L2Restart {
-            correction_text,
-            partial_output: fallback_output,
-            partial_tokens: fallback_tokens,
-        } => Ok(StreamOutcome::Restart {
-            level: crate::injection::InjectionLevel::L2CourseCorrect,
-            text: correction_text,
-            redirect_target: None,
-            partial_output: if partial_output.is_empty() {
-                fallback_output
-            } else {
-                partial_output
-            },
-            partial_tokens: partial_tokens.max(fallback_tokens),
-        }),
-        other => Err(other),
-    }
-}
-
-async fn run_streaming_once<'a>(
-    provider: &dyn crate::provider::Provider,
-    req: LlmRequest,
-    rules: &WatchRules,
-    ctx: &EvalCtx<'a>,
-) -> StreamOutcome {
-    let stream_tx = ctx.tool_ctx.stream_tx.clone();
+    let messages = vec![crate::provider::user_text_message(prompt.clone())];
+    let req = LlmRequest {
+        model: model.clone(),
+        messages,
+        system: None,
+        input: input.clone(),
+        schema: None,
+        cache_prompt,
+        tools: Vec::new(),
+        thinking_enabled: false,
+        stall_timeout_secs: 120,
+    };
     let frame_tx = ctx
         .tool_ctx
         .agent_entry
         .as_ref()
         .map(|e| e.frame_tx.clone());
-    let model_name = req.model.clone();
-    let run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
-    let stall_secs = req.stall_timeout_secs;
-    let obs = provider.call_streaming(req);
-    let cancel = obs.cancel.clone();
-    if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref()
-        && let Err(err) = handle_pending_injections(entry, &cancel)
-    {
-        return match injection_error_to_restart(err, String::new(), 0) {
-            Ok(outcome) => outcome,
-            Err(err) => StreamOutcome::Done(Value::Err(err)),
-        };
+    let mut stream = LlmStream::new(provider.as_ref(), req)
+        .with_stream_tx(ctx.tool_ctx.stream_tx.clone())
+        .with_frame_tx(frame_tx)
+        .with_watch_rules(collect_watch_rules(watches))
+        .with_event_sink(ctx.events)
+        .with_turn_id(ctx.turn_id.clone())
+        .with_flow_run_id(ctx.flow_run_id.clone());
+    if let Some(session) = ctx.session_runtime.as_ref() {
+        stream = stream.with_session(session);
     }
-    let mut events = obs.events;
-    let output = obs.output;
-    tokio::pin!(output);
-
-    let stall_active = stall_secs > 0;
-    let stall_dur = std::time::Duration::from_secs(stall_secs);
-    let stall_sleep = tokio::time::sleep(stall_dur);
-    tokio::pin!(stall_sleep);
-
-    let mut state = StreamMonitor::new(rules, ctx);
-    let elapsed_active = rules.elapsed_ms_gt.is_some();
-    let elapsed_deadline_ms = rules.elapsed_ms_gt.unwrap_or(u64::MAX / 2);
-    let elapsed_sleep = tokio::time::sleep(tokio::time::Duration::from_millis(
-        elapsed_deadline_ms.saturating_add(1),
-    ));
-    tokio::pin!(elapsed_sleep);
-    let started = std::time::Instant::now();
-
-    let mut events_closed = false;
-    let final_result = loop {
-        tokio::select! {
-            ev = async {
-                if events_closed {
-                    std::future::pending().await
-                } else {
-                    events.recv().await
-                }
-            }, if !events_closed => {
-                match ev {
-                    Ok(NodeEvent::LlmChunk { text, cumulative_tokens }) => {
-                        if let Some(session) = ctx.session_runtime.as_ref() {
-                            session.mark_streamed();
-                        }
-                        emit_stream_event(
-                            NodeEvent::LlmChunk { text: text.clone(), cumulative_tokens },
-                            &model_name,
-                            run_id.as_deref(),
-                            stream_tx.as_ref(),
-                            frame_tx.as_ref(),
-                        );
-                        state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
-                        if stall_active {
-                            stall_sleep
-                                .as_mut()
-                                .reset(tokio::time::Instant::now() + stall_dur);
-                        }
-                    }
-                    Ok(NodeEvent::ThinkingChunk { text }) => {
-                        emit_stream_event(
-                            NodeEvent::ThinkingChunk { text },
-                            &model_name,
-                            run_id.as_deref(),
-                            stream_tx.as_ref(),
-                            frame_tx.as_ref(),
-                        );
-                    }
-                    Ok(NodeEvent::LlmDone { total_tokens }) => {
-                        emit_stream_event(
-                            NodeEvent::LlmDone { total_tokens },
-                            &model_name,
-                            run_id.as_deref(),
-                            stream_tx.as_ref(),
-                            frame_tx.as_ref(),
-                        );
-                        state.on_done(total_tokens, started, rules, &cancel);
-                    }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        events_closed = true;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                }
-            }
-            _ = async {
-                if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
-                    entry.injection_notify.notified().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if ctx.tool_ctx.agent_entry.is_some() => {
-                if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref()
-                    && let Err(err) = handle_pending_injections(entry, &cancel)
-                {
-                    break Err(err);
-                }
-            }
-            _ = &mut elapsed_sleep, if elapsed_active && state.abort_reason.is_none() => {
-                state.abort_reason = Some(format!("elapsed > {elapsed_deadline_ms}ms"));
-                cancel.cancel();
-                break Err(RuntimeError::Cancelled("elapsed".into()));
-            }
-            _ = &mut stall_sleep, if stall_active => {
-                cancel.cancel();
-                break Err(RuntimeError::ToolFailed(format!(
-                    "llm stall timeout after {}s",
-                    stall_secs
-                )));
-            }
-            result = &mut output => break result,
-        }
-    };
-
-    while let Ok(ev) = events.try_recv() {
-        match ev {
-            NodeEvent::LlmChunk {
-                text,
-                cumulative_tokens,
-            } => {
-                if let Some(session) = ctx.session_runtime.as_ref() {
-                    session.mark_streamed();
-                }
-                emit_stream_event(
-                    NodeEvent::LlmChunk {
-                        text: text.clone(),
-                        cumulative_tokens,
-                    },
-                    &model_name,
-                    run_id.as_deref(),
-                    stream_tx.as_ref(),
-                    frame_tx.as_ref(),
-                );
-                state.on_chunk(&text, cumulative_tokens, started, rules, &cancel);
-            }
-            NodeEvent::ThinkingChunk { text } => {
-                emit_stream_event(
-                    NodeEvent::ThinkingChunk { text },
-                    &model_name,
-                    run_id.as_deref(),
-                    stream_tx.as_ref(),
-                    frame_tx.as_ref(),
-                );
-            }
-            NodeEvent::LlmDone { total_tokens } => {
-                emit_stream_event(
-                    NodeEvent::LlmDone { total_tokens },
-                    &model_name,
-                    run_id.as_deref(),
-                    stream_tx.as_ref(),
-                    frame_tx.as_ref(),
-                );
-                state.on_done(total_tokens, started, rules, &cancel);
-            }
-            _ => {}
-        }
+    if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
+        stream = stream.with_entry(entry);
     }
-
-    let mut abort_reason = state.abort_reason;
-    match final_result {
-        _ if abort_reason.is_some() => StreamOutcome::Done(Value::Err(RuntimeError::Aborted(
-            abort_reason.take().unwrap_or_default(),
-        ))),
-        Ok(am) => StreamOutcome::Done(crate::provider::assistant_message_to_value(&am)),
-        Err(e) => {
-            match injection_error_to_restart(e, state.text_captured.clone(), state.tokens_seen) {
-                Ok(outcome) => outcome,
-                Err(err) => StreamOutcome::Done(Value::Err(err)),
-            }
-        }
+    match stream.run().await {
+        Ok(am) => Ok(crate::provider::assistant_message_to_value(&am)),
+        Err(e) => Ok(Value::Err(e)),
     }
-}
-
-#[derive(Default)]
-struct WatchRules {
-    token_matches: Vec<(String, String)>,
-    tokens_gt: Option<u64>,
-    elapsed_ms_gt: Option<u64>,
-    warn_token: Vec<WarnRule>,
-    warn_tokens_gt: Vec<(u64, WarnRule)>,
-    warn_elapsed_ms_gt: Vec<(u64, WarnRule)>,
-}
-
-#[derive(Clone)]
-struct WarnRule {
-    target: String,
-    message: String,
-    pattern: String,
 }
 
 fn render_warn_msg(msg: &Option<Expr>, fallback: &str) -> String {
     match msg {
         Some(Expr::Literal(atman_dsl::ast::Literal::Str(s))) => s.clone(),
         _ => fallback.to_string(),
-    }
-}
-
-struct StreamMonitor<'a> {
-    window: String,
-    text_captured: String,
-    tokens_seen: u64,
-    abort_reason: Option<String>,
-    fired_warn_token: std::collections::HashSet<String>,
-    fired_warn_tokens: std::collections::HashSet<u64>,
-    fired_warn_elapsed: std::collections::HashSet<u64>,
-    ctx: &'a EvalCtx<'a>,
-}
-
-impl<'a> StreamMonitor<'a> {
-    fn new(_rules: &WatchRules, ctx: &'a EvalCtx<'a>) -> Self {
-        Self {
-            window: String::new(),
-            text_captured: String::new(),
-            tokens_seen: 0,
-            abort_reason: None,
-            fired_warn_token: Default::default(),
-            fired_warn_tokens: Default::default(),
-            fired_warn_elapsed: Default::default(),
-            ctx,
-        }
-    }
-
-    fn push_window(&mut self, text: &str) {
-        self.window.push_str(text);
-        if self.window.len() > 512 {
-            let drop = self.window.len() - 512;
-            self.window.drain(..drop);
-        }
-        self.text_captured.push_str(text);
-    }
-
-    fn emit_warn(&self, rule: &WarnRule, trigger: &str) {
-        if let Some(sink) = self.ctx.events {
-            sink.emit(crate::event::Event::WatchWarn {
-                turn_id: self.ctx.turn_id.clone(),
-                flow_run_id: self.ctx.flow_run_id.clone(),
-                target: rule.target.clone(),
-                trigger: trigger.to_string(),
-                message: rule.message.clone(),
-            });
-        }
-    }
-
-    fn check_token_warns(&mut self, rules: &WatchRules) {
-        for rule in &rules.warn_token {
-            if !self.fired_warn_token.contains(&rule.pattern)
-                && self.window.contains(rule.pattern.as_str())
-            {
-                self.fired_warn_token.insert(rule.pattern.clone());
-                self.emit_warn(rule, &format!("token({})", rule.pattern));
-            }
-        }
-    }
-
-    fn check_tokens_consumed_warns(&mut self, rules: &WatchRules) {
-        for (threshold, rule) in &rules.warn_tokens_gt {
-            if !self.fired_warn_tokens.contains(threshold) && self.tokens_seen > *threshold {
-                self.fired_warn_tokens.insert(*threshold);
-                self.emit_warn(rule, &format!("tokens_consumed>{threshold}"));
-            }
-        }
-    }
-
-    fn check_elapsed_warns(&mut self, rules: &WatchRules, started: std::time::Instant) {
-        let elapsed = started.elapsed().as_millis() as u64;
-        for (threshold, rule) in &rules.warn_elapsed_ms_gt {
-            if !self.fired_warn_elapsed.contains(threshold) && elapsed > *threshold {
-                self.fired_warn_elapsed.insert(*threshold);
-                self.emit_warn(rule, &format!("elapsed>{threshold}ms"));
-            }
-        }
-    }
-
-    fn on_chunk(
-        &mut self,
-        text: &str,
-        cumulative_tokens: u64,
-        started: std::time::Instant,
-        rules: &WatchRules,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) {
-        self.tokens_seen = cumulative_tokens.max(self.tokens_seen);
-        self.push_window(text);
-        if self.abort_reason.is_none() {
-            for (pat, reason) in &rules.token_matches {
-                if self.window.contains(pat.as_str()) {
-                    self.abort_reason = Some(reason.clone());
-                    cancel.cancel();
-                    break;
-                }
-            }
-        }
-        if self.abort_reason.is_none()
-            && let Some(limit) = rules.tokens_gt
-            && self.tokens_seen > limit
-        {
-            self.abort_reason = Some(format!("tokens_consumed > {limit}"));
-            cancel.cancel();
-        }
-        self.check_token_warns(rules);
-        self.check_tokens_consumed_warns(rules);
-        self.check_elapsed_warns(rules, started);
-    }
-
-    fn on_done(
-        &mut self,
-        total_tokens: u64,
-        started: std::time::Instant,
-        rules: &WatchRules,
-        _cancel: &tokio_util::sync::CancellationToken,
-    ) {
-        self.tokens_seen = total_tokens.max(self.tokens_seen);
-        if self.abort_reason.is_none()
-            && let Some(limit) = rules.tokens_gt
-            && self.tokens_seen > limit
-        {
-            self.abort_reason = Some(format!("tokens_consumed > {limit}"));
-        }
-        self.check_tokens_consumed_warns(rules);
-        self.check_elapsed_warns(rules, started);
     }
 }
 

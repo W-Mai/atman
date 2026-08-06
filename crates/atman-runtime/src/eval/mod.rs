@@ -5,7 +5,7 @@ use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
 use crate::env::Env;
 use crate::error::RuntimeError;
-use crate::streaming::{emit_stream_event, handle_pending_injections};
+use crate::streaming::LlmStream;
 use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
@@ -566,210 +566,47 @@ fn value_struct_string(value: &Value, name: &str) -> Option<String> {
     })
 }
 
+#[derive(Default)]
+struct StreamCallCtx<'a> {
+    session: Option<&'a crate::session::Session>,
+    stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+    flow_run_id: Option<&'a crate::event::FlowRunId>,
+    agent_entry: Option<&'a std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
+    event_sink: Option<&'a crate::event::EventSink>,
+    turn_id: Option<crate::event::TurnId>,
+}
+
 async fn call_and_maybe_stream(
     provider: &dyn crate::provider::Provider,
     req: crate::provider::LlmRequest,
-    session: Option<&crate::session::Session>,
-    stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
-    flow_run_id: Option<&crate::event::FlowRunId>,
-    agent_entry: Option<&std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
+    stream_ctx: StreamCallCtx<'_>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let result =
-        call_and_maybe_stream_inner(provider, req, session, stream_tx, flow_run_id, agent_entry)
-            .await;
-    if let (Some(sess), Err(RuntimeError::AttachmentError { reason })) = (session, &result) {
+    let stream_tx = stream_ctx
+        .stream_tx
+        .or_else(|| stream_ctx.session.map(|s| s.stream_tx()));
+    let mut stream = LlmStream::new(provider, req)
+        .with_stream_tx(stream_tx)
+        .with_event_sink(stream_ctx.event_sink)
+        .with_turn_id(stream_ctx.turn_id)
+        .with_flow_run_id(stream_ctx.flow_run_id.cloned());
+    if let Some(session) = stream_ctx.session {
+        stream = stream.with_session(session);
+    }
+    if let Some(entry) = stream_ctx.agent_entry {
+        stream = stream.with_entry(entry);
+    }
+    let result = stream.run().await;
+    if let (Some(sess), Err(RuntimeError::AttachmentError { reason })) =
+        (stream_ctx.session, &result)
+    {
         let count = sess.record_attachment_degrade(reason);
         if count > 0 {
-            let _ = sess.stream_tx().send(crate::stream::StreamFrame::Note(
-                format!(
-                    "attachment degraded ({reason}); {count} image part(s) replaced. re-issue your last message to retry without them."
-                ),
-            ));
+            let _ = sess.stream_tx().send(crate::stream::StreamFrame::Note(format!(
+                "attachment degraded ({reason}); {count} image part(s) replaced. re-issue your last message to retry without them."
+            )));
         }
     }
     result
-}
-
-async fn call_and_maybe_stream_inner(
-    provider: &dyn crate::provider::Provider,
-    req: crate::provider::LlmRequest,
-    session: Option<&crate::session::Session>,
-    stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
-    flow_run_id: Option<&crate::event::FlowRunId>,
-    agent_entry: Option<&std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
-) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let stream_tx = stream_tx.or_else(|| session.map(|s| s.stream_tx()));
-    let Some(stream_tx) = stream_tx else {
-        return provider.call(req).await;
-    };
-    let model_name = req.model.clone();
-    let run_id = flow_run_id.map(|r| r.0.to_string());
-    let stall_secs = req.stall_timeout_secs;
-    let request_start = std::time::Instant::now();
-    let mut first_token_at: Option<std::time::Instant> = None;
-    let flow_cancel = session.map(|s| s.flow_cancel_token()).unwrap_or_default();
-    let obs = provider.call_streaming(req);
-    let mut events = obs.events;
-    let output = obs.output;
-    tokio::pin!(output);
-
-    let stall_active = stall_secs > 0;
-    let stall_dur = std::time::Duration::from_secs(stall_secs);
-    let stall_sleep = tokio::time::sleep(stall_dur);
-    tokio::pin!(stall_sleep);
-    if let Some(entry) = agent_entry {
-        handle_pending_injections(entry, &flow_cancel)?;
-    }
-    let mark_first_token = |first: &mut Option<std::time::Instant>| {
-        if first.is_none() {
-            *first = Some(std::time::Instant::now());
-        }
-    };
-    loop {
-        tokio::select! {
-            biased;
-            _ = flow_cancel.cancelled() => {
-                return Err(RuntimeError::Cancelled("flow cancelled by user".into()));
-            }
-            _ = async {
-                if let Some(entry) = agent_entry {
-                    entry.injection_notify.notified().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if agent_entry.is_some() => {
-                if let Some(entry) = agent_entry
-                    && let Err(err) = handle_pending_injections(entry, &flow_cancel)
-                {
-                    return Err(err);
-                }
-            }
-            ev = events.recv() => {
-                match ev {
-                    Ok(crate::event::NodeEvent::LlmChunk { text, cumulative_tokens }) => {
-                        if let Some(session) = session {
-                            session.mark_streamed();
-                        }
-                        mark_first_token(&mut first_token_at);
-                        emit_stream_event(
-                            crate::event::NodeEvent::LlmChunk {
-                                text: text.clone(),
-                                cumulative_tokens,
-                            },
-                            &model_name,
-                            run_id.as_deref(),
-                            Some(&stream_tx),
-                            None,
-                        );
-                        if let Some(entry) = agent_entry {
-                            entry.output.lock().unwrap().push_str(&text);
-                        }
-                        if stall_active {
-                            stall_sleep
-                                .as_mut()
-                                .reset(tokio::time::Instant::now() + stall_dur);
-                        }
-                    }
-                    Ok(crate::event::NodeEvent::ThinkingChunk { text }) => {
-                        mark_first_token(&mut first_token_at);
-                        emit_stream_event(
-                            crate::event::NodeEvent::ThinkingChunk { text },
-                            &model_name,
-                            run_id.as_deref(),
-                            Some(&stream_tx),
-                            None,
-                        );
-                    }
-                    Ok(crate::event::NodeEvent::LlmDone { total_tokens }) => {
-                        emit_stream_event(
-                            crate::event::NodeEvent::LlmDone { total_tokens },
-                            &model_name,
-                            run_id.as_deref(),
-                            Some(&stream_tx),
-                            None,
-                        );
-                        if let Some(entry) = agent_entry {
-                            entry
-                                .iteration
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let out = entry.output.lock().unwrap().clone();
-                            let _ = entry
-                                .stream_tx
-                                .send(crate::tools::agent_ctrl::FlowEvent::AssistantDone {
-                                    text: out,
-                                });
-                        }
-                    }
-                    Ok(_) | Err(_) => {}
-                }
-            }
-            _ = &mut stall_sleep, if stall_active => {
-                return Err(RuntimeError::ToolFailed(format!(
-                    "llm stall timeout after {}s",
-                    stall_secs
-                )));
-            }
-            result = &mut output => {
-                while let Ok(ev) = events.try_recv() {
-                    match ev {
-                        crate::event::NodeEvent::LlmChunk { text, .. } => {
-                            if let Some(session) = session {
-                                session.mark_streamed();
-                            }
-                            mark_first_token(&mut first_token_at);
-                            let _ = stream_tx.send(crate::stream::StreamFrame::LlmChunk {
-                                text: text.clone(),
-                                model: model_name.clone(),
-                                run_id: run_id.clone(),
-                            });
-                            if let Some(entry) = agent_entry {
-                                entry.output.lock().unwrap().push_str(&text);
-                            }
-                        }
-                        crate::event::NodeEvent::ThinkingChunk { text } => {
-                            mark_first_token(&mut first_token_at);
-                            let _ = stream_tx.send(crate::stream::StreamFrame::ThinkingChunk {
-                                text,
-                                run_id: run_id.clone(),
-                            });
-                        }
-                        crate::event::NodeEvent::LlmDone { total_tokens } => {
-                            emit_stream_event(
-                                crate::event::NodeEvent::LlmDone { total_tokens },
-                                &model_name,
-                                run_id.as_deref(),
-                                Some(&stream_tx),
-                                None,
-                            );
-                            if let Some(entry) = agent_entry {
-                                entry.iteration.fetch_add(
-                                    1,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
-                                let out = entry.output.lock().unwrap().clone();
-                                let _ = entry
-                                    .stream_tx
-                                    .send(crate::tools::agent_ctrl::FlowEvent::AssistantDone {
-                                        text: out,
-                                    });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                let total_ms = request_start.elapsed().as_millis() as u64;
-                let ttft_ms = first_token_at.map(|t| t.duration_since(request_start).as_millis() as u64);
-                let mut result = result;
-                if let Ok(ref mut am) = result {
-                    am.timing = crate::provider::CallTiming {
-                        total_ms,
-                        ttft_ms,
-                    };
-                }
-                return result;
-            }
-        }
-    }
 }
 
 fn preview_tool_args(positional: &[Value], named: &[(String, Value)]) -> String {
@@ -1183,10 +1020,14 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     let outcome = call_and_maybe_stream(
                         provider.as_ref(),
                         req,
-                        ctx.session_runtime.as_deref(),
-                        ctx.tool_ctx.stream_tx.clone(),
-                        ctx.flow_run_id.as_ref(),
-                        ctx.tool_ctx.agent_entry.as_ref(),
+                        StreamCallCtx {
+                            session: ctx.session_runtime.as_deref(),
+                            stream_tx: ctx.tool_ctx.stream_tx.clone(),
+                            flow_run_id: ctx.flow_run_id.as_ref(),
+                            agent_entry: ctx.tool_ctx.agent_entry.as_ref(),
+                            event_sink: ctx.events,
+                            turn_id: ctx.turn_id.clone(),
+                        },
                     )
                     .await;
                     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -3189,8 +3030,15 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_secs(3));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result =
-            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None, None).await;
+        let result = call_and_maybe_stream(
+            &provider,
+            stall_req(1),
+            StreamCallCtx {
+                stream_tx: Some(stream_tx),
+                ..Default::default()
+            },
+        )
+        .await;
         match result {
             Err(RuntimeError::ToolFailed(msg)) => {
                 assert!(
@@ -3210,8 +3058,15 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_millis(100));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result =
-            call_and_maybe_stream(&provider, stall_req(2), None, Some(stream_tx), None, None).await;
+        let result = call_and_maybe_stream(
+            &provider,
+            stall_req(2),
+            StreamCallCtx {
+                stream_tx: Some(stream_tx),
+                ..Default::default()
+            },
+        )
+        .await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3228,8 +3083,15 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_secs(3));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result =
-            call_and_maybe_stream(&provider, stall_req(0), None, Some(stream_tx), None, None).await;
+        let result = call_and_maybe_stream(
+            &provider,
+            stall_req(0),
+            StreamCallCtx {
+                stream_tx: Some(stream_tx),
+                ..Default::default()
+            },
+        )
+        .await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3247,8 +3109,15 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_millis(800));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result =
-            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None, None).await;
+        let result = call_and_maybe_stream(
+            &provider,
+            stall_req(1),
+            StreamCallCtx {
+                stream_tx: Some(stream_tx),
+                ..Default::default()
+            },
+        )
+        .await;
         match result {
             Ok(am) => {
                 assert!(am.text_concat().contains("hello"));
@@ -3265,8 +3134,15 @@ mod sanitize_tests {
             .with_chunk_delay(std::time::Duration::from_secs(2));
 
         let (stream_tx, _rx) = tokio::sync::broadcast::channel(16);
-        let result =
-            call_and_maybe_stream(&provider, stall_req(1), None, Some(stream_tx), None, None).await;
+        let result = call_and_maybe_stream(
+            &provider,
+            stall_req(1),
+            StreamCallCtx {
+                stream_tx: Some(stream_tx),
+                ..Default::default()
+            },
+        )
+        .await;
         assert!(
             matches!(&result, Err(RuntimeError::ToolFailed(msg)) if msg.contains("stall timeout")),
             "expected stall timeout, got: {result:?}"
