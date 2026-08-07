@@ -20,11 +20,11 @@ pub fn render_panel_content(
     _hovered_history_row: &Option<String>,
     hitmap_out: &mut WmHitmap,
     animation_frame: u32,
-    _mcp_servers: &[atman_runtime::mcp::McpServerStatus],
-    _expanded_mcp_servers: &std::collections::HashSet<String>,
-    _mcp_selected: usize,
-    _hovered_mcp_row: &Option<String>,
-    _mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
+    mcp_servers: &[atman_runtime::mcp::McpServerStatus],
+    expanded_mcp_servers: &std::collections::HashSet<String>,
+    mcp_selected: usize,
+    hovered_mcp_row: &Option<String>,
+    mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
     items_version: u64,
     expanded_version: u64,
 ) {
@@ -34,6 +34,7 @@ pub fn render_panel_content(
     }
 
     if let Some(ref mut content) = panel.content {
+        content.sync_state(panel.scroll, panel.h_scroll, panel.split);
         let regions = content.render_content(
             area,
             f,
@@ -46,6 +47,11 @@ pub fn render_panel_content(
                 activity_nodes,
                 items_version,
                 expanded_version,
+                mcp_servers,
+                expanded_mcp_servers,
+                mcp_selected,
+                hovered_mcp_row,
+                mcp_browser,
             },
         );
         for region in regions {
@@ -62,7 +68,5 @@ pub fn render_panel_content(
                 _ => {}
             }
         }
-        return;
     }
-    crate::window::common::render_placeholder(f, area, &panel.title);
 }

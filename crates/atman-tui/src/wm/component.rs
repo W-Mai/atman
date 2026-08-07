@@ -89,6 +89,11 @@ pub struct RenderCtx<'a> {
     pub activity_nodes: &'a [crate::task_panel::ActivityNode],
     pub items_version: u64,
     pub expanded_version: u64,
+    pub mcp_servers: &'a [atman_runtime::mcp::McpServerStatus],
+    pub expanded_mcp_servers: &'a std::collections::HashSet<String>,
+    pub mcp_selected: usize,
+    pub hovered_mcp_row: &'a Option<String>,
+    pub mcp_browser: &'a crate::mcp_manager::McpBrowserState<'a>,
 }
 
 /// Mutable event context — allows components to send commands and mutate
@@ -144,4 +149,8 @@ pub trait WindowComponent: Send {
     fn title_suffix(&self) -> Option<String> {
         None
     }
+
+    /// Sync scroll/state from the Window shell into this content before
+    /// rendering. Default no-op.
+    fn sync_state(&mut self, _scroll: u16, _h_scroll: u16, _split: bool) {}
 }
