@@ -446,6 +446,8 @@ impl AppState {
 
         self.floating_panels.open_with_size(
             handle,
+            crate::wm::ContentKey::Task(handle.to_string()),
+            crate::wm::OpenPolicy::ReuseExisting,
             crate::floating_panels::PanelKind::Task(kind),
             &label,
             canvas,
@@ -558,6 +560,8 @@ impl AppState {
         let ph = lines.len() as u16 + 5;
         self.floating_panels.open_with_size(
             &id,
+            crate::wm::ContentKey::Mermaid(id.clone()),
+            crate::wm::OpenPolicy::ReuseExisting,
             crate::floating_panels::PanelKind::Mermaid,
             "Mermaid Diagram",
             canvas,
