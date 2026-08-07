@@ -633,7 +633,11 @@ async fn run_frames(
                                 );
                                 editor.set_cursor(pos);
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
-                                // Floating panels take priority — they float on top.
+                                let topmost = app
+                                    .wm
+                                    .hit_test_panel(me.column, me.row)
+                                    .map(|p| (p.id.clone(), p.rect));
+                                if let Some((panel_id, pr)) = topmost {
                                 if let Some(min_id) =
                                     app.wm.hit_test_minimize(me.column, me.row)
                                 {
@@ -714,50 +718,55 @@ async fn run_frames(
                                         app.drag_offset = (me.column, me.row);
                                         app.last_titlebar_click = Some((id, now));
                                     }
-                                } else if let Some((handle, _)) = app
-                                    .last_wm_hitmap
-                                    .history_row_rects
-                                    .iter()
-                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
-                                    .cloned()
-                                {
-                                    let canvas = app.last_transcript_rect.unwrap_or_default();
-                                    app.open_task_panel(&handle, canvas);
-                                } else if let Some((name, _)) = app
-                                    .last_wm_hitmap
-                                    .mcp_row_rects
-                                    .iter()
-                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
-                                    .cloned()
-                                {
-                                    if !app.expanded_mcp_servers.remove(&name) {
-                                        app.expanded_mcp_servers.insert(name);
-                                    }
-                                } else if let Some((panel_idx, path, _)) = app
-                                    .last_wm_hitmap
-                                    .workflow_node_rects
-                                    .iter()
-                                    .find(|(_, _, r)| rect_contains(*r, me.column, me.row))
-                                    .cloned()
-                                {
-                                    if path.is_empty() {
-                                        app.toggle_workflow_panel_expansion(panel_idx);
+                                } else {
+                                    if let Some((handle, _)) = app
+                                        .last_wm_hitmap
+                                        .history_row_rects
+                                        .iter()
+                                        .find(|(_, r)| {
+                                            rect_contains(*r, me.column, me.row)
+                                                && rect_contains(pr, r.x, r.y)
+                                        })
+                                        .cloned()
+                                    {
+                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        app.open_task_panel(&handle, canvas);
+                                    } else if let Some((name, _)) = app
+                                        .last_wm_hitmap
+                                        .mcp_row_rects
+                                        .iter()
+                                        .find(|(_, r)| {
+                                            rect_contains(*r, me.column, me.row)
+                                                && rect_contains(pr, r.x, r.y)
+                                        })
+                                        .cloned()
+                                    {
+                                        if !app.expanded_mcp_servers.remove(&name) {
+                                            app.expanded_mcp_servers.insert(name);
+                                        }
+                                    } else if let Some((panel_idx, path, _)) = app
+                                        .last_wm_hitmap
+                                        .workflow_node_rects
+                                        .iter()
+                                        .find(|(_, _, r)| {
+                                            rect_contains(*r, me.column, me.row)
+                                                && rect_contains(pr, r.x, r.y)
+                                        })
+                                        .cloned()
+                                    {
+                                        if path.is_empty() {
+                                            app.toggle_workflow_panel_expansion(panel_idx);
+                                        } else {
+                                            app.toggle_workflow_node(panel_idx, &path);
+                                        }
                                     } else {
-                                        app.toggle_workflow_node(panel_idx, &path);
+                                        app.wm.focus(&panel_id);
                                     }
-                                } else if app
-                                    .wm
-                                    .hit_test_panel(me.column, me.row)
-                                    .is_some()
-                                {
-                                    let fp_id = app
-                                        .wm
-                                        .hit_test_panel(me.column, me.row)
-                                        .unwrap()
-                                        .id
-                                        .clone();
-                                    app.wm.focus(&fp_id);
-                                } else if let Some(r) = app.last_upper_title_rect
+                                }
+                            } else if app.modal_open() {
+                                // Modal is open — swallow the click (blocks base layer).
+                            } else {
+                                if let Some(r) = app.last_upper_title_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.sidebar_upper_collapsed = !app.sidebar_upper_collapsed;
@@ -1082,6 +1091,7 @@ async fn run_frames(
                                 {
                                     app.toggle_compaction_summary_expand(idx);
                                 }
+                                }
                             } else if let MouseEventKind::Drag(MouseButton::Left) = me.kind {
                                 if let Some(id) = &app.resize_target {
                                     let (ox, oy) = app.resize_offset;
@@ -1173,38 +1183,74 @@ async fn run_frames(
                                         Some(crate::app::OutputItem::StartupCard { .. })
                                     );
                                 if !skip_hover {
-                                // floating panel button hover
-                                let btn_hover = app
+                                let topmost_panel = app
                                     .wm
-                                    .hit_test_btn(me.column, me.row);
-                                if app.hovered_panel_btn != btn_hover {
-                                    app.hovered_panel_btn = btn_hover;
-                                    app.wm_visual_version = app.wm_visual_version.wrapping_add(1);
-                                }
+                                    .hit_test_panel(me.column, me.row)
+                                    .map(|p| (p.id.clone(), p.rect));
+                                if let Some((_panel_id, pr)) = topmost_panel {
+                                    // floating panel button hover
+                                    let btn_hover = app
+                                        .wm
+                                        .hit_test_btn(me.column, me.row);
+                                    if app.hovered_panel_btn != btn_hover {
+                                        app.hovered_panel_btn = btn_hover;
+                                        app.wm_visual_version = app.wm_visual_version.wrapping_add(1);
+                                    }
 
-                                // floating panel history row hover
-                                let history_hover = app
-                                    .last_wm_hitmap
-                                    .history_row_rects
-                                    .iter()
-                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
-                                    .map(|(h, _)| h.clone());
-                                if app.hovered_history_row != history_hover {
-                                    app.hovered_history_row = history_hover;
-                                    app.items_version = app.items_version.wrapping_add(1);
-                                }
+                                    // floating panel history row hover (only in this panel)
+                                    let history_hover = app
+                                        .last_wm_hitmap
+                                        .history_row_rects
+                                        .iter()
+                                        .find(|(_, r)| {
+                                            rect_contains(*r, me.column, me.row)
+                                                && rect_contains(pr, r.x, r.y)
+                                        })
+                                        .map(|(h, _)| h.clone());
+                                    if app.hovered_history_row != history_hover {
+                                        app.hovered_history_row = history_hover;
+                                        app.items_version = app.items_version.wrapping_add(1);
+                                    }
 
-                                let mcp_hover = app
-                                    .last_wm_hitmap
-                                    .mcp_row_rects
-                                    .iter()
-                                    .find(|(_, r)| rect_contains(*r, me.column, me.row))
-                                    .map(|(n, _)| n.clone());
-                                if app.hovered_mcp_row != mcp_hover {
-                                    app.hovered_mcp_row = mcp_hover;
-                                }
+                                    let mcp_hover = app
+                                        .last_wm_hitmap
+                                        .mcp_row_rects
+                                        .iter()
+                                        .find(|(_, r)| {
+                                            rect_contains(*r, me.column, me.row)
+                                                && rect_contains(pr, r.x, r.y)
+                                        })
+                                        .map(|(n, _)| n.clone());
+                                    if app.hovered_mcp_row != mcp_hover {
+                                        app.hovered_mcp_row = mcp_hover;
+                                    }
 
-                                // Sidebar strip hover
+                                    // Over a floating panel — base-layer hovers cleared.
+                                    app.hovered_sidebar_row = None;
+                                    app.hovered_sidebar_hamburger = false;
+                                    app.hovered_sidebar_lower = false;
+                                    app.hovered_sidebar_more = false;
+                                    app.set_hovered_thinking(None);
+                                    app.set_hovered_kill(None);
+                                    app.set_hovered_task(None);
+                                    app.set_hovered_insert(None);
+                                    app.set_hovered_activity(None);
+                                    app.set_hovered_history_btn(false);
+                                    app.set_hovered_hamburger(false);
+                                } else {
+                                    // Not over a panel — panel hovers cleared.
+                                    if app.hovered_panel_btn.is_some() {
+                                        app.hovered_panel_btn = None;
+                                        app.wm_visual_version = app.wm_visual_version.wrapping_add(1);
+                                    }
+                                    if app.hovered_history_row.is_some() {
+                                        app.hovered_history_row = None;
+                                        app.items_version = app.items_version.wrapping_add(1);
+                                    }
+                                    if app.hovered_mcp_row.is_some() {
+                                        app.hovered_mcp_row = None;
+                                    }
+                                    // Sidebar strip hover
                                 let sidebar_hover = app
                                     .last_sidebar_strip_rects
                                     .iter()
@@ -1320,6 +1366,7 @@ async fn run_frames(
                                     app.set_hovered_activity(None);
                                     app.set_hovered_history_btn(false);
                                     app.set_hovered_hamburger(false);
+                                }
                                 }
                                 } // if !skip_hover
                             }
@@ -3151,9 +3198,7 @@ fn handle_key(
         return;
     }
     let modal_active = app.layer_stack.dispatch_key(app);
-    if modal_active
-        && handle_modal_key(&action, app, control_tx)
-    {
+    if modal_active && handle_modal_key(&action, app, control_tx) {
         return;
     }
     if let KeyAction::OpenCommandPalette = action {
@@ -4209,16 +4254,36 @@ fn render_startup_hints(
 }
 
 fn render_modals(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut AppState) {
-    if app.theme_picker_open { render_theme_picker(f, area, app); }
-    if app.palette.open { palette::render(f, area, &app.palette); }
-    if app.session_switcher.open { session_switcher::render(f, area, &app.session_switcher); }
-    if app.onboarding_open { crate::onboarding::render(f, area, &app.onboarding); }
-    if app.provider_manager.open { crate::provider_manager::render(f, area, &app.provider_manager); }
-    if app.model_picker.open { crate::model_picker::render(f, area, &app.model_picker, &app.context.model); }
-    if app.alias_manager.open { crate::alias_manager::render(f, area, &app.alias_manager); }
-    if let Some(modal) = &app.compact_review { compact_review_modal::render(f, area, modal); }
-    if app.history_search.open { history_search_modal::render(f, area, &mut app.history_search); }
-    if app.form_modal.open { form_modal::render(f, area, &app.form_modal); }
+    if app.theme_picker_open {
+        render_theme_picker(f, area, app);
+    }
+    if app.palette.open {
+        palette::render(f, area, &app.palette);
+    }
+    if app.session_switcher.open {
+        session_switcher::render(f, area, &app.session_switcher);
+    }
+    if app.onboarding_open {
+        crate::onboarding::render(f, area, &app.onboarding);
+    }
+    if app.provider_manager.open {
+        crate::provider_manager::render(f, area, &app.provider_manager);
+    }
+    if app.model_picker.open {
+        crate::model_picker::render(f, area, &app.model_picker, &app.context.model);
+    }
+    if app.alias_manager.open {
+        crate::alias_manager::render(f, area, &app.alias_manager);
+    }
+    if let Some(modal) = &app.compact_review {
+        compact_review_modal::render(f, area, modal);
+    }
+    if app.history_search.open {
+        history_search_modal::render(f, area, &mut app.history_search);
+    }
+    if app.form_modal.open {
+        form_modal::render(f, area, &app.form_modal);
+    }
 }
 
 fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {
