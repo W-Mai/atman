@@ -531,7 +531,7 @@ fn format_started_at(snap: &TaskSnapshot) -> String {
     "--:--:--".to_string()
 }
 
-fn render_history_content(
+pub(crate) fn render_history_content(
     f: &mut Frame,
     area: Rect,
     snapshots: &[TaskSnapshot],
@@ -630,7 +630,7 @@ fn render_history_content(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_sub_agent_panel(
+pub(crate) fn render_sub_agent_panel(
     f: &mut Frame,
     area: Rect,
     handle: &str,
@@ -812,7 +812,7 @@ fn render_sub_agent_panel(
     f.render_widget(Paragraph::new(lines).scroll((*scroll, 0)), area);
 }
 
-fn render_task_meta(f: &mut Frame, area: Rect, kind: TaskKind, snap: &TaskSnapshot) {
+pub(crate) fn render_task_meta(f: &mut Frame, area: Rect, kind: TaskKind, snap: &TaskSnapshot) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
         Span::styled(
@@ -859,7 +859,13 @@ fn render_task_meta(f: &mut Frame, area: Rect, kind: TaskKind, snap: &TaskSnapsh
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
-fn render_bash_content(f: &mut Frame, area: Rect, snap: &TaskSnapshot, output: &str, done: bool) {
+pub(crate) fn render_bash_content(
+    f: &mut Frame,
+    area: Rect,
+    snap: &TaskSnapshot,
+    output: &str,
+    done: bool,
+) {
     let t = crate::theme::theme();
     let header = Line::from(vec![
         Span::styled(
@@ -904,7 +910,7 @@ fn render_bash_content(f: &mut Frame, area: Rect, snap: &TaskSnapshot, output: &
     f.render_widget(Paragraph::new(visible), body_area);
 }
 
-fn render_terminal_content(
+pub(crate) fn render_terminal_content(
     f: &mut Frame,
     area: Rect,
     snap: &TaskSnapshot,
@@ -968,7 +974,7 @@ fn render_terminal_content(
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
-fn render_terminal_screen(
+pub(crate) fn render_terminal_screen(
     f: &mut Frame,
     area: Rect,
     title: &str,
@@ -1022,7 +1028,7 @@ fn render_terminal_screen(
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
-fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done: bool) {
+pub(crate) fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done: bool) {
     let t = crate::theme::theme();
     let icon = if done { "✓" } else { "◐" };
     let icon_color = if done { t.success } else { t.accent };
@@ -1057,7 +1063,7 @@ fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done
     f.render_widget(Paragraph::new(visible), body_area);
 }
 
-fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
+pub(crate) fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
     let t = crate::theme::theme();
     let (kind_icon, kind_color) = crate::task_panel::node_kind_glyph(&node.kind);
     let icon = match node.status {
@@ -1115,7 +1121,7 @@ fn render_activity_content(f: &mut Frame, area: Rect, node: &ActivityNode) {
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
-fn render_placeholder(f: &mut Frame, area: Rect, title: &str) {
+pub(crate) fn render_placeholder(f: &mut Frame, area: Rect, title: &str) {
     let t = crate::theme::theme();
     let msg = format!("no data: {title}");
     let total_pad = area.width as usize;

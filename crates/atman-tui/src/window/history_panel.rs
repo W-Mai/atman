@@ -4,18 +4,30 @@ use ratatui::layout::Rect;
 use crate::wm::component::{
     EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
+use crate::wm::floating::WmHitmap;
 
 pub struct HistoryPanelContent {
     pub scroll: u16,
 }
 
 impl WindowComponent for HistoryPanelContent {
-    fn render_content(
-        &mut self,
-        _area: Rect,
-        _frame: &mut Frame,
-        _ctx: &RenderCtx,
-    ) -> Vec<HitRegion> {
+    fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion> {
+        let area = Rect::new(
+            area.x + 1,
+            area.y,
+            area.width.saturating_sub(2),
+            area.height,
+        );
+        let mut dummy = WmHitmap::default();
+        crate::wm::floating::content::render_history_content(
+            frame,
+            area,
+            ctx.snapshots,
+            ctx.items,
+            &mut dummy,
+            &None,
+            self.scroll,
+        );
         Vec::new()
     }
 
