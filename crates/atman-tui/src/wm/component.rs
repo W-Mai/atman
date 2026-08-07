@@ -9,16 +9,12 @@ use crate::keys::KeyAction;
 
 use super::window::WindowId;
 
-// ── Events ──
-
 #[derive(Debug, Clone)]
 pub enum WmEvent {
     Key(KeyAction),
     Mouse(MouseEvent),
     Scroll(u16, bool), // (delta, is_page)
 }
-
-// ── Results ──
 
 #[derive(Debug)]
 pub enum WmEventResult {
@@ -59,8 +55,6 @@ impl Default for SizeHint {
     }
 }
 
-// ── Hit regions ──
-
 #[derive(Debug, Clone)]
 pub struct HitRegion {
     pub target: HitTarget,
@@ -78,8 +72,6 @@ pub enum HitTarget {
     McpRow(String),
 }
 
-// ── Contexts ──
-
 /// Immutable render data passed to `WindowComponent::render_content`.
 pub struct RenderCtx<'a> {
     pub snapshots: &'a [atman_runtime::TaskSnapshot],
@@ -96,8 +88,6 @@ pub struct EventCtx<'a> {
     pub scroll: &'a mut u16,
     pub h_scroll: &'a mut u16,
 }
-
-// ── Trait ──
 
 /// Content contract for floating windows.
 ///

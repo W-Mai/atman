@@ -605,7 +605,20 @@ async fn run_frames(
                             app.refresh_popup(editor.buf());
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
+                            // Check floating panels/modals BEFORE input_rect so clicks
+                            // on overlapping panels don't pass through to the input box.
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind
+                                && !(app.floating_panels.hit_test_panel(me.column, me.row).is_some()
+                                    || app.form_modal.open
+                                    || app.compact_review.is_some()
+                                    || app.session_switcher.open
+                                    || app.history_search.open
+                                    || app.provider_manager.open
+                                    || app.alias_manager.open
+                                    || app.model_picker.open
+                                    || app.onboarding_open
+                                    || app.palette.open
+                                    || app.theme_picker_open)
                                 && let Some(rect) = app.input_rect
                                 && rect_contains(rect, me.column, me.row)
                             {
