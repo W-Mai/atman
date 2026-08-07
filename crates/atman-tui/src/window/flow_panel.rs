@@ -83,7 +83,7 @@ impl WindowComponent for FlowPanelContent {
                 &mut self.render_cache,
             );
         } else {
-            crate::wm::floating::content::render_placeholder(frame, area, &self.handle);
+            super::common::render_placeholder(frame, area, &self.handle);
         }
 
         hitmap_out
