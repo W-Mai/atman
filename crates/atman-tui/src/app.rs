@@ -445,21 +445,25 @@ impl AppState {
         };
 
         let content: Box<dyn crate::wm::WindowComponent> = match kind {
-            atman_runtime::TaskKind::Bash => Box::new(crate::window::bash_panel::BashPanelContent {
-                handle: handle.to_string(),
-                scroll: 0,
-            }),
+            atman_runtime::TaskKind::Bash => {
+                Box::new(crate::window::bash_panel::BashPanelContent {
+                    handle: handle.to_string(),
+                    scroll: 0,
+                })
+            }
             atman_runtime::TaskKind::Terminal => {
                 Box::new(crate::window::terminal_panel::TerminalPanelContent {
                     handle: handle.to_string(),
                     scroll: 0,
                 })
             }
-            atman_runtime::TaskKind::Flow => Box::new(crate::window::flow_panel::FlowPanelContent {
-                handle: handle.to_string(),
-                scroll: 0,
-                expanded_tools: HashSet::new(),
-            }),
+            atman_runtime::TaskKind::Flow => {
+                Box::new(crate::window::flow_panel::FlowPanelContent {
+                    handle: handle.to_string(),
+                    scroll: 0,
+                    expanded_tools: HashSet::new(),
+                })
+            }
         };
 
         self.wm.open_with_size(
