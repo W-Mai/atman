@@ -3,7 +3,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-const PROVIDER_TYPES: &[&str] = &["anthropic", "openai-compat"];
+fn provider_types() -> Vec<&'static str> {
+    atman_runtime::model_registry::config_provider_types()
+}
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
@@ -405,9 +407,10 @@ impl ProviderManager {
                         if let Some(tx) = control_tx {
                             let _ = tx.send(crate::TuiControl::UpdateConfigProvider {
                                 name: p.name.clone(),
-                                provider_type: entry
-                                    .provider
-                                    .unwrap_or_else(|| "openai-compat".into()),
+                                provider_type: entry.provider.unwrap_or_else(|| {
+                                    atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE
+                                        .into()
+                                }),
                                 api_key: entry.api_key.unwrap_or_default(),
                                 base_url: entry.base_url.unwrap_or_default(),
                                 context_budget: entry.context_budget,
@@ -489,8 +492,9 @@ impl ProviderManager {
             if matches!(p.source, ProviderSource::Config) {
                 if let Some(entry) = atman_runtime::model_registry::model_entry(&p.name) {
                     if let (Some(api_key), Some(base_url)) = (entry.api_key, entry.base_url) {
-                        let provider_type =
-                            entry.provider.unwrap_or_else(|| "openai-compat".into());
+                        let provider_type = entry.provider.unwrap_or_else(|| {
+                            atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE.into()
+                        });
                         if let Some(tx) = control_tx {
                             let _ = tx.send(crate::TuiControl::TestProvider {
                                 name: p.name,
@@ -513,7 +517,7 @@ impl ProviderManager {
         self.api_key_editor = InputEditor::default();
         self.base_url_editor = InputEditor::default();
         let mut pt_ed = InputEditor::default();
-        pt_ed.insert_str("openai-compat");
+        pt_ed.insert_str(atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE);
         self.provider_type_editor = pt_ed;
         self.context_budget_editor = InputEditor::default();
         self.max_tokens_editor = InputEditor::default();
@@ -570,7 +574,7 @@ impl ProviderManager {
             return;
         }
         let provider_type = if provider_type.is_empty() {
-            "openai-compat".into()
+            atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE.into()
         } else {
             provider_type
         };
@@ -629,18 +633,20 @@ impl ProviderManager {
                 }
                 KeyAction::CursorLeft if self.form_field == 1 => {
                     let current = self.provider_type_editor.buf().trim();
-                    let idx = PROVIDER_TYPES.iter().position(|t| *t == current).unwrap_or(0);
-                    let new_idx = if idx == 0 { PROVIDER_TYPES.len() - 1 } else { idx - 1 };
+                    let types = provider_types();
+                    let idx = types.iter().position(|t| *t == current).unwrap_or(0);
+                    let new_idx = if idx == 0 { types.len() - 1 } else { idx - 1 };
                     let mut ed = InputEditor::default();
-                    ed.insert_str(PROVIDER_TYPES[new_idx]);
+                    ed.insert_str(types[new_idx]);
                     self.provider_type_editor = ed;
                 }
                 KeyAction::CursorRight if self.form_field == 1 => {
                     let current = self.provider_type_editor.buf().trim();
-                    let idx = PROVIDER_TYPES.iter().position(|t| *t == current).unwrap_or(0);
-                    let new_idx = (idx + 1) % PROVIDER_TYPES.len();
+                    let types = provider_types();
+                    let idx = types.iter().position(|t| *t == current).unwrap_or(0);
+                    let new_idx = (idx + 1) % types.len();
                     let mut ed = InputEditor::default();
-                    ed.insert_str(PROVIDER_TYPES[new_idx]);
+                    ed.insert_str(types[new_idx]);
                     self.provider_type_editor = ed;
                 }
                 KeyAction::Backspace if self.form_field == 1 => {}
@@ -659,6 +665,22 @@ impl ProviderManager {
                     ed.insert_str(new);
                     self.enabled_editor = ed;
                 }
+                KeyAction::CursorLeft if self.form_field == 6 => {
+                    let current = self.thinking_editor.buf().trim();
+                    let new = if current == "true" { "false" } else { "true" };
+                    let mut ed = InputEditor::default();
+                    ed.insert_str(new);
+                    self.thinking_editor = ed;
+                }
+                KeyAction::CursorRight if self.form_field == 6 => {
+                    let current = self.thinking_editor.buf().trim();
+                    let new = if current == "true" { "false" } else { "true" };
+                    let mut ed = InputEditor::default();
+                    ed.insert_str(new);
+                    self.thinking_editor = ed;
+                }
+                KeyAction::Backspace if self.form_field == 6 => {}
+                KeyAction::Char(_) if self.form_field == 6 => {}
                 KeyAction::Backspace if self.form_field == 7 => {}
                 KeyAction::Char(_) if self.form_field == 7 => {}
                 KeyAction::Backspace => {
@@ -779,7 +801,7 @@ impl ProviderManager {
             return;
         }
         let provider_type = if provider_type.is_empty() {
-            "openai-compat".into()
+            atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE.into()
         } else {
             provider_type
         };
@@ -1133,6 +1155,13 @@ fn render_add_dialog(
             } else {
                 (*val).to_string()
             };
+            let toggle_hint = matches!(*label, "Type" | "Thinking" | "Enabled")
+                && active;
+            let display = if toggle_hint {
+                format!("{display_val}  ← →")
+            } else {
+                display_val.clone()
+            };
             if *label == "API Key" && inner.bottom().saturating_sub(y) >= 3 {
                 let input_rect = Rect {
                     x: inner.x,
@@ -1158,10 +1187,8 @@ fn render_add_dialog(
                     input_inner,
                 );
                 if active {
-                    cursor_pos = Some((
-                        input_inner.x + display_val.len().min(input_inner.width as usize) as u16,
-                        input_inner.y,
-                    ));
+                    let display_w = crate::width::width(&display_val).min(input_inner.width as usize) as u16;
+                    cursor_pos = Some((input_inner.x + display_w, input_inner.y));
                 }
                 y = y.saturating_add(3);
                 continue;
@@ -1189,13 +1216,13 @@ fn render_add_dialog(
             };
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    format!("  {display_val}"),
+                    format!("  {display}"),
                     Style::default().fg(theme.tinted_fg.into()),
                 ))),
                 value_rect,
             );
-            if active {
-                cursor_pos = Some((inner.x + 2 + display_val.len() as u16, y));
+            if active && !toggle_hint {
+                cursor_pos = Some((inner.x + 2 + crate::width::width(&display_val) as u16, y));
             }
             y = y.saturating_add(1);
         }
@@ -1233,7 +1260,7 @@ fn render_add_dialog(
                 let style = if selected {
                     Style::default()
                         .fg(theme.accent.into())
-                        .bg(theme.highlight_bg.into())
+                        .bg(theme.panel_bg.into())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.tinted_fg.into())
@@ -1261,7 +1288,7 @@ fn render_add_dialog(
             List::new(items).block(block).highlight_style(
                 Style::default()
                     .fg(theme.accent.into())
-                    .bg(theme.highlight_bg.into())
+                    .bg(theme.panel_bg.into())
                     .add_modifier(Modifier::BOLD),
             ),
             rows[0],

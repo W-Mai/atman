@@ -10,6 +10,24 @@ pub struct ModelInfo {
     pub max_output_tokens: Option<u32>,
 }
 
+pub const DEFAULT_CONFIG_PROVIDER_TYPE: &str = "openai-compat";
+
+pub fn config_provider_types() -> Vec<&'static str> {
+    let mut types = Vec::new();
+    for preset in PROVIDER_PRESETS {
+        if preset.provider_type == "codex" {
+            continue;
+        }
+        if !types.contains(&preset.provider_type) {
+            types.push(preset.provider_type);
+        }
+    }
+    if types.is_empty() {
+        types.push(DEFAULT_CONFIG_PROVIDER_TYPE);
+    }
+    types
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ModelEntry {
     pub model: String,
@@ -468,6 +486,7 @@ pub struct ProviderPresetModel {
     pub id: &'static str,
     pub description: &'static str,
     pub context_budget: u64,
+    pub thinking: bool,
 }
 
 pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
@@ -481,11 +500,13 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
                 id: "deepseek-v4-flash",
                 description: "Fast & capable",
                 context_budget: 1000000,
+                thinking: false,
             },
             ProviderPresetModel {
                 id: "deepseek-v4-pro",
                 description: "Thinking mode",
                 context_budget: 1000000,
+                thinking: true,
             },
         ],
         key_url: Some("https://platform.deepseek.com"),
@@ -501,11 +522,13 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
                 id: "gpt-4o",
                 description: "Most capable",
                 context_budget: 128000,
+                thinking: false,
             },
             ProviderPresetModel {
                 id: "gpt-4o-mini",
                 description: "Fast & cheap",
                 context_budget: 128000,
+                thinking: false,
             },
         ],
         key_url: Some("https://platform.openai.com/api-keys"),
@@ -520,6 +543,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
             id: "claude-sonnet-4-20250514",
             description: "Claude Sonnet 4",
             context_budget: 200000,
+            thinking: true,
         }],
         key_url: Some("https://console.anthropic.com/settings/keys"),
         needs_api_key: true,
@@ -533,6 +557,7 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
             id: "glm-5.2",
             description: "GLM 5.2",
             context_budget: 1000000,
+            thinking: true,
         }],
         key_url: Some("https://open.bigmodel.cn/usercenter/apikeys"),
         needs_api_key: true,

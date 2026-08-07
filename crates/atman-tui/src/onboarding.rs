@@ -13,6 +13,7 @@ pub enum OnboardingStep {
 
 pub struct OnboardingState {
     pub step: OnboardingStep,
+    pub selected_action: usize,
     pub selected_model: usize,
     pub error: Option<String>,
 }
@@ -21,6 +22,7 @@ impl Default for OnboardingState {
     fn default() -> Self {
         Self {
             step: OnboardingStep::ProviderSelect,
+            selected_action: 0,
             selected_model: 0,
             error: None,
         }
@@ -49,9 +51,28 @@ impl OnboardingState {
     }
 
     fn handle_provider_key(&mut self, action: &KeyAction) -> OnboardingEvent {
+        let actions = 2;
         match action {
             KeyAction::Char('q') | KeyAction::Quit => OnboardingEvent::Skipped,
-            KeyAction::Submit => OnboardingEvent::OpenProviderManager,
+            KeyAction::HistoryUp | KeyAction::Char('k') => {
+                self.selected_action = if self.selected_action == 0 {
+                    actions - 1
+                } else {
+                    self.selected_action - 1
+                };
+                OnboardingEvent::None
+            }
+            KeyAction::HistoryDown | KeyAction::Char('j') => {
+                self.selected_action = (self.selected_action + 1) % actions;
+                OnboardingEvent::None
+            }
+            KeyAction::Submit => {
+                if self.selected_action == 0 {
+                    OnboardingEvent::OpenProviderManager
+                } else {
+                    OnboardingEvent::Skipped
+                }
+            }
             _ => OnboardingEvent::None,
         }
     }
@@ -140,7 +161,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(9),
+            Constraint::Length(10),
             Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(2),
@@ -171,7 +192,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     f.render_widget(Paragraph::new(""), rows[1]);
 
     match state.step {
-        OnboardingStep::ProviderSelect => render_provider_step(f, rows[2]),
+        OnboardingStep::ProviderSelect => render_provider_step(f, rows[2], state),
         OnboardingStep::ModelSelect => render_model_step(f, rows[2], state),
     }
 
@@ -203,7 +224,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     );
 }
 
-fn render_provider_step(f: &mut ratatui::Frame, area: Rect) {
+fn render_provider_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let theme = crate::theme::theme();
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -230,24 +251,16 @@ fn render_provider_step(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(Paragraph::new(intro), rows[0]);
 
     let actions = vec![
-        ListItem::new(Line::from(vec![
-            Span::raw(" "),
-            Span::styled("Enter", selected_button_style()),
-            Span::styled(
-                "  Add provider",
-                Style::default().fg(theme.tinted_fg.into()),
-            ),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::raw(" "),
-            Span::styled("q", idle_button_style()),
-            Span::styled(
-                "      Skip for now",
-                Style::default().fg(theme.meta_fg.into()),
-            ),
-        ])),
+        ListItem::new(Line::from(Span::styled(
+            "Add provider",
+            Style::default().fg(theme.tinted_fg.into()),
+        )).alignment(ratatui::layout::Alignment::Center)),
+        ListItem::new(Line::from(Span::styled(
+            "Skip for now",
+            Style::default().fg(theme.meta_fg.into()),
+        )).alignment(ratatui::layout::Alignment::Center)),
     ];
-    let mut state = ListState::default().with_selected(Some(0));
+    let mut list_state = ListState::default().with_selected(Some(state.selected_action));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border.into()))
@@ -257,7 +270,7 @@ fn render_provider_step(f: &mut ratatui::Frame, area: Rect) {
             .block(block)
             .highlight_style(selected_button_style()),
         rows[2],
-        &mut state,
+        &mut list_state,
     );
 
     f.render_widget(
@@ -388,13 +401,6 @@ fn selected_button_style() -> Style {
     let theme = crate::theme::theme();
     Style::default()
         .fg(theme.accent.into())
-        .bg(theme.highlight_bg.into())
-        .add_modifier(Modifier::BOLD)
-}
-
-fn idle_button_style() -> Style {
-    let theme = crate::theme::theme();
-    Style::default()
-        .fg(theme.meta_fg.into())
         .bg(theme.panel_bg.into())
+        .add_modifier(Modifier::BOLD)
 }
