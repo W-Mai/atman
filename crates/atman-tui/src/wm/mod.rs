@@ -6,6 +6,7 @@ pub mod floating;
 pub mod focus;
 pub mod hitmap;
 pub mod layer;
+pub mod layer_stack;
 pub mod modal;
 pub mod modal_wrappers;
 pub mod window;
@@ -18,6 +19,7 @@ pub use floating::{
     FocusState, PanelBtn, PanelKind, WindowInstance, WindowManager, WmHitmap, render, render_shadow,
 };
 pub use layer::{Layer, LayerKind};
+pub use layer_stack::LayerStack;
 pub use modal::{HitTestResult, ModalComponent, ModalEntry, OutsideClickPolicy};
 pub use window::{
     ContentKey, OpenPolicy, WindowCapabilities, WindowContent, WindowId, WindowMode, WindowState,
