@@ -26,11 +26,7 @@ impl FocusState {
         F: Fn(WindowId) -> bool,
     {
         self.history.retain(|&h| h != id);
-        self.active = self
-            .history
-            .iter()
-            .copied()
-            .find(|&h| is_focusable(h));
+        self.active = self.history.iter().copied().find(|&h| is_focusable(h));
     }
 
     /// Iterate focus history (most-recent-first).

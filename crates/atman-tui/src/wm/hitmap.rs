@@ -21,21 +21,18 @@ impl WmHitmap {
     /// Find the topmost window whose region contains the given point.
     /// Searches from highest z to lowest.
     pub fn topmost_at(&self, col: u16, row: u16) -> Option<WindowId> {
-        self.entries
-            .iter()
-            .rev()
-            .find_map(|(id, regions)| {
-                if regions.iter().any(|r| {
-                    col >= r.rect.x
-                        && col < r.rect.x + r.rect.width
-                        && row >= r.rect.y
-                        && row < r.rect.y + r.rect.height
-                }) {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
+        self.entries.iter().rev().find_map(|(id, regions)| {
+            if regions.iter().any(|r| {
+                col >= r.rect.x
+                    && col < r.rect.x + r.rect.width
+                    && row >= r.rect.y
+                    && row < r.rect.y + r.rect.height
+            }) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
     }
 
     /// Check if any window's regions contain the point (for click swallowing).

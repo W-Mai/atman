@@ -134,7 +134,7 @@ pub fn render(
 ) -> TaskPanelHitMap {
     if collapsed {
         let hitmap = render_strip(f, area, snapshots, hover);
-        crate::floating_panels::render_shadow(f, area, &crate::theme::theme());
+        crate::wm::render_shadow(f, area, &crate::theme::theme());
         return hitmap;
     }
 
@@ -829,7 +829,7 @@ pub fn render(
     }
     hitmap.hamburger_rect = Some(hamburger_rect);
 
-    crate::floating_panels::render_shadow(f, area, &t);
+    crate::wm::render_shadow(f, area, &t);
     hitmap
 }
 

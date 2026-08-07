@@ -6,12 +6,12 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use atman_runtime::TaskSnapshot;
 
-use super::{FloatingPanel, PanelBtn, PanelKind};
+use super::{PanelBtn, PanelKind, WindowInstance};
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_shell(
     f: &mut Frame,
-    panel: &FloatingPanel,
+    panel: &WindowInstance,
     is_focused: bool,
     btn_hover: Option<PanelBtn>,
     panel_close_armed: Option<(&str, bool)>,

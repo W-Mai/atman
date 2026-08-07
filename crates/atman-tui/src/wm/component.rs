@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
 use crossterm::event::MouseEvent;
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 
-use crate::floating_panels::PanelBtn;
 use crate::keys::KeyAction;
+use crate::wm::PanelBtn;
 
 use super::window::WindowId;
 
@@ -27,8 +27,15 @@ pub enum WmCommand {
     FocusWindow(WindowId),
     CloseWindow(WindowId),
     ToggleMaximize(WindowId),
-    TermResize { handle: String, rows: u16, cols: u16 },
-    OpenTaskPanel { handle: String, maximized: bool },
+    TermResize {
+        handle: String,
+        rows: u16,
+        cols: u16,
+    },
+    OpenTaskPanel {
+        handle: String,
+        maximized: bool,
+    },
     PushToast(String),
 }
 
@@ -96,12 +103,7 @@ pub struct EventCtx<'a> {
 pub trait WindowComponent: Send {
     /// Render content into the given area (inside the shell border).
     /// Return hit regions for mouse dispatch.
-    fn render_content(
-        &mut self,
-        area: Rect,
-        frame: &mut Frame,
-        ctx: &RenderCtx,
-    ) -> Vec<HitRegion>;
+    fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion>;
 
     /// Handle a key or mouse event. Return Consumed/Ignored.
     fn handle_event(&mut self, event: &WmEvent, ctx: &mut EventCtx) -> WmEventResult;

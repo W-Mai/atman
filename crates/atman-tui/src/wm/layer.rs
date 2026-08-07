@@ -45,8 +45,5 @@ impl Layer {
 /// Check if a point is inside a rect. Matches the convention used throughout
 /// the codebase (`rect_contains`).
 pub fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
-    col >= rect.x
-        && col < rect.x + rect.width
-        && row >= rect.y
-        && row < rect.y + rect.height
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }

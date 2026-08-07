@@ -276,13 +276,13 @@ pub struct AppState {
     pub activity_nodes: Vec<crate::task_panel::ActivityNode>,
     pub task_panel_collapsed: bool,
     pub task_panel_collapsed_groups: std::collections::HashSet<atman_runtime::TaskKind>,
-    pub floating_panels: crate::floating_panels::FloatingPanels,
+    pub wm: crate::wm::WindowManager,
     pub drag_target: Option<String>,
     pub drag_offset: (u16, u16),
     pub last_titlebar_click: Option<(String, std::time::Instant)>,
     pub resize_target: Option<String>,
     pub resize_offset: (u16, u16),
-    pub hovered_panel_btn: Option<(String, crate::floating_panels::PanelBtn)>,
+    pub hovered_panel_btn: Option<(String, crate::wm::PanelBtn)>,
     pub panel_sizes: std::collections::HashMap<String, (u16, u16)>,
     pub hovered_history_row: Option<String>,
     pub hovered_mcp_row: Option<String>,
@@ -294,7 +294,7 @@ pub struct AppState {
     pub mcp_resources_cache:
         std::collections::HashMap<String, Vec<atman_runtime::mcp::McpResource>>,
     pub mcp_prompts_cache: std::collections::HashMap<String, Vec<atman_runtime::mcp::McpPrompt>>,
-    pub last_floating_hitmap: crate::floating_panels::FloatingPanelHitmap,
+    pub last_wm_hitmap: crate::wm::WmHitmap,
     pub last_task_panel_rect: Option<ratatui::layout::Rect>,
     pub last_task_panel_hitmap: crate::task_panel::TaskPanelHitMap,
     pub tick: u64,
@@ -444,11 +444,11 @@ impl AppState {
             (kind, label, 0, 0)
         };
 
-        self.floating_panels.open_with_size(
+        self.wm.open_with_size(
             handle,
             crate::wm::ContentKey::Task(handle.to_string()),
             crate::wm::OpenPolicy::ReuseExisting,
-            crate::floating_panels::PanelKind::Task(kind),
+            crate::wm::PanelKind::Task(kind),
             &label,
             canvas,
             pw,
@@ -558,11 +558,11 @@ impl AppState {
             .unwrap_or(80)
             .max(80) as u16;
         let ph = lines.len() as u16 + 5;
-        self.floating_panels.open_with_size(
+        self.wm.open_with_size(
             &id,
             crate::wm::ContentKey::Mermaid(id.clone()),
             crate::wm::OpenPolicy::ReuseExisting,
-            crate::floating_panels::PanelKind::Mermaid,
+            crate::wm::PanelKind::Mermaid,
             "Mermaid Diagram",
             canvas,
             pw,
@@ -3012,9 +3012,9 @@ mod terminal_stream_tests {
         let canvas = ratatui::layout::Rect::new(0, 0, 80, 24);
         app.open_task_panel("term_s_0", canvas);
         app.open_task_panel("term_s_1", canvas);
-        assert_eq!(app.floating_panels.panels.len(), 2);
-        assert_eq!(app.floating_panels.panels[0].id, "term_s_0");
-        assert_eq!(app.floating_panels.panels[1].id, "term_s_1");
+        assert_eq!(app.wm.panels.len(), 2);
+        assert_eq!(app.wm.panels[0].id, "term_s_0");
+        assert_eq!(app.wm.panels[1].id, "term_s_1");
     }
 }
 

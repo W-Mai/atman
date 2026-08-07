@@ -3,9 +3,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::floating_panels::FloatingPanelHitmap;
 use crate::theme::theme;
 use crate::width;
+use crate::wm::WmHitmap;
 use std::collections::HashSet;
 
 /// Indent + name column + space = 3 + 22 + 1 = 26 chars before description.
@@ -26,7 +26,7 @@ pub fn render_panel(
     expanded: &HashSet<String>,
     selected: usize,
     hovered: &Option<String>,
-    hitmap_out: &mut FloatingPanelHitmap,
+    hitmap_out: &mut WmHitmap,
     browser: &McpBrowserState<'_>,
 ) {
     let t = theme();

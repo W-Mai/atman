@@ -13,21 +13,19 @@ use atman_runtime::{TaskKind, TaskSnapshot};
 use crate::app::OutputItem;
 use crate::task_panel::{ActivityNode, ActivityStatus};
 
-use super::{
-    FloatingPanel, FloatingPanelHitmap, PanelBtn, PanelKind, PanelRenderCache, task_kind_icon,
-};
+use super::{PanelBtn, PanelKind, PanelRenderCache, WindowInstance, WmHitmap, task_kind_icon};
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_panel_content(
     f: &mut Frame,
     area: Rect,
-    panel: &mut FloatingPanel,
+    panel: &mut WindowInstance,
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
     hovered_btn: &Option<(String, PanelBtn)>,
     hovered_history_row: &Option<String>,
-    hitmap_out: &mut FloatingPanelHitmap,
+    hitmap_out: &mut WmHitmap,
     animation_frame: u32,
     mcp_servers: &[atman_runtime::mcp::McpServerStatus],
     expanded_mcp_servers: &std::collections::HashSet<String>,
@@ -523,7 +521,7 @@ fn render_history_content(
     area: Rect,
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
-    hitmap: &mut FloatingPanelHitmap,
+    hitmap: &mut WmHitmap,
     hovered_row: &Option<String>,
     scroll: u16,
 ) {
@@ -634,7 +632,7 @@ fn render_sub_agent_panel(
     expanded_tools: &HashSet<String>,
     scroll: &mut u16,
     animation_frame: u32,
-    hitmap_out: &mut FloatingPanelHitmap,
+    hitmap_out: &mut WmHitmap,
     item_idx: usize,
     items_version: u64,
     expanded_version: u64,

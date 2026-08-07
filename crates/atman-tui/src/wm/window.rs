@@ -2,7 +2,6 @@ use std::collections::HashSet;
 
 use ratatui::layout::Rect;
 
-
 /// WM-internal window identity. Unique per window instance.
 /// Uses a u64 counter — no external dependency required.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -36,10 +35,17 @@ pub enum OpenPolicy {
 /// What kind of content a window displays.
 #[derive(Debug, Clone)]
 pub enum WindowContent {
-    Task { handle: String, kind: atman_runtime::TaskKind },
+    Task {
+        handle: String,
+        kind: atman_runtime::TaskKind,
+    },
     History,
-    Activity { run_id: String },
-    Mermaid { item_id: String },
+    Activity {
+        run_id: String,
+    },
+    Mermaid {
+        item_id: String,
+    },
     Cheatsheet,
     Mcp,
 }

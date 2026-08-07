@@ -1,5 +1,5 @@
-use ratatui::layout::Rect;
 use ratatui::Frame;
+use ratatui::layout::Rect;
 
 use super::component::{EventCtx, HitRegion, RenderCtx, WmEvent, WmEventResult};
 use super::window::WindowId;
@@ -51,10 +51,7 @@ pub trait ModalComponent: Send {
     /// Hit-test a mouse position. Returns Inside with regions, or Outside.
     fn hit_test(&self, col: u16, row: u16, viewport: Rect) -> HitTestResult {
         let rect = self.preferred_rect(viewport);
-        if col >= rect.x
-            && col < rect.x + rect.width
-            && row >= rect.y
-            && row < rect.y + rect.height
+        if col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
         {
             HitTestResult::Inside(Vec::new())
         } else {

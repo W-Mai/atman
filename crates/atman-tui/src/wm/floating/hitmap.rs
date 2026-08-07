@@ -1,16 +1,16 @@
 use ratatui::layout::Rect;
 
-use super::{FloatingPanel, FloatingPanels, PanelBtn};
+use super::{PanelBtn, WindowInstance, WindowManager};
 
 #[derive(Debug, Default)]
-pub struct FloatingPanelHitmap {
+pub struct WmHitmap {
     pub history_row_rects: Vec<(String, Rect)>,
     pub workflow_node_rects: Vec<(usize, String, Rect)>,
     pub mcp_row_rects: Vec<(String, Rect)>,
 }
 
-impl FloatingPanels {
-    pub fn hit_test_titlebar(&self, col: u16, row: u16) -> Option<&FloatingPanel> {
+impl WindowManager {
+    pub fn hit_test_titlebar(&self, col: u16, row: u16) -> Option<&WindowInstance> {
         // draggable = panel rect + shadow ring (2 cols left/right, 1 row top/bottom)
         // EXCEPT content area and button hit areas
         self.panels
@@ -92,7 +92,7 @@ impl FloatingPanels {
         None
     }
 
-    pub fn hit_test_panel(&self, col: u16, row: u16) -> Option<&FloatingPanel> {
+    pub fn hit_test_panel(&self, col: u16, row: u16) -> Option<&WindowInstance> {
         self.panels
             .iter()
             .filter(|p| {

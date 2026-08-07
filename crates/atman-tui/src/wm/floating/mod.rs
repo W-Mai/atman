@@ -19,14 +19,14 @@ pub mod shadow;
 pub mod shell;
 
 pub use focus::FocusState;
-pub use hitmap::FloatingPanelHitmap;
+pub use hitmap::WmHitmap;
 pub use shadow::{
     lerp_color, multiply_color, render_bottom_fade, render_input_shadow, render_shadow,
     render_top_fade,
 };
 
 #[derive(Debug, Clone)]
-pub struct FloatingPanel {
+pub struct WindowInstance {
     pub id: String,
     pub content_key: ContentKey,
     pub kind: PanelKind,
@@ -103,8 +103,8 @@ pub fn task_kind_icon(kind: TaskKind) -> &'static str {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct FloatingPanels {
-    pub panels: Vec<FloatingPanel>,
+pub struct WindowManager {
+    pub panels: Vec<WindowInstance>,
     pub focus: FocusState,
     z_counter: u32,
 }
@@ -112,7 +112,7 @@ pub struct FloatingPanels {
 const DEFAULT_PANEL_W: u16 = 88;
 const DEFAULT_PANEL_H: u16 = 29;
 
-impl FloatingPanels {
+impl WindowManager {
     pub fn focused(&self) -> Option<&str> {
         self.focus.active.as_deref()
     }
@@ -206,7 +206,7 @@ impl FloatingPanels {
         } else {
             None
         };
-        let panel = FloatingPanel {
+        let panel = WindowInstance {
             id: id.to_string(),
             content_key,
             kind,
@@ -311,7 +311,7 @@ fn default_rect(canvas: Rect) -> Rect {
 pub fn render(
     f: &mut Frame,
     _canvas: Rect,
-    panels: &mut FloatingPanels,
+    panels: &mut WindowManager,
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
@@ -327,8 +327,8 @@ pub fn render(
     mcp_browser: &crate::mcp_manager::McpBrowserState<'_>,
     items_version: u64,
     expanded_version: u64,
-) -> FloatingPanelHitmap {
-    let mut all_hitmap = FloatingPanelHitmap::default();
+) -> WmHitmap {
+    let mut all_hitmap = WmHitmap::default();
     let mut sorted: Vec<usize> = (0..panels.panels.len()).collect();
     sorted.sort_by_key(|&i| panels.panels[i].z);
 
@@ -363,7 +363,7 @@ pub fn render(
             height: panel.rect.height.saturating_sub(3),
         };
 
-        let mut panel_hitmap = FloatingPanelHitmap::default();
+        let mut panel_hitmap = WmHitmap::default();
         if content_area.height > 0 && content_area.width > 0 {
             let content_bg: Color = t.code_bg.into();
             f.render_widget(Clear, content_area);
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn open_creates_panel_and_focuses() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "bg_1",
             ContentKey::Task("bg_1".to_string()),
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn open_existing_focuses_without_duplicate() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "bg_1",
             ContentKey::Task("bg_1".to_string()),
@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn close_removes_and_refocuses() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn focus_brings_to_front() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn toggle_maximize_swaps_rect() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn hit_test_titlebar_finds_topmost() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn move_panel_no_clamp() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn hit_test_titlebar_includes_shadow_ring() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn hit_test_titlebar_excludes_content() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -595,7 +595,7 @@ mod tests {
         // Content area starts at y+2 (panel.rect.y + 2). The titlebar
         // exclusion must cover y+2 so that clicks on the first content row
         // (e.g. first history row) are not captured as drag.
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::History,
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn hit_test_close_at_correct_position() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn hit_test_resize_at_correct_position() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn resize_panel_min_size() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -683,7 +683,7 @@ mod tests {
     fn shadow_border_not_overlapped_by_panel() {
         // shadow border is at lx0 (rect.x - 2), which is outside panel.rect
         // panel.rect starts at rect.x, so rect.x - 2 is NOT inside panel
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
@@ -701,7 +701,7 @@ mod tests {
 
     #[test]
     fn close_uses_history_not_panels_last() {
-        let mut fp = FloatingPanels::default();
+        let mut fp = WindowManager::default();
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),

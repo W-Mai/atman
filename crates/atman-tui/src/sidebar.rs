@@ -324,7 +324,7 @@ pub fn render(
                 }
             }
         }
-        crate::floating_panels::render_shadow(f, upper_area, &t);
+        crate::wm::render_shadow(f, upper_area, &t);
     }
 
     // ── Lower panel ──
@@ -383,7 +383,7 @@ pub fn render(
                 }
             }
         }
-        crate::floating_panels::render_shadow(f, lower_area, &t);
+        crate::wm::render_shadow(f, lower_area, &t);
     }
 
     // ── Meta (only when both panels expanded) ──
@@ -1457,7 +1457,7 @@ pub fn render_sidebar_popup(
         .collect();
     f.render_widget(ratatui::widgets::Paragraph::new(visible), content_area);
 
-    crate::floating_panels::render_shadow(f, popup_area, &t);
+    crate::wm::render_shadow(f, popup_area, &t);
     popup_area
 }
 

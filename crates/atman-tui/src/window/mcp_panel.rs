@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use crate::wm::component::{
-    EventCtx, HitRegion, RenderCtx, SizeHint, WmEvent, WmEventResult, WindowComponent,
+    EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 
 pub struct McpPanelContent {

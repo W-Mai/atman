@@ -20,16 +20,15 @@ pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
 pub mod form_modal;
-pub mod wm;
-pub mod window;
 pub mod highlight;
 pub mod history;
 pub mod history_search_modal;
 pub mod mcp_manager;
 pub mod model_picker;
 pub mod onboarding;
+pub mod window;
+pub mod wm;
 
-pub mod floating_panels;
 pub mod input;
 pub mod keys;
 pub mod layout;
@@ -514,17 +513,17 @@ async fn run_frames(
                             ) =>
                         {
                             let over_floating = app
-                                .floating_panels
+                                .wm
                                 .hit_test_panel(me.column, me.row)
                                 .is_some();
                             if over_floating {
                                 let id = app
-                                    .floating_panels
+                                    .wm
                                     .hit_test_panel(me.column, me.row)
                                     .unwrap()
                                     .id
                                     .clone();
-                                if let Some(p) = app.floating_panels.panels.iter_mut().find(|p| p.id == id) {
+                                if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id) {
                                     match me.kind {
                                         MouseEventKind::ScrollUp => {
                                             p.scroll = p.scroll.saturating_sub(3);
@@ -609,7 +608,7 @@ async fn run_frames(
                             // Check floating panels/modals BEFORE input_rect so clicks
                             // on overlapping panels don't pass through to the input box.
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind
-                                && !(app.floating_panels.hit_test_panel(me.column, me.row).is_some()
+                                && !(app.wm.hit_test_panel(me.column, me.row).is_some()
                                     || app.form_modal.open
                                     || app.compact_review.is_some()
                                     || app.session_switcher.open
@@ -636,16 +635,16 @@ async fn run_frames(
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
                                 // Floating panels take priority — they float on top.
                                 if let Some(min_id) =
-                                    app.floating_panels.hit_test_minimize(me.column, me.row)
+                                    app.wm.hit_test_minimize(me.column, me.row)
                                 {
-                                    app.floating_panels.close(&min_id);
+                                    app.wm.close(&min_id);
                                 } else if let Some(max_id) =
-                                    app.floating_panels.hit_test_maximize(me.column, me.row)
+                                    app.wm.hit_test_maximize(me.column, me.row)
                                 {
                                     let canvas = app.maximized_canvas();
-                                    app.floating_panels.toggle_maximize(&max_id, canvas);
-                                    if let Some(p) = app.floating_panels.panels.iter().find(|p| p.id == max_id) {
-                                        if p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal) {
+                                    app.wm.toggle_maximize(&max_id, canvas);
+                                    if let Some(p) = app.wm.panels.iter().find(|p| p.id == max_id) {
+                                        if p.kind == crate::wm::PanelKind::Task(atman_runtime::TaskKind::Terminal) {
                                             let inner_cols = p.rect.width.saturating_sub(8);
                                             let inner_rows = p.rect.height.saturating_sub(5);
                                             if inner_cols > 0 && inner_rows > 0 {
@@ -660,7 +659,7 @@ async fn run_frames(
                                         }
                                     }
                                 } else if let Some(close_id) =
-                                    app.floating_panels.hit_test_close(me.column, me.row)
+                                    app.wm.hit_test_close(me.column, me.row)
                                 {
                                     let armed = app.panel_close_armed_id == Some(close_id.clone())
                                         && !app.panel_close_arm_expired();
@@ -688,13 +687,13 @@ async fn run_frames(
                                         );
                                     }
                                 } else if let Some(resize_id) =
-                                    app.floating_panels.hit_test_resize(me.column, me.row)
+                                    app.wm.hit_test_resize(me.column, me.row)
                                 {
-                                    app.floating_panels.focus(&resize_id);
+                                    app.wm.focus(&resize_id);
                                     app.resize_target = Some(resize_id);
                                     app.resize_offset = (me.column, me.row);
                                 } else if let Some(fp) = app
-                                    .floating_panels
+                                    .wm
                                     .hit_test_titlebar(me.column, me.row)
                                 {
                                     let id = fp.id.clone();
@@ -707,16 +706,16 @@ async fn run_frames(
                                         });
                                     if is_double {
                                         let canvas = app.last_transcript_rect.unwrap_or_default();
-                                        app.floating_panels.toggle_maximize(&id, canvas);
+                                        app.wm.toggle_maximize(&id, canvas);
                                         app.last_titlebar_click = None;
                                     } else {
-                                        app.floating_panels.focus(&id);
+                                        app.wm.focus(&id);
                                         app.drag_target = Some(id.clone());
                                         app.drag_offset = (me.column, me.row);
                                         app.last_titlebar_click = Some((id, now));
                                     }
                                 } else if let Some((handle, _)) = app
-                                    .last_floating_hitmap
+                                    .last_wm_hitmap
                                     .history_row_rects
                                     .iter()
                                     .find(|(_, r)| rect_contains(*r, me.column, me.row))
@@ -725,7 +724,7 @@ async fn run_frames(
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
                                     app.open_task_panel(&handle, canvas);
                                 } else if let Some((name, _)) = app
-                                    .last_floating_hitmap
+                                    .last_wm_hitmap
                                     .mcp_row_rects
                                     .iter()
                                     .find(|(_, r)| rect_contains(*r, me.column, me.row))
@@ -735,7 +734,7 @@ async fn run_frames(
                                         app.expanded_mcp_servers.insert(name);
                                     }
                                 } else if let Some((panel_idx, path, _)) = app
-                                    .last_floating_hitmap
+                                    .last_wm_hitmap
                                     .workflow_node_rects
                                     .iter()
                                     .find(|(_, _, r)| rect_contains(*r, me.column, me.row))
@@ -747,17 +746,17 @@ async fn run_frames(
                                         app.toggle_workflow_node(panel_idx, &path);
                                     }
                                 } else if app
-                                    .floating_panels
+                                    .wm
                                     .hit_test_panel(me.column, me.row)
                                     .is_some()
                                 {
                                     let fp_id = app
-                                        .floating_panels
+                                        .wm
                                         .hit_test_panel(me.column, me.row)
                                         .unwrap()
                                         .id
                                         .clone();
-                                    app.floating_panels.focus(&fp_id);
+                                    app.wm.focus(&fp_id);
                                 } else if let Some(r) = app.last_upper_title_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -770,10 +769,10 @@ async fn run_frames(
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
-                                    app.floating_panels.open(
+                                    app.wm.open(
                                         "mcp-manager",
                                         crate::wm::ContentKey::Mcp,
-                                        crate::floating_panels::PanelKind::Mcp,
+                                        crate::wm::PanelKind::Mcp,
                                         "MCP Servers",
                                         canvas,
                                     );
@@ -907,11 +906,11 @@ async fn run_frames(
                                             .get("__history__")
                                             .copied()
                                             .unwrap_or((0, 0));
-                                        app.floating_panels.open_with_size(
+                                        app.wm.open_with_size(
                                             "__history__",
                                             crate::wm::ContentKey::History,
                                             crate::wm::OpenPolicy::ReuseExisting,
-                                            crate::floating_panels::PanelKind::History,
+                                            crate::wm::PanelKind::History,
                                             "History",
                                             canvas,
                                             pw,
@@ -931,10 +930,10 @@ async fn run_frames(
                                             .iter()
                                             .find(|n| n.run_id == *run_id && n.node_id == *node_id);
                                         if let Some(node) = node {
-                                            app.floating_panels.open(
+                                            app.wm.open(
                                                 &panel_id,
                                                 crate::wm::ContentKey::Activity(run_id.clone()),
-                                                crate::floating_panels::PanelKind::Activity,
+                                                crate::wm::PanelKind::Activity,
                                                 &node.label,
                                                 canvas,
                                             );
@@ -1061,26 +1060,26 @@ async fn run_frames(
                                     let dy = me.row as i32 - oy as i32;
                                     if dx != 0 || dy != 0 {
                                         let was_maximized = app
-                                            .floating_panels
+                                            .wm
                                             .panels
                                             .iter()
                                             .find(|p| &p.id == id)
                                             .is_some_and(|p| p.maximized);
                                         if was_maximized {
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.floating_panels.unmaximize(id, canvas);
+                                            app.wm.unmaximize(id, canvas);
                                         }
                                         if let Some(p) = app
-                                            .floating_panels
+                                            .wm
                                             .panels
                                             .iter()
                                             .find(|p| &p.id == id)
                                         {
-                                            let is_term = p.kind == crate::floating_panels::PanelKind::Task(atman_runtime::TaskKind::Terminal);
+                                            let is_term = p.kind == crate::wm::PanelKind::Task(atman_runtime::TaskKind::Terminal);
                                             let nw = (p.rect.width as i32 + dx).max(20) as u16;
                                             let nh = (p.rect.height as i32 + dy).max(6) as u16;
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.floating_panels.resize_panel(id, nw, nh, canvas);
+                                            app.wm.resize_panel(id, nw, nh, canvas);
                                             app.resize_offset = (me.column, me.row);
                                             if is_term {
                                                 let inner_cols = nw.saturating_sub(8);
@@ -1103,17 +1102,17 @@ async fn run_frames(
                                     let dy = me.row as i32 - oy as i32;
                                     if dx != 0 || dy != 0 {
                                         let was_maximized = app
-                                            .floating_panels
+                                            .wm
                                             .panels
                                             .iter()
                                             .find(|p| &p.id == id)
                                             .is_some_and(|p| p.maximized);
                                         if was_maximized {
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.floating_panels.unmaximize(id, canvas);
+                                            app.wm.unmaximize(id, canvas);
                                         }
                                         if let Some(p) = app
-                                            .floating_panels
+                                            .wm
                                             .panels
                                             .iter()
                                             .find(|p| &p.id == id)
@@ -1121,7 +1120,7 @@ async fn run_frames(
                                             let nx = (p.rect.x as i32 + dx).max(0) as u16;
                                             let ny = (p.rect.y as i32 + dy).max(0) as u16;
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.floating_panels.move_panel(id, nx, ny, canvas);
+                                            app.wm.move_panel(id, nx, ny, canvas);
                                             app.drag_offset = (me.column, me.row);
                                         }
                                     }
@@ -1130,7 +1129,7 @@ async fn run_frames(
                                 if app.resize_target.is_some() {
                                     let id = app.resize_target.clone();
                                     if let Some(id) = id {
-                                        if let Some(p) = app.floating_panels.panels.iter().find(|p| p.id == id) {
+                                        if let Some(p) = app.wm.panels.iter().find(|p| p.id == id) {
                                             app.panel_sizes.insert(id.clone(), (p.rect.width, p.rect.height));
                                             app.save_ui_state();
                                         }
@@ -1147,7 +1146,7 @@ async fn run_frames(
                                 if !skip_hover {
                                 // floating panel button hover
                                 let btn_hover = app
-                                    .floating_panels
+                                    .wm
                                     .hit_test_btn(me.column, me.row);
                                 if app.hovered_panel_btn != btn_hover {
                                     app.hovered_panel_btn = btn_hover;
@@ -1156,7 +1155,7 @@ async fn run_frames(
 
                                 // floating panel history row hover
                                 let history_hover = app
-                                    .last_floating_hitmap
+                                    .last_wm_hitmap
                                     .history_row_rects
                                     .iter()
                                     .find(|(_, r)| rect_contains(*r, me.column, me.row))
@@ -1167,7 +1166,7 @@ async fn run_frames(
                                 }
 
                                 let mcp_hover = app
-                                    .last_floating_hitmap
+                                    .last_wm_hitmap
                                     .mcp_row_rects
                                     .iter()
                                     .find(|(_, r)| rect_contains(*r, me.column, me.row))
@@ -2263,20 +2262,20 @@ fn dispatch_palette_entry(
         }
         PaletteEntryId::ManageMcp => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
-            app.floating_panels.open(
+            app.wm.open(
                 "mcp-manager",
                 crate::wm::ContentKey::Mcp,
-                crate::floating_panels::PanelKind::Mcp,
+                crate::wm::PanelKind::Mcp,
                 "MCP Servers",
                 canvas,
             );
         }
         PaletteEntryId::ShowHelp => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
-            app.floating_panels.open(
+            app.wm.open(
                 "cheatsheet",
                 crate::wm::ContentKey::Cheatsheet,
-                crate::floating_panels::PanelKind::Cheatsheet,
+                crate::wm::PanelKind::Cheatsheet,
                 "Keybindings",
                 canvas,
             );
@@ -2763,9 +2762,9 @@ fn handle_key(
     }
 
     if let KeyAction::Tab = action {
-        if let Some(id) = app.floating_panels.focused().map(String::from)
-            && let Some(panel) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
-            && panel.kind == crate::floating_panels::PanelKind::Mermaid
+        if let Some(id) = app.wm.focused().map(String::from)
+            && let Some(panel) = app.wm.panels.iter_mut().find(|p| p.id == id)
+            && panel.kind == crate::wm::PanelKind::Mermaid
         {
             panel.split = !panel.split;
             app.mark_items_dirty();
@@ -2773,12 +2772,12 @@ fn handle_key(
         }
     }
 
-    if let Some(id) = app.floating_panels.focused().map(String::from)
+    if let Some(id) = app.wm.focused().map(String::from)
         && app
-            .floating_panels
+            .wm
             .panels
             .iter()
-            .any(|p| p.id == id && p.kind == crate::floating_panels::PanelKind::Mcp)
+            .any(|p| p.id == id && p.kind == crate::wm::PanelKind::Mcp)
     {
         let server_count = app.context.mcp_servers.len();
         match action {
@@ -2911,7 +2910,7 @@ fn handle_key(
                 return;
             }
             KeyAction::Char('q') => {
-                app.floating_panels.close(&id);
+                app.wm.close(&id);
                 return;
             }
             _ => {}
@@ -3325,8 +3324,8 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ScrollUp | KeyAction::PageUp => {
-            if let Some(id) = app.floating_panels.focused().map(String::from)
-                && let Some(p) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
+            if let Some(id) = app.wm.focused().map(String::from)
+                && let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id)
             {
                 p.scroll = p
                     .scroll
@@ -3345,8 +3344,8 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ScrollDown | KeyAction::PageDown => {
-            if let Some(id) = app.floating_panels.focused().map(String::from)
-                && let Some(p) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
+            if let Some(id) = app.wm.focused().map(String::from)
+                && let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id)
             {
                 p.scroll = p
                     .scroll
@@ -3373,9 +3372,9 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Escape => {
-            if let Some(id) = app.floating_panels.focused().map(String::from) {
-                if app.floating_panels.panels.iter().any(|p| p.id == id) {
-                    app.floating_panels.close(&id);
+            if let Some(id) = app.wm.focused().map(String::from) {
+                if app.wm.panels.iter().any(|p| p.id == id) {
+                    app.wm.close(&id);
                     return;
                 }
             }
@@ -3416,10 +3415,10 @@ fn handle_key(
         }
         KeyAction::HelpModal => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
-            app.floating_panels.open(
+            app.wm.open(
                 "cheatsheet",
                 crate::wm::ContentKey::Cheatsheet,
-                crate::floating_panels::PanelKind::Cheatsheet,
+                crate::wm::PanelKind::Cheatsheet,
                 "Keybindings",
                 canvas,
             );
@@ -3885,16 +3884,16 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_task_panel_rect = None;
         app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
     }
-    if !app.floating_panels.panels.is_empty() {
+    if !app.wm.panels.is_empty() {
         let close_armed = app
             .panel_close_armed_id
             .clone()
             .zip(Some(app.panel_close_arm_expired()));
         let max_canvas = app.maximized_canvas();
-        app.last_floating_hitmap = crate::floating_panels::render(
+        app.last_wm_hitmap = crate::wm::render(
             f,
             l.transcript,
-            &mut app.floating_panels,
+            &mut app.wm,
             &app.task_snapshots,
             &app.items,
             &app.activity_nodes,
@@ -3916,7 +3915,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             app.expanded_version,
         );
     } else {
-        app.last_floating_hitmap = crate::floating_panels::FloatingPanelHitmap::default();
+        app.last_wm_hitmap = crate::wm::WmHitmap::default();
     }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
@@ -4109,7 +4108,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             width: w,
             height: h,
         };
-        crate::floating_panels::render_shadow(f, form_area, &crate::theme::theme());
+        crate::wm::render_shadow(f, form_area, &crate::theme::theme());
         crate::mcp_manager::render_mcp_add_form(f, form_area, form);
     }
     if intro_progress >= 1.0 && app.startup_intro.is_some() {

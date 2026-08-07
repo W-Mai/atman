@@ -1,4 +1,4 @@
-use super::FloatingPanel;
+use super::WindowInstance;
 
 #[derive(Debug, Default, Clone)]
 pub struct FocusState {
@@ -17,7 +17,7 @@ impl FocusState {
         self.active = None;
     }
 
-    pub fn remove_and_refocus(&mut self, id: &str, panels: &[FloatingPanel]) {
+    pub fn remove_and_refocus(&mut self, id: &str, panels: &[WindowInstance]) {
         self.history.retain(|h| h != id);
         let live: std::collections::HashSet<&str> = panels.iter().map(|p| p.id.as_str()).collect();
         self.active = self
