@@ -1155,8 +1155,7 @@ fn render_add_dialog(
             } else {
                 (*val).to_string()
             };
-            let toggle_hint = matches!(*label, "Type" | "Thinking" | "Enabled")
-                && active;
+            let toggle_hint = matches!(*label, "Type" | "Thinking" | "Enabled") && active;
             let display = if toggle_hint {
                 format!("{display_val}  ← →")
             } else {
@@ -1187,7 +1186,8 @@ fn render_add_dialog(
                     input_inner,
                 );
                 if active {
-                    let display_w = crate::width::width(&display_val).min(input_inner.width as usize) as u16;
+                    let display_w =
+                        crate::width::width(&display_val).min(input_inner.width as usize) as u16;
                     cursor_pos = Some((input_inner.x + display_w, input_inner.y));
                 }
                 y = y.saturating_add(3);

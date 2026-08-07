@@ -251,14 +251,20 @@ fn render_provider_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingSt
     f.render_widget(Paragraph::new(intro), rows[0]);
 
     let actions = vec![
-        ListItem::new(Line::from(Span::styled(
-            "Add provider",
-            Style::default().fg(theme.tinted_fg.into()),
-        )).alignment(ratatui::layout::Alignment::Center)),
-        ListItem::new(Line::from(Span::styled(
-            "Skip for now",
-            Style::default().fg(theme.meta_fg.into()),
-        )).alignment(ratatui::layout::Alignment::Center)),
+        ListItem::new(
+            Line::from(Span::styled(
+                "Add provider",
+                Style::default().fg(theme.tinted_fg.into()),
+            ))
+            .alignment(ratatui::layout::Alignment::Center),
+        ),
+        ListItem::new(
+            Line::from(Span::styled(
+                "Skip for now",
+                Style::default().fg(theme.meta_fg.into()),
+            ))
+            .alignment(ratatui::layout::Alignment::Center),
+        ),
     ];
     let mut list_state = ListState::default().with_selected(Some(state.selected_action));
     let block = Block::default()

@@ -2742,7 +2742,7 @@ fn handle_key(
     }
 
     if let KeyAction::Tab = action {
-        if let Some(id) = app.floating_panels.focused.clone()
+        if let Some(id) = app.floating_panels.focused().map(String::from)
             && let Some(panel) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
             && panel.kind == crate::floating_panels::PanelKind::Mermaid
         {
@@ -2752,7 +2752,7 @@ fn handle_key(
         }
     }
 
-    if let Some(id) = app.floating_panels.focused.clone()
+    if let Some(id) = app.floating_panels.focused().map(String::from)
         && app
             .floating_panels
             .panels
@@ -3304,8 +3304,8 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ScrollUp | KeyAction::PageUp => {
-            if let Some(id) = &app.floating_panels.focused.clone()
-                && let Some(p) = app.floating_panels.panels.iter_mut().find(|p| &p.id == id)
+            if let Some(id) = app.floating_panels.focused().map(String::from)
+                && let Some(p) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
             {
                 p.scroll = p
                     .scroll
@@ -3324,8 +3324,8 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ScrollDown | KeyAction::PageDown => {
-            if let Some(id) = &app.floating_panels.focused.clone()
-                && let Some(p) = app.floating_panels.panels.iter_mut().find(|p| &p.id == id)
+            if let Some(id) = app.floating_panels.focused().map(String::from)
+                && let Some(p) = app.floating_panels.panels.iter_mut().find(|p| p.id == id)
             {
                 p.scroll = p
                     .scroll
@@ -3352,7 +3352,7 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Escape => {
-            if let Some(id) = app.floating_panels.focused.clone() {
+            if let Some(id) = app.floating_panels.focused().map(String::from) {
                 if app.floating_panels.panels.iter().any(|p| p.id == id) {
                     app.floating_panels.close(&id);
                     return;
