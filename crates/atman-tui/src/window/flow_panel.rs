@@ -14,10 +14,17 @@ pub struct FlowPanelContent {
 impl WindowComponent for FlowPanelContent {
     fn render_content(
         &mut self,
-        _area: Rect,
-        _frame: &mut Frame,
+        area: Rect,
+        frame: &mut Frame,
         _ctx: &RenderCtx,
     ) -> Vec<HitRegion> {
+        let area = Rect::new(
+            area.x + 1,
+            area.y,
+            area.width.saturating_sub(2),
+            area.height,
+        );
+        crate::wm::floating::content::render_placeholder(frame, area, &self.handle);
         Vec::new()
     }
 
