@@ -41,7 +41,7 @@ pub fn render_panel_content(
     }
 
     if let Some(ref mut content) = panel.content {
-        let _ = content.render_content(
+        let regions = content.render_content(
             area,
             f,
             &crate::wm::RenderCtx {
@@ -52,6 +52,20 @@ pub fn render_panel_content(
                 expanded_tools: &panel.expanded_tools,
             },
         );
+        for region in regions {
+            match region.target {
+                crate::wm::component::HitTarget::HistoryRow(s) => {
+                    hitmap_out.history_row_rects.push((s, region.rect))
+                }
+                crate::wm::component::HitTarget::WorkflowNode(i, s) => {
+                    hitmap_out.workflow_node_rects.push((i, s, region.rect))
+                }
+                crate::wm::component::HitTarget::McpRow(s) => {
+                    hitmap_out.mcp_row_rects.push((s, region.rect))
+                }
+                _ => {}
+            }
+        }
         return;
     }
 

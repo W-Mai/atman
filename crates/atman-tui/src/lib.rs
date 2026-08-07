@@ -1150,7 +1150,7 @@ async fn run_frames(
                                     .hit_test_btn(me.column, me.row);
                                 if app.hovered_panel_btn != btn_hover {
                                     app.hovered_panel_btn = btn_hover;
-                                    app.items_version = app.items_version.wrapping_add(1);
+                                    app.wm_visual_version = app.wm_visual_version.wrapping_add(1);
                                 }
 
                                 // floating panel history row hover
@@ -2761,6 +2761,18 @@ fn handle_key(
         return;
     }
 
+    match action {
+        crate::keys::KeyAction::CyclePanelForward => {
+            app.wm.cycle_focus(true);
+            return;
+        }
+        crate::keys::KeyAction::CyclePanelBackward => {
+            app.wm.cycle_focus(false);
+            return;
+        }
+        _ => {}
+    }
+
     if let KeyAction::Tab = action {
         if let Some(id) = app.wm.focused().map(String::from)
             && let Some(panel) = app.wm.panels.iter_mut().find(|p| p.id == id)
@@ -3456,6 +3468,7 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::BackTab => {}
+        KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
     }
     if edited {
         app.refresh_popup(editor.buf());
@@ -4091,8 +4104,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.form_modal.open {
         form_modal::render(f, area, &app.form_modal);
     }
-    // Toast notifications in top-right corner
-    render_toasts(f, area, app);
     // Modal notification overlay
     if let Some(ref msg) = app.modal_notification {
         render_notify_modal(f, area, msg);
@@ -4111,6 +4122,8 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         crate::wm::render_shadow(f, form_area, &crate::theme::theme());
         crate::mcp_manager::render_mcp_add_form(f, form_area, form);
     }
+    // Toast notifications in top-right corner
+    render_toasts(f, area, app);
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
     }
