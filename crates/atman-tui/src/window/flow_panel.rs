@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use atman_runtime::message::Message;
-use atman_runtime::workflow::WorkflowGraph;
+use atman_runtime::workflow::{WorkflowGraph, WorkflowNodeKind};
 
 use crate::app::OutputItem;
 use crate::wm::component::{
@@ -82,6 +82,66 @@ impl WindowComponent for FlowPanelContent {
                 ctx.expanded_version,
                 &mut self.render_cache,
             );
+        } else if let Some((panel_idx, _)) = ctx.items.iter().enumerate().rev().find(|(_, it)| {
+            if let OutputItem::WorkflowPanel { graph, .. } = it {
+                graph.root.iter().any(|node| {
+                    matches!(
+                        &node.kind,
+                        WorkflowNodeKind::Flow { run_id, .. } if run_id == &self.handle
+                    )
+                })
+            } else {
+                false
+            }
+        }) && let Some(OutputItem::WorkflowPanel { graph, expanded_nodes, .. }) =
+            ctx.items.get(panel_idx)
+        {
+            let render_width = area.width.max(300);
+            let (lines, regions) = crate::output::render_workflow_panel_with_regions(
+                graph,
+                expanded_nodes,
+                true,
+                false,
+                ctx.animation_frame,
+                render_width,
+                crate::output::MAX_COLLAPSED_BODY_ROWS,
+            );
+            let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+            self.scroll = self.scroll.min(max_scroll);
+            for r in &regions {
+                let row0 = area.y as u32 + r.start_row.saturating_sub(self.scroll as u32);
+                let row1 = area.y as u32 + r.end_row.saturating_sub(self.scroll as u32);
+                let col0 = area.x + r.col_start;
+                let col1 = area.x + r.col_end;
+                if col1 > col0 && row1 > row0 {
+                    hitmap_out.push(HitRegion {
+                        target: HitTarget::WorkflowNode(panel_idx, r.path_key.clone()),
+                        rect: Rect {
+                            x: col0,
+                            y: row0 as u16,
+                            width: col1 - col0,
+                            height: (row1 - row0) as u16,
+                        },
+                    });
+                }
+            }
+            self.render_cache = Some(PanelRenderCache {
+                items_version: ctx.items_version,
+                expanded_version: ctx.expanded_version,
+                width: area.width,
+                animation_frame: None,
+                messages_len: 0,
+                workflow_expanded: true,
+                expanded_tools_len: 0,
+                lines: lines.clone(),
+                regions: regions.clone(),
+                wf_offset: 0,
+            });
+            frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), area);
+        } else if let Some(snap) =
+            ctx.snapshots.iter().find(|s| s.source_handle == self.handle)
+        {
+            super::common::render_task_meta(frame, area, atman_runtime::TaskKind::Flow, snap);
         } else {
             super::common::render_placeholder(frame, area, &self.handle);
         }
