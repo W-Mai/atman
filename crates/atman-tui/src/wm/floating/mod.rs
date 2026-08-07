@@ -10,7 +10,7 @@ use atman_runtime::{TaskKind, TaskSnapshot};
 
 use crate::app::OutputItem;
 use crate::task_panel::ActivityNode;
-use crate::wm::{ContentKey, OpenPolicy};
+use crate::wm::{ContentKey, OpenPolicy, WindowId};
 
 pub mod content;
 pub mod focus;
@@ -27,6 +27,7 @@ pub use shadow::{
 
 pub struct WindowInstance {
     pub id: String,
+    pub window_id: WindowId,
     pub content_key: ContentKey,
     pub kind: PanelKind,
     pub content: Option<Box<dyn crate::wm::WindowComponent>>,
@@ -107,6 +108,7 @@ pub struct WindowManager {
     pub panels: Vec<WindowInstance>,
     pub focus: FocusState,
     z_counter: u32,
+    next_window_id: u64,
 }
 
 const DEFAULT_PANEL_W: u16 = 88;
@@ -206,8 +208,11 @@ impl WindowManager {
         } else {
             None
         };
+        let window_id = WindowId(self.next_window_id);
+        self.next_window_id += 1;
         let panel = WindowInstance {
             id: id.to_string(),
+            window_id,
             content_key,
             kind,
             content: None,
