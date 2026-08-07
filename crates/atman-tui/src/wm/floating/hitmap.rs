@@ -99,10 +99,11 @@ impl WindowManager {
         self.panels
             .iter()
             .filter(|p| {
-                col >= p.rect.x
-                    && col < p.rect.x + p.rect.width
-                    && row >= p.rect.y
-                    && row < p.rect.y + p.rect.height
+                let sx0 = p.rect.x.saturating_sub(2);
+                let sx1 = p.rect.x + p.rect.width + 1;
+                let sy0 = p.rect.y.saturating_sub(1);
+                let sy1 = p.rect.y + p.rect.height + 1;
+                col >= sx0 && col <= sx1 && row >= sy0 && row <= sy1
             })
             .max_by_key(|p| p.z)
     }
