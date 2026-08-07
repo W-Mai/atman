@@ -758,6 +758,7 @@ async fn run_frames(
                                     let canvas = app.last_transcript_rect.unwrap_or_default();
                                     app.floating_panels.open(
                                         "mcp-manager",
+                                        crate::wm::ContentKey::Mcp,
                                         crate::floating_panels::PanelKind::Mcp,
                                         "MCP Servers",
                                         canvas,
@@ -894,6 +895,8 @@ async fn run_frames(
                                             .unwrap_or((0, 0));
                                         app.floating_panels.open_with_size(
                                             "__history__",
+                                            crate::wm::ContentKey::History,
+                                            crate::wm::OpenPolicy::ReuseExisting,
                                             crate::floating_panels::PanelKind::History,
                                             "History",
                                             canvas,
@@ -916,6 +919,7 @@ async fn run_frames(
                                         if let Some(node) = node {
                                             app.floating_panels.open(
                                                 &panel_id,
+                                                crate::wm::ContentKey::Activity(run_id.clone()),
                                                 crate::floating_panels::PanelKind::Activity,
                                                 &node.label,
                                                 canvas,
@@ -2247,6 +2251,7 @@ fn dispatch_palette_entry(
             let canvas = app.last_transcript_rect.unwrap_or_default();
             app.floating_panels.open(
                 "mcp-manager",
+                crate::wm::ContentKey::Mcp,
                 crate::floating_panels::PanelKind::Mcp,
                 "MCP Servers",
                 canvas,
@@ -2256,6 +2261,7 @@ fn dispatch_palette_entry(
             let canvas = app.last_transcript_rect.unwrap_or_default();
             app.floating_panels.open(
                 "cheatsheet",
+                crate::wm::ContentKey::Cheatsheet,
                 crate::floating_panels::PanelKind::Cheatsheet,
                 "Keybindings",
                 canvas,
@@ -3398,6 +3404,7 @@ fn handle_key(
             let canvas = app.last_transcript_rect.unwrap_or_default();
             app.floating_panels.open(
                 "cheatsheet",
+                crate::wm::ContentKey::Cheatsheet,
                 crate::floating_panels::PanelKind::Cheatsheet,
                 "Keybindings",
                 canvas,

@@ -10,6 +10,7 @@ use atman_runtime::{TaskKind, TaskSnapshot};
 
 use crate::app::OutputItem;
 use crate::task_panel::ActivityNode;
+use crate::wm::{ContentKey, OpenPolicy};
 
 pub mod content;
 pub mod focus;
@@ -27,6 +28,7 @@ pub use shadow::{
 #[derive(Debug, Clone)]
 pub struct FloatingPanel {
     pub id: String,
+    pub content_key: ContentKey,
     pub kind: PanelKind,
     pub title: String,
     pub rect: Rect,
@@ -115,14 +117,33 @@ impl FloatingPanels {
         self.focus.active.as_deref()
     }
 
-    pub fn open(&mut self, id: &str, kind: PanelKind, title: &str, canvas: Rect) {
-        self.open_with_size(id, kind, title, canvas, 0, 0, false);
+    pub fn open(
+        &mut self,
+        id: &str,
+        content_key: ContentKey,
+        kind: PanelKind,
+        title: &str,
+        canvas: Rect,
+    ) {
+        self.open_with_size(
+            id,
+            content_key,
+            OpenPolicy::ReuseExisting,
+            kind,
+            title,
+            canvas,
+            0,
+            0,
+            false,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn open_with_size(
         &mut self,
         id: &str,
+        content_key: ContentKey,
+        policy: OpenPolicy,
         kind: PanelKind,
         title: &str,
         canvas: Rect,
@@ -135,7 +156,20 @@ impl FloatingPanels {
         } else {
             (w, h)
         };
-        if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
+        let reuse = match policy {
+            OpenPolicy::ReuseExisting => self
+                .panels
+                .iter()
+                .find(|p| p.content_key == content_key)
+                .map(|p| p.id.clone()),
+            OpenPolicy::AlwaysNew => None,
+        };
+        if let Some(existing_id) = reuse {
+            let p = self
+                .panels
+                .iter_mut()
+                .find(|p| p.id == existing_id)
+                .unwrap();
             p.kind = kind;
             p.title = title.to_string();
             if !p.maximized && !maximized {
@@ -149,8 +183,8 @@ impl FloatingPanels {
                 p.rect = maximized_rect(canvas);
                 p.maximized = true;
             }
-            self.focus.focus(id);
-            self.bring_to_front(id);
+            self.focus.focus(&existing_id);
+            self.bring_to_front(&existing_id);
             return;
         }
         self.z_counter += 1;
@@ -174,6 +208,7 @@ impl FloatingPanels {
         };
         let panel = FloatingPanel {
             id: id.to_string(),
+            content_key,
             kind,
             title: title.to_string(),
             rect,
@@ -385,6 +420,7 @@ mod tests {
         let mut fp = FloatingPanels::default();
         fp.open(
             "bg_1",
+            ContentKey::Task("bg_1".to_string()),
             PanelKind::Task(TaskKind::Bash),
             "cargo build",
             canvas(),
@@ -398,12 +434,14 @@ mod tests {
         let mut fp = FloatingPanels::default();
         fp.open(
             "bg_1",
+            ContentKey::Task("bg_1".to_string()),
             PanelKind::Task(TaskKind::Bash),
             "cargo build",
             canvas(),
         );
         fp.open(
             "bg_1",
+            ContentKey::Task("bg_1".to_string()),
             PanelKind::Task(TaskKind::Bash),
             "cargo build",
             canvas(),
@@ -414,8 +452,20 @@ mod tests {
     #[test]
     fn close_removes_and_refocuses() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
-        fp.open("b", PanelKind::Task(TaskKind::Bash), "b", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
+        fp.open(
+            "b",
+            ContentKey::Task("b".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "b",
+            canvas(),
+        );
         fp.close("b");
         assert_eq!(fp.panels.len(), 1);
         assert_eq!(fp.focused(), Some("a"));
@@ -424,8 +474,20 @@ mod tests {
     #[test]
     fn focus_brings_to_front() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
-        fp.open("b", PanelKind::Task(TaskKind::Bash), "b", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
+        fp.open(
+            "b",
+            ContentKey::Task("b".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "b",
+            canvas(),
+        );
         let z_b_before = fp.panels.iter().find(|p| p.id == "b").unwrap().z;
         fp.focus("a");
         let z_a = fp.panels.iter().find(|p| p.id == "a").unwrap().z;
@@ -435,7 +497,13 @@ mod tests {
     #[test]
     fn toggle_maximize_swaps_rect() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
         let orig = fp.panels[0].rect;
         fp.toggle_maximize("a", canvas());
         assert!(fp.panels[0].maximized);
@@ -448,8 +516,20 @@ mod tests {
     #[test]
     fn hit_test_titlebar_finds_topmost() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
-        fp.open("b", PanelKind::Task(TaskKind::Bash), "b", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
+        fp.open(
+            "b",
+            ContentKey::Task("b".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "b",
+            canvas(),
+        );
         let b = fp.panels.iter().find(|p| p.id == "b").unwrap().clone();
         let hit = fp.hit_test_titlebar(b.rect.x + 2, b.rect.y);
         assert!(hit.is_some());
@@ -459,7 +539,13 @@ mod tests {
     #[test]
     fn move_panel_no_clamp() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
         fp.move_panel("a", 200, 200, canvas());
         let p = &fp.panels[0];
         assert_eq!(p.rect.x, 200);
@@ -469,7 +555,13 @@ mod tests {
     #[test]
     fn hit_test_titlebar_includes_shadow_ring() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
         let p = fp.panels[0].clone();
         // shadow ring: 2 cols left of panel
         let hit = fp.hit_test_titlebar(p.rect.x - 1, p.rect.y + 1);
@@ -485,7 +577,13 @@ mod tests {
     #[test]
     fn hit_test_titlebar_excludes_content() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
         let p = fp.panels[0].clone();
         // content area: x+2..x+w-2, y+3..y+h-2
         let hit = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y + 4);
@@ -498,7 +596,13 @@ mod tests {
         // exclusion must cover y+2 so that clicks on the first content row
         // (e.g. first history row) are not captured as drag.
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::History, "History", canvas());
+        fp.open(
+            "a",
+            ContentKey::History,
+            PanelKind::History,
+            "History",
+            canvas(),
+        );
         let p = fp.panels[0].clone();
         // first content row is at y+2, x+3 (inside content x range)
         let hit = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y + 2);
@@ -517,7 +621,13 @@ mod tests {
     #[test]
     fn hit_test_close_at_correct_position() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
         let p = fp.panels[0].clone();
         let hit = fp.hit_test_close(p.rect.x + 1, p.rect.y + 5);
         assert!(hit.is_some());
@@ -530,7 +640,13 @@ mod tests {
     #[test]
     fn hit_test_resize_at_correct_position() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
         let p = fp.panels[0].clone();
         // ⇲ at (x+w-1, y+h-1) — 3x3 area
         let cx = p.rect.x + p.rect.width - 1;
@@ -550,7 +666,13 @@ mod tests {
     #[test]
     fn resize_panel_min_size() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
         let c = canvas();
         fp.resize_panel("a", 5, 3, c);
         assert_eq!(fp.panels[0].rect.width, 20);
@@ -562,7 +684,13 @@ mod tests {
         // shadow border is at lx0 (rect.x - 2), which is outside panel.rect
         // panel.rect starts at rect.x, so rect.x - 2 is NOT inside panel
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
         let p = fp.panels[0].clone();
         // shadow top border y = rect.y - 1, panel starts at rect.y
         // so shadow top is NOT inside panel
@@ -574,9 +702,27 @@ mod tests {
     #[test]
     fn close_uses_history_not_panels_last() {
         let mut fp = FloatingPanels::default();
-        fp.open("a", PanelKind::Task(TaskKind::Bash), "a", canvas());
-        fp.open("b", PanelKind::Task(TaskKind::Bash), "b", canvas());
-        fp.open("c", PanelKind::Task(TaskKind::Bash), "c", canvas());
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
+        fp.open(
+            "b",
+            ContentKey::Task("b".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "b",
+            canvas(),
+        );
+        fp.open(
+            "c",
+            ContentKey::Task("c".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "c",
+            canvas(),
+        );
         // focus order: a was focused first, then b, then c.
         // Now re-focus "a" so it's most-recent in history.
         fp.focus("a");
