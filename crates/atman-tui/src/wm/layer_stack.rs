@@ -18,8 +18,8 @@ impl LayerStack {
         }
     }
 
-    pub fn dispatch_key(&self) -> bool {
-        false
+    pub fn dispatch_key(&self, app: &crate::app::AppState) -> bool {
+        app.modal_open()
     }
 
     pub fn dispatch_mouse(&self) -> bool {

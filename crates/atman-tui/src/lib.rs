@@ -2697,6 +2697,147 @@ fn handle_approval_key(
     }
 }
 
+fn handle_modal_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) -> bool {
+    if app.form_modal.open {
+        handle_form_key(action, app, control_tx);
+        return true;
+    }
+    if app.compact_review.is_some() {
+        handle_compact_review_key(action, app, control_tx);
+        return true;
+    }
+    if app.session_switcher.open {
+        handle_session_switcher_key(action, app, control_tx);
+        return true;
+    }
+    if app.history_search.open {
+        handle_history_search_key(action, app);
+        return true;
+    }
+    if app.provider_manager.open {
+        app.provider_manager.handle_key(action, control_tx);
+        if let Some(model) = app.provider_manager.open_alias_model.take() {
+            app.alias_manager.open_form_with_model(&model);
+        }
+        if app.provider_manager.add_just_completed {
+            app.provider_manager.add_just_completed = false;
+            if app.onboarding_open {
+                app.onboarding.provider_added();
+            }
+        }
+        if app.provider_manager.refresh_just_triggered {
+            app.provider_manager.refresh_just_triggered = false;
+            app.push_toast(
+                "refreshing models…",
+                app::NoteLevel::Info,
+                std::time::Duration::from_secs(2),
+                app::ToastPosition::TopRight,
+            );
+        }
+        if app.provider_manager.test_just_triggered {
+            app.provider_manager.test_just_triggered = false;
+            app.push_toast(
+                "testing endpoint…",
+                app::NoteLevel::Info,
+                std::time::Duration::from_secs(5),
+                app::ToastPosition::TopRight,
+            );
+        }
+        return true;
+    }
+    if app.alias_manager.open {
+        app.alias_manager.handle_key(action, control_tx);
+        return true;
+    }
+    if app.model_picker.open {
+        app.model_picker.handle_key(action);
+        if let Some(model) = app.model_picker.picked.take() {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::SwitchModel {
+                    model: model.clone(),
+                });
+            }
+            app.context.model = model.clone();
+            app.push_toast(
+                format!("model switched to {model}"),
+                app::NoteLevel::Success,
+                std::time::Duration::from_secs(3),
+                app::ToastPosition::TopRight,
+            );
+        }
+        return true;
+    }
+    if app.onboarding_open {
+        match app.onboarding.handle_key(action) {
+            crate::onboarding::OnboardingEvent::None => {}
+            crate::onboarding::OnboardingEvent::OpenProviderManager => {
+                app.provider_manager.open_add();
+            }
+            crate::onboarding::OnboardingEvent::Completed => {
+                app.onboarding_open = false;
+                app.hints_dismissed = false;
+                app.save_ui_state();
+                app.push_toast(
+                    "Setup complete — smart model configured".to_string(),
+                    app::NoteLevel::Success,
+                    std::time::Duration::from_secs(4),
+                    app::ToastPosition::TopRight,
+                );
+            }
+            crate::onboarding::OnboardingEvent::Skipped => {
+                app.onboarding_open = false;
+                app.onboarding_skipped = true;
+                app.save_ui_state();
+                app.push_toast(
+                    "You can configure atman in ~/.config/atman/config.toml".to_string(),
+                    app::NoteLevel::Warn,
+                    std::time::Duration::from_secs(5),
+                    app::ToastPosition::TopRight,
+                );
+            }
+        }
+        return true;
+    }
+    if app.palette.open {
+        handle_palette_key(action, app, control_tx);
+        return true;
+    }
+    if app.theme_picker_open {
+        let themes = [
+            atman_runtime::trust::Theme::Default,
+            atman_runtime::trust::Theme::Wuxia,
+            atman_runtime::trust::Theme::Animal,
+            atman_runtime::trust::Theme::Weather,
+            atman_runtime::trust::Theme::Drink,
+        ];
+        let max = themes.len();
+        match action {
+            KeyAction::Escape => {
+                app.theme_picker_open = false;
+            }
+            KeyAction::HistoryUp | KeyAction::CursorLeft => {
+                app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
+            }
+            KeyAction::HistoryDown | KeyAction::CursorRight => {
+                app.picker_selected = (app.picker_selected + 1) % max;
+            }
+            KeyAction::Submit | KeyAction::Char('\r') => {
+                app.trust.theme = themes[app.picker_selected.min(max - 1)];
+                app.theme_picker_open = false;
+                app.save_ui_state();
+            }
+            KeyAction::Quit => app.should_quit = true,
+            _ => {}
+        }
+        return true;
+    }
+    false
+}
+
 fn handle_key(
     action: KeyAction,
     app: &mut AppState,
@@ -3009,108 +3150,10 @@ fn handle_key(
         }
         return;
     }
-    if app.form_modal.open {
-        handle_form_key(&action, app, control_tx);
-        return;
-    }
-    if app.compact_review.is_some() {
-        handle_compact_review_key(&action, app, control_tx);
-        return;
-    }
-    if app.session_switcher.open {
-        handle_session_switcher_key(&action, app, control_tx);
-        return;
-    }
-    if app.history_search.open {
-        handle_history_search_key(&action, app);
-        return;
-    }
-    if app.provider_manager.open {
-        app.provider_manager.handle_key(&action, control_tx);
-        if let Some(model) = app.provider_manager.open_alias_model.take() {
-            app.alias_manager.open_form_with_model(&model);
-        }
-        if app.provider_manager.add_just_completed {
-            app.provider_manager.add_just_completed = false;
-            if app.onboarding_open {
-                app.onboarding.provider_added();
-            }
-        }
-        if app.provider_manager.refresh_just_triggered {
-            app.provider_manager.refresh_just_triggered = false;
-            app.push_toast(
-                "refreshing models…",
-                app::NoteLevel::Info,
-                std::time::Duration::from_secs(2),
-                app::ToastPosition::TopRight,
-            );
-        }
-        if app.provider_manager.test_just_triggered {
-            app.provider_manager.test_just_triggered = false;
-            app.push_toast(
-                "testing endpoint…",
-                app::NoteLevel::Info,
-                std::time::Duration::from_secs(5),
-                app::ToastPosition::TopRight,
-            );
-        }
-        return;
-    }
-    if app.alias_manager.open {
-        app.alias_manager.handle_key(&action, control_tx);
-        return;
-    }
-    if app.model_picker.open {
-        app.model_picker.handle_key(&action);
-        if let Some(model) = app.model_picker.picked.take() {
-            if let Some(tx) = control_tx {
-                let _ = tx.send(TuiControl::SwitchModel {
-                    model: model.clone(),
-                });
-            }
-            app.context.model = model.clone();
-            app.push_toast(
-                format!("model switched to {model}"),
-                app::NoteLevel::Success,
-                std::time::Duration::from_secs(3),
-                app::ToastPosition::TopRight,
-            );
-        }
-        return;
-    }
-    if app.onboarding_open {
-        match app.onboarding.handle_key(&action) {
-            crate::onboarding::OnboardingEvent::None => {}
-            crate::onboarding::OnboardingEvent::OpenProviderManager => {
-                app.provider_manager.open_add();
-            }
-            crate::onboarding::OnboardingEvent::Completed => {
-                app.onboarding_open = false;
-                app.hints_dismissed = false;
-                app.save_ui_state();
-                app.push_toast(
-                    "Setup complete — smart model configured".to_string(),
-                    app::NoteLevel::Success,
-                    std::time::Duration::from_secs(4),
-                    app::ToastPosition::TopRight,
-                );
-            }
-            crate::onboarding::OnboardingEvent::Skipped => {
-                app.onboarding_open = false;
-                app.onboarding_skipped = true;
-                app.save_ui_state();
-                app.push_toast(
-                    "You can configure atman in ~/.config/atman/config.toml".to_string(),
-                    app::NoteLevel::Warn,
-                    std::time::Duration::from_secs(5),
-                    app::ToastPosition::TopRight,
-                );
-            }
-        }
-        return;
-    }
-    if app.palette.open {
-        handle_palette_key(&action, app, control_tx);
+    let modal_active = app.layer_stack.dispatch_key(app);
+    if modal_active
+        && handle_modal_key(&action, app, control_tx)
+    {
         return;
     }
     if let KeyAction::OpenCommandPalette = action {
@@ -3194,35 +3237,6 @@ fn handle_key(
                         app.push_note(&warning, app::NoteLevel::Warn);
                     }
                 }
-            }
-            KeyAction::Quit => app.should_quit = true,
-            _ => {}
-        }
-        return;
-    }
-    if app.theme_picker_open {
-        let themes = [
-            atman_runtime::trust::Theme::Default,
-            atman_runtime::trust::Theme::Wuxia,
-            atman_runtime::trust::Theme::Animal,
-            atman_runtime::trust::Theme::Weather,
-            atman_runtime::trust::Theme::Drink,
-        ];
-        let max = themes.len();
-        match action {
-            KeyAction::Escape => {
-                app.theme_picker_open = false;
-            }
-            KeyAction::HistoryUp | KeyAction::CursorLeft => {
-                app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
-            }
-            KeyAction::HistoryDown | KeyAction::CursorRight => {
-                app.picker_selected = (app.picker_selected + 1) % max;
-            }
-            KeyAction::Submit | KeyAction::Char('\r') => {
-                app.trust.theme = themes[app.picker_selected.min(max - 1)];
-                app.theme_picker_open = false;
-                app.save_ui_state();
             }
             KeyAction::Quit => app.should_quit = true,
             _ => {}

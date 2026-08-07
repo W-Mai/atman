@@ -278,6 +278,7 @@ pub struct AppState {
     pub task_panel_collapsed: bool,
     pub task_panel_collapsed_groups: std::collections::HashSet<atman_runtime::TaskKind>,
     pub wm: crate::wm::WindowManager,
+    pub layer_stack: crate::wm::LayerStack,
     pub drag_target: Option<String>,
     pub drag_offset: (u16, u16),
     pub last_titlebar_click: Option<(String, std::time::Instant)>,
@@ -364,6 +365,7 @@ impl AppState {
             follow_tail: true,
             mouse_captured: true,
             wm_visual_version: 0,
+            layer_stack: crate::wm::LayerStack::new(),
             ..Default::default()
         }
     }
