@@ -40,6 +40,21 @@ pub fn render_panel_content(
         return;
     }
 
+    if let Some(ref mut content) = panel.content {
+        let _ = content.render_content(
+            area,
+            f,
+            &crate::wm::RenderCtx {
+                snapshots,
+                items,
+                animation_frame,
+                panel_width: area.width,
+                expanded_tools: &panel.expanded_tools,
+            },
+        );
+        return;
+    }
+
     let area = Rect::new(area.x + 1, area.y, area.width - 2, area.height);
 
     match panel.kind {
