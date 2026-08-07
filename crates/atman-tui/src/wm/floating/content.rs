@@ -42,7 +42,6 @@ pub fn render_panel_content(
                 snapshots,
                 items,
                 animation_frame,
-                panel_width: area.width,
                 expanded_tools: &panel.expanded_tools,
                 activity_nodes,
                 items_version,

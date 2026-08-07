@@ -18,7 +18,6 @@ use crate::wm::floating::PanelRenderCache;
 pub struct FlowPanelContent {
     pub handle: String,
     pub scroll: u16,
-    pub expanded_tools: std::collections::HashSet<String>,
     pub render_cache: Option<PanelRenderCache>,
 }
 
@@ -93,8 +92,11 @@ impl WindowComponent for FlowPanelContent {
             } else {
                 false
             }
-        }) && let Some(OutputItem::WorkflowPanel { graph, expanded_nodes, .. }) =
-            ctx.items.get(panel_idx)
+        }) && let Some(OutputItem::WorkflowPanel {
+            graph,
+            expanded_nodes,
+            ..
+        }) = ctx.items.get(panel_idx)
         {
             let render_width = area.width.max(300);
             let (lines, regions) = crate::output::render_workflow_panel_with_regions(
@@ -138,8 +140,10 @@ impl WindowComponent for FlowPanelContent {
                 wf_offset: 0,
             });
             frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), area);
-        } else if let Some(snap) =
-            ctx.snapshots.iter().find(|s| s.source_handle == self.handle)
+        } else if let Some(snap) = ctx
+            .snapshots
+            .iter()
+            .find(|s| s.source_handle == self.handle)
         {
             super::common::render_task_meta(frame, area, atman_runtime::TaskKind::Flow, snap);
         } else {
