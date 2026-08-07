@@ -148,6 +148,12 @@ impl WindowComponent for MermaidPanelContent {
         }
     }
 
+    fn sync_state(&mut self, scroll: u16, h_scroll: u16, split: bool) {
+        self.scroll = scroll;
+        self.h_scroll = h_scroll;
+        self.split = split;
+    }
+
     fn title_suffix(&self) -> Option<String> {
         if self.split {
             Some("Tab: diagram".into())

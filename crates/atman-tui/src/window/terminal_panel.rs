@@ -56,6 +56,10 @@ impl WindowComponent for TerminalPanelContent {
         WmEventResult::Ignored
     }
 
+    fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
+        self.scroll = scroll;
+    }
+
     fn preferred_size(&self, _viewport: Rect) -> SizeHint {
         SizeHint {
             min: (20, 6),
