@@ -597,6 +597,16 @@ impl AppState {
             ph,
             false,
         );
+        if let Some(p) = self.wm.panels.iter_mut().find(|p| p.id == id) {
+            p.content = Some(Box::new(
+                crate::window::mermaid_panel::MermaidPanelContent {
+                    item_id: id.clone(),
+                    scroll: 0,
+                    h_scroll: 0,
+                    split: false,
+                },
+            ));
+        }
     }
 
     pub fn maximized_canvas(&self) -> ratatui::layout::Rect {

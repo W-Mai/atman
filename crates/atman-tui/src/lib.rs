@@ -776,6 +776,13 @@ async fn run_frames(
                                         "MCP Servers",
                                         canvas,
                                     );
+                                    if let Some(p) =
+                                        app.wm.panels.iter_mut().find(|p| p.id == "mcp-manager")
+                                    {
+                                        p.content = Some(Box::new(
+                                            crate::window::mcp_panel::McpPanelContent { scroll: 0 },
+                                        ));
+                                    }
                                 } else if let Some(r) = app.last_goal_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -917,6 +924,15 @@ async fn run_frames(
                                             ph,
                                             false,
                                         );
+                                        if let Some(p) =
+                                            app.wm.panels.iter_mut().find(|p| p.id == "__history__")
+                                        {
+                                            p.content = Some(Box::new(
+                                                crate::window::history_panel::HistoryPanelContent {
+                                                    scroll: 0,
+                                                },
+                                            ));
+                                        }
                                     } else if let Some((run_id, node_id, _)) = hm
                                         .activity_rects
                                         .iter()
@@ -937,6 +953,19 @@ async fn run_frames(
                                                 &node.label,
                                                 canvas,
                                             );
+                                            if let Some(p) = app
+                                                .wm
+                                                .panels
+                                                .iter_mut()
+                                                .find(|p| p.id == panel_id)
+                                            {
+                                                p.content = Some(Box::new(
+                                                    crate::window::activity_panel::ActivityPanelContent {
+                                                        run_id: panel_id.clone(),
+                                                        scroll: 0,
+                                                    },
+                                                ));
+                                            }
                                         }
                                     } else {
                                         let hit_task = hm
@@ -2269,6 +2298,11 @@ fn dispatch_palette_entry(
                 "MCP Servers",
                 canvas,
             );
+            if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == "mcp-manager") {
+                p.content = Some(Box::new(crate::window::mcp_panel::McpPanelContent {
+                    scroll: 0,
+                }));
+            }
         }
         PaletteEntryId::ShowHelp => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
@@ -2279,6 +2313,11 @@ fn dispatch_palette_entry(
                 "Keybindings",
                 canvas,
             );
+            if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == "cheatsheet") {
+                p.content = Some(Box::new(
+                    crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+                ));
+            }
         }
         PaletteEntryId::SetTrustMode => {
             app.trust_mode_picker_open = true;
@@ -3434,6 +3473,11 @@ fn handle_key(
                 "Keybindings",
                 canvas,
             );
+            if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == "cheatsheet") {
+                p.content = Some(Box::new(
+                    crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+                ));
+            }
             *interrupt_prompt = None;
         }
         KeyAction::Interrupt => {
