@@ -9,6 +9,7 @@ pub mod focus;
 pub mod hitmap;
 pub mod layer;
 pub mod modal;
+pub mod modal_wrappers;
 pub mod window;
 
 pub use component::{
