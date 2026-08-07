@@ -280,6 +280,32 @@ impl WindowManager {
             }
         }
     }
+
+    pub fn cycle_focus(&mut self, forward: bool) {
+        if self.panels.len() < 2 {
+            return;
+        }
+        let mut sorted: Vec<&WindowInstance> = self.panels.iter().collect();
+        sorted.sort_by_key(|p| std::cmp::Reverse(p.z));
+        let current_idx = sorted
+            .iter()
+            .position(|p| Some(p.id.as_str()) == self.focus.active.as_deref());
+        let next_idx = match current_idx {
+            Some(i) => {
+                if forward {
+                    (i + 1) % sorted.len()
+                } else {
+                    (i + sorted.len() - 1) % sorted.len()
+                }
+            }
+            None => 0,
+        };
+        if let Some(target) = sorted.get(next_idx) {
+            let id = target.id.clone();
+            self.focus.focus(&id);
+            self.bring_to_front(&id);
+        }
+    }
 }
 
 fn maximized_rect(canvas: Rect) -> Rect {

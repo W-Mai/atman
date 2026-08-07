@@ -238,6 +238,7 @@ pub struct AppState {
     pub animation_frame: u32,
     pub deny_arm: Option<std::time::Instant>,
     pub items_version: u64,
+    pub wm_visual_version: u64,
     pub expanded_version: u64,
     pub terminal_throttle: Option<Instant>,
     pub layout_cache: crate::output::LayoutCache,
@@ -349,6 +350,7 @@ impl AppState {
             goal,
             follow_tail: true,
             mouse_captured: true,
+            wm_visual_version: 0,
             ..Default::default()
         }
     }

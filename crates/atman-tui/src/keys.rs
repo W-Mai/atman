@@ -23,6 +23,8 @@ pub enum KeyAction {
     Interrupt,
     Escape,
     Tab,
+    CyclePanelForward,
+    CyclePanelBackward,
     BackTab,
     HelpModal,
     ToggleSidebar,
