@@ -20,6 +20,7 @@ pub mod clipboard;
 pub mod compact_review_modal;
 pub mod completion;
 pub mod form_modal;
+pub mod wm;
 pub mod highlight;
 pub mod history;
 pub mod history_search_modal;
