@@ -145,6 +145,7 @@ pub fn render_panel(
             let abs_y = area.y + (lines.len() as u16).saturating_sub(*scroll);
             if abs_y >= area.y && abs_y < area.y + area.height {
                 hitmap_out.mcp_row_rects.push((
+                    String::new(),
                     s.name.clone(),
                     Rect {
                         x: area.x,

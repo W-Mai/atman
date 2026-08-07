@@ -35,7 +35,7 @@ impl WindowComponent for HistoryPanelContent {
         hitmap
             .history_row_rects
             .into_iter()
-            .map(|(handle, rect)| HitRegion {
+            .map(|(_, handle, rect)| HitRegion {
                 target: HitTarget::HistoryRow(handle),
                 rect,
             })
@@ -94,6 +94,7 @@ fn render_history_content(
         let is_hovered = hovered_row.as_deref() == Some(&snap.source_handle);
         if visible_i < visible_height {
             hitmap.history_row_rects.push((
+                String::new(),
                 snap.source_handle.clone(),
                 Rect {
                     x: area.x,
