@@ -25,11 +25,11 @@ pub use shadow::{
     render_top_fade,
 };
 
-#[derive(Debug, Clone)]
 pub struct WindowInstance {
     pub id: String,
     pub content_key: ContentKey,
     pub kind: PanelKind,
+    pub content: Option<Box<dyn crate::wm::WindowComponent>>,
     pub title: String,
     pub rect: Rect,
     pub z: u32,
@@ -102,7 +102,7 @@ pub fn task_kind_icon(kind: TaskKind) -> &'static str {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default)]
 pub struct WindowManager {
     pub panels: Vec<WindowInstance>,
     pub focus: FocusState,
@@ -210,6 +210,7 @@ impl WindowManager {
             id: id.to_string(),
             content_key,
             kind,
+            content: None,
             title: title.to_string(),
             rect,
             z: self.z_counter,

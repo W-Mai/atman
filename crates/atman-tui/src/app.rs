@@ -444,6 +444,24 @@ impl AppState {
             (kind, label, 0, 0)
         };
 
+        let content: Box<dyn crate::wm::WindowComponent> = match kind {
+            atman_runtime::TaskKind::Bash => Box::new(crate::window::bash_panel::BashPanelContent {
+                handle: handle.to_string(),
+                scroll: 0,
+            }),
+            atman_runtime::TaskKind::Terminal => {
+                Box::new(crate::window::terminal_panel::TerminalPanelContent {
+                    handle: handle.to_string(),
+                    scroll: 0,
+                })
+            }
+            atman_runtime::TaskKind::Flow => Box::new(crate::window::flow_panel::FlowPanelContent {
+                handle: handle.to_string(),
+                scroll: 0,
+                expanded_tools: HashSet::new(),
+            }),
+        };
+
         self.wm.open_with_size(
             handle,
             crate::wm::ContentKey::Task(handle.to_string()),
@@ -455,6 +473,9 @@ impl AppState {
             ph,
             maximized,
         );
+        if let Some(panel) = self.wm.panels.iter_mut().find(|panel| panel.id == handle) {
+            panel.content = Some(content);
+        }
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {

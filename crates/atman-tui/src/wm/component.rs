@@ -83,7 +83,6 @@ pub enum HitTarget {
 pub struct RenderCtx<'a> {
     pub snapshots: &'a [atman_runtime::TaskSnapshot],
     pub items: &'a [crate::app::OutputItem],
-    pub messages: &'a [atman_runtime::message::Message],
     pub animation_frame: u32,
     pub panel_width: u16,
     pub expanded_tools: &'a HashSet<String>,
