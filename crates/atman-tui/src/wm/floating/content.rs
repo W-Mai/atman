@@ -61,14 +61,16 @@ pub fn render_panel_content(
         panel.split = sp;
         for region in regions {
             match region.target {
-                crate::wm::component::HitTarget::HistoryRow(s) => {
-                    hitmap_out.history_row_rects.push((s, region.rect))
-                }
-                crate::wm::component::HitTarget::WorkflowNode(i, s) => {
-                    hitmap_out.workflow_node_rects.push((i, s, region.rect))
-                }
+                crate::wm::component::HitTarget::HistoryRow(s) => hitmap_out
+                    .history_row_rects
+                    .push((panel.id.clone(), s, region.rect)),
+                crate::wm::component::HitTarget::WorkflowNode(i, s) => hitmap_out
+                    .workflow_node_rects
+                    .push((panel.id.clone(), i, s, region.rect)),
                 crate::wm::component::HitTarget::McpRow(s) => {
-                    hitmap_out.mcp_row_rects.push((s, region.rect))
+                    hitmap_out
+                        .mcp_row_rects
+                        .push((panel.id.clone(), s, region.rect))
                 }
                 _ => {}
             }

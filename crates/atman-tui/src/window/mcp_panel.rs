@@ -33,7 +33,7 @@ impl WindowComponent for McpPanelContent {
         hitmap
             .mcp_row_rects
             .into_iter()
-            .map(|(id, rect)| HitRegion {
+            .map(|(_, id, rect)| HitRegion {
                 target: HitTarget::McpRow(id),
                 rect,
             })

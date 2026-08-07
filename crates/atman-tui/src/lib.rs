@@ -719,41 +719,45 @@ async fn run_frames(
                                         app.last_titlebar_click = Some((id, now));
                                     }
                                 } else {
-                                    if let Some((handle, _)) = app
+                                    let history_hit = app
                                         .last_wm_hitmap
                                         .history_row_rects
                                         .iter()
-                                        .find(|(_, r)| {
-                                            rect_contains(*r, me.column, me.row)
+                                        .find(|(pid, _, r)| {
+                                            pid == &panel_id
+                                                && rect_contains(*r, me.column, me.row)
                                                 && rect_contains(pr, r.x, r.y)
                                         })
-                                        .cloned()
-                                    {
-                                        let canvas = app.last_transcript_rect.unwrap_or_default();
-                                        app.open_task_panel(&handle, canvas);
-                                    } else if let Some((name, _)) = app
+                                        .map(|(_, h, _)| h.clone());
+                                    let mcp_hit = app
                                         .last_wm_hitmap
                                         .mcp_row_rects
                                         .iter()
-                                        .find(|(_, r)| {
-                                            rect_contains(*r, me.column, me.row)
+                                        .find(|(pid, _, r)| {
+                                            pid == &panel_id
+                                                && rect_contains(*r, me.column, me.row)
                                                 && rect_contains(pr, r.x, r.y)
                                         })
-                                        .cloned()
-                                    {
-                                        if !app.expanded_mcp_servers.remove(&name) {
-                                            app.expanded_mcp_servers.insert(name);
-                                        }
-                                    } else if let Some((panel_idx, path, _)) = app
+                                        .map(|(_, n, _)| n.clone());
+                                    let wf_hit = app
                                         .last_wm_hitmap
                                         .workflow_node_rects
                                         .iter()
-                                        .find(|(_, _, r)| {
-                                            rect_contains(*r, me.column, me.row)
+                                        .find(|(pid, _, _, r)| {
+                                            pid == &panel_id
+                                                && rect_contains(*r, me.column, me.row)
                                                 && rect_contains(pr, r.x, r.y)
                                         })
-                                        .cloned()
-                                    {
+                                        .map(|(_, i, p, _)| (*i, p.clone()));
+                                    if let Some(handle) = history_hit {
+                                        let canvas =
+                                            app.last_transcript_rect.unwrap_or_default();
+                                        app.open_task_panel(&handle, canvas);
+                                    } else if let Some(name) = mcp_hit {
+                                        if !app.expanded_mcp_servers.remove(&name) {
+                                            app.expanded_mcp_servers.insert(name);
+                                        }
+                                    } else if let Some((panel_idx, path)) = wf_hit {
                                         if path.is_empty() {
                                             app.toggle_workflow_panel_expansion(panel_idx);
                                         } else {
@@ -1187,7 +1191,7 @@ async fn run_frames(
                                     .wm
                                     .hit_test_panel(me.column, me.row)
                                     .map(|p| (p.id.clone(), p.rect));
-                                if let Some((_panel_id, pr)) = topmost_panel {
+                                if let Some((panel_id, pr)) = topmost_panel {
                                     // floating panel button hover
                                     let btn_hover = app
                                         .wm
@@ -1202,11 +1206,12 @@ async fn run_frames(
                                         .last_wm_hitmap
                                         .history_row_rects
                                         .iter()
-                                        .find(|(_, r)| {
-                                            rect_contains(*r, me.column, me.row)
+                                        .find(|(pid, _, r)| {
+                                            pid == &panel_id
+                                                && rect_contains(*r, me.column, me.row)
                                                 && rect_contains(pr, r.x, r.y)
                                         })
-                                        .map(|(h, _)| h.clone());
+                                        .map(|(_, h, _)| h.clone());
                                     if app.hovered_history_row != history_hover {
                                         app.hovered_history_row = history_hover;
                                         app.items_version = app.items_version.wrapping_add(1);
@@ -1216,11 +1221,12 @@ async fn run_frames(
                                         .last_wm_hitmap
                                         .mcp_row_rects
                                         .iter()
-                                        .find(|(_, r)| {
-                                            rect_contains(*r, me.column, me.row)
+                                        .find(|(pid, _, r)| {
+                                            pid == &panel_id
+                                                && rect_contains(*r, me.column, me.row)
                                                 && rect_contains(pr, r.x, r.y)
                                         })
-                                        .map(|(n, _)| n.clone());
+                                        .map(|(_, n, _)| n.clone());
                                     if app.hovered_mcp_row != mcp_hover {
                                         app.hovered_mcp_row = mcp_hover;
                                     }

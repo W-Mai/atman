@@ -4,9 +4,12 @@ use super::{PanelBtn, WindowInstance, WindowManager};
 
 #[derive(Debug, Default)]
 pub struct WmHitmap {
-    pub history_row_rects: Vec<(String, Rect)>,
-    pub workflow_node_rects: Vec<(usize, String, Rect)>,
-    pub mcp_row_rects: Vec<(String, Rect)>,
+    // Each entry is (panel_id, ...) so hit regions can be attributed to the
+    // panel that produced them. Consumers must not fire a region owned by a
+    // lower-z panel that the topmost panel would block.
+    pub history_row_rects: Vec<(String, String, Rect)>, // (panel_id, handle, rect)
+    pub workflow_node_rects: Vec<(String, usize, String, Rect)>, // (panel_id, idx, path, rect)
+    pub mcp_row_rects: Vec<(String, String, Rect)>,     // (panel_id, name, rect)
 }
 
 impl WindowManager {
