@@ -19,6 +19,12 @@ impl WindowComponent for CheatsheetPanelContent {
         frame: &mut Frame,
         _ctx: &RenderCtx,
     ) -> Vec<HitRegion> {
+        let area = Rect::new(
+            area.x + 1,
+            area.y,
+            area.width.saturating_sub(2),
+            area.height,
+        );
         let lines = completion::cheatsheet_lines();
         let max_scroll = (lines.len() as u16).saturating_sub(area.height);
         self.scroll = self.scroll.min(max_scroll);
@@ -34,6 +40,10 @@ impl WindowComponent for CheatsheetPanelContent {
 
     fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
         self.scroll = scroll;
+    }
+
+    fn extract_state(&self) -> (u16, u16, bool) {
+        (self.scroll, 0, false)
     }
 
     fn preferred_size(&self, _viewport: Rect) -> SizeHint {

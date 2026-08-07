@@ -94,6 +94,7 @@ pub struct RenderCtx<'a> {
     pub mcp_selected: usize,
     pub hovered_mcp_row: &'a Option<String>,
     pub mcp_browser: &'a crate::mcp_manager::McpBrowserState<'a>,
+    pub hovered_history_row: &'a Option<String>,
 }
 
 /// Mutable event context — allows components to send commands and mutate
@@ -153,4 +154,11 @@ pub trait WindowComponent: Send {
     /// Sync scroll/state from the Window shell into this content before
     /// rendering. Default no-op.
     fn sync_state(&mut self, _scroll: u16, _h_scroll: u16, _split: bool) {}
+
+    /// Extract current scroll/state from this content after rendering.
+    /// Returns `(scroll, h_scroll, split)`. Used to sync clamped values
+    /// (e.g. scroll→max_scroll) back to the Window shell.
+    fn extract_state(&self) -> (u16, u16, bool) {
+        (0, 0, false)
+    }
 }
