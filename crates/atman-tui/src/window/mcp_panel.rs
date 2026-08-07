@@ -48,6 +48,10 @@ impl WindowComponent for McpPanelContent {
         self.scroll = scroll;
     }
 
+    fn extract_state(&self) -> (u16, u16, bool) {
+        (self.scroll, 0, false)
+    }
+
     fn preferred_size(&self, _viewport: Rect) -> SizeHint {
         SizeHint {
             min: (40, 10),

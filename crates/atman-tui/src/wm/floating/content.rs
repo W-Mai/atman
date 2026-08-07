@@ -17,7 +17,7 @@ pub fn render_panel_content(
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
     hovered_btn: &Option<(String, PanelBtn)>,
-    _hovered_history_row: &Option<String>,
+    hovered_history_row: &Option<String>,
     hitmap_out: &mut WmHitmap,
     animation_frame: u32,
     mcp_servers: &[atman_runtime::mcp::McpServerStatus],
@@ -52,8 +52,13 @@ pub fn render_panel_content(
                 mcp_selected,
                 hovered_mcp_row,
                 mcp_browser,
+                hovered_history_row,
             },
         );
+        let (s, hs, sp) = content.extract_state();
+        panel.scroll = s;
+        panel.h_scroll = hs;
+        panel.split = sp;
         for region in regions {
             match region.target {
                 crate::wm::component::HitTarget::HistoryRow(s) => {

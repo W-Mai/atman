@@ -6,7 +6,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::app::OutputItem;
 use crate::wm::component::{
-    EventCtx, HitRegion, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
+    EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
 use crate::wm::floating::WmHitmap;
 
@@ -22,17 +22,24 @@ impl WindowComponent for HistoryPanelContent {
             area.width.saturating_sub(2),
             area.height,
         );
-        let mut dummy = WmHitmap::default();
+        let mut hitmap = WmHitmap::default();
         render_history_content(
             frame,
             area,
             ctx.snapshots,
             ctx.items,
-            &mut dummy,
-            &None,
+            &mut hitmap,
+            ctx.hovered_history_row,
             self.scroll,
         );
-        Vec::new()
+        hitmap
+            .history_row_rects
+            .into_iter()
+            .map(|(handle, rect)| HitRegion {
+                target: HitTarget::HistoryRow(handle),
+                rect,
+            })
+            .collect()
     }
 
     fn handle_event(&mut self, _event: &WmEvent, _ctx: &mut EventCtx) -> WmEventResult {
@@ -41,6 +48,10 @@ impl WindowComponent for HistoryPanelContent {
 
     fn sync_state(&mut self, scroll: u16, _h_scroll: u16, _split: bool) {
         self.scroll = scroll;
+    }
+
+    fn extract_state(&self) -> (u16, u16, bool) {
+        (self.scroll, 0, false)
     }
 
     fn preferred_size(&self, _viewport: Rect) -> SizeHint {
