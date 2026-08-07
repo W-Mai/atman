@@ -4118,36 +4118,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     if app.trust_mode_picker_open {
         render_trust_mode_picker(f, area, app);
     }
-    if app.theme_picker_open {
-        render_theme_picker(f, area, app);
-    }
-    if app.palette.open {
-        palette::render(f, area, &app.palette);
-    }
-    if app.session_switcher.open {
-        session_switcher::render(f, area, &app.session_switcher);
-    }
-    if app.onboarding_open {
-        crate::onboarding::render(f, area, &app.onboarding);
-    }
-    if app.provider_manager.open {
-        crate::provider_manager::render(f, area, &app.provider_manager);
-    }
-    if app.model_picker.open {
-        crate::model_picker::render(f, area, &app.model_picker, &app.context.model);
-    }
-    if app.alias_manager.open {
-        crate::alias_manager::render(f, area, &app.alias_manager);
-    }
-    if let Some(modal) = app.compact_review.as_ref() {
-        compact_review_modal::render(f, area, modal);
-    }
-    if app.history_search.open {
-        history_search_modal::render(f, area, &mut app.history_search);
-    }
-    if app.form_modal.open {
-        form_modal::render(f, area, &app.form_modal);
-    }
+    render_modals(f, area, app);
     // Modal notification overlay
     if let Some(ref msg) = app.modal_notification {
         render_notify_modal(f, area, msg);
@@ -4221,6 +4192,19 @@ fn render_startup_hints(
         .wrap(ratatui::widgets::Wrap { trim: true }),
         rect,
     );
+}
+
+fn render_modals(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut AppState) {
+    if app.theme_picker_open { render_theme_picker(f, area, app); }
+    if app.palette.open { palette::render(f, area, &app.palette); }
+    if app.session_switcher.open { session_switcher::render(f, area, &app.session_switcher); }
+    if app.onboarding_open { crate::onboarding::render(f, area, &app.onboarding); }
+    if app.provider_manager.open { crate::provider_manager::render(f, area, &app.provider_manager); }
+    if app.model_picker.open { crate::model_picker::render(f, area, &app.model_picker, &app.context.model); }
+    if app.alias_manager.open { crate::alias_manager::render(f, area, &app.alias_manager); }
+    if let Some(modal) = &app.compact_review { compact_review_modal::render(f, area, modal); }
+    if app.history_search.open { history_search_modal::render(f, area, &mut app.history_search); }
+    if app.form_modal.open { form_modal::render(f, area, &app.form_modal); }
 }
 
 fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {
