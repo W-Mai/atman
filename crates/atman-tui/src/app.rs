@@ -344,6 +344,19 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
 }
 
 impl AppState {
+    pub fn modal_open(&self) -> bool {
+        self.form_modal.open
+            || self.compact_review.is_some()
+            || self.session_switcher.open
+            || self.history_search.open
+            || self.provider_manager.open
+            || self.alias_manager.open
+            || self.model_picker.open
+            || self.onboarding_open
+            || self.palette.open
+            || self.theme_picker_open
+    }
+
     pub fn new(session_id: String, goal: Option<String>) -> Self {
         Self {
             session_id,
