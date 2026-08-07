@@ -86,6 +86,9 @@ pub struct RenderCtx<'a> {
     pub animation_frame: u32,
     pub panel_width: u16,
     pub expanded_tools: &'a HashSet<String>,
+    pub activity_nodes: &'a [crate::task_panel::ActivityNode],
+    pub items_version: u64,
+    pub expanded_version: u64,
 }
 
 /// Mutable event context — allows components to send commands and mutate

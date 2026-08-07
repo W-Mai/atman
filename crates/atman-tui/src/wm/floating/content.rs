@@ -50,6 +50,9 @@ pub fn render_panel_content(
                 animation_frame,
                 panel_width: area.width,
                 expanded_tools: &panel.expanded_tools,
+                activity_nodes,
+                items_version,
+                expanded_version,
             },
         );
         for region in regions {

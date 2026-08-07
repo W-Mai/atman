@@ -131,7 +131,7 @@ impl WindowComponent for MermaidPanelContent {
                 frame.render_widget(p, inner_area);
             }
         } else {
-            crate::wm::floating::content::render_placeholder(frame, area, &self.item_id);
+            super::common::render_placeholder(frame, area, &self.item_id);
         }
         Vec::new()
     }

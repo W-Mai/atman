@@ -464,6 +464,7 @@ impl AppState {
                     handle: handle.to_string(),
                     scroll: 0,
                     expanded_tools: HashSet::new(),
+                    render_cache: None,
                 })
             }
         };
