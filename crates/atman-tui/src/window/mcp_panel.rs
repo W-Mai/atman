@@ -22,7 +22,7 @@ impl WindowComponent for McpPanelContent {
             area.width.saturating_sub(2),
             area.height,
         );
-        crate::wm::floating::content::render_placeholder(frame, area, "mcp");
+        super::common::render_placeholder(frame, area, "MCP Servers");
         Vec::new()
     }
 

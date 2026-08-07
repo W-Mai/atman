@@ -1,6 +1,7 @@
 pub mod activity_panel;
 pub mod bash_panel;
 pub mod cheatsheet_panel;
+pub mod common;
 pub mod flow_panel;
 pub mod history_panel;
 pub mod mcp_panel;

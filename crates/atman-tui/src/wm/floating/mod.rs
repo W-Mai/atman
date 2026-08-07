@@ -48,19 +48,19 @@ pub struct WindowInstance {
 /// the stored regions using the *current* scroll/area.
 #[derive(Clone, Debug)]
 pub struct PanelRenderCache {
-    items_version: u64,
-    expanded_version: u64,
-    width: u16,
+    pub(crate) items_version: u64,
+    pub(crate) expanded_version: u64,
+    pub(crate) width: u16,
     /// None when the panel is done/idle → cache survives across frames.
     /// Some(frame) when running → invalidated every animation tick.
-    animation_frame: Option<u32>,
-    messages_len: usize,
-    workflow_expanded: bool,
-    expanded_tools_len: usize,
+    pub(crate) animation_frame: Option<u32>,
+    pub(crate) messages_len: usize,
+    pub(crate) workflow_expanded: bool,
+    pub(crate) expanded_tools_len: usize,
 
-    lines: Vec<Line<'static>>,
-    regions: Vec<crate::output::NodeRegion>,
-    wf_offset: u32,
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) regions: Vec<crate::output::NodeRegion>,
+    pub(crate) wf_offset: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
