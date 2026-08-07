@@ -72,7 +72,7 @@ pub(crate) fn render_task_meta(
     f.render_widget(Paragraph::new(lines), body_area);
 }
 
-fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {
+pub(crate) fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {
     match status {
         atman_runtime::TaskStatus::Running => "◐",
         atman_runtime::TaskStatus::Killing => "◑",
@@ -82,7 +82,7 @@ fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {
     }
 }
 
-fn status_color(status: atman_runtime::TaskStatus) -> Color {
+pub(crate) fn status_color(status: atman_runtime::TaskStatus) -> Color {
     let t = crate::theme::theme();
     match status {
         atman_runtime::TaskStatus::Running => t.accent.into(),
@@ -93,7 +93,7 @@ fn status_color(status: atman_runtime::TaskStatus) -> Color {
     }
 }
 
-fn format_elapsed(ms: u64) -> String {
+pub(crate) fn format_elapsed(ms: u64) -> String {
     let s = ms / 1000;
     let raw = if s < 60 {
         format!("{s}s")

@@ -562,7 +562,7 @@ mod tests {
             "b",
             canvas(),
         );
-        let b = fp.panels.iter().find(|p| p.id == "b").unwrap().clone();
+        let b = fp.panels.iter().find(|p| p.id == "b").unwrap();
         let hit = fp.hit_test_titlebar(b.rect.x + 2, b.rect.y);
         assert!(hit.is_some());
         assert_eq!(hit.unwrap().id, "b");
@@ -594,7 +594,7 @@ mod tests {
             "a",
             canvas(),
         );
-        let p = fp.panels[0].clone();
+        let p = &fp.panels[0];
         // shadow ring: 2 cols left of panel
         let hit = fp.hit_test_titlebar(p.rect.x - 1, p.rect.y + 1);
         assert!(hit.is_some(), "should hit shadow ring left of panel");
@@ -616,7 +616,7 @@ mod tests {
             "a",
             canvas(),
         );
-        let p = fp.panels[0].clone();
+        let p = &fp.panels[0];
         // content area: x+2..x+w-2, y+3..y+h-2
         let hit = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y + 4);
         assert!(hit.is_none(), "should not hit content area");
@@ -635,7 +635,7 @@ mod tests {
             "History",
             canvas(),
         );
-        let p = fp.panels[0].clone();
+        let p = &fp.panels[0];
         // first content row is at y+2, x+3 (inside content x range)
         let hit = fp.hit_test_titlebar(p.rect.x + 3, p.rect.y + 2);
         assert!(
@@ -660,7 +660,7 @@ mod tests {
             "a",
             canvas(),
         );
-        let p = fp.panels[0].clone();
+        let p = &fp.panels[0];
         let hit = fp.hit_test_close(p.rect.x + 1, p.rect.y + 5);
         assert!(hit.is_some());
         let hit_pad = fp.hit_test_close(p.rect.x, p.rect.y + 5);
@@ -679,7 +679,7 @@ mod tests {
             "a",
             canvas(),
         );
-        let p = fp.panels[0].clone();
+        let p = &fp.panels[0];
         // ⇲ at (x+w-1, y+h-1) — 3x3 area
         let cx = p.rect.x + p.rect.width - 1;
         let cy = p.rect.y + p.rect.height - 1;
@@ -723,7 +723,7 @@ mod tests {
             "a",
             canvas(),
         );
-        let p = fp.panels[0].clone();
+        let p = &fp.panels[0];
         // shadow top border y = rect.y - 1, panel starts at rect.y
         // so shadow top is NOT inside panel
         assert!(p.rect.y > 0, "panel should not be at y=0 for shadow test");

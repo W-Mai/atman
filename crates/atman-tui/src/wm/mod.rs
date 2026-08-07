@@ -3,8 +3,6 @@
 
 pub mod component;
 pub mod floating;
-pub mod focus;
-pub mod hitmap;
 pub mod layer;
 pub mod layer_stack;
 pub mod modal;

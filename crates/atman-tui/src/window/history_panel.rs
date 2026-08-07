@@ -86,9 +86,9 @@ fn render_history_content(
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, snap) in done.iter().enumerate() {
-        let icon = status_icon(snap.status);
-        let elapsed = format_elapsed(snap.elapsed_ms());
-        let st_color = status_color(snap.status);
+        let icon = super::common::status_icon(snap.status);
+        let elapsed = super::common::format_elapsed(snap.elapsed_ms());
+        let st_color = super::common::status_color(snap.status);
         let visible_i = (i as u16).saturating_sub(scroll);
         let row_y = area.y + visible_i;
         let is_hovered = hovered_row.as_deref() == Some(&snap.source_handle);
@@ -222,37 +222,4 @@ fn format_started_at(snap: &atman_runtime::TaskSnapshot) -> String {
         }
     }
     "--:--:--".to_string()
-}
-
-fn status_icon(status: atman_runtime::TaskStatus) -> &'static str {
-    match status {
-        atman_runtime::TaskStatus::Running => "◐",
-        atman_runtime::TaskStatus::Killing => "◑",
-        atman_runtime::TaskStatus::Ok => "✓",
-        atman_runtime::TaskStatus::Err => "✗",
-        atman_runtime::TaskStatus::Killed => "⊘",
-    }
-}
-
-fn status_color(status: atman_runtime::TaskStatus) -> Color {
-    let t = crate::theme::theme();
-    match status {
-        atman_runtime::TaskStatus::Running => t.accent.into(),
-        atman_runtime::TaskStatus::Killing => t.warn.into(),
-        atman_runtime::TaskStatus::Ok => t.success.into(),
-        atman_runtime::TaskStatus::Err => t.error.into(),
-        atman_runtime::TaskStatus::Killed => t.subtle_fg.into(),
-    }
-}
-
-fn format_elapsed(ms: u64) -> String {
-    let s = ms / 1000;
-    let raw = if s < 60 {
-        format!("{s}s")
-    } else if s < 3600 {
-        format!("{}:{:02}", s / 60, s % 60)
-    } else {
-        format!("{}h{:02}m", s / 3600, (s % 3600) / 60)
-    };
-    format!("{:>5}", raw)
 }
