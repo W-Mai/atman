@@ -84,7 +84,6 @@ pub struct RenderCtx<'a> {
     pub snapshots: &'a [atman_runtime::TaskSnapshot],
     pub items: &'a [crate::app::OutputItem],
     pub animation_frame: u32,
-    pub panel_width: u16,
     pub expanded_tools: &'a HashSet<String>,
     pub activity_nodes: &'a [crate::task_panel::ActivityNode],
     pub items_version: u64,
@@ -114,39 +113,48 @@ pub trait WindowComponent: Send {
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion>;
 
     /// Handle a key or mouse event. Return Consumed/Ignored.
+    #[allow(dead_code)]
     fn handle_event(&mut self, event: &WmEvent, ctx: &mut EventCtx) -> WmEventResult;
 
     /// Preferred size for floating placement.
+    #[allow(dead_code)]
     fn preferred_size(&self, viewport: Rect) -> SizeHint;
 
     /// Called when this window gains focus.
+    #[allow(dead_code)]
     fn on_focus(&mut self) {}
 
     /// Called when this window loses focus.
+    #[allow(dead_code)]
     fn on_blur(&mut self) {}
 
     /// Called when the window is about to close.
     /// Return `Block` to prevent closing (e.g., unsaved changes).
+    #[allow(dead_code)]
     fn on_close(&mut self) -> CloseOutcome {
         CloseOutcome::Close
     }
 
     /// Called when the window's content area changes size.
+    #[allow(dead_code)]
     fn on_resize(&mut self, _area: Rect, _ctx: &mut EventCtx) {}
 
     /// Whether this window's content should update while not focused.
     /// (e.g., live task output = true, static history = false)
+    #[allow(dead_code)]
     fn wants_background_updates(&self) -> bool {
         false
     }
 
     /// Content version for cache invalidation. If this changes, the cache
     /// is invalidated and content is re-rendered.
+    #[allow(dead_code)]
     fn content_version(&self) -> u64 {
         0
     }
 
     /// Optional suffix appended to the title (e.g., Mermaid's "Tab: split").
+    #[allow(dead_code)]
     fn title_suffix(&self) -> Option<String> {
         None
     }

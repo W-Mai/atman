@@ -478,7 +478,6 @@ impl AppState {
                 Box::new(crate::window::flow_panel::FlowPanelContent {
                     handle: handle.to_string(),
                     scroll: 0,
-                    expanded_tools: HashSet::new(),
                     render_cache: None,
                 })
             }
