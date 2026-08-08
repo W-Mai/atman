@@ -175,7 +175,7 @@ pub(crate) async fn run_frames(
                                         app.app.history_search.scroll_preview(true, 3);
                                     } else {
                                         app.app.history_search.move_up();
-                                        key_handler::refresh_history_preview(&mut app.app);
+                                        crate::history_search_modal::refresh_history_preview(&mut app.app);
                                     }
                                 }
                                 MouseEventKind::ScrollDown => {
@@ -185,7 +185,7 @@ pub(crate) async fn run_frames(
                                         app.app.history_search.scroll_preview(false, 3);
                                     } else {
                                         app.app.history_search.move_down();
-                                        key_handler::refresh_history_preview(&mut app.app);
+                                        crate::history_search_modal::refresh_history_preview(&mut app.app);
                                     }
                                 }
                                 MouseEventKind::Down(MouseButton::Left) => {
@@ -195,7 +195,7 @@ pub(crate) async fn run_frames(
                                         if app.app.history_search.selected != idx {
                                             app.app.history_search.selected = idx;
                                             app.app.history_search.preview_scroll = 0;
-                                            key_handler::refresh_history_preview(&mut app.app);
+                                            crate::history_search_modal::refresh_history_preview(&mut app.app);
                                         }
                                     }
                                 }

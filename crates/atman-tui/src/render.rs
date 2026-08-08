@@ -559,7 +559,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     );
 
     if !ui.wm.panels.is_empty() {
-        let hovered_panel_btn = ui.wm.interaction.hovered_panel_btn.clone();
+        let hovered_panel_btn = ui.wm.interaction.hovered_panel_btn;
         let hovered_history_row = ui.wm.interaction.hovered_history_row.clone();
         let hovered_mcp_row = ui.wm.interaction.hovered_mcp_row.clone();
         let close_armed = ui

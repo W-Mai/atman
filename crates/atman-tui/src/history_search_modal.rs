@@ -1,4 +1,6 @@
+use crate::app::AppState;
 use crate::input::InputEditor;
+use crate::keys::KeyAction;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -158,6 +160,176 @@ impl HistorySearchModal {
         self.selected = 0;
         self.preview_lines.clear();
     }
+}
+
+pub(crate) fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
+    use crate::history_search_modal::{HistoryHit, HistorySearchScope};
+    match action {
+        KeyAction::Escape => app.history_search.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => {
+            app.history_search.move_up();
+            refresh_history_preview(app);
+        }
+        KeyAction::HistoryDown | KeyAction::CursorRight => {
+            app.history_search.move_down();
+            refresh_history_preview(app);
+        }
+        KeyAction::PageUp => {
+            app.history_search.scroll_preview(true, 10);
+        }
+        KeyAction::PageDown => {
+            app.history_search.scroll_preview(false, 10);
+        }
+        KeyAction::ScrollUp => {
+            app.history_search.scroll_preview(true, 3);
+        }
+        KeyAction::ScrollDown => {
+            app.history_search.scroll_preview(false, 3);
+        }
+        KeyAction::Tab => {
+            app.history_search.scope = app.history_search.scope.toggle();
+        }
+        KeyAction::Submit => {
+            let query = app.history_search.editor.buf().trim().to_string();
+            if query.is_empty() {
+                app.history_search.set_error("empty query".into());
+                return;
+            }
+            let Some(session) = app.session.as_ref() else {
+                app.history_search.set_error("no session in context".into());
+                return;
+            };
+            let Some(idx) = session.project_index() else {
+                app.history_search
+                    .set_error("project index unavailable".into());
+                return;
+            };
+            let session_filter = match app.history_search.scope {
+                HistorySearchScope::Session => Some(session.id().to_string()),
+                HistorySearchScope::Project => None,
+            };
+            let rows = match idx.fts_search_project_events(&query, session_filter.as_deref(), 50) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    app.history_search.set_error(format!("search failed: {e}"));
+                    return;
+                }
+            };
+            let hits: Vec<HistoryHit> = rows
+                .into_iter()
+                .map(|row| {
+                    let snippet = extract_event_snippet(&row.kind, &row.payload);
+                    HistoryHit {
+                        session_id: row.session_id,
+                        seq: row.seq,
+                        ts: row.ts,
+                        kind: row.kind,
+                        snippet,
+                    }
+                })
+                .collect();
+            app.history_search.set_results(hits, query);
+            refresh_history_preview(app);
+        }
+        KeyAction::Char(c) => {
+            if *c == 'j' && app.history_search.editor.buf().is_empty() {
+                app.history_search.move_down();
+                refresh_history_preview(app);
+            } else if *c == 'k' && app.history_search.editor.buf().is_empty() {
+                app.history_search.move_up();
+                refresh_history_preview(app);
+            } else {
+                app.history_search.editor.insert_char(*c);
+            }
+        }
+        KeyAction::Backspace => {
+            app.history_search.editor.backspace();
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn refresh_history_preview(app: &mut AppState) {
+    let (session_id, seq) = match app.history_search.selected_hit() {
+        Some(hit) => (hit.session_id.clone(), hit.seq),
+        None => {
+            app.history_search.set_preview(Vec::new());
+            return;
+        }
+    };
+    let Some(session) = app.session.as_ref() else {
+        return;
+    };
+    let Some(idx) = session.project_index() else {
+        return;
+    };
+    let rows = match idx.find_project_events_around(&session_id, seq, 3) {
+        Ok(r) => r,
+        Err(_) => {
+            app.history_search.set_preview(Vec::new());
+            return;
+        }
+    };
+    let lines: Vec<String> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let is_hit = row.seq == seq;
+            let text = extract_event_text(&row.kind, &row.payload);
+            if text.is_none() && !is_hit {
+                return None;
+            }
+            let marker = if is_hit { "▶" } else { " " };
+            let body = text.unwrap_or_else(|| format!("<{}>", row.kind));
+            Some(format!(
+                "{marker} **[{}]** seq={}  \n{}",
+                row.kind, row.seq, body
+            ))
+        })
+        .collect();
+    app.history_search.set_preview(lines);
+}
+
+pub(crate) fn extract_event_text(kind: &str, payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    match kind {
+        "user_msg" | "assistant_msg" | "system_msg" | "tool_result_msg" => {
+            let parts = v.get("message")?.get("parts")?.as_array()?;
+            let mut chunks = Vec::new();
+            for p in parts {
+                if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        chunks.push(text.to_string());
+                    }
+                } else if let Some(thinking) = p.get("thinking").and_then(|t| t.as_str()) {
+                    if !thinking.is_empty() {
+                        chunks.push(format!("_{thinking}_"));
+                    }
+                } else if let Some(summary) = p.get("summary").and_then(|t| t.as_str()) {
+                    if !summary.is_empty() {
+                        chunks.push(summary.to_string());
+                    }
+                } else if let Some(content) = p.get("content").and_then(|t| t.as_str()) {
+                    if !content.is_empty() {
+                        chunks.push(format!("```\n{content}\n```"));
+                    }
+                }
+            }
+            if chunks.is_empty() {
+                None
+            } else {
+                Some(chunks.join("\n\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn extract_event_snippet(kind: &str, payload: &str) -> String {
+    let text = extract_event_text(kind, payload).unwrap_or_else(|| format!("<{kind}>"));
+    text.chars()
+        .take(120)
+        .collect::<String>()
+        .replace('\n', " ")
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal) {

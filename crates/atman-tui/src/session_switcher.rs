@@ -3,7 +3,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::SessionPickerRow;
+use tokio::sync::mpsc;
+
+use crate::app::{self, AppState};
+use crate::key_handler::{enumerate_session_rows, request_session_switch};
+use crate::keys::KeyAction;
+use crate::{SessionPickerRow, TuiControl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SessionScope {
@@ -261,6 +266,107 @@ fn row_matches_filter(row: &SessionPickerRow, needle: &str) -> bool {
         return true;
     }
     false
+}
+
+pub(crate) fn handle_session_switcher_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    if app.session_switcher.rename_mode {
+        match action {
+            KeyAction::Escape => {
+                app.session_switcher.cancel_rename();
+                app.push_note("rename cancelled", app::NoteLevel::Info);
+            }
+            KeyAction::Submit => {
+                if let Some((sid, title)) = app.session_switcher.commit_rename() {
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::RenameSession {
+                            session_id: sid.clone(),
+                            title: title.clone(),
+                        });
+                    }
+                    let msg = match &title {
+                        Some(t) => format!("renamed {sid} → {t}"),
+                        None => format!("cleared title on {sid}"),
+                    };
+                    app.push_note(msg, app::NoteLevel::Info);
+                }
+            }
+            KeyAction::Backspace => app.session_switcher.rename_pop(),
+            KeyAction::Char(c) => app.session_switcher.rename_push(*c),
+            _ => {}
+        }
+        return;
+    }
+    if app.session_switcher.filter_mode {
+        match action {
+            KeyAction::Escape | KeyAction::Submit => {
+                app.session_switcher.leave_filter_mode();
+            }
+            KeyAction::Backspace => app.session_switcher.filter_pop(),
+            KeyAction::Char(c) => app.session_switcher.filter_push(*c),
+            _ => {}
+        }
+        return;
+    }
+    if let KeyAction::Char('d') | KeyAction::Char('D') = action {
+        if app.session_switcher.delete_armed_matches_selected() {
+            if let Some(sid) = app.session_switcher.remove_selected() {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::DeleteSession(sid.clone()));
+                }
+                app.push_note(format!("deleted session {sid}"), app::NoteLevel::Info);
+            }
+        } else {
+            let armed = app.session_switcher.arm_delete().map(str::to_owned);
+            match armed {
+                Some(sid) => app.push_note(
+                    format!("press d again to confirm delete {sid}"),
+                    app::NoteLevel::Warn,
+                ),
+                None => app.push_note("no session selected", app::NoteLevel::Warn),
+            }
+        }
+        return;
+    }
+    if app.session_switcher.delete_armed.is_some() {
+        app.session_switcher.clear_delete_arm();
+        app.push_note("delete cancelled", app::NoteLevel::Info);
+    }
+    if let KeyAction::Char('s') | KeyAction::Char('S') = action {
+        app.session_switcher.toggle_sort();
+        return;
+    }
+    if let KeyAction::Char('f') | KeyAction::Char('F') = action {
+        app.session_switcher.enter_filter_mode();
+        return;
+    }
+    if let KeyAction::Char('r') | KeyAction::Char('R') = action {
+        if app.session_switcher.begin_rename().is_none() {
+            app.push_note("no session selected", app::NoteLevel::Warn);
+        }
+        return;
+    }
+    match action {
+        KeyAction::Escape => app.session_switcher.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => app.session_switcher.move_up(),
+        KeyAction::HistoryDown | KeyAction::CursorRight => app.session_switcher.move_down(),
+        KeyAction::Tab => {
+            let new_scope = app.session_switcher.scope.toggle();
+            let rows = enumerate_session_rows(app, new_scope);
+            app.session_switcher.scope = new_scope;
+            app.session_switcher.set_rows(rows);
+        }
+        KeyAction::Submit => {
+            if let Some(sid) = app.session_switcher.selected_id() {
+                app.session_switcher.close();
+                request_session_switch(app, control_tx, sid.clone());
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
