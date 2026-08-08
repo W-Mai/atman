@@ -94,11 +94,71 @@ pub enum PanelBtn {
 }
 
 #[derive(Default)]
+pub struct WmInteractionState {
+    pub drag_target: Option<WindowId>,
+    pub drag_offset: (u16, u16),
+    pub last_titlebar_click: Option<(WindowId, std::time::Instant)>,
+    pub resize_target: Option<WindowId>,
+    pub resize_offset: (u16, u16),
+    pub hovered_panel_btn: Option<(WindowId, PanelBtn)>,
+    pub hovered_history_row: Option<String>,
+    pub hovered_mcp_row: Option<String>,
+    pub last_hitmap: WmHitmap,
+    pub panel_close_armed_id: Option<String>,
+    pub panel_close_armed_at: Option<std::time::Instant>,
+}
+
+#[derive(Default)]
 pub struct WindowManager {
     pub panels: Vec<WindowInstance>,
     pub focus: FocusState,
+    pub layers: LayerStack,
+    pub interaction: WmInteractionState,
     z_counter: u32,
     next_window_id: u64,
+}
+
+impl WindowManager {
+    pub fn arm_panel_close(&mut self, id: String) {
+        self.interaction.panel_close_armed_id = Some(id);
+        self.interaction.panel_close_armed_at = Some(std::time::Instant::now());
+    }
+
+    pub fn clear_panel_close_arm(&mut self) {
+        self.interaction.panel_close_armed_id = None;
+        self.interaction.panel_close_armed_at = None;
+    }
+
+    pub fn panel_close_arm_expired(&self) -> bool {
+        match self.interaction.panel_close_armed_at {
+            Some(t) => t.elapsed() > std::time::Duration::from_secs(2),
+            None => true,
+        }
+    }
+
+    pub fn sync_modals(&mut self, flags: &crate::app::ModalOpenFlags) {
+        let was_open = !self.layers.modal_stack.is_empty();
+        let focused_id = self.focused_id();
+        let restore_focus = self
+            .layers
+            .modal_stack
+            .first()
+            .and_then(|entry| entry.pre_modal_focus);
+        self.layers.sync_modals(flags);
+        if self.layers.modal_stack.is_empty() {
+            if was_open
+                && let Some(id) = restore_focus
+                && self.panels.iter().any(|panel| panel.id == id)
+            {
+                self.focus(id);
+            }
+        } else {
+            if !was_open && let Some(root) = self.layers.modal_stack.first_mut() {
+                root.pre_modal_focus = focused_id;
+            }
+            self.focus.blur();
+        }
+    }
 }
 
 const DEFAULT_PANEL_W: u16 = 88;

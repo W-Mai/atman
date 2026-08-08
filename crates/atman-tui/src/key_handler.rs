@@ -1,3 +1,4 @@
+use crate::UiState;
 use tokio::sync::mpsc;
 
 use super::TuiControl;
@@ -405,9 +406,10 @@ pub(crate) fn handle_session_switcher_key(
 
 pub(crate) fn handle_palette_key(
     action: &KeyAction,
-    app: &mut AppState,
+    ui: &mut UiState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    let app = &mut ui.app;
     match action {
         KeyAction::Escape => app.palette.close(),
         KeyAction::HistoryUp | KeyAction::CursorLeft => app.palette.move_up(),
@@ -417,7 +419,7 @@ pub(crate) fn handle_palette_key(
         KeyAction::Submit => {
             if let Some(id) = app.palette.selected() {
                 app.palette.close();
-                dispatch_palette_entry(id, app, control_tx);
+                dispatch_palette_entry(id, ui, control_tx);
             }
         }
         _ => {}
@@ -426,9 +428,10 @@ pub(crate) fn handle_palette_key(
 
 pub(crate) fn dispatch_palette_entry(
     id: crate::palette::PaletteEntryId,
-    app: &mut AppState,
+    ui: &mut UiState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
+    let app = &mut ui.app;
     use crate::palette::PaletteEntryId;
     match id {
         PaletteEntryId::YankMode => {
@@ -502,14 +505,14 @@ pub(crate) fn dispatch_palette_entry(
         }
         PaletteEntryId::ManageMcp => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
-            app.wm.open(
+            ui.wm.open(
                 "mcp-manager",
                 crate::wm::ContentKey::Mcp,
                 crate::wm::WindowContent::Mcp,
                 "MCP Servers",
                 canvas,
             );
-            if let Some(p) = app
+            if let Some(p) = ui
                 .wm
                 .panels
                 .iter_mut()
@@ -522,14 +525,14 @@ pub(crate) fn dispatch_palette_entry(
         }
         PaletteEntryId::ShowHelp => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
-            app.wm.open(
+            ui.wm.open(
                 "cheatsheet",
                 crate::wm::ContentKey::Cheatsheet,
                 crate::wm::WindowContent::Cheatsheet,
                 "Keybindings",
                 canvas,
             );
-            if let Some(p) = app
+            if let Some(p) = ui
                 .wm
                 .panels
                 .iter_mut()
@@ -921,9 +924,10 @@ pub(crate) fn handle_approval_key(
 pub(crate) fn handle_modal_key(
     kind: crate::wm::ModalKind,
     action: &KeyAction,
-    app: &mut AppState,
+    ui: &mut UiState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) -> bool {
+    let app = &mut ui.app;
     if kind == crate::wm::ModalKind::Form && app.form_modal.open {
         handle_form_key(action, app, control_tx);
         return true;
@@ -1025,7 +1029,7 @@ pub(crate) fn handle_modal_key(
         return true;
     }
     if kind == crate::wm::ModalKind::Palette && app.palette.open {
-        handle_palette_key(action, app, control_tx);
+        handle_palette_key(action, ui, control_tx);
         return true;
     }
     if kind == crate::wm::ModalKind::ThemePicker && app.theme_picker_open {
@@ -1062,7 +1066,7 @@ pub(crate) fn handle_modal_key(
 
 pub(crate) fn handle_key(
     action: KeyAction,
-    app: &mut AppState,
+    app: &mut UiState,
     editor: &mut InputEditor,
     interrupt_prompt: &mut Option<std::time::Instant>,
     submit_tx: Option<&mpsc::UnboundedSender<String>>,
@@ -1372,11 +1376,11 @@ pub(crate) fn handle_key(
         }
         return;
     }
-    app.sync_modal_stack();
-    if let Some(kind) = app.layer_stack.dispatch_key()
+    app.wm.sync_modals(&app.modal_open_flags());
+    if let Some(kind) = app.wm.layers.dispatch_key()
         && handle_modal_key(kind, &action, app, control_tx)
     {
-        app.sync_modal_stack();
+        app.wm.sync_modals(&app.modal_open_flags());
         return;
     }
     if let KeyAction::OpenCommandPalette = action {
@@ -1409,7 +1413,8 @@ pub(crate) fn handle_key(
         {
             let idx = (digit as usize) - 1;
             if let Some(entry) = recent.get(idx) {
-                request_session_switch(app, control_tx, entry.session_id.clone());
+                let session_id = entry.session_id.clone();
+                request_session_switch(app, control_tx, session_id);
                 return;
             }
         }

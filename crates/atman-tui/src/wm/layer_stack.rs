@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
-use crate::app::AppState;
+use crate::app::{AppState, ModalOpenFlags};
+use crate::wm::WindowId;
 use crate::wm::layer::LayerKind;
 use crate::wm::modal_wrappers::{
     AliasManagerWrapper, CompactReviewWrapper, FormModalWrapper, HistorySearchWrapper,
@@ -32,32 +33,22 @@ impl LayerStack {
         }
     }
 
-    pub fn sync_modals(&mut self, app: &mut AppState) {
-        let open = Self::open_modals(app);
+    pub fn sync_modals(&mut self, flags: &ModalOpenFlags) {
+        let open = Self::open_modals(flags);
         let open_set: HashSet<_> = open.iter().copied().collect();
         let saved_focus: HashMap<_, _> = self
             .modal_stack
             .iter()
             .map(|entry| (entry.kind, entry.pre_modal_focus))
             .collect();
-        let restore_focus = self
-            .modal_stack
-            .first()
-            .filter(|entry| !open_set.contains(&entry.kind))
-            .and_then(|entry| entry.pre_modal_focus);
 
         self.modal_stack
             .retain(|entry| open_set.contains(&entry.kind));
         for kind in open {
             if self.modal_stack.iter().all(|entry| entry.kind != kind) {
-                let pre_modal_focus = if self.modal_stack.is_empty() {
-                    app.wm.focus.active
-                } else {
-                    None
-                };
                 self.modal_stack.push(ModalEntry {
                     kind,
-                    pre_modal_focus,
+                    pre_modal_focus: None,
                 });
             }
         }
@@ -66,27 +57,19 @@ impl LayerStack {
         {
             root.pre_modal_focus = saved_focus.get(&root.kind).cloned().flatten();
         }
-
-        if self.modal_stack.is_empty() {
-            if let Some(id) = restore_focus
-                && app.wm.panels.iter().any(|panel| panel.id == id)
-            {
-                app.wm.focus(id);
-            }
-        } else {
-            app.wm.focus.blur();
-        }
     }
 
     pub fn dispatch_key(&self) -> Option<ModalKind> {
         self.modal_stack.last().map(|entry| entry.kind)
     }
 
-    pub fn has_floating(&self, app: &AppState) -> bool {
-        app.wm.focused().is_some()
-    }
-
-    pub fn render_modals(&self, frame: &mut Frame, area: Rect, app: &mut AppState) {
+    pub fn render_modals(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        app: &mut AppState,
+        focused_id: WindowId,
+    ) {
         let snapshots = Vec::new();
         let items = Vec::new();
         let expanded_tools = HashSet::new();
@@ -103,7 +86,7 @@ impl LayerStack {
             prompts: &mcp_prompts,
         };
         let ctx = RenderCtx {
-            window_id: app.wm.focused_id().unwrap_or(crate::wm::WindowId(0)),
+            window_id: focused_id,
             snapshots: &snapshots,
             items: &items,
             animation_frame: 0,
@@ -166,7 +149,7 @@ impl LayerStack {
         false
     }
 
-    fn open_modals(app: &AppState) -> Vec<ModalKind> {
+    fn open_modals(flags: &ModalOpenFlags) -> Vec<ModalKind> {
         const MODALS: [ModalKind; 10] = [
             ModalKind::ThemePicker,
             ModalKind::Palette,
@@ -181,7 +164,7 @@ impl LayerStack {
         ];
         MODALS
             .into_iter()
-            .filter(|kind| kind.is_open(app))
+            .filter(|kind| kind.is_open(flags))
             .collect()
     }
 }

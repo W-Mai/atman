@@ -50,7 +50,9 @@ use atman_runtime::stream::StreamFrame;
 use event_loop::*;
 use render::*;
 use terminal_guard::TerminalGuard;
+pub use ui_state::*;
 mod event_loop;
+mod ui_state;
 
 pub enum TuiNote {
     Info(String),

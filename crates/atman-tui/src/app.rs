@@ -167,6 +167,37 @@ pub struct ToastNote {
     pub fade_started: Option<std::time::Instant>,
 }
 
+#[derive(Clone, Copy)]
+pub struct ModalOpenFlags {
+    pub form: bool,
+    pub compact_review: bool,
+    pub session_switcher: bool,
+    pub history_search: bool,
+    pub provider_manager: bool,
+    pub alias_manager: bool,
+    pub model_picker: bool,
+    pub onboarding: bool,
+    pub palette: bool,
+    pub theme_picker: bool,
+}
+
+impl AppState {
+    pub fn modal_open_flags(&self) -> ModalOpenFlags {
+        ModalOpenFlags {
+            form: self.form_modal.open,
+            compact_review: self.compact_review.is_some(),
+            session_switcher: self.session_switcher.open,
+            history_search: self.history_search.open,
+            provider_manager: self.provider_manager.open,
+            alias_manager: self.alias_manager.open,
+            model_picker: self.model_picker.open,
+            onboarding: self.onboarding_open,
+            palette: self.palette.open,
+            theme_picker: self.theme_picker_open,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub items: Vec<OutputItem>,
@@ -226,8 +257,6 @@ pub struct AppState {
     pub hovered_hamburger: bool,
     pub kill_armed_id: Option<atman_runtime::TaskId>,
     pub kill_armed_at: Option<Instant>,
-    pub panel_close_armed_id: Option<String>,
-    pub panel_close_armed_at: Option<Instant>,
     pub startup_intro: Option<StartupIntro>,
     pub onboarding_open: bool,
     pub onboarding: crate::onboarding::OnboardingState,
@@ -277,17 +306,7 @@ pub struct AppState {
     pub activity_nodes: Vec<crate::task_panel::ActivityNode>,
     pub task_panel_collapsed: bool,
     pub task_panel_collapsed_groups: std::collections::HashSet<atman_runtime::TaskKind>,
-    pub wm: crate::wm::WindowManager,
-    pub layer_stack: crate::wm::LayerStack,
-    pub drag_target: Option<crate::wm::WindowId>,
-    pub drag_offset: (u16, u16),
-    pub last_titlebar_click: Option<(crate::wm::WindowId, std::time::Instant)>,
-    pub resize_target: Option<crate::wm::WindowId>,
-    pub resize_offset: (u16, u16),
-    pub hovered_panel_btn: Option<(crate::wm::WindowId, crate::wm::PanelBtn)>,
     pub panel_sizes: std::collections::HashMap<String, (u16, u16)>,
-    pub hovered_history_row: Option<String>,
-    pub hovered_mcp_row: Option<String>,
     pub expanded_mcp_servers: HashSet<String>,
     pub mcp_selected: usize,
     pub mcp_remove_armed: Option<String>,
@@ -296,7 +315,6 @@ pub struct AppState {
     pub mcp_resources_cache:
         std::collections::HashMap<String, Vec<atman_runtime::mcp::McpResource>>,
     pub mcp_prompts_cache: std::collections::HashMap<String, Vec<atman_runtime::mcp::McpPrompt>>,
-    pub last_wm_hitmap: crate::wm::WmHitmap,
     pub last_task_panel_rect: Option<ratatui::layout::Rect>,
     pub last_task_panel_hitmap: crate::task_panel::TaskPanelHitMap,
     pub tick: u64,
@@ -345,16 +363,6 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
 }
 
 impl AppState {
-    pub fn modal_open(&self) -> bool {
-        !self.layer_stack.modal_stack.is_empty()
-    }
-
-    pub fn sync_modal_stack(&mut self) {
-        let mut layer_stack = std::mem::take(&mut self.layer_stack);
-        layer_stack.sync_modals(self);
-        self.layer_stack = layer_stack;
-    }
-
     pub fn new(session_id: String, goal: Option<String>) -> Self {
         Self {
             session_id,
@@ -362,7 +370,6 @@ impl AppState {
             follow_tail: true,
             mouse_captured: true,
             wm_visual_version: 0,
-            layer_stack: crate::wm::LayerStack::new(),
             ..Default::default()
         }
     }
@@ -380,181 +387,14 @@ impl AppState {
         }
     }
 
-    pub fn open_task_panel(&mut self, handle: &str, canvas: ratatui::layout::Rect) {
-        self.open_task_panel_impl(handle, canvas, false, false);
-    }
-
-    pub fn open_task_panel_maximized(&mut self, handle: &str) {
-        let canvas = self.maximized_canvas();
-        self.open_task_panel_impl(handle, canvas, true, false);
-    }
-
     /// Background-task-completion open: never steals focus from a focused
     /// floating panel; if a panel is focused, keep its focus and notify via
     /// toast.
-    pub fn open_task_panel_background(&mut self, handle: &str) {
-        let canvas = self.maximized_canvas();
-        let focused_before = self.wm.focused_id();
-        let opened = self.open_task_panel_impl(handle, canvas, false, true);
-        if focused_before.is_some() && opened {
-            self.push_toast(
-                format!("background task ready — see panel {handle}"),
-                NoteLevel::Info,
-                std::time::Duration::from_secs(4),
-                ToastPosition::TopRight,
-            );
-        }
-    }
-
-    fn open_task_panel_impl(
-        &mut self,
-        handle: &str,
-        canvas: ratatui::layout::Rect,
-        maximized: bool,
-        background: bool,
-    ) -> bool {
-        let item = self
-            .items
-            .iter()
-            .rev()
-            .find(|it| it.handle() == Some(handle))
-            .cloned();
-        let snap = self
-            .task_snapshots
-            .iter()
-            .find(|s| s.source_handle == handle)
-            .cloned();
-
-        // A completed bash task may have left the in-memory item list (e.g.
-        // after a history restore) while its snapshot and session log file
-        // survive. Reconstruct the output so the panel shows real content
-        // instead of falling through to the empty placeholder.
-        let item = self.reconstruct_bash_item(&snap).or(item);
-
-        let (kind, label, pw, ph) = if let Some(item) = item {
-            match item {
-                OutputItem::Terminal {
-                    handle: h, screen, ..
-                } => {
-                    let (pw, ph) = (screen.cols + 8, screen.rows + 5);
-                    let label = snap
-                        .as_ref()
-                        .map(|s| s.label.clone())
-                        .unwrap_or_else(|| h.clone());
-                    (atman_runtime::TaskKind::Terminal, label, pw, ph)
-                }
-                OutputItem::Bash { handle: h, .. } => {
-                    let (pw, ph) = self.panel_sizes.get(&h).copied().unwrap_or((0, 0));
-                    let label = snap
-                        .as_ref()
-                        .map(|s| s.label.clone())
-                        .unwrap_or_else(|| h.clone());
-                    (atman_runtime::TaskKind::Bash, label, pw, ph)
-                }
-                OutputItem::SubAgentActivity { handle: h, .. } => {
-                    let label = snap
-                        .as_ref()
-                        .map(|s| s.label.clone())
-                        .unwrap_or_else(|| h.clone());
-                    (atman_runtime::TaskKind::Flow, label, 0, 0)
-                }
-                OutputItem::WorkflowPanel { .. } => {
-                    let kind = snap
-                        .as_ref()
-                        .map(|s| s.kind)
-                        .unwrap_or(atman_runtime::TaskKind::Flow);
-                    let label = snap
-                        .as_ref()
-                        .map(|s| s.label.clone())
-                        .unwrap_or_else(|| handle.to_string());
-                    (kind, label, 0, 0)
-                }
-                _ => unreachable!("handle() only returns Some for Terminal/Bash"),
-            }
-        } else {
-            let kind = snap
-                .as_ref()
-                .map(|s| s.kind)
-                .unwrap_or(atman_runtime::TaskKind::Flow);
-            let label = snap
-                .as_ref()
-                .map(|s| s.label.clone())
-                .unwrap_or_else(|| handle.to_string());
-            (kind, label, 0, 0)
-        };
-
-        let content: Box<dyn crate::wm::WindowComponent> = match kind {
-            atman_runtime::TaskKind::Bash => {
-                Box::new(crate::window::bash_panel::BashPanelContent {
-                    handle: handle.to_string(),
-                    scroll: 0,
-                })
-            }
-            atman_runtime::TaskKind::Terminal => {
-                Box::new(crate::window::terminal_panel::TerminalPanelContent {
-                    handle: handle.to_string(),
-                    scroll: 0,
-                })
-            }
-            atman_runtime::TaskKind::Flow => {
-                Box::new(crate::window::flow_panel::FlowPanelContent {
-                    handle: handle.to_string(),
-                    scroll: 0,
-                    render_cache: None,
-                })
-            }
-        };
-
-        let existing_ids: std::collections::HashSet<crate::wm::WindowId> =
-            self.wm.panels.iter().map(|p| p.id).collect();
-        let window_id = if background {
-            self.wm.open_background_with_size(
-                handle,
-                crate::wm::ContentKey::Task(handle.to_string()),
-                crate::wm::OpenPolicy::ReuseExisting,
-                crate::wm::WindowContent::Task {
-                    handle: handle.to_string(),
-                    kind,
-                },
-                &label,
-                canvas,
-                pw,
-                ph,
-                maximized,
-            )
-        } else {
-            self.wm.open_with_size(
-                handle,
-                crate::wm::ContentKey::Task(handle.to_string()),
-                crate::wm::OpenPolicy::ReuseExisting,
-                crate::wm::WindowContent::Task {
-                    handle: handle.to_string(),
-                    kind,
-                },
-                &label,
-                canvas,
-                pw,
-                ph,
-                maximized,
-            )
-        };
-        let is_new = !existing_ids.contains(&window_id);
-        if let Some(panel) = self
-            .wm
-            .panels
-            .iter_mut()
-            .find(|panel| panel.id == window_id)
-        {
-            panel.content = Some(content);
-        }
-        is_new
-    }
-
     /// Rebuild an `OutputItem::Bash` for a completed bash task whose in-memory
     /// item was evicted (e.g. after a history restore) but whose session log
     /// file still exists on disk at `<session_dir>/bg_<handle>.log`. Returns
     /// `None` when no snapshot/log is available.
-    fn reconstruct_bash_item(
+    pub(crate) fn reconstruct_bash_item(
         &mut self,
         snap: &Option<atman_runtime::TaskSnapshot>,
     ) -> Option<OutputItem> {
@@ -681,47 +521,6 @@ impl AppState {
         None
     }
 
-    pub fn open_mermaid_panel(&mut self, item_idx: usize, canvas: ratatui::layout::Rect) {
-        let id = format!("mermaid:{item_idx}");
-        let source = self.mermaid_item_source(item_idx).unwrap_or_default();
-        let lines = crate::mermaid::render_mermaid(&source, canvas.width.saturating_sub(8));
-        let pw = lines
-            .iter()
-            .map(|l| crate::width::spans_width(&l.spans))
-            .max()
-            .unwrap_or(80)
-            .max(80) as u16;
-        let ph = lines.len() as u16 + 5;
-        self.wm.open_with_size(
-            &id,
-            crate::wm::ContentKey::Mermaid(id.clone()),
-            crate::wm::OpenPolicy::ReuseExisting,
-            crate::wm::WindowContent::Mermaid {
-                item_id: id.clone(),
-            },
-            "Mermaid Diagram",
-            canvas,
-            pw,
-            ph,
-            false,
-        );
-        if let Some(p) = self
-            .wm
-            .panels
-            .iter_mut()
-            .find(|p| p.content_key == crate::wm::ContentKey::Mermaid(id.clone()))
-        {
-            p.content = Some(Box::new(
-                crate::window::mermaid_panel::MermaidPanelContent {
-                    item_id: id.clone(),
-                    scroll: 0,
-                    h_scroll: 0,
-                    split: false,
-                },
-            ));
-        }
-    }
-
     pub fn maximized_canvas(&self) -> ratatui::layout::Rect {
         let full = self.last_full_rect.unwrap_or_default();
         let transcript = self.last_transcript_rect.unwrap_or(full);
@@ -833,27 +632,6 @@ impl AppState {
 
     pub fn kill_arm_expired(&self) -> bool {
         match self.kill_armed_at {
-            Some(t) => t.elapsed() > std::time::Duration::from_secs(2),
-            None => true,
-        }
-    }
-
-    pub fn arm_panel_close(&mut self, id: String) {
-        self.panel_close_armed_id = Some(id);
-        self.panel_close_armed_at = Some(Instant::now());
-        self.items_version = self.items_version.wrapping_add(1);
-    }
-
-    pub fn clear_panel_close_arm(&mut self) {
-        if self.panel_close_armed_id.is_some() {
-            self.panel_close_armed_id = None;
-            self.panel_close_armed_at = None;
-            self.items_version = self.items_version.wrapping_add(1);
-        }
-    }
-
-    pub fn panel_close_arm_expired(&self) -> bool {
-        match self.panel_close_armed_at {
             Some(t) => t.elapsed() > std::time::Duration::from_secs(2),
             None => true,
         }
@@ -3128,7 +2906,7 @@ mod terminal_stream_tests {
     #[test]
     fn open_task_panel_different_handles_create_different_panels() {
         use atman_runtime::tools::term::{TerminalCell, TerminalScreen};
-        let mut app = AppState::new("s".into(), None);
+        let mut app = crate::UiState::new(AppState::new("s".into(), None));
         app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
         app.items.push(OutputItem::Terminal {
             handle: "term_s_0".into(),
@@ -3171,7 +2949,7 @@ mod terminal_stream_tests {
     #[test]
     fn open_task_panel_background_preserves_focus() {
         use atman_runtime::tools::term::{TerminalCell, TerminalScreen};
-        let mut app = AppState::new("s".into(), None);
+        let mut app = crate::UiState::new(AppState::new("s".into(), None));
         app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
         app.items.push(OutputItem::Terminal {
             handle: "term_s_0".into(),
@@ -3287,7 +3065,7 @@ mod terminal_e2e_tests {
         use ratatui::backend::TestBackend;
         use std::collections::HashSet;
 
-        let mut app = AppState::new("s".into(), None);
+        let mut app = crate::UiState::new(AppState::new("s".into(), None));
         app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
 
         // Simulate a completed bash task: item in items, snapshot in task_snapshots.
@@ -3323,6 +3101,16 @@ mod terminal_e2e_tests {
 
         let backend = TestBackend::new(60, 10);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        // Split the UiState into its field borrows so the panel (in wm) can be
+        // mutated independently of the read-only AppState fields.
+        let wm = &mut app.wm;
+        let snapshots = &app.app.task_snapshots;
+        let items = &app.app.items;
+        let activity_nodes = &app.app.activity_nodes;
+        let items_version = app.app.items_version;
+        let expanded_version = app.app.expanded_version;
+
         terminal
             .draw(|f| {
                 let mut hitmap = crate::wm::WmHitmap::default();
@@ -3337,10 +3125,10 @@ mod terminal_e2e_tests {
                 crate::wm::content::render_panel_content(
                     f,
                     f.area(),
-                    &mut app.wm.panels[0],
-                    &app.task_snapshots,
-                    &app.items,
-                    &app.activity_nodes,
+                    &mut wm.panels[0],
+                    snapshots,
+                    items,
+                    activity_nodes,
                     &None,
                     &None,
                     &mut hitmap,
@@ -3352,8 +3140,8 @@ mod terminal_e2e_tests {
                     0,
                     &None,
                     &browser,
-                    app.items_version,
-                    app.expanded_version,
+                    items_version,
+                    expanded_version,
                 );
             })
             .unwrap();

@@ -1,3 +1,4 @@
+use crate::UiState;
 use std::io::Stdout;
 
 use anyhow::Result;
@@ -33,47 +34,49 @@ pub(crate) async fn run_frames(
     if let Some(tr) = handle.task_registry.take() {
         app = app.with_task_registry(tr);
     }
+    let mut app = UiState::new(app);
     let ui_state = crate::states::PersistedUiState::load();
-    ui_state.apply(&mut app);
-    if handle.onboarding_recommended && !app.onboarding_skipped {
-        app.onboarding_open = true;
+    ui_state.apply(&mut app.app);
+    if handle.onboarding_recommended && !app.app.onboarding_skipped {
+        app.app.onboarding_open = true;
         if let Some(tx) = handle.control_tx.as_ref() {
             let _ = tx.send(TuiControl::OnboardingInit);
         }
     }
-    app.startup_intro = handle.startup_intro.take();
+    app.app.startup_intro = handle.startup_intro.take();
     // Reset started_at so the 300ms fade begins now, not when the
     // switch was requested (which may have been seconds ago).
-    if let Some(ref mut intro) = app.startup_intro {
+    if let Some(ref mut intro) = app.app.startup_intro {
         intro.started_at = std::time::Instant::now();
     }
     // Carry boot toasts into the live app so they persist seamlessly.
     if !handle.boot_toasts.is_empty() {
         for toast in std::mem::take(&mut handle.boot_toasts) {
-            app.push_toast(toast.message, toast.level, toast.ttl, toast.position);
+            app.app
+                .push_toast(toast.message, toast.level, toast.ttl, toast.position);
         }
     }
     if let Some(rx) = handle.context_rx.as_ref() {
-        app.context = rx.borrow().clone();
+        app.app.context = rx.borrow().clone();
     }
     if let Some(rx) = handle.goal_rx.as_ref() {
-        app.goal = rx.borrow().clone();
+        app.app.goal = rx.borrow().clone();
     }
     if let Some(rx) = handle.attach_rx.as_ref() {
-        app.attach_count = *rx.borrow();
+        app.app.attach_count = *rx.borrow();
     }
     if let Some(rx) = handle.todos_rx.as_ref() {
-        app.todos = rx.borrow().clone();
+        app.app.todos = rx.borrow().clone();
     }
     if let Some(rx) = handle.plans_rx.as_ref() {
-        app.plans = rx.borrow().clone();
+        app.app.plans = rx.borrow().clone();
     }
     if let Some(rx) = handle.approvals_rx.as_ref() {
-        app.pending_approvals = rx.borrow().clone();
+        app.app.pending_approvals = rx.borrow().clone();
     }
-    if let Some(sess) = &app.session {
+    if let Some(sess) = &app.app.session {
         sess.approval()
-            .set_auto_ceiling(app.trust.mode.auto_ceiling());
+            .set_auto_ceiling(app.app.trust.mode.auto_ceiling());
     }
     let mut editor = InputEditor::default();
     if let Some(sess) = handle.session.as_ref() {
@@ -125,11 +128,11 @@ pub(crate) async fn run_frames(
     let session_for_sub = handle.session.clone();
 
     loop {
-        app.tick_toasts();
+        app.app.tick_toasts();
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
-        app.tick = app.tick.wrapping_add(1);
+        app.app.tick = app.app.tick.wrapping_add(1);
 
-        if app.should_quit {
+        if app.app.should_quit {
             break;
         }
 
@@ -141,15 +144,15 @@ pub(crate) async fn run_frames(
             _ = wait_sigterm(sigterm.as_mut()) => {
                 break;
             }
-            _ = animation_tick.tick(), if app.has_active_animation() => {
-                app.animation_frame = app.animation_frame.wrapping_add(1);
+            _ = animation_tick.tick(), if app.app.has_active_animation() => {
+                app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
-            _ = intro_tick.tick(), if app.startup_intro.is_some() => {
-                app.animation_frame = app.animation_frame.wrapping_add(1);
+            _ = intro_tick.tick(), if app.app.startup_intro.is_some() => {
+                app.app.animation_frame = app.app.animation_frame.wrapping_add(1);
             }
-            _ = toast_tick.tick(), if !app.toasts.is_empty() => {}
+            _ = toast_tick.tick(), if !app.app.toasts.is_empty() => {}
             latest = poll_update_check(&mut update_check), if !update_check.is_finished() => {
-                app.latest_release = latest;
+                app.app.latest_release = latest;
             }
 
             key = key_events.recv() => {
@@ -162,37 +165,37 @@ pub(crate) async fn run_frames(
                 loop {
                     match current {
                         Some(Ok(CtEvent::Mouse(me)))
-                            if app.history_search.open =>
+                            if app.app.history_search.open =>
                         {
                             match me.kind {
                                 MouseEventKind::ScrollUp => {
                                     if let Some(crate::history_search_modal::HistoryArea::Preview) =
-                                        app.history_search.hit_test(me.column, me.row)
+                                        app.app.history_search.hit_test(me.column, me.row)
                                     {
-                                        app.history_search.scroll_preview(true, 3);
+                                        app.app.history_search.scroll_preview(true, 3);
                                     } else {
-                                        app.history_search.move_up();
-                                        key_handler::refresh_history_preview(&mut app);
+                                        app.app.history_search.move_up();
+                                        key_handler::refresh_history_preview(&mut app.app);
                                     }
                                 }
                                 MouseEventKind::ScrollDown => {
                                     if let Some(crate::history_search_modal::HistoryArea::Preview) =
-                                        app.history_search.hit_test(me.column, me.row)
+                                        app.app.history_search.hit_test(me.column, me.row)
                                     {
-                                        app.history_search.scroll_preview(false, 3);
+                                        app.app.history_search.scroll_preview(false, 3);
                                     } else {
-                                        app.history_search.move_down();
-                                        key_handler::refresh_history_preview(&mut app);
+                                        app.app.history_search.move_down();
+                                        key_handler::refresh_history_preview(&mut app.app);
                                     }
                                 }
                                 MouseEventKind::Down(MouseButton::Left) => {
                                     if let Some(idx) =
-                                        app.history_search.click_result(me.column, me.row)
+                                        app.app.history_search.click_result(me.column, me.row)
                                     {
-                                        if app.history_search.selected != idx {
-                                            app.history_search.selected = idx;
-                                            app.history_search.preview_scroll = 0;
-                                            key_handler::refresh_history_preview(&mut app);
+                                        if app.app.history_search.selected != idx {
+                                            app.app.history_search.selected = idx;
+                                            app.app.history_search.preview_scroll = 0;
+                                            key_handler::refresh_history_preview(&mut app.app);
                                         }
                                     }
                                 }
@@ -209,13 +212,11 @@ pub(crate) async fn run_frames(
                                     | MouseEventKind::ScrollRight
                             ) =>
                         {
-                            let over_floating = app
-                                .wm
+                            let over_floating = app.wm
                                 .hit_test_panel(me.column, me.row)
                                 .is_some();
                             if over_floating {
-                                let id = app
-                                    .wm
+                                let id = app.wm
                                     .hit_test_panel(me.column, me.row)
                                     .unwrap()
                                     .id;
@@ -246,7 +247,7 @@ pub(crate) async fn run_frames(
                                 .map(|r| rect_contains(r, me.column, me.row))
                                 .unwrap_or(false);
                             if over_input {
-                                let cw = if let Some(r) = app.input_rect {
+                                let cw = if let Some(r) = app.app.input_rect {
                                     r.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize
                                 } else {
                                     80
@@ -261,19 +262,19 @@ pub(crate) async fn run_frames(
                                     }
                                 }
                             } else if over_sidebar {
-                                let over_goal = app.last_goal_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
-                                let over_plan = app.last_plan_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
-                                let over_todo = app.last_todo_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
+                                let over_goal = app.app.last_goal_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
+                                let over_plan = app.app.last_plan_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
+                                let over_todo = app.app.last_todo_rect.map(|r| rect_contains(r, me.column, me.row)).unwrap_or(false);
                                 let up = matches!(me.kind, MouseEventKind::ScrollUp);
                                 if over_goal {
-                                    if up { app.goal_scroll = app.goal_scroll.saturating_sub(1); }
-                                    else { app.goal_scroll = app.goal_scroll.saturating_add(1); }
+                                    if up { app.app.goal_scroll = app.app.goal_scroll.saturating_sub(1); }
+                                    else { app.app.goal_scroll = app.app.goal_scroll.saturating_add(1); }
                                 } else if over_plan {
-                                    if up { app.plans_scroll = app.plans_scroll.saturating_sub(1); }
-                                    else { app.plans_scroll = app.plans_scroll.saturating_add(1); }
+                                    if up { app.app.plans_scroll = app.app.plans_scroll.saturating_sub(1); }
+                                    else { app.app.plans_scroll = app.app.plans_scroll.saturating_add(1); }
                                 } else if over_todo {
-                                    if up { app.todos_scroll = app.todos_scroll.saturating_sub(1); }
-                                    else { app.todos_scroll = app.todos_scroll.saturating_add(1); }
+                                    if up { app.app.todos_scroll = app.app.todos_scroll.saturating_sub(1); }
+                                    else { app.app.todos_scroll = app.app.todos_scroll.saturating_add(1); }
                                 }
                             } else if matches!(me.kind, MouseEventKind::ScrollUp) {
                                 scroll_delta = scroll_delta.saturating_sub(3);
@@ -298,25 +299,25 @@ pub(crate) async fn run_frames(
                         Some(Ok(CtEvent::Paste(s))) => {
                             editor.ingest_paste(&s);
                             interrupt_prompt = None;
-                            app.refresh_popup(editor.buf());
+                            app.app.refresh_popup(editor.buf());
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
-                            app.sync_modal_stack();
+                            app.wm.sync_modals(&app.app.modal_open_flags());
                             // Check floating panels/modals BEFORE input_rect so clicks
                             // on overlapping panels don't pass through to the input box.
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind
                                 && !(app.wm.hit_test_panel(me.column, me.row).is_some()
-                                    || app.form_modal.open
-                                    || app.compact_review.is_some()
-                                    || app.session_switcher.open
-                                    || app.history_search.open
-                                    || app.provider_manager.open
-                                    || app.alias_manager.open
-                                    || app.model_picker.open
-                                    || app.onboarding_open
-                                    || app.palette.open
-                                    || app.theme_picker_open)
-                                && let Some(rect) = app.input_rect
+                                    || app.app.form_modal.open
+                                    || app.app.compact_review.is_some()
+                                    || app.app.session_switcher.open
+                                    || app.app.history_search.open
+                                    || app.app.provider_manager.open
+                                    || app.app.alias_manager.open
+                                    || app.app.model_picker.open
+                                    || app.app.onboarding_open
+                                    || app.app.palette.open
+                                    || app.app.theme_picker_open)
+                                && let Some(rect) = app.app.input_rect
                                 && rect_contains(rect, me.column, me.row)
                             {
                                 let inner_x = me.column.saturating_sub(rect.x + layout::INPUT_LEFT);
@@ -330,8 +331,7 @@ pub(crate) async fn run_frames(
                                 );
                                 editor.set_cursor(pos);
                             } else if let MouseEventKind::Down(MouseButton::Left) = me.kind {
-                                let topmost = app
-                                    .wm
+                                let topmost = app.wm
                                     .hit_test_panel(me.column, me.row)
                                     .map(|p| (p.id, p.rect));
                                 if let Some((panel_id, pr)) = topmost {
@@ -344,7 +344,7 @@ pub(crate) async fn run_frames(
                                     app.wm.hit_test_maximize(me.column, me.row)
                                     && max_id == panel_id
                                 {
-                                    let canvas = app.maximized_canvas();
+                                    let canvas = app.app.maximized_canvas();
                                     app.wm.toggle_maximize(max_id, canvas);
                                     if let Some(p) = app.wm.panels.iter().find(|p| p.id == max_id) {
                                         if matches!(p.content_kind, crate::wm::WindowContent::Task { kind: atman_runtime::TaskKind::Terminal, .. }) {
@@ -353,8 +353,7 @@ pub(crate) async fn run_frames(
                                             if inner_cols > 0 && inner_rows > 0 {
                                                 if let Some(tx) = &handle.control_tx {
                                                     let _ = tx.send(TuiControl::TermResize {
-                                                        handle: app
-                                                            .wm
+                                                        handle: app.wm
                                                             .content_kind(max_id)
                                                             .and_then(|kind| match kind {
                                                                 crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
@@ -372,18 +371,18 @@ pub(crate) async fn run_frames(
                                     app.wm.hit_test_close(me.column, me.row)
                                 {
                                     let close_label = app.wm.label(close_id).unwrap_or_default().to_string();
-                                    let armed = app.panel_close_armed_id.as_deref() == Some(close_label.as_str())
-                                        && !app.panel_close_arm_expired();
+                                    let armed = app.wm.interaction.panel_close_armed_id.as_deref() == Some(close_label.as_str())
+                                        && !app.wm.panel_close_arm_expired();
                                     if armed {
                                         let tid = app
                                             .task_snapshots
                                             .iter()
                                             .find(|s| s.source_handle == close_label)
                                             .map(|s| s.id.clone());
-                                        if let (Some(tr), Some(tid)) = (&app.task_registry, tid) {
+                                        if let (Some(tr), Some(tid)) = (&app.app.task_registry, tid) {
                                             tr.kill(&tid);
                                         }
-                                        app.clear_panel_close_arm();
+                                        app.wm.clear_panel_close_arm();
                                     } else {
                                         let label = app
                                             .task_snapshots
@@ -391,8 +390,8 @@ pub(crate) async fn run_frames(
                                             .find(|s| s.source_handle == close_label)
                                             .map(|s| s.label.clone())
                                             .unwrap_or_default();
-                                        app.arm_panel_close(close_label);
-                                        app.push_note(
+                                        app.wm.arm_panel_close(close_label);
+                                        app.app.push_note(
                                             format!("press ✕ again to kill {label}"),
                                             app::NoteLevel::Warn,
                                         );
@@ -401,33 +400,30 @@ pub(crate) async fn run_frames(
                                     app.wm.hit_test_resize(me.column, me.row)
                                 {
                                     app.wm.focus(resize_id);
-                                    app.resize_target = Some(resize_id);
-                                    app.resize_offset = (me.column, me.row);
-                                } else if let Some(fp) = app
-                                    .wm
+                                    app.wm.interaction.resize_target = Some(resize_id);
+                                    app.wm.interaction.resize_offset = (me.column, me.row);
+                                } else if let Some(fp) = app.wm
                                     .hit_test_titlebar(me.column, me.row)
                                 {
                                     let id = fp.id;
                                     let now = std::time::Instant::now();
-                                    let is_double = app
-                                        .last_titlebar_click
+                                    let is_double = app.wm.interaction.last_titlebar_click
                                         .as_ref()
                                         .is_some_and(|(prev_id, ts)| {
                                             *prev_id == id && now.duration_since(*ts).as_millis() < 400
                                         });
                                     if is_double {
-                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        let canvas = app.app.last_transcript_rect.unwrap_or_default();
                                         app.wm.toggle_maximize(id, canvas);
-                                        app.last_titlebar_click = None;
+                                        app.wm.interaction.last_titlebar_click = None;
                                     } else {
                                         app.wm.focus(id);
-                                        app.drag_target = Some(id);
-                                        app.drag_offset = (me.column, me.row);
-                                        app.last_titlebar_click = Some((id, now));
+                                        app.wm.interaction.drag_target = Some(id);
+                                        app.wm.interaction.drag_offset = (me.column, me.row);
+                                        app.wm.interaction.last_titlebar_click = Some((id, now));
                                     }
                                 } else {
-                                    let history_hit = app
-                                        .last_wm_hitmap
+                                    let history_hit = app.wm.interaction.last_hitmap
                                         .history_row_rects
                                         .iter()
                                         .find(|(pid, _, r)| {
@@ -436,8 +432,7 @@ pub(crate) async fn run_frames(
                                                 && rect_contains(pr, r.x, r.y)
                                         })
                                         .map(|(_, h, _)| h.clone());
-                                    let mcp_hit = app
-                                        .last_wm_hitmap
+                                    let mcp_hit = app.wm.interaction.last_hitmap
                                         .mcp_row_rects
                                         .iter()
                                         .find(|(pid, _, r)| {
@@ -446,8 +441,7 @@ pub(crate) async fn run_frames(
                                                 && rect_contains(pr, r.x, r.y)
                                         })
                                         .map(|(_, n, _)| n.clone());
-                                    let wf_hit = app
-                                        .last_wm_hitmap
+                                    let wf_hit = app.wm.interaction.last_hitmap
                                         .workflow_node_rects
                                         .iter()
                                         .find(|(pid, _, _, r)| {
@@ -458,20 +452,19 @@ pub(crate) async fn run_frames(
                                         .map(|(_, i, p, _)| (*i, p.clone()));
                                     if let Some(handle) = history_hit {
                                         let canvas =
-                                            app.last_transcript_rect.unwrap_or_default();
+                                            app.app.last_transcript_rect.unwrap_or_default();
                                         app.open_task_panel(&handle, canvas);
                                     } else if let Some(name) = mcp_hit {
-                                        if !app.expanded_mcp_servers.remove(&name) {
-                                            app.expanded_mcp_servers.insert(name);
+                                        if !app.app.expanded_mcp_servers.remove(&name) {
+                                            app.app.expanded_mcp_servers.insert(name);
                                         }
                                     } else if let Some((panel_idx, path)) = wf_hit {
                                         if path.is_empty() {
-                                            app.toggle_workflow_panel_expansion(panel_idx);
+                                            app.app.toggle_workflow_panel_expansion(panel_idx);
                                         } else {
-                                            app.toggle_workflow_node(panel_idx, &path);
+                                            app.app.toggle_workflow_node(panel_idx, &path);
                                         }
-                                    } else if let Some((_pid, tool_id, _)) = app
-                                        .last_wm_hitmap
+                                    } else if let Some((_pid, tool_id, _)) = app.wm.interaction.last_hitmap
                                         .tool_header_rects
                                         .iter()
                                         .find(|(pid, _, r)| {
@@ -480,30 +473,30 @@ pub(crate) async fn run_frames(
                                         })
                                         .cloned()
                                     {
-                                        if !app.expanded_tools.remove(&tool_id) {
-                                            app.expanded_tools.insert(tool_id);
+                                        if !app.app.expanded_tools.remove(&tool_id) {
+                                            app.app.expanded_tools.insert(tool_id);
                                         }
-                                        app.expanded_version =
-                                            app.expanded_version.wrapping_add(1);
+                                        app.app.expanded_version =
+                                            app.app.expanded_version.wrapping_add(1);
                                     } else {
                                         app.wm.focus(panel_id);
                                     }
                                 }
-                            } else if app.modal_open() {
+                            } else if !app.wm.layers.modal_stack.is_empty() {
                                 // Modal is open — swallow the click (blocks base layer).
                             } else {
-                                if let Some(r) = app.last_upper_title_rect
+                                if let Some(r) = app.app.last_upper_title_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.sidebar_upper_collapsed = !app.sidebar_upper_collapsed;
-                                } else if let Some(r) = app.last_lower_title_rect
+                                    app.app.sidebar_upper_collapsed = !app.app.sidebar_upper_collapsed;
+                                } else if let Some(r) = app.app.last_lower_title_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.sidebar_lower_collapsed = !app.sidebar_lower_collapsed;
-                                } else if let Some(r) = app.last_sidebar_more_rect
+                                    app.app.sidebar_lower_collapsed = !app.app.sidebar_lower_collapsed;
+                                } else if let Some(r) = app.app.last_sidebar_more_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    let canvas = app.last_transcript_rect.unwrap_or_default();
+                                    let canvas = app.app.last_transcript_rect.unwrap_or_default();
                                     app.wm.open(
                                         "mcp-manager",
                                         crate::wm::ContentKey::Mcp,
@@ -518,28 +511,28 @@ pub(crate) async fn run_frames(
                                             crate::window::mcp_panel::McpPanelContent { scroll: 0 },
                                         ));
                                     }
-                                } else if let Some(r) = app.last_goal_hdr_rect
+                                } else if let Some(r) = app.app.last_goal_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.goal_collapsed = !app.goal_collapsed;
-                                    app.save_ui_state();
-                                } else if let Some(r) = app.last_plan_hdr_rect
+                                    app.app.goal_collapsed = !app.app.goal_collapsed;
+                                    app.app.save_ui_state();
+                                } else if let Some(r) = app.app.last_plan_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.plan_collapsed = !app.plan_collapsed;
-                                    app.save_ui_state();
-                                } else if let Some(r) = app.last_todo_hdr_rect
+                                    app.app.plan_collapsed = !app.app.plan_collapsed;
+                                    app.app.save_ui_state();
+                                } else if let Some(r) = app.app.last_todo_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.todo_collapsed = !app.todo_collapsed;
-                                    app.save_ui_state();
-                                } else if app.sidebar_popup.is_some()
+                                    app.app.todo_collapsed = !app.app.todo_collapsed;
+                                    app.app.save_ui_state();
+                                } else if app.app.sidebar_popup.is_some()
                                     && app
                                         .last_sidebar_popup_rect
                                         .map(|r| !rect_contains(r, me.column, me.row))
                                         .unwrap_or(true)
                                 {
-                                    app.sidebar_popup = None;
+                                    app.app.sidebar_popup = None;
                                 } else if let Some((key, _)) = app
                                     .last_sidebar_strip_rects
                                     .iter()
@@ -549,65 +542,65 @@ pub(crate) async fn run_frames(
                                         .strip_prefix("plan:")
                                         .and_then(|s| s.parse::<usize>().ok())
                                     {
-                                        app.sidebar_popup =
+                                        app.app.sidebar_popup =
                                             Some(crate::sidebar::SidebarPopupKind::Plan(idx));
                                     } else if let Some(idx) = key
                                         .strip_prefix("todo:")
                                         .and_then(|s| s.parse::<usize>().ok())
                                     {
-                                        app.sidebar_popup =
+                                        app.app.sidebar_popup =
                                             Some(crate::sidebar::SidebarPopupKind::Todo(idx));
                                     }
-                                } else if let Some(r) = app.last_ctx_hdr_rect
+                                } else if let Some(r) = app.app.last_ctx_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.context_collapsed = !app.context_collapsed;
-                                    app.save_ui_state();
-                                } else if let Some(r) = app.last_meta_hdr_rect
+                                    app.app.context_collapsed = !app.app.context_collapsed;
+                                    app.app.save_ui_state();
+                                } else if let Some(r) = app.app.last_meta_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.meta_collapsed = !app.meta_collapsed;
-                                    app.save_ui_state();
-                                } else if let Some(r) = app.last_mcp_hdr_rect
+                                    app.app.meta_collapsed = !app.app.meta_collapsed;
+                                    app.app.save_ui_state();
+                                } else if let Some(r) = app.app.last_mcp_hdr_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.mcp_collapsed = !app.mcp_collapsed;
-                                    app.save_ui_state();
-                                } else if let Some(r) = app.last_collapse_btn_rect
+                                    app.app.mcp_collapsed = !app.app.mcp_collapsed;
+                                    app.app.save_ui_state();
+                                } else if let Some(r) = app.app.last_collapse_btn_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.sidebar_collapsed = true;
-                                    app.save_ui_state();
-                                } else if let Some(r) = app.last_expand_btn_rect
+                                    app.app.sidebar_collapsed = true;
+                                    app.app.save_ui_state();
+                                } else if let Some(r) = app.app.last_expand_btn_rect
                                     && rect_contains(r, me.column, me.row)
-                                    && !app.sidebar_collapse_locked
+                                    && !app.app.sidebar_collapse_locked
                                 {
-                                    app.sidebar_collapsed = false;
-                                    app.save_ui_state();
-                                } else if let Some(r) = app.last_task_panel_rect
+                                    app.app.sidebar_collapsed = false;
+                                    app.app.save_ui_state();
+                                } else if let Some(r) = app.app.last_task_panel_rect
                                     && me.column >= r.x
                                     && me.column < r.x + 10
                                     && me.row == r.y + 1
                                 {
-                                    app.task_panel_collapsed = !app.task_panel_collapsed;
-                                    app.save_ui_state();
-                                } else if let Some(r) = app.last_task_panel_rect
+                                    app.app.task_panel_collapsed = !app.app.task_panel_collapsed;
+                                    app.app.save_ui_state();
+                                } else if let Some(r) = app.app.last_task_panel_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    let hm = &app.last_task_panel_hitmap;
+                                    let hm = &app.app.last_task_panel_hitmap;
                                     let hit_kill = hm
                                         .kill_rects
                                         .iter()
                                         .find(|(_, kr)| rect_contains(*kr, me.column, me.row))
                                         .map(|(t, _)| t.clone());
                                     if let Some(tid) = hit_kill {
-                                        if app.kill_armed_id == Some(tid.clone())
-                                            && !app.kill_arm_expired()
+                                        if app.app.kill_armed_id == Some(tid.clone())
+                                            && !app.app.kill_arm_expired()
                                         {
-                                            if let Some(tr) = &app.task_registry {
+                                            if let Some(tr) = &app.app.task_registry {
                                                 tr.kill(&tid);
                                             }
-                                            app.clear_kill_arm();
+                                            app.app.clear_kill_arm();
                                         } else {
                                             let label = app
                                                 .task_snapshots
@@ -615,8 +608,8 @@ pub(crate) async fn run_frames(
                                                 .find(|s| s.id == tid)
                                                 .map(|s| s.label.clone())
                                                 .unwrap_or_default();
-                                            app.arm_kill(tid.clone());
-                                            app.push_note(
+                                            app.app.arm_kill(tid.clone());
+                                            app.app.push_note(
                                                 format!("press ✕ again to kill {label}"),
                                                 app::NoteLevel::Warn,
                                             );
@@ -627,22 +620,22 @@ pub(crate) async fn run_frames(
                                         .find(|(_, ir)| rect_contains(*ir, me.column, me.row))
                                     {
                                         editor.prefill(&format!("{handle} "));
-                                        app.refresh_popup(editor.buf());
-                                        app.clear_kill_arm();
+                                        app.app.refresh_popup(editor.buf());
+                                        app.app.clear_kill_arm();
                                     } else if let Some((kind, _)) = hm
                                         .group_header_rects
                                         .iter()
                                         .find(|(_, hr)| rect_contains(*hr, me.column, me.row))
                                     {
-                                        if app.task_panel_collapsed_groups.contains(kind) {
-                                            app.task_panel_collapsed_groups.remove(kind);
+                                        if app.app.task_panel_collapsed_groups.contains(kind) {
+                                            app.app.task_panel_collapsed_groups.remove(kind);
                                         } else {
-                                            app.task_panel_collapsed_groups.insert(*kind);
+                                            app.app.task_panel_collapsed_groups.insert(*kind);
                                         }
                                     } else if let Some(hr) = &hm.history_btn_rect
                                         && rect_contains(*hr, me.column, me.row)
                                     {
-                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        let canvas = app.app.last_transcript_rect.unwrap_or_default();
                                         let (pw, ph) = app
                                             .panel_sizes
                                             .get("__history__")
@@ -674,22 +667,23 @@ pub(crate) async fn run_frames(
                                         .find(|(_, _, ar)| rect_contains(*ar, me.column, me.row))
                                         .map(|(r, n, a)| (r, n, a))
                                     {
-                                        let canvas = app.last_transcript_rect.unwrap_or_default();
+                                        let canvas = app.app.last_transcript_rect.unwrap_or_default();
                                         let panel_id = format!("{run_id}:{node_id}");
-                                        let node = app
+                                        let label = app
+                                            .app
                                             .activity_nodes
                                             .iter()
-                                            .find(|n| n.run_id == *run_id && n.node_id == *node_id);
-                                        if let Some(node) = node {
+                                            .find(|n| n.run_id == *run_id && n.node_id == *node_id)
+                                            .map(|n| n.label.clone());
+                                        if let Some(label) = label {
                                             app.wm.open(
                                                 &panel_id,
                                                 crate::wm::ContentKey::Activity(run_id.clone()),
                                                 crate::wm::WindowContent::Activity { run_id: run_id.clone() },
-                                                &node.label,
+                                                &label,
                                                 canvas,
                                             );
-                                            if let Some(p) = app
-                                                .wm
+                                            if let Some(p) = app.wm
                                                 .panels
                                                 .iter_mut()
                                                 .find(|p| p.content_key == crate::wm::ContentKey::Activity(run_id.clone()))
@@ -714,147 +708,144 @@ pub(crate) async fn run_frames(
                                             .find(|(_, r)| rect_contains(*r, me.column, me.row))
                                             .map(|(h, _)| h.clone());
                                         if let Some(handle) = hit_task {
-                                            app.clear_kill_arm();
+                                            app.app.clear_kill_arm();
                                             let is_header = hit_header.as_deref() == Some(&handle);
                                             let is_expanded =
-                                                app.expanded_tasks.contains(&handle);
+                                                app.app.expanded_tasks.contains(&handle);
                                             if is_header && is_expanded {
-                                                app.expanded_tasks.remove(&handle);
+                                                app.app.expanded_tasks.remove(&handle);
                                             } else if is_header && !is_expanded {
-                                                app.expanded_tasks.insert(handle.clone());
+                                                app.app.expanded_tasks.insert(handle.clone());
                                             } else {
                                                 let canvas =
-                                                    app.last_transcript_rect.unwrap_or_default();
+                                                    app.app.last_transcript_rect.unwrap_or_default();
                                                 app.open_task_panel(&handle, canvas);
                                             }
                                         }
                                     }
                                 } else if let Some((panel_idx, node_id)) =
-                                    app.hit_test_node(me.column, me.row)
+                                    app.app.hit_test_node(me.column, me.row)
                                 {
                                     if node_id
                                         == crate::output::COLLAPSED_CARD_FULLSCREEN_KEY
                                     {
                                         if let Some(handle) =
-                                            app.workflow_panel_task_handle(panel_idx)
+                                            app.app.workflow_panel_task_handle(panel_idx)
                                         {
                                             app.open_task_panel_maximized(&handle);
                                         }
                                     } else if node_id
                                         == crate::output::TERMINAL_FULLSCREEN_KEY
                                     {
-                                        if let Some(handle) = app.terminal_item_handle(panel_idx) {
+                                        if let Some(handle) = app.app.terminal_item_handle(panel_idx) {
                                             let canvas =
-                                                app.last_transcript_rect.unwrap_or_default();
+                                                app.app.last_transcript_rect.unwrap_or_default();
                                             app.open_task_panel(&handle, canvas);
                                         }
                                     } else if node_id == crate::output::BASH_FULLSCREEN_KEY
                                     {
-                                        if let Some(handle) = app.bash_item_handle(panel_idx) {
+                                        if let Some(handle) = app.app.bash_item_handle(panel_idx) {
                                             let canvas =
-                                                app.last_transcript_rect.unwrap_or_default();
+                                                app.app.last_transcript_rect.unwrap_or_default();
                                             app.open_task_panel(&handle, canvas);
                                         }
                                     } else if node_id
                                         == crate::output::SUB_AGENT_FULLSCREEN_KEY
                                     {
                                         if let Some(handle) =
-                                            app.sub_agent_item_handle(panel_idx)
+                                            app.app.sub_agent_item_handle(panel_idx)
                                         {
                                             let canvas =
-                                                app.last_transcript_rect.unwrap_or_default();
+                                                app.app.last_transcript_rect.unwrap_or_default();
                                             app.open_task_panel(&handle, canvas);
                                         }
                                     } else if node_id == crate::output::MERMAID_FULLSCREEN_KEY
                                     {
                                         let canvas =
-                                            app.last_transcript_rect.unwrap_or_default();
+                                            app.app.last_transcript_rect.unwrap_or_default();
                                         app.open_mermaid_panel(panel_idx, canvas);
                                     } else if node_id.is_empty() {
-                                        app.toggle_workflow_panel_expansion(panel_idx);
+                                        app.app.toggle_workflow_panel_expansion(panel_idx);
                                     } else {
-                                        app.toggle_workflow_node(panel_idx, &node_id);
+                                        app.app.toggle_workflow_node(panel_idx, &node_id);
                                     }
-                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::Thinking { .. }) =
-                                        app.items.get(idx)
+                                        app.app.items.get(idx)
                                 {
-                                    app.toggle_thinking_expanded(idx);
-                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    app.app.toggle_thinking_expanded(idx);
+                                } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::WorkflowPanel { .. }) =
-                                        app.items.get(idx)
+                                        app.app.items.get(idx)
                                 {
                                     if me.modifiers.contains(KeyModifiers::SHIFT) {
-                                        if let Some(handle) = app.workflow_panel_task_handle(idx) {
+                                        if let Some(handle) = app.app.workflow_panel_task_handle(idx) {
                                             app.open_task_panel_maximized(&handle);
                                         }
                                     } else {
-                                        app.toggle_workflow_panel_expansion(idx);
+                                        app.app.toggle_workflow_panel_expansion(idx);
                                     }
-                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::Terminal { .. }) =
-                                        app.items.get(idx)
+                                        app.app.items.get(idx)
                                 {
-                                    app.toggle_terminal_expand(idx);
-                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    app.app.toggle_terminal_expand(idx);
+                                } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::Bash { .. }) =
-                                        app.items.get(idx)
+                                        app.app.items.get(idx)
                                 {
-                                    app.toggle_bash_expand(idx);
-                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    app.app.toggle_bash_expand(idx);
+                                } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::SubAgentActivity { .. }) =
-                                        app.items.get(idx)
+                                        app.app.items.get(idx)
                                 {
-                                    app.toggle_sub_agent_expand(idx);
-                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    app.app.toggle_sub_agent_expand(idx);
+                                } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::DiffPreview { .. }) =
-                                        app.items.get(idx)
+                                        app.app.items.get(idx)
                                 {
-                                    app.toggle_diff_preview_expand(idx);
-                                } else if let Some(idx) = app.hit_test(me.column, me.row)
+                                    app.app.toggle_diff_preview_expand(idx);
+                                } else if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::CompactionSummary { .. }) =
-                                        app.items.get(idx)
+                                        app.app.items.get(idx)
                                 {
-                                    app.toggle_compaction_summary_expand(idx);
+                                    app.app.toggle_compaction_summary_expand(idx);
                                 }
                                 }
                             } else if let MouseEventKind::Drag(MouseButton::Left) = me.kind {
-                                if let Some(id) = &app.resize_target {
-                                    let (ox, oy) = app.resize_offset;
+                                if let Some(id) = app.wm.interaction.resize_target {
+                                    let (ox, oy) = app.wm.interaction.resize_offset;
                                     let dx = me.column as i32 - ox as i32;
                                     let dy = me.row as i32 - oy as i32;
                                     if dx != 0 || dy != 0 {
-                                        let was_maximized = app
-                                            .wm
+                                        let was_maximized = app.wm
                                             .panels
                                             .iter()
-                                            .find(|p| &p.id == id)
+                                            .find(|p| p.id == id)
                                             .is_some_and(|p| p.maximized);
                                         if was_maximized {
-                                            let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.wm.unmaximize(*id, canvas)
+                                            let canvas = app.app.last_transcript_rect.unwrap_or_default();
+                                            app.wm.unmaximize(id, canvas)
                                         }
-                                        if let Some(p) = app
-                                            .wm
+                                        if let Some(p) = app.wm
                                             .panels
                                             .iter()
-                                            .find(|p| &p.id == id)
+                                            .find(|p| p.id == id)
                                         {
                                             let is_term = matches!(p.content_kind, crate::wm::WindowContent::Task { kind: atman_runtime::TaskKind::Terminal, .. });
                                             let nw = (p.rect.width as i32 + dx).max(20) as u16;
                                             let nh = (p.rect.height as i32 + dy).max(6) as u16;
-                                            let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.wm.resize_panel(*id, nw, nh, canvas);
-                                            app.resize_offset = (me.column, me.row);
+                                            let canvas = app.app.last_transcript_rect.unwrap_or_default();
+                                            app.wm.resize_panel(id, nw, nh, canvas);
+                                            app.wm.interaction.resize_offset = (me.column, me.row);
                                             if is_term {
                                                 let inner_cols = nw.saturating_sub(8);
                                                 let inner_rows = nh.saturating_sub(5);
                                                 if inner_cols > 0 && inner_rows > 0 {
                                                     if let Some(tx) = &handle.control_tx {
                                                         let _ = tx.send(TuiControl::TermResize {
-                                                            handle: app
-                                                                .wm
-                                                                .content_kind(*id)
+                                                            handle: app.wm
+                                                                .content_kind(id)
                                                                 .and_then(|kind| match kind {
                                                                     crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
                                                                     _ => None,
@@ -868,64 +859,60 @@ pub(crate) async fn run_frames(
                                             }
                                         }
                                     }
-                                } else if let Some(id) = &app.drag_target {
-                                    let (ox, oy) = app.drag_offset;
+                                } else if let Some(id) = app.wm.interaction.drag_target {
+                                    let (ox, oy) = app.wm.interaction.drag_offset;
                                     let dx = me.column as i32 - ox as i32;
                                     let dy = me.row as i32 - oy as i32;
                                     if dx != 0 || dy != 0 {
-                                        let was_maximized = app
-                                            .wm
+                                        let was_maximized = app.wm
                                             .panels
                                             .iter()
-                                            .find(|p| &p.id == id)
+                                            .find(|p| p.id == id)
                                             .is_some_and(|p| p.maximized);
                                         if was_maximized {
-                                            let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.wm.unmaximize(*id, canvas)
+                                            let canvas = app.app.last_transcript_rect.unwrap_or_default();
+                                            app.wm.unmaximize(id, canvas)
                                         }
-                                        if let Some(p) = app
-                                            .wm
+                                        if let Some(p) = app.wm
                                             .panels
                                             .iter()
-                                            .find(|p| &p.id == id)
+                                            .find(|p| p.id == id)
                                         {
                                             let nx = (p.rect.x as i32 + dx).max(0) as u16;
                                             let ny = (p.rect.y as i32 + dy).max(0) as u16;
-                                            let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.wm.move_panel(*id, nx, ny, canvas);
-                                            app.drag_offset = (me.column, me.row);
+                                            let canvas = app.app.last_transcript_rect.unwrap_or_default();
+                                            app.wm.move_panel(id, nx, ny, canvas);
+                                            app.wm.interaction.drag_offset = (me.column, me.row);
                                         }
                                     }
                                 }
                             } else if let MouseEventKind::Up(MouseButton::Left) = me.kind {
-                                if app.resize_target.is_some() {
-                                    let id = app.resize_target;
+                                if app.wm.interaction.resize_target.is_some() {
+                                    let id = app.wm.interaction.resize_target;
                                     if let Some(id) = id {
                                         if let Some(p) = app.wm.panels.iter().find(|p| p.id == id) {
                                             if let Some(label) = app.wm.label(id) {
-                                                app.panel_sizes.insert(label.to_string(), (p.rect.width, p.rect.height));
+                                                app.app.panel_sizes.insert(label.to_string(), (p.rect.width, p.rect.height));
                                             }
-                                            app.save_ui_state();
+                                            app.app.save_ui_state();
                                         }
                                     }
                                 }
-                                app.drag_target = None;
-                                app.resize_target = None;
+                                app.wm.interaction.drag_target = None;
+                                app.wm.interaction.resize_target = None;
                             } else if let MouseEventKind::Moved = me.kind {
-                                let skip_hover = app.startup_intro.is_some()
+                                let skip_hover = app.app.startup_intro.is_some()
                                     || matches!(
-                                        app.items.first(),
+                                        app.app.items.first(),
                                         Some(crate::app::OutputItem::StartupCard { .. })
                                     );
                                 if !skip_hover {
-                                let topmost_panel = app
-                                    .wm
+                                let topmost_panel = app.wm
                                     .hit_test_panel(me.column, me.row)
                                     .map(|p| (p.id, p.rect));
                                 if let Some((panel_id, pr)) = topmost_panel {
                                     // floating panel button hover (topmost only)
-                                    let btn_hover = app
-                                        .wm
+                                    let btn_hover = app.wm
                                         .hit_test_btn(me.column, me.row)
                                         .filter(|(id, _)| {
                                             topmost_panel
@@ -933,14 +920,13 @@ pub(crate) async fn run_frames(
                                                 .map(|(pid, _)| id == pid)
                                                 .unwrap_or(false)
                                         });
-                                    if app.hovered_panel_btn != btn_hover {
-                                        app.hovered_panel_btn = btn_hover;
+                                    if app.wm.interaction.hovered_panel_btn != btn_hover {
+                                        app.wm.interaction.hovered_panel_btn = btn_hover;
                                         app.wm_visual_version = app.wm_visual_version.wrapping_add(1);
                                     }
 
                                     // floating panel history row hover (only in this panel)
-                                    let history_hover = app
-                                        .last_wm_hitmap
+                                    let history_hover = app.wm.interaction.last_hitmap
                                         .history_row_rects
                                         .iter()
                                         .find(|(pid, _, r)| {
@@ -949,13 +935,12 @@ pub(crate) async fn run_frames(
                                                 && rect_contains(pr, r.x, r.y)
                                         })
                                         .map(|(_, h, _)| h.clone());
-                                    if app.hovered_history_row != history_hover {
-                                        app.hovered_history_row = history_hover;
-                                        app.items_version = app.items_version.wrapping_add(1);
+                                    if app.wm.interaction.hovered_history_row != history_hover {
+                                        app.wm.interaction.hovered_history_row = history_hover;
+                                        app.app.items_version = app.app.items_version.wrapping_add(1);
                                     }
 
-                                    let mcp_hover = app
-                                        .last_wm_hitmap
+                                    let mcp_hover = app.wm.interaction.last_hitmap
                                         .mcp_row_rects
                                         .iter()
                                         .find(|(pid, _, r)| {
@@ -964,34 +949,34 @@ pub(crate) async fn run_frames(
                                                 && rect_contains(pr, r.x, r.y)
                                         })
                                         .map(|(_, n, _)| n.clone());
-                                    if app.hovered_mcp_row != mcp_hover {
-                                        app.hovered_mcp_row = mcp_hover;
+                                    if app.wm.interaction.hovered_mcp_row != mcp_hover {
+                                        app.wm.interaction.hovered_mcp_row = mcp_hover;
                                     }
 
                                     // Over a floating panel — base-layer hovers cleared.
-                                    app.hovered_sidebar_row = None;
-                                    app.hovered_sidebar_hamburger = false;
-                                    app.hovered_sidebar_lower = false;
-                                    app.hovered_sidebar_more = false;
-                                    app.set_hovered_thinking(None);
-                                    app.set_hovered_kill(None);
-                                    app.set_hovered_task(None);
-                                    app.set_hovered_insert(None);
-                                    app.set_hovered_activity(None);
-                                    app.set_hovered_history_btn(false);
-                                    app.set_hovered_hamburger(false);
+                                    app.app.hovered_sidebar_row = None;
+                                    app.app.hovered_sidebar_hamburger = false;
+                                    app.app.hovered_sidebar_lower = false;
+                                    app.app.hovered_sidebar_more = false;
+                                    app.app.set_hovered_thinking(None);
+                                    app.app.set_hovered_kill(None);
+                                    app.app.set_hovered_task(None);
+                                    app.app.set_hovered_insert(None);
+                                    app.app.set_hovered_activity(None);
+                                    app.app.set_hovered_history_btn(false);
+                                    app.app.set_hovered_hamburger(false);
                                 } else {
                                     // Not over a panel — panel hovers cleared.
-                                    if app.hovered_panel_btn.is_some() {
-                                        app.hovered_panel_btn = None;
+                                    if app.wm.interaction.hovered_panel_btn.is_some() {
+                                        app.wm.interaction.hovered_panel_btn = None;
                                         app.wm_visual_version = app.wm_visual_version.wrapping_add(1);
                                     }
-                                    if app.hovered_history_row.is_some() {
-                                        app.hovered_history_row = None;
-                                        app.items_version = app.items_version.wrapping_add(1);
+                                    if app.wm.interaction.hovered_history_row.is_some() {
+                                        app.wm.interaction.hovered_history_row = None;
+                                        app.app.items_version = app.app.items_version.wrapping_add(1);
                                     }
-                                    if app.hovered_mcp_row.is_some() {
-                                        app.hovered_mcp_row = None;
+                                    if app.wm.interaction.hovered_mcp_row.is_some() {
+                                        app.wm.interaction.hovered_mcp_row = None;
                                     }
                                     // Sidebar strip hover
                                 let sidebar_hover = app
@@ -999,18 +984,18 @@ pub(crate) async fn run_frames(
                                     .iter()
                                     .find(|(_, r)| rect_contains(**r, me.column, me.row))
                                     .map(|(k, _)| k.clone());
-                                if app.hovered_sidebar_row != sidebar_hover {
-                                    app.hovered_sidebar_row = sidebar_hover;
+                                if app.app.hovered_sidebar_row != sidebar_hover {
+                                    app.app.hovered_sidebar_row = sidebar_hover;
                                 }
 
                                 // Sidebar hamburger hover (upper panel title)
                                 let ham_hover = app
                                     .last_collapse_btn_rect
-                                    .or(app.last_upper_title_rect)
+                                    .or(app.app.last_upper_title_rect)
                                     .map(|r| rect_contains(r, me.column, me.row))
                                     .unwrap_or(false);
-                                if app.hovered_sidebar_hamburger != ham_hover {
-                                    app.hovered_sidebar_hamburger = ham_hover;
+                                if app.app.hovered_sidebar_hamburger != ham_hover {
+                                    app.app.hovered_sidebar_hamburger = ham_hover;
                                 }
 
                                 // Sidebar lower panel title hover
@@ -1018,8 +1003,8 @@ pub(crate) async fn run_frames(
                                     .last_lower_title_rect
                                     .map(|r| rect_contains(r, me.column, me.row))
                                     .unwrap_or(false);
-                                if app.hovered_sidebar_lower != lower_hover {
-                                    app.hovered_sidebar_lower = lower_hover;
+                                if app.app.hovered_sidebar_lower != lower_hover {
+                                    app.app.hovered_sidebar_lower = lower_hover;
                                 }
 
                                 // Sidebar MCP "more" row hover
@@ -1027,39 +1012,39 @@ pub(crate) async fn run_frames(
                                     .last_sidebar_more_rect
                                     .map(|r| rect_contains(r, me.column, me.row))
                                     .unwrap_or(false);
-                                if app.hovered_sidebar_more != more_hover {
-                                    app.hovered_sidebar_more = more_hover;
+                                if app.app.hovered_sidebar_more != more_hover {
+                                    app.app.hovered_sidebar_more = more_hover;
                                 }
 
-                                if let Some(idx) = app.hit_test(me.column, me.row)
+                                if let Some(idx) = app.app.hit_test(me.column, me.row)
                                     && let Some(crate::app::OutputItem::Thinking { .. }) =
-                                        app.items.get(idx)
+                                        app.app.items.get(idx)
                                 {
-                                    app.set_hovered_thinking(Some(idx));
+                                    app.app.set_hovered_thinking(Some(idx));
                                 } else {
-                                    app.set_hovered_thinking(None);
+                                    app.app.set_hovered_thinking(None);
                                 }
-                                let hm = &app.last_task_panel_hitmap;
+                                let hm = &app.app.last_task_panel_hitmap;
                                 if let Some(kr) = hm
                                     .kill_rects
                                     .iter()
                                     .find(|(_, r)| rect_contains(*r, me.column, me.row))
                                 {
-                                    app.set_hovered_kill(Some(kr.0.clone()));
-                                    app.set_hovered_task(None);
-                                    app.set_hovered_insert(None);
-                                    app.set_hovered_activity(None);
-                                    app.set_hovered_history_btn(false);
+                                    app.app.set_hovered_kill(Some(kr.0.clone()));
+                                    app.app.set_hovered_task(None);
+                                    app.app.set_hovered_insert(None);
+                                    app.app.set_hovered_activity(None);
+                                    app.app.set_hovered_history_btn(false);
                                 } else if let Some(ir) = hm
                                     .insert_rects
                                     .iter()
                                     .find(|(_, r)| rect_contains(*r, me.column, me.row))
                                 {
-                                    app.set_hovered_insert(Some(ir.0.clone()));
-                                    app.set_hovered_kill(None);
-                                    app.set_hovered_task(None);
-                                    app.set_hovered_activity(None);
-                                    app.set_hovered_history_btn(false);
+                                    app.app.set_hovered_insert(Some(ir.0.clone()));
+                                    app.app.set_hovered_kill(None);
+                                    app.app.set_hovered_task(None);
+                                    app.app.set_hovered_activity(None);
+                                    app.app.set_hovered_history_btn(false);
                                 } else if let Some(tr) = hm
                                     .task_rects
                                     .iter()
@@ -1069,46 +1054,46 @@ pub(crate) async fn run_frames(
                                         .task_snapshots
                                         .iter()
                                         .find(|s| s.source_handle == tr.0);
-                                    app.set_hovered_task(snap.map(|s| s.id.clone()));
-                                    app.set_hovered_kill(None);
-                                    app.set_hovered_insert(None);
-                                    app.set_hovered_activity(None);
-                                    app.set_hovered_history_btn(false);
+                                    app.app.set_hovered_task(snap.map(|s| s.id.clone()));
+                                    app.app.set_hovered_kill(None);
+                                    app.app.set_hovered_insert(None);
+                                    app.app.set_hovered_activity(None);
+                                    app.app.set_hovered_history_btn(false);
                                 } else if let Some(ar) = hm
                                     .activity_rects
                                     .iter()
                                     .find(|(_, _, r)| rect_contains(*r, me.column, me.row))
                                 {
-                                    app.set_hovered_activity(Some((ar.0.clone(), ar.1.clone())));
-                                    app.set_hovered_kill(None);
-                                    app.set_hovered_task(None);
-                                    app.set_hovered_insert(None);
-                                    app.set_hovered_history_btn(false);
+                                    app.app.set_hovered_activity(Some((ar.0.clone(), ar.1.clone())));
+                                    app.app.set_hovered_kill(None);
+                                    app.app.set_hovered_task(None);
+                                    app.app.set_hovered_insert(None);
+                                    app.app.set_hovered_history_btn(false);
                                 } else if let Some(hr) = &hm.history_btn_rect
                                     && rect_contains(*hr, me.column, me.row)
                                 {
-                                    app.set_hovered_history_btn(true);
-                                    app.set_hovered_hamburger(false);
-                                    app.set_hovered_kill(None);
-                                    app.set_hovered_task(None);
-                                    app.set_hovered_insert(None);
-                                    app.set_hovered_activity(None);
+                                    app.app.set_hovered_history_btn(true);
+                                    app.app.set_hovered_hamburger(false);
+                                    app.app.set_hovered_kill(None);
+                                    app.app.set_hovered_task(None);
+                                    app.app.set_hovered_insert(None);
+                                    app.app.set_hovered_activity(None);
                                 } else if let Some(hr) = &hm.hamburger_rect
                                     && rect_contains(*hr, me.column, me.row)
                                 {
-                                    app.set_hovered_hamburger(true);
-                                    app.set_hovered_history_btn(false);
-                                    app.set_hovered_kill(None);
-                                    app.set_hovered_task(None);
-                                    app.set_hovered_insert(None);
-                                    app.set_hovered_activity(None);
+                                    app.app.set_hovered_hamburger(true);
+                                    app.app.set_hovered_history_btn(false);
+                                    app.app.set_hovered_kill(None);
+                                    app.app.set_hovered_task(None);
+                                    app.app.set_hovered_insert(None);
+                                    app.app.set_hovered_activity(None);
                                 } else {
-                                    app.set_hovered_kill(None);
-                                    app.set_hovered_task(None);
-                                    app.set_hovered_insert(None);
-                                    app.set_hovered_activity(None);
-                                    app.set_hovered_history_btn(false);
-                                    app.set_hovered_hamburger(false);
+                                    app.app.set_hovered_kill(None);
+                                    app.app.set_hovered_task(None);
+                                    app.app.set_hovered_insert(None);
+                                    app.app.set_hovered_activity(None);
+                                    app.app.set_hovered_history_btn(false);
+                                    app.app.set_hovered_hamburger(false);
                                 }
                                 }
                                 } // if !skip_hover
@@ -1128,9 +1113,9 @@ pub(crate) async fn run_frames(
                     }
                 }
                 if scroll_delta < 0 {
-                    app.scroll_up((-scroll_delta) as u32);
+                    app.app.scroll_up((-scroll_delta) as u32);
                 } else if scroll_delta > 0 {
-                    app.scroll_down(scroll_delta as u32);
+                    app.app.scroll_down(scroll_delta as u32);
                 }
             }
             frame = merge_rx.recv() => {
@@ -1155,12 +1140,12 @@ pub(crate) async fn run_frames(
                             }
                         });
                     }
-                    app.apply_stream_frame(frame);
+                    app.app.apply_stream_frame(frame);
                     let mut drained = 0u32;
                     while drained < 256 {
                         match merge_rx.try_recv() {
                             Ok(extra) => {
-                                app.apply_stream_frame(extra);
+                                app.app.apply_stream_frame(extra);
                                 drained += 1;
                             }
                             Err(_) => break,
@@ -1172,81 +1157,81 @@ pub(crate) async fn run_frames(
             }
             ev = recv_task_event(handle.task_event_rx.as_mut()) => {
                 if let Some(ev) = ev {
-                    app.apply_task_event(ev);
+                    app.app.apply_task_event(ev);
                 }
             }
             note = recv_note(handle.note_rx.as_mut()) => {
                 if let Some(n) = note {
                     let (text, level) = n.into_parts();
-                    app.push_note(text, level);
+                    app.app.push_note(text, level);
                 }
             }
             _ = wait_goal_change(handle.goal_rx.as_mut()) => {
                 if let Some(rx) = handle.goal_rx.as_mut() {
-                    app.goal = rx.borrow().clone();
+                    app.app.goal = rx.borrow().clone();
                 }
             }
             _ = wait_context_change(handle.context_rx.as_mut()) => {
                 if let Some(rx) = handle.context_rx.as_mut() {
-                    app.context = rx.borrow().clone();
+                    app.app.context = rx.borrow().clone();
                 }
             }
             _ = wait_attach_change(handle.attach_rx.as_mut()) => {
                 if let Some(rx) = handle.attach_rx.as_mut() {
-                    app.attach_count = *rx.borrow();
+                    app.app.attach_count = *rx.borrow();
                 }
             }
             _ = wait_todos_change(handle.todos_rx.as_mut()) => {
                 if let Some(rx) = handle.todos_rx.as_mut() {
-                    app.todos = rx.borrow().clone();
-                    let first_pending = app.todos.iter().position(|t| !matches!(t.status, atman_runtime::memory::todo::TodoStatus::Done | atman_runtime::memory::todo::TodoStatus::Cancelled));
+                    app.app.todos = rx.borrow().clone();
+                    let first_pending = app.app.todos.iter().position(|t| !matches!(t.status, atman_runtime::memory::todo::TodoStatus::Done | atman_runtime::memory::todo::TodoStatus::Cancelled));
                     if let Some(idx) = first_pending {
                         if idx > 0 {
-                            app.todos_scroll = ((idx - 1) * 2) as u16;
+                            app.app.todos_scroll = ((idx - 1) * 2) as u16;
                         } else {
-                            app.todos_scroll = 0;
+                            app.app.todos_scroll = 0;
                         }
                     }
                 }
             }
             _ = wait_plans_change(handle.plans_rx.as_mut()) => {
                 if let Some(rx) = handle.plans_rx.as_mut() {
-                    app.plans = rx.borrow().clone();
-                    let first_pending_step = app.plans.iter().max_by_key(|p| p.updated_at)
+                    app.app.plans = rx.borrow().clone();
+                    let first_pending_step = app.app.plans.iter().max_by_key(|p| p.updated_at)
                         .and_then(|p| p.steps.iter().position(|s| !s.done));
                     if let Some(idx) = first_pending_step {
                         if idx > 0 {
-                            app.plans_scroll = idx as u16;
+                            app.app.plans_scroll = idx as u16;
                         } else {
-                            app.plans_scroll = 0;
+                            app.app.plans_scroll = 0;
                         }
                     }
                 }
             }
             _ = wait_approvals_change(handle.approvals_rx.as_mut()) => {
                 if let Some(rx) = handle.approvals_rx.as_mut() {
-                    app.pending_approvals = rx.borrow().clone();
+                    app.app.pending_approvals = rx.borrow().clone();
                 }
             }
             inj = recv_injection(handle.injection_rx.as_mut()) => {
                 if let Some(inj) = inj {
                     // Keep only pending injections, drop consumed/cancelled ones.
                     if matches!(inj.state, atman_runtime::injection::InjectionState::Pending) {
-                        if !app.pending_injections.iter().any(|i| i.id == inj.id) {
-                            app.pending_injections.push(inj);
+                        if !app.app.pending_injections.iter().any(|i| i.id == inj.id) {
+                            app.app.pending_injections.push(inj);
                         }
                     } else {
-                        app.pending_injections.retain(|i| i.id != inj.id);
+                        app.app.pending_injections.retain(|i| i.id != inj.id);
                     }
-                    app.mark_items_dirty();
+                    app.app.mark_items_dirty();
                 }
             }
             _ = wait_compact_review_change(handle.compact_review_rx.as_mut()) => {
                 if let Some(rx) = handle.compact_review_rx.as_mut() {
                     let latest = rx.borrow().clone();
-                    match (latest, app.compact_review.is_some()) {
+                    match (latest, app.app.compact_review.is_some()) {
                         (Some(pending), false) => {
-                            app.compact_review = Some(
+                            app.app.compact_review = Some(
                                 crate::compact_review_modal::CompactReviewModal::new(pending),
                             );
                         }
@@ -1256,13 +1241,13 @@ pub(crate) async fn run_frames(
                                 .as_ref()
                                 .is_some_and(|m| m.pending.review_id != pending.review_id)
                             {
-                                app.compact_review = Some(
+                                app.app.compact_review = Some(
                                     crate::compact_review_modal::CompactReviewModal::new(pending),
                                 );
                             }
                         }
                         (None, _) => {
-                            app.compact_review = None;
+                            app.app.compact_review = None;
                         }
                     }
                 }
@@ -1271,23 +1256,23 @@ pub(crate) async fn run_frames(
                 if let Some(rx) = handle.form_rx.as_mut() {
                     let latest = rx.borrow().clone();
                     if latest.is_empty() {
-                        if !app.form_modal.try_show_confirm(true)
-                            && app.form_modal.confirm_form.is_none()
+                        if !app.app.form_modal.try_show_confirm(true)
+                            && app.app.form_modal.confirm_form.is_none()
                         {
-                            app.form_modal.end_batch();
+                            app.app.form_modal.end_batch();
                         }
                     } else {
                         let ids: Vec<String> =
                             latest.iter().map(|p| p.form_id.clone()).collect();
-                        app.form_modal.merge_batch_ids(&ids);
-                        let current = app.form_modal.active_form_id().map(String::from);
+                        app.app.form_modal.merge_batch_ids(&ids);
+                        let current = app.app.form_modal.active_form_id().map(String::from);
                         let want: Option<String> = current
                             .filter(|id| ids.iter().any(|x| x == id))
                             .or_else(|| {
-                                app.form_modal
+                                app.app.form_modal
                                     .batch_ids
                                     .iter()
-                                    .zip(app.form_modal.batch_statuses.iter())
+                                    .zip(app.app.form_modal.batch_statuses.iter())
                                     .find(|(_, s)| matches!(s, crate::form_modal::BatchStatus::Pending))
                                     .map(|(id, _)| id.clone())
                                     .filter(|id| ids.iter().any(|x| x == id))
@@ -1296,9 +1281,9 @@ pub(crate) async fn run_frames(
                         if let Some(want_id) = want
                             && let Some(target) =
                                 latest.iter().find(|p| p.form_id == want_id).cloned()
-                            && app.form_modal.active_form_id() != Some(target.form_id.as_str())
+                            && app.app.form_modal.active_form_id() != Some(target.form_id.as_str())
                         {
-                            app.form_modal.attach(target, &ids);
+                            app.app.form_modal.attach(target, &ids);
                         }
                     }
                 }
@@ -1307,33 +1292,33 @@ pub(crate) async fn run_frames(
                 if let Some(cmd) = cmd {
                     match cmd {
                         TuiCommand::SetSidebar(mode) => {
-                            app.sidebar_mode = mode;
+                            app.app.sidebar_mode = mode;
                         }
                         TuiCommand::OpenSessionSwitcher => {
                             let scope = crate::session_switcher::SessionScope::Project;
                             let rows = key_handler::enumerate_session_rows(&app, scope);
-                            app.session_switcher.open_with(rows, scope);
+                            app.app.session_switcher.open_with(rows, scope);
                         }
                         TuiCommand::OpenTrustModePicker => {
-                            app.trust_mode_picker_open = true;
+                            app.app.trust_mode_picker_open = true;
                         }
                         TuiCommand::OpenThemePicker => {
-                            app.theme_picker_open = true;
+                            app.app.theme_picker_open = true;
                         }
                         TuiCommand::OpenModelPicker => {
-                            app.model_picker.open();
+                            app.app.model_picker.open();
                         }
                         TuiCommand::CycleOutside => {
-                            if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
-                                app.trust.outside = app.trust.outside.next();
-                                app.mark_items_dirty();
+                            if app.app.trust.mode == atman_runtime::trust::TrustMode::Eager {
+                                app.app.trust.outside = app.app.trust.outside.next();
+                                app.app.mark_items_dirty();
                             } else {
-                                app.push_note("outside switch only available in eager mode", app::NoteLevel::Warn);
+                                app.app.push_note("outside switch only available in eager mode", app::NoteLevel::Warn);
                             }
                         }
                         TuiCommand::ProviderModelsUpdated => {
-                            app.provider_manager.refresh_list();
-                            app.push_toast(
+                            app.app.provider_manager.refresh_list();
+                            app.app.push_toast(
                                 "models refreshed",
                                 app::NoteLevel::Success,
                                 std::time::Duration::from_secs(3),
@@ -1346,7 +1331,7 @@ pub(crate) async fn run_frames(
                             } else {
                                 app::NoteLevel::Error
                             };
-                            app.push_toast(
+                            app.app.push_toast(
                                 msg,
                                 level,
                                 std::time::Duration::from_secs(5),
@@ -1359,7 +1344,7 @@ pub(crate) async fn run_frames(
                             } else {
                                 app::NoteLevel::Error
                             };
-                            app.push_toast(
+                            app.app.push_toast(
                                 format!("{name}: {message}"),
                                 level,
                                 std::time::Duration::from_secs(5),
@@ -1367,7 +1352,7 @@ pub(crate) async fn run_frames(
                             );
                         }
                         TuiCommand::McpReloaded => {
-                            app.push_toast(
+                            app.app.push_toast(
                                 "MCP servers reloaded",
                                 app::NoteLevel::Success,
                                 std::time::Duration::from_secs(3),
@@ -1375,10 +1360,10 @@ pub(crate) async fn run_frames(
                             );
                         }
                         TuiCommand::McpResourcesResult { name, resources } => {
-                            app.mcp_resources_cache.insert(name, resources);
+                            app.app.mcp_resources_cache.insert(name, resources);
                         }
                         TuiCommand::McpPromptsResult { name, prompts } => {
-                            app.mcp_prompts_cache.insert(name, prompts);
+                            app.app.mcp_prompts_cache.insert(name, prompts);
                         }
                     }
                 }
