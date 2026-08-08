@@ -150,3 +150,88 @@ fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done
         .collect();
     f.render_widget(Paragraph::new(visible), body_area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atman_runtime::task_registry::{TaskSnapshot, TaskStatus};
+    use std::collections::HashSet;
+
+    fn snapshot(src: &str) -> TaskSnapshot {
+        TaskSnapshot {
+            id: atman_runtime::TaskId::new(),
+            kind: atman_runtime::TaskKind::Bash,
+            label: format!("bash {src}"),
+            status: TaskStatus::Ok,
+            started_at: std::time::Instant::now(),
+            ended_at: Some(std::time::Instant::now()),
+            source_handle: src.to_string(),
+            session_id: "s".to_string(),
+        }
+    }
+
+    fn bash_item(src: &str, output: &str, done: bool) -> OutputItem {
+        OutputItem::Bash {
+            handle: src.to_string(),
+            output: output.to_string(),
+            done,
+            expanded: false,
+        }
+    }
+
+    fn ctx<'a>(items: &'a [OutputItem], snaps: &'a [TaskSnapshot]) -> RenderCtx<'a> {
+        RenderCtx {
+            window_id: crate::wm::WindowId(1),
+            snapshots: snaps,
+            items,
+            animation_frame: 0,
+            expanded_tools: &HashSet::new(),
+            activity_nodes: &[],
+            items_version: 0,
+            expanded_version: 0,
+            mcp_servers: &[],
+            expanded_mcp_servers: &HashSet::new(),
+            mcp_selected: 0,
+            hovered_mcp_row: &None,
+            mcp_browser: &crate::mcp_manager::McpBrowserState {
+                tab: crate::mcp_manager::McpBrowserTab::Resources,
+                resources: &std::collections::HashMap::new(),
+                prompts: &std::collections::HashMap::new(),
+            },
+            hovered_history_row: &None,
+        }
+    }
+
+    fn render(panel: &mut BashPanelContent, ctx: &RenderCtx<'_>) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(50, 10)).unwrap();
+        terminal
+            .draw(|f| {
+                panel.render_content(f.area(), f, ctx);
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(50)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn renders_output_when_item_and_snapshot_present() {
+        let items = [bash_item("bg_s_1", "hello\nworld", true)];
+        let snaps = [snapshot("bg_s_1")];
+        let mut panel = BashPanelContent {
+            handle: "bg_s_1".into(),
+            scroll: 0,
+        };
+        let lines = render(&mut panel, &ctx(&items, &snaps));
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("hello") && joined.contains("world"),
+            "panel should show bash output, got:\n{joined}"
+        );
+    }
+}

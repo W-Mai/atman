@@ -13,7 +13,7 @@ use crate::app::OutputItem;
 use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
-use crate::wm::floating::PanelRenderCache;
+use crate::wm::PanelRenderCache;
 
 pub struct FlowPanelContent {
     pub handle: String,

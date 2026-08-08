@@ -4,7 +4,7 @@ use ratatui::layout::Rect;
 use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
-use crate::wm::floating::WmHitmap;
+use crate::wm::WmHitmap;
 
 pub struct McpPanelContent {
     pub scroll: u16,
