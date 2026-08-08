@@ -77,6 +77,7 @@ pub enum HitTarget {
     HistoryRow(String),
     WorkflowNode(usize, String),
     McpRow(String),
+    ToolHeader(String),
 }
 
 /// Immutable render data passed to `WindowComponent::render_content`.

@@ -78,6 +78,9 @@ pub fn render_panel_content(
                 crate::wm::component::HitTarget::McpRow(s) => {
                     hitmap_out.mcp_row_rects.push((panel.id, s, region.rect))
                 }
+                crate::wm::component::HitTarget::ToolHeader(s) => {
+                    hitmap_out.tool_header_rects.push((panel.id, s, region.rect))
+                }
                 _ => {}
             }
         }
