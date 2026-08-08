@@ -1,0 +1,1831 @@
+use tokio::sync::mpsc;
+
+use super::TuiControl;
+use crate::app::AppState;
+use crate::input::InputEditor;
+use crate::keys::KeyAction;
+use crate::{app, keys, layout};
+
+pub(crate) fn yank_candidate_indices(app: &AppState) -> Vec<usize> {
+    app.items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| match it {
+            app::OutputItem::AssistantMd { .. } | app::OutputItem::UserTurn { .. } => Some(i),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn emit_yank_selection_note(app: &mut AppState, cands: &[usize]) {
+    let total = cands.len();
+    let cur = app.yank_index.min(total.saturating_sub(1)) + 1;
+    let kind = cands
+        .get(app.yank_index)
+        .and_then(|i| app.items.get(*i))
+        .map(|it| match it {
+            app::OutputItem::AssistantMd { .. } => "assistant",
+            app::OutputItem::UserTurn { .. } => "user",
+            _ => "other",
+        })
+        .unwrap_or("?");
+    app.push_note(format!("yank {cur}/{total} — {kind}"), app::NoteLevel::Info);
+}
+
+pub(crate) fn yank_selected_text(app: &AppState) -> Option<String> {
+    let cands = yank_candidate_indices(app);
+    let item_idx = *cands.get(app.yank_index)?;
+    match app.items.get(item_idx)? {
+        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
+        app::OutputItem::UserTurn { text } => Some(text.clone()),
+        _ => None,
+    }
+}
+
+pub(crate) fn enumerate_session_rows(
+    app: &AppState,
+    scope: crate::session_switcher::SessionScope,
+) -> Vec<crate::SessionPickerRow> {
+    let Some(session) = &app.session else {
+        return Vec::new();
+    };
+    let session_dir = session.dir();
+    let Some(sessions_root) = session_dir.parent() else {
+        return Vec::new();
+    };
+    let current_fp = session.meta().and_then(|m| m.project_fingerprint);
+    let restrict_to_project = matches!(scope, crate::session_switcher::SessionScope::Project);
+    let mut rows = Vec::new();
+    let Ok(entries) = std::fs::read_dir(sessions_root) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let sid = entry.file_name().to_string_lossy().to_string();
+        if sid == session.id().to_string() {
+            continue;
+        }
+        let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
+        let peer_fp = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
+        let is_legacy = peer_fp.is_none();
+        if restrict_to_project
+            && let Some(current_fp) = current_fp.as_ref()
+            && !is_legacy
+            && peer_fp.as_deref() != Some(current_fp.as_str())
+        {
+            continue;
+        }
+        let project = if is_legacy {
+            Some("(legacy)".into())
+        } else {
+            meta.as_ref()
+                .and_then(|m| m.project_root.as_ref())
+                .map(|p| p.display().to_string())
+        };
+        let events_path = entry.path().join("events.jsonl");
+        let updated_at = std::fs::metadata(&events_path)
+            .and_then(|m| m.modified())
+            .or_else(|_| entry.metadata().and_then(|m| m.modified()))
+            .ok()
+            .map(|st| {
+                let ts: chrono::DateTime<chrono::Local> = st.into();
+                ts.to_rfc3339()
+            })
+            .unwrap_or_default();
+        let (user_count, total_count) = count_message_events(&events_path);
+        if user_count == 0 {
+            continue;
+        }
+        rows.push(crate::SessionPickerRow {
+            id: sid,
+            project,
+            message_count: total_count,
+            updated_at,
+            goal: meta.as_ref().and_then(|m| m.title.clone()),
+        });
+    }
+    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    rows.truncate(200);
+    rows
+}
+
+pub(crate) fn count_message_events(path: &std::path::Path) -> (usize, usize) {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return (0, 0),
+    };
+    let mut user = 0usize;
+    let mut total = 0usize;
+    for l in contents.lines() {
+        let is_user = l.contains("\"type\":\"user_msg\"");
+        let is_assistant = l.contains("\"type\":\"assistant_msg\"");
+        let is_tool = l.contains("\"type\":\"tool_result_msg\"");
+        if is_user {
+            user += 1;
+        }
+        if is_user || is_assistant || is_tool {
+            total += 1;
+        }
+    }
+    (user, total)
+}
+
+pub(crate) fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
+    use crate::history_search_modal::{HistoryHit, HistorySearchScope};
+    match action {
+        KeyAction::Escape => app.history_search.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => {
+            app.history_search.move_up();
+            refresh_history_preview(app);
+        }
+        KeyAction::HistoryDown | KeyAction::CursorRight => {
+            app.history_search.move_down();
+            refresh_history_preview(app);
+        }
+        KeyAction::PageUp => {
+            app.history_search.scroll_preview(true, 10);
+        }
+        KeyAction::PageDown => {
+            app.history_search.scroll_preview(false, 10);
+        }
+        KeyAction::ScrollUp => {
+            app.history_search.scroll_preview(true, 3);
+        }
+        KeyAction::ScrollDown => {
+            app.history_search.scroll_preview(false, 3);
+        }
+        KeyAction::Tab => {
+            app.history_search.scope = app.history_search.scope.toggle();
+        }
+        KeyAction::Submit => {
+            let query = app.history_search.editor.buf().trim().to_string();
+            if query.is_empty() {
+                app.history_search.set_error("empty query".into());
+                return;
+            }
+            let Some(session) = app.session.as_ref() else {
+                app.history_search.set_error("no session in context".into());
+                return;
+            };
+            let Some(idx) = session.project_index() else {
+                app.history_search
+                    .set_error("project index unavailable".into());
+                return;
+            };
+            let session_filter = match app.history_search.scope {
+                HistorySearchScope::Session => Some(session.id().to_string()),
+                HistorySearchScope::Project => None,
+            };
+            let rows = match idx.fts_search_project_events(&query, session_filter.as_deref(), 50) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    app.history_search.set_error(format!("search failed: {e}"));
+                    return;
+                }
+            };
+            let hits: Vec<HistoryHit> = rows
+                .into_iter()
+                .map(|row| {
+                    let snippet = extract_event_snippet(&row.kind, &row.payload);
+                    HistoryHit {
+                        session_id: row.session_id,
+                        seq: row.seq,
+                        ts: row.ts,
+                        kind: row.kind,
+                        snippet,
+                    }
+                })
+                .collect();
+            app.history_search.set_results(hits, query);
+            refresh_history_preview(app);
+        }
+        KeyAction::Char(c) => {
+            if *c == 'j' && app.history_search.editor.buf().is_empty() {
+                app.history_search.move_down();
+                refresh_history_preview(app);
+            } else if *c == 'k' && app.history_search.editor.buf().is_empty() {
+                app.history_search.move_up();
+                refresh_history_preview(app);
+            } else {
+                app.history_search.editor.insert_char(*c);
+            }
+        }
+        KeyAction::Backspace => {
+            app.history_search.editor.backspace();
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn refresh_history_preview(app: &mut AppState) {
+    let (session_id, seq) = match app.history_search.selected_hit() {
+        Some(hit) => (hit.session_id.clone(), hit.seq),
+        None => {
+            app.history_search.set_preview(Vec::new());
+            return;
+        }
+    };
+    let Some(session) = app.session.as_ref() else {
+        return;
+    };
+    let Some(idx) = session.project_index() else {
+        return;
+    };
+    let rows = match idx.find_project_events_around(&session_id, seq, 3) {
+        Ok(r) => r,
+        Err(_) => {
+            app.history_search.set_preview(Vec::new());
+            return;
+        }
+    };
+    let lines: Vec<String> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let is_hit = row.seq == seq;
+            let text = extract_event_text(&row.kind, &row.payload);
+            if text.is_none() && !is_hit {
+                return None;
+            }
+            let marker = if is_hit { "▶" } else { " " };
+            let body = text.unwrap_or_else(|| format!("<{}>", row.kind));
+            Some(format!(
+                "{marker} **[{}]** seq={}  \n{}",
+                row.kind, row.seq, body
+            ))
+        })
+        .collect();
+    app.history_search.set_preview(lines);
+}
+
+pub(crate) fn extract_event_text(kind: &str, payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    match kind {
+        "user_msg" | "assistant_msg" | "system_msg" | "tool_result_msg" => {
+            let parts = v.get("message")?.get("parts")?.as_array()?;
+            let mut chunks = Vec::new();
+            for p in parts {
+                if let Some(text) = p.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        chunks.push(text.to_string());
+                    }
+                } else if let Some(thinking) = p.get("thinking").and_then(|t| t.as_str()) {
+                    if !thinking.is_empty() {
+                        chunks.push(format!("_{thinking}_"));
+                    }
+                } else if let Some(summary) = p.get("summary").and_then(|t| t.as_str()) {
+                    if !summary.is_empty() {
+                        chunks.push(summary.to_string());
+                    }
+                } else if let Some(content) = p.get("content").and_then(|t| t.as_str()) {
+                    if !content.is_empty() {
+                        chunks.push(format!("```\n{content}\n```"));
+                    }
+                }
+            }
+            if chunks.is_empty() {
+                None
+            } else {
+                Some(chunks.join("\n\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn extract_event_snippet(kind: &str, payload: &str) -> String {
+    let text = extract_event_text(kind, payload).unwrap_or_else(|| format!("<{kind}>"));
+    text.chars()
+        .take(120)
+        .collect::<String>()
+        .replace('\n', " ")
+}
+
+pub(crate) fn handle_session_switcher_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    if app.session_switcher.rename_mode {
+        match action {
+            KeyAction::Escape => {
+                app.session_switcher.cancel_rename();
+                app.push_note("rename cancelled", app::NoteLevel::Info);
+            }
+            KeyAction::Submit => {
+                if let Some((sid, title)) = app.session_switcher.commit_rename() {
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::RenameSession {
+                            session_id: sid.clone(),
+                            title: title.clone(),
+                        });
+                    }
+                    let msg = match &title {
+                        Some(t) => format!("renamed {sid} → {t}"),
+                        None => format!("cleared title on {sid}"),
+                    };
+                    app.push_note(msg, app::NoteLevel::Info);
+                }
+            }
+            KeyAction::Backspace => app.session_switcher.rename_pop(),
+            KeyAction::Char(c) => app.session_switcher.rename_push(*c),
+            _ => {}
+        }
+        return;
+    }
+    if app.session_switcher.filter_mode {
+        match action {
+            KeyAction::Escape | KeyAction::Submit => {
+                app.session_switcher.leave_filter_mode();
+            }
+            KeyAction::Backspace => app.session_switcher.filter_pop(),
+            KeyAction::Char(c) => app.session_switcher.filter_push(*c),
+            _ => {}
+        }
+        return;
+    }
+    if let KeyAction::Char('d') | KeyAction::Char('D') = action {
+        if app.session_switcher.delete_armed_matches_selected() {
+            if let Some(sid) = app.session_switcher.remove_selected() {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::DeleteSession(sid.clone()));
+                }
+                app.push_note(format!("deleted session {sid}"), app::NoteLevel::Info);
+            }
+        } else {
+            let armed = app.session_switcher.arm_delete().map(str::to_owned);
+            match armed {
+                Some(sid) => app.push_note(
+                    format!("press d again to confirm delete {sid}"),
+                    app::NoteLevel::Warn,
+                ),
+                None => app.push_note("no session selected", app::NoteLevel::Warn),
+            }
+        }
+        return;
+    }
+    if app.session_switcher.delete_armed.is_some() {
+        app.session_switcher.clear_delete_arm();
+        app.push_note("delete cancelled", app::NoteLevel::Info);
+    }
+    if let KeyAction::Char('s') | KeyAction::Char('S') = action {
+        app.session_switcher.toggle_sort();
+        return;
+    }
+    if let KeyAction::Char('f') | KeyAction::Char('F') = action {
+        app.session_switcher.enter_filter_mode();
+        return;
+    }
+    if let KeyAction::Char('r') | KeyAction::Char('R') = action {
+        if app.session_switcher.begin_rename().is_none() {
+            app.push_note("no session selected", app::NoteLevel::Warn);
+        }
+        return;
+    }
+    match action {
+        KeyAction::Escape => app.session_switcher.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => app.session_switcher.move_up(),
+        KeyAction::HistoryDown | KeyAction::CursorRight => app.session_switcher.move_down(),
+        KeyAction::Tab => {
+            let new_scope = app.session_switcher.scope.toggle();
+            let rows = enumerate_session_rows(app, new_scope);
+            app.session_switcher.scope = new_scope;
+            app.session_switcher.set_rows(rows);
+        }
+        KeyAction::Submit => {
+            if let Some(sid) = app.session_switcher.selected_id() {
+                app.session_switcher.close();
+                request_session_switch(app, control_tx, sid.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn handle_palette_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    match action {
+        KeyAction::Escape => app.palette.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => app.palette.move_up(),
+        KeyAction::HistoryDown | KeyAction::CursorRight => app.palette.move_down(),
+        KeyAction::Backspace => app.palette.backspace(),
+        KeyAction::Char(c) => app.palette.push_char(*c),
+        KeyAction::Submit => {
+            if let Some(id) = app.palette.selected() {
+                app.palette.close();
+                dispatch_palette_entry(id, app, control_tx);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn dispatch_palette_entry(
+    id: crate::palette::PaletteEntryId,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    use crate::palette::PaletteEntryId;
+    match id {
+        PaletteEntryId::YankMode => {
+            let cands = yank_candidate_indices(app);
+            if cands.is_empty() {
+                app.push_note("nothing to yank yet", app::NoteLevel::Warn);
+                return;
+            }
+            app.yank_mode = true;
+            app.yank_index = cands.len().saturating_sub(1);
+            app.push_note(
+                "yank mode — j/k to move, Enter to copy, Esc to cancel",
+                app::NoteLevel::Info,
+            );
+        }
+        PaletteEntryId::CopyLastMessage => copy_last_message(app),
+        PaletteEntryId::CopyLastTool => copy_last_tool(app),
+        PaletteEntryId::CompactNow => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::CompactNow);
+                app.push_note("requested transcript compaction", app::NoteLevel::Info);
+            }
+        }
+        PaletteEntryId::SwitchSession => {
+            let scope = crate::session_switcher::SessionScope::Project;
+            let rows = enumerate_session_rows(app, scope);
+            app.session_switcher.open_with(rows, scope);
+        }
+        PaletteEntryId::NewSession => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::NewSession);
+            }
+        }
+        PaletteEntryId::MoveSession => {
+            if let (Some(tx), Some(session)) = (control_tx, app.session.as_ref()) {
+                let form = atman_runtime::form::PendingForm {
+                    form_id: "session_move_path".to_string(),
+                    run_id: atman_runtime::event::FlowRunId::now(),
+                    tool_use_id: "session_move_path".to_string(),
+                    kind: atman_runtime::form::FormKind::Text {
+                        prompt: "New working directory:".to_string(),
+                        placeholder: Some("/path/to/project".to_string()),
+                        multiline: false,
+                    },
+                    emitted_at: chrono::Utc::now(),
+                };
+                session.forms().request(form);
+                let _ = tx.send(TuiControl::MoveSession);
+            }
+        }
+        PaletteEntryId::DeleteSession => {
+            let scope = crate::session_switcher::SessionScope::Project;
+            let rows = enumerate_session_rows(app, scope);
+            app.session_switcher.open_with(rows, scope);
+        }
+        PaletteEntryId::SearchHistory => {
+            app.history_search.open();
+        }
+        PaletteEntryId::ToggleSidebar => {
+            app.sidebar_mode = app.sidebar_mode.toggle();
+            app.save_ui_state();
+        }
+        PaletteEntryId::ManageProviders => {
+            app.provider_manager.toggle();
+        }
+        PaletteEntryId::ManageAliases => {
+            app.alias_manager.toggle();
+        }
+        PaletteEntryId::SwitchModel => {
+            app.model_picker.open();
+        }
+        PaletteEntryId::ManageMcp => {
+            let canvas = app.last_transcript_rect.unwrap_or_default();
+            app.wm.open(
+                "mcp-manager",
+                crate::wm::ContentKey::Mcp,
+                crate::wm::WindowContent::Mcp,
+                "MCP Servers",
+                canvas,
+            );
+            if let Some(p) = app
+                .wm
+                .panels
+                .iter_mut()
+                .find(|p| p.content_key == crate::wm::ContentKey::Mcp)
+            {
+                p.content = Some(Box::new(crate::window::mcp_panel::McpPanelContent {
+                    scroll: 0,
+                }));
+            }
+        }
+        PaletteEntryId::ShowHelp => {
+            let canvas = app.last_transcript_rect.unwrap_or_default();
+            app.wm.open(
+                "cheatsheet",
+                crate::wm::ContentKey::Cheatsheet,
+                crate::wm::WindowContent::Cheatsheet,
+                "Keybindings",
+                canvas,
+            );
+            if let Some(p) = app
+                .wm
+                .panels
+                .iter_mut()
+                .find(|p| p.content_key == crate::wm::ContentKey::Cheatsheet)
+            {
+                p.content = Some(Box::new(
+                    crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+                ));
+            }
+        }
+        PaletteEntryId::SetTrustMode => {
+            app.trust_mode_picker_open = true;
+        }
+        PaletteEntryId::SetModeTheme => {
+            app.theme_picker_open = true;
+        }
+    }
+}
+
+pub(crate) fn copy_last_message(app: &mut AppState) {
+    let text = app.items.iter().rev().find_map(|item| match item {
+        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
+        _ => None,
+    });
+    match text {
+        Some(t) if !t.is_empty() => {
+            let n = t.chars().count();
+            crate::clipboard::write_osc52(&t);
+            app.push_note(
+                format!("copied {n} chars from last message"),
+                app::NoteLevel::Info,
+            );
+        }
+        _ => app.push_note("no assistant message to copy", app::NoteLevel::Warn),
+    }
+}
+
+pub(crate) fn copy_last_tool(app: &mut AppState) {
+    let text = app.items.iter().rev().find_map(|item| match item {
+        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
+        _ => None,
+    });
+    match text {
+        Some(t) if !t.is_empty() => {
+            crate::clipboard::write_osc52(&t);
+            app.push_note("copied last tool output", app::NoteLevel::Info);
+        }
+        _ => app.push_note("no tool output to copy", app::NoteLevel::Warn),
+    }
+}
+
+pub(crate) fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {
+    let cands = yank_candidate_indices(app);
+    if cands.is_empty() {
+        app.yank_mode = false;
+        return true;
+    }
+    match action {
+        KeyAction::Escape => {
+            app.yank_mode = false;
+            app.push_note("yank cancelled", app::NoteLevel::Info);
+            true
+        }
+        KeyAction::Char('y') | KeyAction::Char('Y') => {
+            app.yank_mode = false;
+            true
+        }
+        KeyAction::Char('j') | KeyAction::HistoryDown | KeyAction::CursorRight => {
+            app.yank_index = (app.yank_index + 1).min(cands.len().saturating_sub(1));
+            emit_yank_selection_note(app, &cands);
+            true
+        }
+        KeyAction::Char('k') | KeyAction::HistoryUp | KeyAction::CursorLeft => {
+            app.yank_index = app.yank_index.saturating_sub(1);
+            emit_yank_selection_note(app, &cands);
+            true
+        }
+        KeyAction::Char('g') => {
+            app.yank_index = 0;
+            emit_yank_selection_note(app, &cands);
+            true
+        }
+        KeyAction::Char('G') => {
+            app.yank_index = cands.len().saturating_sub(1);
+            emit_yank_selection_note(app, &cands);
+            true
+        }
+        KeyAction::Submit => {
+            if let Some(text) = yank_selected_text(app) {
+                let n = text.chars().count();
+                crate::clipboard::write_osc52(&text);
+                app.push_note(
+                    format!("yanked {n} chars to clipboard (OSC 52)"),
+                    app::NoteLevel::Info,
+                );
+            } else {
+                app.push_note("yank: nothing selected", app::NoteLevel::Warn);
+            }
+            app.yank_mode = false;
+            true
+        }
+        _ => true,
+    }
+}
+
+pub(crate) fn handle_form_key(
+    action: &keys::KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    use atman_runtime::form::FormKind;
+    let Some(form_id) = app.form_modal.active_form_id().map(String::from) else {
+        return;
+    };
+    let is_text = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::Text { .. })
+    );
+    let is_confirm = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::Confirm { .. })
+    );
+    let is_multi = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::MultiSelect { .. })
+    );
+    let dispatch_outcome = |app: &mut AppState,
+                            control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+                            outcome: crate::form_modal::SubmitOutcome| {
+        use crate::form_modal::SubmitOutcome;
+        match outcome {
+            SubmitOutcome::Single { form_id, answer } => {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
+                }
+            }
+            SubmitOutcome::BatchConfirmed => {
+                for (i, answer) in app.form_modal.batch_answers.iter().enumerate() {
+                    if let Some(a) = answer
+                        && let Some(tx) = control_tx
+                    {
+                        let id = app.form_modal.batch_ids.get(i).cloned().unwrap_or_default();
+                        let _ = tx.send(TuiControl::FormSubmit {
+                            form_id: id,
+                            answer: a.clone(),
+                        });
+                    }
+                }
+            }
+            SubmitOutcome::BatchCancelled => {
+                for id in &app.form_modal.batch_ids {
+                    if id == "__batch_confirm" {
+                        continue;
+                    }
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::FormSubmit {
+                            form_id: id.clone(),
+                            answer: atman_runtime::form::FormAnswer::Cancelled,
+                        });
+                    }
+                }
+            }
+            SubmitOutcome::None => {}
+        }
+    };
+    match action {
+        KeyAction::Escape => {
+            let outcome = app.form_modal.cancel();
+            dispatch_outcome(app, control_tx, outcome);
+        }
+        KeyAction::Submit => {
+            let outcome = app.form_modal.submit();
+            dispatch_outcome(app, control_tx, outcome);
+        }
+        KeyAction::Char('y') | KeyAction::Char('Y') if is_confirm => {
+            let outcome = app.form_modal.submit();
+            dispatch_outcome(app, control_tx, outcome);
+        }
+        KeyAction::Char('n') | KeyAction::Char('N') if is_confirm => {
+            let outcome = app.form_modal.confirm_no();
+            dispatch_outcome(app, control_tx, outcome);
+        }
+        KeyAction::Char(' ') if is_multi => {
+            app.form_modal.toggle_current();
+        }
+        KeyAction::Tab => {
+            if let Some(target_id) = app.form_modal.switch_to(1)
+                && target_id != form_id
+            {
+                let in_registry = app
+                    .session
+                    .as_ref()
+                    .map(|s| {
+                        s.forms()
+                            .list_pending()
+                            .iter()
+                            .any(|p| p.form_id == target_id)
+                    })
+                    .unwrap_or(false);
+                if in_registry {
+                    if let Some(sess) = app.session.as_ref() {
+                        sess.forms().promote(&target_id);
+                    }
+                } else if let Some(cached) = app.form_modal.cached_forms.get(&target_id).cloned() {
+                    let ids = app.form_modal.batch_ids.clone();
+                    app.form_modal.attach(cached, &ids);
+                }
+            }
+        }
+        KeyAction::HistoryUp | KeyAction::Char('k') if !is_text => {
+            app.form_modal.move_cursor(-1);
+        }
+        KeyAction::HistoryDown | KeyAction::Char('j') if !is_text => {
+            app.form_modal.move_cursor(1);
+        }
+        KeyAction::CursorLeft if is_confirm => {
+            app.form_modal.move_cursor(-1);
+        }
+        KeyAction::CursorRight if is_confirm => {
+            app.form_modal.move_cursor(1);
+        }
+        KeyAction::Char(c) if is_text => {
+            app.form_modal.text_editor.insert_char(*c);
+        }
+        KeyAction::Backspace if is_text => {
+            app.form_modal.text_editor.backspace();
+        }
+        KeyAction::Newline if is_text => {
+            app.form_modal.text_editor.insert_newline();
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn handle_compact_review_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    let Some(modal) = app.compact_review.as_mut() else {
+        return;
+    };
+    use crate::compact_review_modal::CompactReviewMode;
+    match modal.mode {
+        CompactReviewMode::Viewing => match action {
+            KeyAction::Submit => {
+                let review_id = modal.pending.review_id.clone();
+                let edited = if modal.summary_is_dirty() {
+                    Some(modal.edited_summary())
+                } else {
+                    None
+                };
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::CompactReviewAccept { review_id, edited });
+                }
+                app.compact_review = None;
+            }
+            KeyAction::Char('e') => modal.enter_editing(),
+            KeyAction::Char('r') | KeyAction::Escape => {
+                let review_id = modal.pending.review_id.clone();
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::CompactReviewReject { review_id });
+                }
+                app.compact_review = None;
+            }
+            KeyAction::PageUp => modal.scroll_up(),
+            KeyAction::PageDown => modal.scroll_down(),
+            _ => {}
+        },
+        CompactReviewMode::Editing => match action {
+            KeyAction::Escape => modal.leave_editing(),
+            KeyAction::Char(c) => modal.editor.insert_char(*c),
+            KeyAction::Backspace => modal.editor.backspace(),
+            KeyAction::DeleteWordBackward => modal.editor.delete_word_backward(),
+            KeyAction::Newline | KeyAction::Submit => modal.editor.insert_newline(),
+            KeyAction::CursorLeft => modal.editor.move_left(),
+            KeyAction::CursorRight => modal.editor.move_right(),
+            KeyAction::CursorHome => modal.editor.move_home(),
+            KeyAction::CursorEnd => modal.editor.move_end(),
+            _ => {}
+        },
+    }
+}
+
+pub(crate) fn is_approval_key(action: &KeyAction) -> bool {
+    matches!(
+        action,
+        KeyAction::Char('1'..='9')
+            | KeyAction::Char('a')
+            | KeyAction::Char('A')
+            | KeyAction::Char('d')
+            | KeyAction::Char('D')
+            | KeyAction::Escape
+    )
+}
+
+pub(crate) fn handle_approval_key(
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) -> bool {
+    let Some(tx) = control_tx else {
+        return false;
+    };
+    let queue = &app.pending_approvals;
+    let deny_armed = app
+        .deny_arm
+        .map(|t| t.elapsed() < std::time::Duration::from_millis(2000))
+        .unwrap_or(false);
+    if !deny_armed {
+        app.deny_arm = None;
+    }
+    match action {
+        KeyAction::Char(c) => match c {
+            '1'..='9' if deny_armed => {
+                let idx = (*c as u8 - b'1') as usize;
+                if let Some(p) = queue.get(idx) {
+                    let _ = tx.send(TuiControl::DenyTool {
+                        tool_use_id: p.tool_use_id.clone(),
+                        reason: "denied by user".into(),
+                    });
+                    app.push_note(format!("denied {}", p.tool_name), app::NoteLevel::Warn);
+                }
+                app.deny_arm = None;
+                true
+            }
+            '1'..='9' => {
+                let idx = (*c as u8 - b'1') as usize;
+                if let Some(p) = queue.get(idx) {
+                    let _ = tx.send(TuiControl::ApproveTool(p.tool_use_id.clone()));
+                    app.push_note(
+                        format!("approved {} ({})", p.tool_name, p.tool_use_id),
+                        app::NoteLevel::Info,
+                    );
+                }
+                true
+            }
+            'a' | 'A' => {
+                let _ = tx.send(TuiControl::ApproveAllPending);
+                app.push_note(
+                    format!("approved all {} pending", queue.len()),
+                    app::NoteLevel::Info,
+                );
+                app.deny_arm = None;
+                true
+            }
+            'd' | 'D' => {
+                let deny_first = queue.len() <= 1 || deny_armed;
+                if deny_first {
+                    if let Some(p) = queue.first() {
+                        let _ = tx.send(TuiControl::DenyTool {
+                            tool_use_id: p.tool_use_id.clone(),
+                            reason: "denied by user".into(),
+                        });
+                        app.push_note(format!("denied {}", p.tool_name), app::NoteLevel::Warn);
+                    }
+                    app.deny_arm = None;
+                } else {
+                    app.deny_arm = Some(std::time::Instant::now());
+                    app.push_note(
+                        format!("d + N to deny nth, dd to deny first (of {})", queue.len()),
+                        app::NoteLevel::Info,
+                    );
+                }
+                true
+            }
+            _ => {
+                app.deny_arm = None;
+                false
+            }
+        },
+        KeyAction::Escape => {
+            let _ = tx.send(TuiControl::DenyAllPending {
+                reason: "user pressed Esc".into(),
+            });
+            let _ = tx.send(TuiControl::CancelFlow);
+            app.push_note(
+                format!("denied all {} pending, flow cancelled", queue.len()),
+                app::NoteLevel::Warn,
+            );
+            app.deny_arm = None;
+            app.cancel_running_activities();
+            true
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn handle_modal_key(
+    kind: crate::wm::ModalKind,
+    action: &KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) -> bool {
+    if kind == crate::wm::ModalKind::Form && app.form_modal.open {
+        handle_form_key(action, app, control_tx);
+        return true;
+    }
+    if kind == crate::wm::ModalKind::CompactReview && app.compact_review.is_some() {
+        handle_compact_review_key(action, app, control_tx);
+        return true;
+    }
+    if kind == crate::wm::ModalKind::SessionSwitcher && app.session_switcher.open {
+        handle_session_switcher_key(action, app, control_tx);
+        return true;
+    }
+    if kind == crate::wm::ModalKind::HistorySearch && app.history_search.open {
+        handle_history_search_key(action, app);
+        return true;
+    }
+    if kind == crate::wm::ModalKind::ProviderManager && app.provider_manager.open {
+        app.provider_manager.handle_key(action, control_tx);
+        if let Some(model) = app.provider_manager.open_alias_model.take() {
+            app.alias_manager.open_form_with_model(&model);
+        }
+        if app.provider_manager.add_just_completed {
+            app.provider_manager.add_just_completed = false;
+            if app.onboarding_open {
+                app.onboarding.provider_added();
+            }
+        }
+        if app.provider_manager.refresh_just_triggered {
+            app.provider_manager.refresh_just_triggered = false;
+            app.push_toast(
+                "refreshing models…",
+                app::NoteLevel::Info,
+                std::time::Duration::from_secs(2),
+                app::ToastPosition::TopRight,
+            );
+        }
+        if app.provider_manager.test_just_triggered {
+            app.provider_manager.test_just_triggered = false;
+            app.push_toast(
+                "testing endpoint…",
+                app::NoteLevel::Info,
+                std::time::Duration::from_secs(5),
+                app::ToastPosition::TopRight,
+            );
+        }
+        return true;
+    }
+    if kind == crate::wm::ModalKind::AliasManager && app.alias_manager.open {
+        app.alias_manager.handle_key(action, control_tx);
+        return true;
+    }
+    if kind == crate::wm::ModalKind::ModelPicker && app.model_picker.open {
+        app.model_picker.handle_key(action);
+        if let Some(model) = app.model_picker.picked.take() {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::SwitchModel {
+                    model: model.clone(),
+                });
+            }
+            app.context.model = model.clone();
+            app.push_toast(
+                format!("model switched to {model}"),
+                app::NoteLevel::Success,
+                std::time::Duration::from_secs(3),
+                app::ToastPosition::TopRight,
+            );
+        }
+        return true;
+    }
+    if kind == crate::wm::ModalKind::Onboarding && app.onboarding_open {
+        match app.onboarding.handle_key(action) {
+            crate::onboarding::OnboardingEvent::None => {}
+            crate::onboarding::OnboardingEvent::OpenProviderManager => {
+                app.provider_manager.open_add();
+            }
+            crate::onboarding::OnboardingEvent::Completed => {
+                app.onboarding_open = false;
+                app.hints_dismissed = false;
+                app.save_ui_state();
+                app.push_toast(
+                    "Setup complete — smart model configured".to_string(),
+                    app::NoteLevel::Success,
+                    std::time::Duration::from_secs(4),
+                    app::ToastPosition::TopRight,
+                );
+            }
+            crate::onboarding::OnboardingEvent::Skipped => {
+                app.onboarding_open = false;
+                app.onboarding_skipped = true;
+                app.save_ui_state();
+                app.push_toast(
+                    "You can configure atman in ~/.config/atman/config.toml".to_string(),
+                    app::NoteLevel::Warn,
+                    std::time::Duration::from_secs(5),
+                    app::ToastPosition::TopRight,
+                );
+            }
+        }
+        return true;
+    }
+    if kind == crate::wm::ModalKind::Palette && app.palette.open {
+        handle_palette_key(action, app, control_tx);
+        return true;
+    }
+    if kind == crate::wm::ModalKind::ThemePicker && app.theme_picker_open {
+        let themes = [
+            atman_runtime::trust::Theme::Default,
+            atman_runtime::trust::Theme::Wuxia,
+            atman_runtime::trust::Theme::Animal,
+            atman_runtime::trust::Theme::Weather,
+            atman_runtime::trust::Theme::Drink,
+        ];
+        let max = themes.len();
+        match action {
+            KeyAction::Escape => {
+                app.theme_picker_open = false;
+            }
+            KeyAction::HistoryUp | KeyAction::CursorLeft => {
+                app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
+            }
+            KeyAction::HistoryDown | KeyAction::CursorRight => {
+                app.picker_selected = (app.picker_selected + 1) % max;
+            }
+            KeyAction::Submit | KeyAction::Char('\r') => {
+                app.trust.theme = themes[app.picker_selected.min(max - 1)];
+                app.theme_picker_open = false;
+                app.save_ui_state();
+            }
+            KeyAction::Quit => app.should_quit = true,
+            _ => {}
+        }
+        return true;
+    }
+    false
+}
+
+pub(crate) fn handle_key(
+    action: KeyAction,
+    app: &mut AppState,
+    editor: &mut InputEditor,
+    interrupt_prompt: &mut Option<std::time::Instant>,
+    submit_tx: Option<&mpsc::UnboundedSender<String>>,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    // MCP add form intercepts all keys when open
+    if app.mcp_add_form.is_some() {
+        let mut form = app.mcp_add_form.take().unwrap();
+        let mut close = false;
+        let mut reload = false;
+        let mut toast: Option<(String, app::NoteLevel)> = None;
+
+        match action {
+            KeyAction::Escape => {
+                close = true;
+            }
+            KeyAction::Tab => {
+                form.next_field();
+            }
+            KeyAction::BackTab => {
+                form.prev_field();
+            }
+            KeyAction::Submit => match form.build_config() {
+                Ok(cfg) => {
+                    let mut configs = atman_runtime::mcp_config::load(None);
+                    configs.retain(|c| c.name != cfg.name);
+                    configs.push(cfg);
+                    match atman_runtime::mcp_config::save(&configs) {
+                        Ok(()) => {
+                            reload = true;
+                            close = true;
+                            toast = Some(("MCP server added".into(), app::NoteLevel::Success));
+                        }
+                        Err(e) => form.error = Some(format!("save failed: {e}")),
+                    }
+                }
+                Err(e) => form.error = Some(e),
+            },
+            KeyAction::Char(c) => {
+                form.error = None;
+                match form.field {
+                    0 => form.name.insert_char(c),
+                    2 if form.transport_idx == 0 => form.command.insert_char(c),
+                    2 => form.url.insert_char(c),
+                    3 => form.args.insert_char(c),
+                    4 => form.env.insert_char(c),
+                    _ => {}
+                }
+            }
+            KeyAction::Backspace => {
+                form.error = None;
+                match form.field {
+                    0 => form.name.backspace(),
+                    2 if form.transport_idx == 0 => form.command.backspace(),
+                    2 => form.url.backspace(),
+                    3 => form.args.backspace(),
+                    4 => form.env.backspace(),
+                    _ => {}
+                }
+            }
+            KeyAction::CursorLeft => {
+                form.error = None;
+                match form.field {
+                    1 if form.transport_idx > 0 => form.transport_idx -= 1,
+                    5 if form.tier_idx > 0 => form.tier_idx -= 1,
+                    _ => {}
+                }
+            }
+            KeyAction::CursorRight => {
+                form.error = None;
+                match form.field {
+                    1 if form.transport_idx < 2 => form.transport_idx += 1,
+                    5 if form.tier_idx < 2 => form.tier_idx += 1,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+
+        if close {
+            app.mcp_add_form = None;
+        } else {
+            app.mcp_add_form = Some(form);
+        }
+        if reload {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::McpReload);
+            }
+        }
+        if let Some((msg, level)) = toast {
+            app.push_toast(
+                msg,
+                level,
+                std::time::Duration::from_secs(3),
+                app::ToastPosition::TopRight,
+            );
+        }
+        return;
+    }
+
+    match action {
+        crate::keys::KeyAction::CyclePanelForward => {
+            app.wm.cycle_focus(true);
+            return;
+        }
+        crate::keys::KeyAction::CyclePanelBackward => {
+            app.wm.cycle_focus(false);
+            return;
+        }
+        _ => {}
+    }
+
+    if let KeyAction::Tab = action {
+        if let Some(id) = app.wm.focused_id()
+            && let Some(panel) = app.wm.panels.iter_mut().find(|p| p.id == id)
+            && matches!(panel.content_kind, crate::wm::WindowContent::Mermaid { .. })
+        {
+            panel.split = !panel.split;
+            app.mark_items_dirty();
+            return;
+        }
+    }
+
+    if let Some(id) = app.wm.focused_id()
+        && app
+            .wm
+            .panels
+            .iter()
+            .any(|p| p.id == id && matches!(p.content_kind, crate::wm::WindowContent::Mcp))
+    {
+        let server_count = app.context.mcp_servers.len();
+        match action {
+            KeyAction::Tab => {
+                app.mcp_browser_tab = app.mcp_browser_tab.next();
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    match app.mcp_browser_tab {
+                        crate::mcp_manager::McpBrowserTab::Resources
+                            if !app.mcp_resources_cache.contains_key(&name) =>
+                        {
+                            if let Some(tx) = control_tx {
+                                let _ = tx.send(TuiControl::McpListResources { name });
+                                app.push_toast(
+                                    "loading resources…".to_string(),
+                                    app::NoteLevel::Info,
+                                    std::time::Duration::from_secs(3),
+                                    app::ToastPosition::TopRight,
+                                );
+                            }
+                        }
+                        crate::mcp_manager::McpBrowserTab::Prompts
+                            if !app.mcp_prompts_cache.contains_key(&name) =>
+                        {
+                            if let Some(tx) = control_tx {
+                                let _ = tx.send(TuiControl::McpListPrompts { name });
+                                app.push_toast(
+                                    "loading prompts…".to_string(),
+                                    app::NoteLevel::Info,
+                                    std::time::Duration::from_secs(3),
+                                    app::ToastPosition::TopRight,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            KeyAction::HistoryUp | KeyAction::Char('k') => {
+                app.mcp_remove_armed = None;
+                if app.mcp_selected > 0 {
+                    app.mcp_selected -= 1;
+                }
+                return;
+            }
+            KeyAction::HistoryDown | KeyAction::Char('j') => {
+                app.mcp_remove_armed = None;
+                if app.mcp_selected + 1 < server_count {
+                    app.mcp_selected += 1;
+                }
+                return;
+            }
+            KeyAction::Submit => {
+                app.mcp_remove_armed = None;
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    if !app.expanded_mcp_servers.remove(&name) {
+                        app.expanded_mcp_servers.insert(name);
+                    }
+                }
+                return;
+            }
+            KeyAction::Char('d') => {
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    match atman_runtime::mcp_config::toggle_disabled(&name) {
+                        Ok(disabled) => {
+                            let msg = if disabled {
+                                format!("disabled {name} — reloading…")
+                            } else {
+                                format!("enabled {name} — reloading…")
+                            };
+                            app.push_toast(
+                                msg,
+                                app::NoteLevel::Info,
+                                std::time::Duration::from_secs(3),
+                                app::ToastPosition::TopRight,
+                            );
+                            if let Some(tx) = control_tx {
+                                let _ = tx.send(TuiControl::McpReload);
+                            }
+                        }
+                        Err(e) => {
+                            app.push_toast(
+                                format!("toggle failed: {e}"),
+                                app::NoteLevel::Error,
+                                std::time::Duration::from_secs(5),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+            KeyAction::Char('r') => {
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    app.mcp_remove_armed = Some(name.clone());
+                    app.modal_notification = Some(format!(
+                        "Remove MCP server \"{name}\"?\n\n  Enter = confirm   Esc = cancel"
+                    ));
+                }
+                return;
+            }
+            KeyAction::Char('a') => {
+                app.mcp_add_form = Some(crate::mcp_manager::McpAddForm::default());
+                return;
+            }
+            KeyAction::Char('t') => {
+                if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
+                    let name = s.name.clone();
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::McpTest { name: name.clone() });
+                        app.push_toast(
+                            format!("testing {name}…"),
+                            app::NoteLevel::Info,
+                            std::time::Duration::from_secs(10),
+                            app::ToastPosition::TopRight,
+                        );
+                    } else {
+                        app.push_toast(
+                            "test not available (no control channel)",
+                            app::NoteLevel::Warn,
+                            std::time::Duration::from_secs(3),
+                            app::ToastPosition::TopRight,
+                        );
+                    }
+                }
+                return;
+            }
+            KeyAction::Char('q') => {
+                app.wm.close(id);
+                return;
+            }
+            _ => {}
+        }
+    }
+    if app.modal_notification.is_some() {
+        if app.mcp_remove_armed.is_some() {
+            match action {
+                KeyAction::Submit => {
+                    let name = app.mcp_remove_armed.take().unwrap();
+                    app.modal_notification = None;
+                    match atman_runtime::mcp_config::remove(&name) {
+                        Ok(()) => {
+                            app.push_toast(
+                                format!("removed {name} — reloading…"),
+                                app::NoteLevel::Info,
+                                std::time::Duration::from_secs(3),
+                                app::ToastPosition::TopRight,
+                            );
+                            if let Some(tx) = control_tx {
+                                let _ = tx.send(TuiControl::McpReload);
+                            }
+                        }
+                        Err(e) => {
+                            app.push_toast(
+                                format!("remove failed: {e}"),
+                                app::NoteLevel::Error,
+                                std::time::Duration::from_secs(5),
+                                app::ToastPosition::TopRight,
+                            );
+                        }
+                    }
+                    return;
+                }
+                KeyAction::Escape => {
+                    app.mcp_remove_armed = None;
+                    app.modal_notification = None;
+                    return;
+                }
+                _ => return,
+            }
+        }
+        if matches!(action, KeyAction::Escape) {
+            app.modal_notification = None;
+        }
+        return;
+    }
+    app.sync_modal_stack();
+    if let Some(kind) = app.layer_stack.dispatch_key()
+        && handle_modal_key(kind, &action, app, control_tx)
+    {
+        app.sync_modal_stack();
+        return;
+    }
+    if let KeyAction::OpenCommandPalette = action {
+        app.palette.open();
+        return;
+    }
+    if matches!(action, KeyAction::Char('x'))
+        && matches!(
+            app.items.first(),
+            Some(crate::app::OutputItem::StartupCard { .. })
+        )
+        && !app.hints_dismissed
+    {
+        app.hints_dismissed = true;
+        app.save_ui_state();
+        return;
+    }
+    if let Some(crate::app::OutputItem::StartupCard { recent, .. }) = app.items.first() {
+        // The overlay only animates away when the user actually starts
+        // a session:
+        //   * a digit 1-9 → resume that recent session
+        //   * Enter (Submit) with input in the editor → begin a new
+        //     session interaction
+        // Plain char keys just type into the editor and the overlay
+        // stays put with the growing text visible in its input slot.
+        if editor.buf().is_empty()
+            && let KeyAction::Char(c) = &action
+            && let Some(digit) = c.to_digit(10)
+            && (1..=9).contains(&digit)
+        {
+            let idx = (digit as usize) - 1;
+            if let Some(entry) = recent.get(idx) {
+                request_session_switch(app, control_tx, entry.session_id.clone());
+                return;
+            }
+        }
+        if matches!(action, KeyAction::Submit)
+            && !editor.buf().trim().is_empty()
+            && app.startup_intro.is_none()
+        {
+            let (version, recent) = match app.items.first() {
+                Some(crate::app::OutputItem::StartupCard { version, recent }) => {
+                    (version.clone(), recent.clone())
+                }
+                _ => (String::new(), Vec::new()),
+            };
+            app.items.remove(0);
+            app.items_version = app.items_version.wrapping_add(1);
+            app.startup_intro = Some(crate::app::StartupIntro {
+                started_at: std::time::Instant::now(),
+                version,
+                recent,
+            });
+        }
+    }
+    if app.trust_mode_picker_open {
+        let modes = atman_runtime::trust::TrustMode::all();
+        let max = modes.len();
+        match action {
+            KeyAction::Escape => {
+                app.trust_mode_picker_open = false;
+            }
+            KeyAction::HistoryUp | KeyAction::CursorLeft => {
+                app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
+            }
+            KeyAction::HistoryDown | KeyAction::CursorRight => {
+                app.picker_selected = (app.picker_selected + 1) % max;
+            }
+            KeyAction::Submit | KeyAction::Char('\r') => {
+                let new_mode = modes[app.picker_selected.min(max - 1)];
+                let prev = app.trust.mode;
+                app.trust.mode = new_mode;
+                app.trust_mode_picker_open = false;
+                app.save_ui_state();
+                if new_mode != prev {
+                    if let Some(sess) = app.session.as_ref() {
+                        sess.approval().set_auto_ceiling(new_mode.auto_ceiling());
+                    }
+                    let display = app.trust.theme.display(new_mode);
+                    if let Some(warning) = new_mode.warning(&display) {
+                        app.push_note(&warning, app::NoteLevel::Warn);
+                    }
+                }
+            }
+            KeyAction::Quit => app.should_quit = true,
+            _ => {}
+        }
+        return;
+    }
+    if app.popup.is_open() {
+        match &action {
+            KeyAction::Escape => {
+                app.popup.close();
+                return;
+            }
+            KeyAction::HistoryUp => {
+                app.popup.prev();
+                return;
+            }
+            KeyAction::HistoryDown => {
+                app.popup.next();
+                return;
+            }
+            KeyAction::Tab => {
+                if let Some(item) = app.popup.accept() {
+                    editor.replace_with(&item.insert);
+                }
+                app.refresh_popup(editor.buf());
+                return;
+            }
+            _ => {
+                app.popup.close();
+            }
+        }
+    }
+    if !app.pending_approvals.is_empty() && is_approval_key(&action) {
+        handle_approval_key(&action, app, control_tx);
+        return;
+    }
+    if app.yank_mode && handle_yank_key(&action, app) {
+        return;
+    }
+    let mut edited = false;
+    match action {
+        KeyAction::Char(c) => {
+            editor.insert_char(c);
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::OpenCommandPalette => {
+            app.palette.open();
+            *interrupt_prompt = None;
+        }
+        KeyAction::SearchHistory => {
+            app.history_search.open();
+            *interrupt_prompt = None;
+        }
+        KeyAction::Backspace => {
+            editor.backspace();
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::DeleteWordBackward => {
+            editor.delete_word_backward();
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::Newline => {
+            editor.insert_newline();
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::Submit => {
+            if let Some(line) = editor.submit() {
+                if !app.has_running_workflow() {
+                    app.push_user_turn(line.clone());
+                }
+                if let Some(tx) = submit_tx {
+                    let _ = tx.send(line);
+                }
+            }
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::HistoryUp => {
+            let cw = app
+                .input_rect
+                .map(|r| r.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize)
+                .unwrap_or(80);
+            if !editor.move_line_up_visual(cw) {
+                editor.history_up();
+            }
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::HistoryDown => {
+            let cw = app
+                .input_rect
+                .map(|r| r.width.saturating_sub(layout::INPUT_H_OVERHEAD) as usize)
+                .unwrap_or(80);
+            if !editor.move_line_down_visual(cw) {
+                editor.history_down();
+            }
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::CursorLeft => {
+            editor.move_left();
+            *interrupt_prompt = None;
+        }
+        KeyAction::CursorRight => {
+            editor.move_right();
+            *interrupt_prompt = None;
+        }
+        KeyAction::CursorHome => {
+            editor.move_home();
+            *interrupt_prompt = None;
+        }
+        KeyAction::CursorEnd => {
+            editor.move_end();
+            *interrupt_prompt = None;
+        }
+        KeyAction::Tab => {
+            if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
+                app.trust.outside = app.trust.outside.next();
+                app.mark_items_dirty();
+                app.save_ui_state();
+            } else if editor.expand_paste_at_cursor() {
+                edited = true;
+            }
+            *interrupt_prompt = None;
+        }
+        KeyAction::NudgePrefill => {
+            editor.prefill("!nudge ");
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::CoursePrefill => {
+            editor.prefill("!course-correct ");
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::RedirectPrefill => {
+            editor.prefill("!redirect ");
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::HardStop => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::HardStop);
+            }
+            app.cancel_running_activities();
+            *interrupt_prompt = None;
+        }
+        KeyAction::ScrollUp | KeyAction::PageUp => {
+            if let Some(id) = app.wm.focused_id()
+                && let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id)
+            {
+                p.scroll = p
+                    .scroll
+                    .saturating_sub(if matches!(action, KeyAction::PageUp) {
+                        10
+                    } else {
+                        3
+                    });
+                return;
+            }
+            app.scroll_up(if matches!(action, KeyAction::PageUp) {
+                10
+            } else {
+                1
+            });
+            *interrupt_prompt = None;
+        }
+        KeyAction::ScrollDown | KeyAction::PageDown => {
+            if let Some(id) = app.wm.focused_id()
+                && let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id)
+            {
+                p.scroll = p
+                    .scroll
+                    .saturating_add(if matches!(action, KeyAction::PageDown) {
+                        10
+                    } else {
+                        3
+                    });
+                return;
+            }
+            app.scroll_down(if matches!(action, KeyAction::PageDown) {
+                10
+            } else {
+                1
+            });
+            *interrupt_prompt = None;
+        }
+        KeyAction::Home => {
+            app.scroll_to_top();
+            *interrupt_prompt = None;
+        }
+        KeyAction::End => {
+            app.scroll_to_tail();
+            *interrupt_prompt = None;
+        }
+        KeyAction::Escape => {
+            if let Some(id) = app.wm.focused_id() {
+                if app.wm.panels.iter().any(|p| p.id == id) {
+                    app.wm.close(id);
+                    return;
+                }
+            }
+            if app.streaming || app.has_running_workflow() {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::CancelFlow);
+                }
+                app.push_note("cancel requested", app::NoteLevel::Warn);
+                app.cancel_running_activities();
+            }
+            *interrupt_prompt = None;
+        }
+        KeyAction::ToggleSidebar => {
+            app.sidebar_collapsed = !app.sidebar_collapsed;
+            app.save_ui_state();
+            *interrupt_prompt = None;
+        }
+        KeyAction::ToggleMouseCapture => {
+            let now_on = app.toggle_mouse_capture();
+            app.save_ui_state();
+            if let Err(e) = crate::terminal_guard::set_mouse_capture(now_on) {
+                app.push_note(
+                    format!("mouse capture toggle failed: {e}"),
+                    app::NoteLevel::Warn,
+                );
+            } else if !now_on && !app.select_mode_hinted {
+                app.push_note(
+                    "SELECT MODE — drag mouse to copy; press F3 to resume interaction",
+                    app::NoteLevel::Info,
+                );
+                app.select_mode_hinted = true;
+            }
+            *interrupt_prompt = None;
+        }
+        KeyAction::ToggleLastTool => {
+            app.toggle_last_tool_expansion();
+            *interrupt_prompt = None;
+        }
+        KeyAction::HelpModal => {
+            let canvas = app.last_transcript_rect.unwrap_or_default();
+            app.wm.open(
+                "cheatsheet",
+                crate::wm::ContentKey::Cheatsheet,
+                crate::wm::WindowContent::Cheatsheet,
+                "Keybindings",
+                canvas,
+            );
+            if let Some(p) = app
+                .wm
+                .panels
+                .iter_mut()
+                .find(|p| p.content_key == crate::wm::ContentKey::Cheatsheet)
+            {
+                p.content = Some(Box::new(
+                    crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+                ));
+            }
+            *interrupt_prompt = None;
+        }
+        KeyAction::Interrupt => {
+            // Ctrl+C priority: clear input first, then stop flow, then quit.
+            if !editor.buf().is_empty() {
+                editor.clear();
+                edited = true;
+                *interrupt_prompt = None;
+            } else if app.streaming || app.has_running_workflow() {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::HardStop);
+                }
+                app.push_note("flow stopped (Ctrl+C)", app::NoteLevel::Warn);
+                app.cancel_running_activities();
+                *interrupt_prompt = None;
+            } else {
+                let within_window = interrupt_prompt
+                    .map(|t| t.elapsed() < std::time::Duration::from_millis(1500))
+                    .unwrap_or(false);
+                if within_window {
+                    app.should_quit = true;
+                } else {
+                    *interrupt_prompt = Some(std::time::Instant::now());
+                    app.push_note("press Ctrl+C again to quit", app::NoteLevel::Warn);
+                }
+            }
+        }
+        KeyAction::Quit => {
+            app.should_quit = true;
+        }
+        KeyAction::Ignore => {
+            *interrupt_prompt = None;
+        }
+        KeyAction::BackTab => {}
+        KeyAction::CyclePanelForward | KeyAction::CyclePanelBackward => {}
+    }
+    if edited {
+        app.refresh_popup(editor.buf());
+    }
+}
+
+// The outgoing tui exits fast; the incoming tui plays the fade+slide
+// intro on top of the freshly rendered new session so content appears
+// first, then the banner/sessions fade out and input docks bottom.
+pub(crate) fn request_session_switch(
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+    sid: String,
+) {
+    let intro = match app.items.first() {
+        Some(crate::app::OutputItem::StartupCard { version, recent }) => crate::app::StartupIntro {
+            started_at: std::time::Instant::now(),
+            version: version.clone(),
+            recent: recent.clone(),
+        },
+        _ => {
+            // No StartupCard (e.g. mid-session switch): still play the
+            // fade transition so the user sees a smooth hand-off.
+            crate::app::StartupIntro {
+                started_at: std::time::Instant::now(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                recent: Vec::new(),
+            }
+        }
+    };
+    if let Some(tx) = control_tx {
+        let _ = tx.send(TuiControl::SwitchSession {
+            sid,
+            intro: intro.clone(),
+        });
+    }
+    app.should_quit = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_event_text;
+
+    #[test]
+    fn extract_event_text_user_msg() {
+        let payload = r#"{"type":"user_msg","seq":1,"message":{"role":"user","parts":[{"type":"text","text":"hello world"}]}}"#;
+        assert_eq!(
+            extract_event_text("user_msg", payload),
+            Some("hello world".into())
+        );
+    }
+
+    #[test]
+    fn extract_event_text_assistant_with_thinking() {
+        let payload = r#"{"type":"assistant_msg","message":{"role":"assistant","parts":[{"type":"thinking","thinking":"let me think"},{"type":"text","text":"answer"}]}}"#;
+        let text = extract_event_text("assistant_msg", payload).unwrap();
+        assert!(text.contains("answer"));
+        assert!(text.contains("let me think"));
+    }
+
+    #[test]
+    fn extract_event_text_tool_result_wraps_in_code_block() {
+        let payload = r#"{"type":"tool_result_msg","message":{"role":"tool","parts":[{"type":"tool_result","tool_use_id":"x","content":"line1\nline2","is_error":false}]}}"#;
+        let text = extract_event_text("tool_result_msg", payload).unwrap();
+        assert!(text.contains("```"));
+        assert!(text.contains("line1"));
+    }
+
+    #[test]
+    fn extract_event_text_unknown_kind_returns_none() {
+        let payload = r#"{"type":"flow_start"}"#;
+        assert_eq!(extract_event_text("flow_start", payload), None);
+    }
+}
