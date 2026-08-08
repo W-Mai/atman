@@ -605,6 +605,7 @@ async fn run_frames(
                             app.refresh_popup(editor.buf());
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
+                            app.sync_modal_stack();
                             // Check floating panels/modals BEFORE input_rect so clicks
                             // on overlapping panels don't pass through to the input box.
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind
@@ -2751,27 +2752,28 @@ fn handle_approval_key(
 }
 
 fn handle_modal_key(
+    kind: crate::wm::ModalKind,
     action: &KeyAction,
     app: &mut AppState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) -> bool {
-    if app.form_modal.open {
+    if kind == crate::wm::ModalKind::Form && app.form_modal.open {
         handle_form_key(action, app, control_tx);
         return true;
     }
-    if app.compact_review.is_some() {
+    if kind == crate::wm::ModalKind::CompactReview && app.compact_review.is_some() {
         handle_compact_review_key(action, app, control_tx);
         return true;
     }
-    if app.session_switcher.open {
+    if kind == crate::wm::ModalKind::SessionSwitcher && app.session_switcher.open {
         handle_session_switcher_key(action, app, control_tx);
         return true;
     }
-    if app.history_search.open {
+    if kind == crate::wm::ModalKind::HistorySearch && app.history_search.open {
         handle_history_search_key(action, app);
         return true;
     }
-    if app.provider_manager.open {
+    if kind == crate::wm::ModalKind::ProviderManager && app.provider_manager.open {
         app.provider_manager.handle_key(action, control_tx);
         if let Some(model) = app.provider_manager.open_alias_model.take() {
             app.alias_manager.open_form_with_model(&model);
@@ -2802,11 +2804,11 @@ fn handle_modal_key(
         }
         return true;
     }
-    if app.alias_manager.open {
+    if kind == crate::wm::ModalKind::AliasManager && app.alias_manager.open {
         app.alias_manager.handle_key(action, control_tx);
         return true;
     }
-    if app.model_picker.open {
+    if kind == crate::wm::ModalKind::ModelPicker && app.model_picker.open {
         app.model_picker.handle_key(action);
         if let Some(model) = app.model_picker.picked.take() {
             if let Some(tx) = control_tx {
@@ -2824,7 +2826,7 @@ fn handle_modal_key(
         }
         return true;
     }
-    if app.onboarding_open {
+    if kind == crate::wm::ModalKind::Onboarding && app.onboarding_open {
         match app.onboarding.handle_key(action) {
             crate::onboarding::OnboardingEvent::None => {}
             crate::onboarding::OnboardingEvent::OpenProviderManager => {
@@ -2855,11 +2857,11 @@ fn handle_modal_key(
         }
         return true;
     }
-    if app.palette.open {
+    if kind == crate::wm::ModalKind::Palette && app.palette.open {
         handle_palette_key(action, app, control_tx);
         return true;
     }
-    if app.theme_picker_open {
+    if kind == crate::wm::ModalKind::ThemePicker && app.theme_picker_open {
         let themes = [
             atman_runtime::trust::Theme::Default,
             atman_runtime::trust::Theme::Wuxia,
@@ -3203,8 +3205,11 @@ fn handle_key(
         }
         return;
     }
-    let modal_active = app.layer_stack.dispatch_key(app);
-    if modal_active && handle_modal_key(&action, app, control_tx) {
+    app.sync_modal_stack();
+    if let Some(kind) = app.layer_stack.dispatch_key()
+        && handle_modal_key(kind, &action, app, control_tx)
+    {
+        app.sync_modal_stack();
         return;
     }
     if let KeyAction::OpenCommandPalette = action {
@@ -4180,10 +4185,13 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         border_color,
     );
 
+    app.sync_modal_stack();
     if app.trust_mode_picker_open {
         render_trust_mode_picker(f, area, app);
     }
-    render_modals(f, area, app);
+    let layer_stack = std::mem::take(&mut app.layer_stack);
+    layer_stack.render_modals(f, area, app);
+    app.layer_stack = layer_stack;
     // Modal notification overlay
     if let Some(ref msg) = app.modal_notification {
         render_notify_modal(f, area, msg);
@@ -4257,39 +4265,6 @@ fn render_startup_hints(
         .wrap(ratatui::widgets::Wrap { trim: true }),
         rect,
     );
-}
-
-fn render_modals(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &mut AppState) {
-    if app.theme_picker_open {
-        render_theme_picker(f, area, app);
-    }
-    if app.palette.open {
-        palette::render(f, area, &app.palette);
-    }
-    if app.session_switcher.open {
-        session_switcher::render(f, area, &app.session_switcher);
-    }
-    if app.onboarding_open {
-        crate::onboarding::render(f, area, &app.onboarding);
-    }
-    if app.provider_manager.open {
-        crate::provider_manager::render(f, area, &app.provider_manager);
-    }
-    if app.model_picker.open {
-        crate::model_picker::render(f, area, &app.model_picker, &app.context.model);
-    }
-    if app.alias_manager.open {
-        crate::alias_manager::render(f, area, &app.alias_manager);
-    }
-    if let Some(modal) = &app.compact_review {
-        compact_review_modal::render(f, area, modal);
-    }
-    if app.history_search.open {
-        history_search_modal::render(f, area, &mut app.history_search);
-    }
-    if app.form_modal.open {
-        form_modal::render(f, area, &app.form_modal);
-    }
 }
 
 fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {

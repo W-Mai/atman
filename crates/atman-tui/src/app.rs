@@ -346,16 +346,13 @@ pub fn frame_run_id(frame: &StreamFrame) -> Option<&str> {
 
 impl AppState {
     pub fn modal_open(&self) -> bool {
-        self.form_modal.open
-            || self.compact_review.is_some()
-            || self.session_switcher.open
-            || self.history_search.open
-            || self.provider_manager.open
-            || self.alias_manager.open
-            || self.model_picker.open
-            || self.onboarding_open
-            || self.palette.open
-            || self.theme_picker_open
+        !self.layer_stack.modal_stack.is_empty()
+    }
+
+    pub fn sync_modal_stack(&mut self) {
+        let mut layer_stack = std::mem::take(&mut self.layer_stack);
+        layer_stack.sync_modals(self);
+        self.layer_stack = layer_stack;
     }
 
     pub fn new(session_id: String, goal: Option<String>) -> Self {

@@ -18,7 +18,7 @@ pub use floating::{
 };
 pub use layer::{Layer, LayerKind};
 pub use layer_stack::LayerStack;
-pub use modal::{HitTestResult, ModalComponent, ModalEntry, OutsideClickPolicy};
+pub use modal::{HitTestResult, ModalComponent, ModalEntry, ModalKind, OutsideClickPolicy};
 pub use window::{
     ContentKey, OpenPolicy, WindowCapabilities, WindowContent, WindowId, WindowMode, WindowState,
 };

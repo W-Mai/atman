@@ -2,7 +2,36 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use super::component::{EventCtx, HitRegion, RenderCtx, WmEvent, WmEventResult};
-use super::window::WindowId;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModalKind {
+    Form,
+    CompactReview,
+    SessionSwitcher,
+    HistorySearch,
+    ProviderManager,
+    AliasManager,
+    ModelPicker,
+    Onboarding,
+    Palette,
+    ThemePicker,
+}
+
+impl ModalKind {
+    pub fn is_open(self, app: &crate::app::AppState) -> bool {
+        match self {
+            Self::Form => app.form_modal.open,
+            Self::CompactReview => app.compact_review.is_some(),
+            Self::SessionSwitcher => app.session_switcher.open,
+            Self::HistorySearch => app.history_search.open,
+            Self::ProviderManager => app.provider_manager.open,
+            Self::AliasManager => app.alias_manager.open,
+            Self::ModelPicker => app.model_picker.open,
+            Self::Onboarding => app.onboarding_open,
+            Self::Palette => app.palette.open,
+            Self::ThemePicker => app.theme_picker_open,
+        }
+    }
+}
 
 /// Result of a modal hit-test.
 #[derive(Debug, Clone)]
@@ -65,9 +94,8 @@ pub trait ModalComponent: Send {
     }
 }
 
-/// A stack entry in the modal layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModalEntry {
-    pub component: Box<dyn ModalComponent>,
-    /// Focus to restore when this modal is popped.
-    pub parent_focus: Option<WindowId>,
+    pub kind: ModalKind,
+    pub pre_modal_focus: Option<String>,
 }
