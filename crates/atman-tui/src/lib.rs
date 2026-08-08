@@ -521,8 +521,7 @@ async fn run_frames(
                                     .wm
                                     .hit_test_panel(me.column, me.row)
                                     .unwrap()
-                                    .id
-                                    .clone();
+                                    .id;
                                 if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id) {
                                     match me.kind {
                                         MouseEventKind::ScrollUp => {
@@ -636,7 +635,7 @@ async fn run_frames(
                                 let topmost = app
                                     .wm
                                     .hit_test_panel(me.column, me.row)
-                                    .map(|p| (p.id.clone(), p.rect));
+                                    .map(|p| (p.id, p.rect));
                                 if let Some((panel_id, pr)) = topmost {
                                 if let Some(min_id) =
                                     app.wm.hit_test_minimize(me.column, me.row)
@@ -722,7 +721,7 @@ async fn run_frames(
                                         app.last_titlebar_click = None;
                                     } else {
                                         app.wm.focus(id);
-                                        app.drag_target = Some(id.clone());
+                                        app.drag_target = Some(id);
                                         app.drag_offset = (me.column, me.row);
                                         app.last_titlebar_click = Some((id, now));
                                     }
@@ -1185,7 +1184,7 @@ async fn run_frames(
                                 }
                             } else if let MouseEventKind::Up(MouseButton::Left) = me.kind {
                                 if app.resize_target.is_some() {
-                                    let id = app.resize_target.clone();
+                                    let id = app.resize_target;
                                     if let Some(id) = id {
                                         if let Some(p) = app.wm.panels.iter().find(|p| p.id == id) {
                                             if let Some(label) = app.wm.label(id) {
@@ -1207,7 +1206,7 @@ async fn run_frames(
                                 let topmost_panel = app
                                     .wm
                                     .hit_test_panel(me.column, me.row)
-                                    .map(|p| (p.id.clone(), p.rect));
+                                    .map(|p| (p.id, p.rect));
                                 if let Some((panel_id, pr)) = topmost_panel {
                                     // floating panel button hover
                                     let btn_hover = app

@@ -446,6 +446,14 @@ mod tests {
         }
     }
 
+    fn id(fp: &WindowManager, label: &str) -> WindowId {
+        fp.panels
+            .iter()
+            .find(|panel| panel.label == label)
+            .unwrap()
+            .id
+    }
+
     #[test]
     fn open_creates_panel_and_focuses() {
         let mut fp = WindowManager::default();
@@ -457,7 +465,7 @@ mod tests {
             canvas(),
         );
         assert_eq!(fp.panels.len(), 1);
-        assert_eq!(fp.focused(), Some("bg_1"));
+        assert_eq!(fp.focused(), Some("bg_1".to_string()));
     }
 
     #[test]
@@ -497,9 +505,9 @@ mod tests {
             "b",
             canvas(),
         );
-        fp.close("b");
+        fp.close(id(&fp, "b"));
         assert_eq!(fp.panels.len(), 1);
-        assert_eq!(fp.focused(), Some("a"));
+        assert_eq!(fp.focused(), Some("a".to_string()));
     }
 
     #[test]
@@ -519,9 +527,9 @@ mod tests {
             "b",
             canvas(),
         );
-        let z_b_before = fp.panels.iter().find(|p| p.id == "b").unwrap().z;
-        fp.focus("a");
-        let z_a = fp.panels.iter().find(|p| p.id == "a").unwrap().z;
+        let z_b_before = fp.panels.iter().find(|p| p.id == id(&fp, "b")).unwrap().z;
+        fp.focus(id(&fp, "a"));
+        let z_a = fp.panels.iter().find(|p| p.id == id(&fp, "a")).unwrap().z;
         assert!(z_a > z_b_before);
     }
 
@@ -536,10 +544,10 @@ mod tests {
             canvas(),
         );
         let orig = fp.panels[0].rect;
-        fp.toggle_maximize("a", canvas());
+        fp.toggle_maximize(id(&fp, "a"), canvas());
         assert!(fp.panels[0].maximized);
         assert_ne!(fp.panels[0].rect, orig);
-        fp.toggle_maximize("a", canvas());
+        fp.toggle_maximize(id(&fp, "a"), canvas());
         assert!(!fp.panels[0].maximized);
         assert_eq!(fp.panels[0].rect, orig);
     }
@@ -561,10 +569,10 @@ mod tests {
             "b",
             canvas(),
         );
-        let b = fp.panels.iter().find(|p| p.id == "b").unwrap();
+        let b = fp.panels.iter().find(|p| p.id == id(&fp, "b")).unwrap();
         let hit = fp.hit_test_titlebar(b.rect.x + 2, b.rect.y);
         assert!(hit.is_some());
-        assert_eq!(hit.unwrap().id, "b");
+        assert_eq!(hit.unwrap().id, id(&fp, "b"));
     }
 
     #[test]
@@ -577,7 +585,7 @@ mod tests {
             "a",
             canvas(),
         );
-        fp.move_panel("a", 200, 200, canvas());
+        fp.move_panel(id(&fp, "a"), 200, 200, canvas());
         let p = &fp.panels[0];
         assert_eq!(p.rect.x, 200);
         assert_eq!(p.rect.y, 200);
@@ -630,7 +638,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::History,
-            PanelKind::History,
+            WindowContent::History,
             "History",
             canvas(),
         );
@@ -705,7 +713,7 @@ mod tests {
             canvas(),
         );
         let c = canvas();
-        fp.resize_panel("a", 5, 3, c);
+        fp.resize_panel(id(&fp, "a"), 5, 3, c);
         assert_eq!(fp.panels[0].rect.width, 20);
         assert_eq!(fp.panels[0].rect.height, 6);
     }
@@ -756,14 +764,14 @@ mod tests {
         );
         // focus order: a was focused first, then b, then c.
         // Now re-focus "a" so it's most-recent in history.
-        fp.focus("a");
+        fp.focus(id(&fp, "a"));
         // close "c" (the last-opened). Focus should go to "a" (most recent in
         // history), not "b" (panels.last()).
-        fp.close("c");
+        fp.close(id(&fp, "c"));
         assert_eq!(fp.panels.len(), 2);
         assert_eq!(
             fp.focused(),
-            Some("a"),
+            Some("a".to_string()),
             "close should refocus by history, not panels.last()"
         );
     }

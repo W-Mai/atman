@@ -64,6 +64,8 @@ impl WindowComponent for HistoryPanelContent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn render_history_content(
     f: &mut Frame,
     area: Rect,

@@ -3080,8 +3080,8 @@ mod terminal_stream_tests {
         app.open_task_panel("term_s_0", canvas);
         app.open_task_panel("term_s_1", canvas);
         assert_eq!(app.wm.panels.len(), 2);
-        assert_eq!(app.wm.panels[0].id, "term_s_0");
-        assert_eq!(app.wm.panels[1].id, "term_s_1");
+        assert_eq!(app.wm.panels[0].label, "term_s_0");
+        assert_eq!(app.wm.panels[1].label, "term_s_1");
     }
 }
 
