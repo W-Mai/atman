@@ -14,7 +14,7 @@ pub use component::{
     WmEvent, WmEventResult,
 };
 pub use floating::{
-    FocusState, PanelBtn, PanelKind, WindowInstance, WindowManager, WmHitmap, render, render_shadow,
+    FocusState, PanelBtn, WindowInstance, WindowManager, WmHitmap, render, render_shadow,
 };
 pub use layer::{Layer, LayerKind};
 pub use layer_stack::LayerStack;

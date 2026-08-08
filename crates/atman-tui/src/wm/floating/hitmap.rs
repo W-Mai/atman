@@ -1,5 +1,7 @@
 use ratatui::layout::Rect;
 
+use crate::wm::WindowId;
+
 use super::{PanelBtn, WindowInstance, WindowManager};
 
 #[derive(Debug, Default)]
@@ -7,9 +9,9 @@ pub struct WmHitmap {
     // Each entry is (panel_id, ...) so hit regions can be attributed to the
     // panel that produced them. Consumers must not fire a region owned by a
     // lower-z panel that the topmost panel would block.
-    pub history_row_rects: Vec<(String, String, Rect)>, // (panel_id, handle, rect)
-    pub workflow_node_rects: Vec<(String, usize, String, Rect)>, // (panel_id, idx, path, rect)
-    pub mcp_row_rects: Vec<(String, String, Rect)>,     // (panel_id, name, rect)
+    pub history_row_rects: Vec<(WindowId, String, Rect)>,
+    pub workflow_node_rects: Vec<(WindowId, usize, String, Rect)>,
+    pub mcp_row_rects: Vec<(WindowId, String, Rect)>,
 }
 
 impl WindowManager {
@@ -37,33 +39,33 @@ impl WindowManager {
             .max_by_key(|p| p.z)
     }
 
-    pub fn hit_test_minimize(&self, col: u16, row: u16) -> Option<String> {
+    pub fn hit_test_minimize(&self, col: u16, row: u16) -> Option<WindowId> {
         self.panels
             .iter()
             .filter(|p| col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 2)
             .max_by_key(|p| p.z)
-            .map(|p| p.id.clone())
+            .map(|p| p.id)
     }
 
-    pub fn hit_test_maximize(&self, col: u16, row: u16) -> Option<String> {
+    pub fn hit_test_maximize(&self, col: u16, row: u16) -> Option<WindowId> {
         self.panels
             .iter()
             .filter(|p| col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 3)
             .max_by_key(|p| p.z)
-            .map(|p| p.id.clone())
+            .map(|p| p.id)
     }
 
-    pub fn hit_test_close(&self, col: u16, row: u16) -> Option<String> {
+    pub fn hit_test_close(&self, col: u16, row: u16) -> Option<WindowId> {
         self.panels
             .iter()
             .filter(|p| {
                 p.rect.height >= 8 && col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 5
             })
             .max_by_key(|p| p.z)
-            .map(|p| p.id.clone())
+            .map(|p| p.id)
     }
 
-    pub fn hit_test_resize(&self, col: u16, row: u16) -> Option<String> {
+    pub fn hit_test_resize(&self, col: u16, row: u16) -> Option<WindowId> {
         // 3x3 area around the resize button at (x+w-1, y+h-1)
         self.panels
             .iter()
@@ -76,10 +78,10 @@ impl WindowManager {
                     && row <= cy + 1
             })
             .max_by_key(|p| p.z)
-            .map(|p| p.id.clone())
+            .map(|p| p.id)
     }
 
-    pub fn hit_test_btn(&self, col: u16, row: u16) -> Option<(String, PanelBtn)> {
+    pub fn hit_test_btn(&self, col: u16, row: u16) -> Option<(WindowId, PanelBtn)> {
         if let Some(id) = self.hit_test_minimize(col, row) {
             return Some((id, PanelBtn::Minimize));
         }

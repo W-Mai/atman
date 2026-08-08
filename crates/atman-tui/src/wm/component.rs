@@ -81,6 +81,7 @@ pub enum HitTarget {
 
 /// Immutable render data passed to `WindowComponent::render_content`.
 pub struct RenderCtx<'a> {
+    pub window_id: crate::wm::WindowId,
     pub snapshots: &'a [atman_runtime::TaskSnapshot],
     pub items: &'a [crate::app::OutputItem],
     pub animation_frame: u32,

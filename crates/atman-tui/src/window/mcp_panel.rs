@@ -29,6 +29,7 @@ impl WindowComponent for McpPanelContent {
             ctx.hovered_mcp_row,
             &mut hitmap,
             ctx.mcp_browser,
+            ctx.window_id,
         );
         hitmap
             .mcp_row_rects

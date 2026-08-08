@@ -6,7 +6,9 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use atman_runtime::TaskSnapshot;
 
-use super::{PanelBtn, PanelKind, WindowInstance};
+use crate::wm::WindowContent;
+
+use super::{PanelBtn, WindowInstance};
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_shell(
@@ -39,7 +41,7 @@ pub fn render_shell(
         panel.rect,
     );
 
-    let title_text = if panel.kind == PanelKind::Mermaid {
+    let title_text = if matches!(panel.content_kind, WindowContent::Mermaid { .. }) {
         let hint = if panel.split {
             "Tab: diagram"
         } else {
@@ -51,7 +53,7 @@ pub fn render_shell(
     };
     let title_line = Line::from(vec![
         Span::styled(
-            format!(" {} ", panel.kind.icon()),
+            format!(" {} ", panel.content_kind.icon()),
             Style::default().fg(t.heading.into()).bg(panel_bg),
         ),
         Span::styled(
@@ -124,10 +126,10 @@ pub fn render_shell(
         );
 
         if panel.rect.height >= 8 {
-            let killable = match &panel.kind {
-                PanelKind::Task(_) => snapshots
+            let killable = match &panel.content_kind {
+                WindowContent::Task { handle, .. } => snapshots
                     .iter()
-                    .any(|s| s.source_handle == panel.id && s.is_running()),
+                    .any(|s| s.source_handle == *handle && s.is_running()),
                 _ => false,
             };
             if killable {
@@ -139,7 +141,7 @@ pub fn render_shell(
                 };
                 let armed = panel_close_armed
                     .as_ref()
-                    .is_some_and(|(id, expired)| id == &panel.id && !expired);
+                    .is_some_and(|(id, expired)| id == &panel.label && !expired);
                 let (close_fg, close_bg) = if btn_hover == Some(PanelBtn::Close) || armed {
                     (t.error.into(), hover_bg)
                 } else {
