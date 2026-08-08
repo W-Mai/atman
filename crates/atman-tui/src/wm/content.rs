@@ -41,7 +41,11 @@ pub fn render_panel_content(
         if !is_focused && modal_open && !content.wants_background_updates() {
             return;
         }
-        panel.content_version = content.content_version();
+        let version = content.content_version();
+        if version != panel.content_version {
+            panel.render_cache = None;
+        }
+        panel.content_version = version;
         content.sync_state(panel.scroll, panel.h_scroll, panel.split);
         let regions = content.render_content(
             area,
