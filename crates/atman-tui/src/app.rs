@@ -546,6 +546,158 @@ impl AppState {
         }
     }
 
+    pub fn mcp_browser_state(&self) -> crate::mcp_manager::McpBrowserState<'_> {
+        crate::mcp_manager::McpBrowserState {
+            tab: self.mcp_browser_tab,
+            resources: &self.mcp_resources_cache,
+            prompts: &self.mcp_prompts_cache,
+        }
+    }
+
+    pub fn open_task_panel(
+        &mut self,
+        wm: &mut crate::wm::WindowManager,
+        handle: &str,
+        canvas: ratatui::layout::Rect,
+        maximized: bool,
+        background: bool,
+    ) -> bool {
+        let item = self
+            .items
+            .iter()
+            .rev()
+            .find(|it| it.handle() == Some(handle))
+            .cloned();
+        let snap = self
+            .task_snapshots
+            .iter()
+            .find(|s| s.source_handle == handle)
+            .cloned();
+
+        // A completed bash task may have left the in-memory item list (e.g.
+        // after a history restore) while its snapshot and session log file
+        // survive. Reconstruct the output so the panel shows real content
+        // instead of falling through to the empty placeholder.
+        let item = self.reconstruct_bash_item(&snap).or(item);
+
+        let (kind, label, pw, ph) = if let Some(item) = item {
+            match item {
+                crate::app::OutputItem::Terminal {
+                    handle: h, screen, ..
+                } => {
+                    let (pw, ph) = (screen.cols + 8, screen.rows + 5);
+                    let label = snap
+                        .as_ref()
+                        .map(|s| s.label.clone())
+                        .unwrap_or_else(|| h.clone());
+                    (atman_runtime::TaskKind::Terminal, label, pw, ph)
+                }
+                crate::app::OutputItem::Bash { handle: h, .. } => {
+                    let (pw, ph) = self.panel_sizes.get(&h).copied().unwrap_or((0, 0));
+                    let label = snap
+                        .as_ref()
+                        .map(|s| s.label.clone())
+                        .unwrap_or_else(|| h.clone());
+                    (atman_runtime::TaskKind::Bash, label, pw, ph)
+                }
+                crate::app::OutputItem::SubAgentActivity { handle: h, .. } => {
+                    let label = snap
+                        .as_ref()
+                        .map(|s| s.label.clone())
+                        .unwrap_or_else(|| h.clone());
+                    (atman_runtime::TaskKind::Flow, label, 0, 0)
+                }
+                crate::app::OutputItem::WorkflowPanel { .. } => {
+                    let kind = snap
+                        .as_ref()
+                        .map(|s| s.kind)
+                        .unwrap_or(atman_runtime::TaskKind::Flow);
+                    let label = snap
+                        .as_ref()
+                        .map(|s| s.label.clone())
+                        .unwrap_or_else(|| handle.to_string());
+                    (kind, label, 0, 0)
+                }
+                _ => unreachable!("handle() only returns Some for Terminal/Bash"),
+            }
+        } else {
+            let kind = snap
+                .as_ref()
+                .map(|s| s.kind)
+                .unwrap_or(atman_runtime::TaskKind::Flow);
+            let label = snap
+                .as_ref()
+                .map(|s| s.label.clone())
+                .unwrap_or_else(|| handle.to_string());
+            (kind, label, 0, 0)
+        };
+
+        let content: Box<dyn crate::wm::WindowComponent> = match kind {
+            atman_runtime::TaskKind::Bash => {
+                Box::new(crate::window::bash_panel::BashPanelContent {
+                    handle: handle.to_string(),
+                    scroll: 0,
+                })
+            }
+            atman_runtime::TaskKind::Terminal => {
+                Box::new(crate::window::terminal_panel::TerminalPanelContent {
+                    handle: handle.to_string(),
+                    scroll: 0,
+                })
+            }
+            atman_runtime::TaskKind::Flow => {
+                Box::new(crate::window::flow_panel::FlowPanelContent {
+                    handle: handle.to_string(),
+                    scroll: 0,
+                    render_cache: None,
+                })
+            }
+        };
+
+        let existing_ids: std::collections::HashSet<crate::wm::WindowId> =
+            wm.panels.iter().map(|p| p.id).collect();
+        let window_id = if background {
+            wm.open_background_with_size(
+                handle,
+                crate::wm::ContentKey::Task(handle.to_string()),
+                crate::wm::OpenPolicy::ReuseExisting,
+                crate::wm::WindowContent::Task {
+                    handle: handle.to_string(),
+                    kind,
+                },
+                &label,
+                canvas,
+                pw,
+                ph,
+                maximized,
+            )
+        } else {
+            wm.open_with_size(
+                handle,
+                crate::wm::ContentKey::Task(handle.to_string()),
+                crate::wm::OpenPolicy::ReuseExisting,
+                crate::wm::WindowContent::Task {
+                    handle: handle.to_string(),
+                    kind,
+                },
+                &label,
+                canvas,
+                pw,
+                ph,
+                maximized,
+            )
+        };
+        let is_new = !existing_ids.contains(&window_id);
+        if let Some(panel) = wm
+            .panels
+            .iter_mut()
+            .find(|panel| panel.id == window_id)
+        {
+            panel.content = Some(content);
+        }
+        is_new
+    }
+
     pub fn toggle_workflow_node(&mut self, panel_index: usize, node_id: &str) {
         if let Some(item) = self.items.get_mut(panel_index) {
             let expanded_nodes = match item {
