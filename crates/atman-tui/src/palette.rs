@@ -2,6 +2,14 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use tokio::sync::mpsc;
+
+use crate::app::{self};
+use crate::key_handler::{
+    copy_last_message, copy_last_tool, enumerate_session_rows, yank_candidate_indices,
+};
+use crate::keys::KeyAction;
+use crate::{TuiControl, UiState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteEntryId {
@@ -305,6 +313,154 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
         }
     }
     true
+}
+
+pub(crate) fn handle_palette_key(
+    action: &KeyAction,
+    ui: &mut UiState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    let app = &mut ui.app;
+    match action {
+        KeyAction::Escape => app.palette.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => app.palette.move_up(),
+        KeyAction::HistoryDown | KeyAction::CursorRight => app.palette.move_down(),
+        KeyAction::Backspace => app.palette.backspace(),
+        KeyAction::Char(c) => app.palette.push_char(*c),
+        KeyAction::Submit => {
+            if let Some(id) = app.palette.selected() {
+                app.palette.close();
+                dispatch_palette_entry(id, ui, control_tx);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn dispatch_palette_entry(
+    id: crate::palette::PaletteEntryId,
+    ui: &mut UiState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    let app = &mut ui.app;
+    use crate::palette::PaletteEntryId;
+    match id {
+        PaletteEntryId::YankMode => {
+            let cands = yank_candidate_indices(app);
+            if cands.is_empty() {
+                app.push_note("nothing to yank yet", app::NoteLevel::Warn);
+                return;
+            }
+            app.yank_mode = true;
+            app.yank_index = cands.len().saturating_sub(1);
+            app.push_note(
+                "yank mode — j/k to move, Enter to copy, Esc to cancel",
+                app::NoteLevel::Info,
+            );
+        }
+        PaletteEntryId::CopyLastMessage => copy_last_message(app),
+        PaletteEntryId::CopyLastTool => copy_last_tool(app),
+        PaletteEntryId::CompactNow => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::CompactNow);
+                app.push_note("requested transcript compaction", app::NoteLevel::Info);
+            }
+        }
+        PaletteEntryId::SwitchSession => {
+            let scope = crate::session_switcher::SessionScope::Project;
+            let rows = enumerate_session_rows(app, scope);
+            app.session_switcher.open_with(rows, scope);
+        }
+        PaletteEntryId::NewSession => {
+            if let Some(tx) = control_tx {
+                let _ = tx.send(TuiControl::NewSession);
+            }
+        }
+        PaletteEntryId::MoveSession => {
+            if let (Some(tx), Some(session)) = (control_tx, app.session.as_ref()) {
+                let form = atman_runtime::form::PendingForm {
+                    form_id: "session_move_path".to_string(),
+                    run_id: atman_runtime::event::FlowRunId::now(),
+                    tool_use_id: "session_move_path".to_string(),
+                    kind: atman_runtime::form::FormKind::Text {
+                        prompt: "New working directory:".to_string(),
+                        placeholder: Some("/path/to/project".to_string()),
+                        multiline: false,
+                    },
+                    emitted_at: chrono::Utc::now(),
+                };
+                session.forms().request(form);
+                let _ = tx.send(TuiControl::MoveSession);
+            }
+        }
+        PaletteEntryId::DeleteSession => {
+            let scope = crate::session_switcher::SessionScope::Project;
+            let rows = enumerate_session_rows(app, scope);
+            app.session_switcher.open_with(rows, scope);
+        }
+        PaletteEntryId::SearchHistory => {
+            app.history_search.open();
+        }
+        PaletteEntryId::ToggleSidebar => {
+            app.sidebar_mode = app.sidebar_mode.toggle();
+            app.save_ui_state();
+        }
+        PaletteEntryId::ManageProviders => {
+            app.provider_manager.toggle();
+        }
+        PaletteEntryId::ManageAliases => {
+            app.alias_manager.toggle();
+        }
+        PaletteEntryId::SwitchModel => {
+            app.model_picker.open();
+        }
+        PaletteEntryId::ManageMcp => {
+            let canvas = app.last_transcript_rect.unwrap_or_default();
+            ui.wm.open(
+                "mcp-manager",
+                crate::wm::ContentKey::Mcp,
+                crate::wm::WindowContent::Mcp,
+                "MCP Servers",
+                canvas,
+            );
+            if let Some(p) = ui
+                .wm
+                .panels
+                .iter_mut()
+                .find(|p| p.content_key == crate::wm::ContentKey::Mcp)
+            {
+                p.content = Some(Box::new(crate::window::mcp_panel::McpPanelContent {
+                    scroll: 0,
+                }));
+            }
+        }
+        PaletteEntryId::ShowHelp => {
+            let canvas = app.last_transcript_rect.unwrap_or_default();
+            ui.wm.open(
+                "cheatsheet",
+                crate::wm::ContentKey::Cheatsheet,
+                crate::wm::WindowContent::Cheatsheet,
+                "Keybindings",
+                canvas,
+            );
+            if let Some(p) = ui
+                .wm
+                .panels
+                .iter_mut()
+                .find(|p| p.content_key == crate::wm::ContentKey::Cheatsheet)
+            {
+                p.content = Some(Box::new(
+                    crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+                ));
+            }
+        }
+        PaletteEntryId::SetTrustMode => {
+            app.trust_mode_picker_open = true;
+        }
+        PaletteEntryId::SetModeTheme => {
+            app.theme_picker_open = true;
+        }
+    }
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {

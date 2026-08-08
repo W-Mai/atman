@@ -4,7 +4,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
+use tokio::sync::mpsc;
+
+use crate::app::AppState;
 use crate::input::InputEditor;
+use crate::keys::{self, KeyAction};
+use crate::TuiControl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchStatus {
@@ -347,6 +352,135 @@ impl FormModal {
     fn attach_test(&mut self, form: PendingForm) {
         let id = form.form_id.clone();
         self.attach(form, &[id]);
+    }
+}
+
+pub(crate) fn handle_form_key(
+    action: &keys::KeyAction,
+    app: &mut AppState,
+    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+) {
+    use atman_runtime::form::FormKind;
+    let Some(form_id) = app.form_modal.active_form_id().map(String::from) else {
+        return;
+    };
+    let is_text = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::Text { .. })
+    );
+    let is_confirm = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::Confirm { .. })
+    );
+    let is_multi = matches!(
+        app.form_modal.pending.as_ref().map(|p| &p.kind),
+        Some(FormKind::MultiSelect { .. })
+    );
+    let dispatch_outcome = |app: &mut AppState,
+                            control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
+                            outcome: crate::form_modal::SubmitOutcome| {
+        use crate::form_modal::SubmitOutcome;
+        match outcome {
+            SubmitOutcome::Single { form_id, answer } => {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
+                }
+            }
+            SubmitOutcome::BatchConfirmed => {
+                for (i, answer) in app.form_modal.batch_answers.iter().enumerate() {
+                    if let Some(a) = answer
+                        && let Some(tx) = control_tx
+                    {
+                        let id = app.form_modal.batch_ids.get(i).cloned().unwrap_or_default();
+                        let _ = tx.send(TuiControl::FormSubmit {
+                            form_id: id,
+                            answer: a.clone(),
+                        });
+                    }
+                }
+            }
+            SubmitOutcome::BatchCancelled => {
+                for id in &app.form_modal.batch_ids {
+                    if id == "__batch_confirm" {
+                        continue;
+                    }
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::FormSubmit {
+                            form_id: id.clone(),
+                            answer: atman_runtime::form::FormAnswer::Cancelled,
+                        });
+                    }
+                }
+            }
+            SubmitOutcome::None => {}
+        }
+    };
+    match action {
+        KeyAction::Escape => {
+            let outcome = app.form_modal.cancel();
+            dispatch_outcome(app, control_tx, outcome);
+        }
+        KeyAction::Submit => {
+            let outcome = app.form_modal.submit();
+            dispatch_outcome(app, control_tx, outcome);
+        }
+        KeyAction::Char('y') | KeyAction::Char('Y') if is_confirm => {
+            let outcome = app.form_modal.submit();
+            dispatch_outcome(app, control_tx, outcome);
+        }
+        KeyAction::Char('n') | KeyAction::Char('N') if is_confirm => {
+            let outcome = app.form_modal.confirm_no();
+            dispatch_outcome(app, control_tx, outcome);
+        }
+        KeyAction::Char(' ') if is_multi => {
+            app.form_modal.toggle_current();
+        }
+        KeyAction::Tab => {
+            if let Some(target_id) = app.form_modal.switch_to(1)
+                && target_id != form_id
+            {
+                let in_registry = app
+                    .session
+                    .as_ref()
+                    .map(|s| {
+                        s.forms()
+                            .list_pending()
+                            .iter()
+                            .any(|p| p.form_id == target_id)
+                    })
+                    .unwrap_or(false);
+                if in_registry {
+                    if let Some(sess) = app.session.as_ref() {
+                        sess.forms().promote(&target_id);
+                    }
+                } else if let Some(cached) = app.form_modal.cached_forms.get(&target_id).cloned() {
+                    let ids = app.form_modal.batch_ids.clone();
+                    app.form_modal.attach(cached, &ids);
+                }
+            }
+        }
+        KeyAction::HistoryUp | KeyAction::Char('k') if !is_text => {
+            app.form_modal.move_cursor(-1);
+        }
+        KeyAction::HistoryDown | KeyAction::Char('j') if !is_text => {
+            app.form_modal.move_cursor(1);
+        }
+        KeyAction::CursorLeft if is_confirm => {
+            app.form_modal.move_cursor(-1);
+        }
+        KeyAction::CursorRight if is_confirm => {
+            app.form_modal.move_cursor(1);
+        }
+        KeyAction::Char(c) if is_text => {
+            app.form_modal.text_editor.insert_char(*c);
+        }
+        KeyAction::Backspace if is_text => {
+            app.form_modal.text_editor.backspace();
+        }
+        KeyAction::Newline if is_text => {
+            app.form_modal.text_editor.insert_newline();
+        }
+        _ => {}
     }
 }
 
