@@ -95,10 +95,10 @@ impl LayerStack {
         let expanded_mcp_servers = HashSet::new();
         let hovered_mcp_row = None;
         let hovered_history_row = None;
-        let mcp_resources = HashMap::new();
-        let mcp_prompts = HashMap::new();
+        let mcp_resources = app.mcp_resources_cache.clone();
+        let mcp_prompts = app.mcp_prompts_cache.clone();
         let mcp_browser = crate::mcp_manager::McpBrowserState {
-            tab: crate::mcp_manager::McpBrowserTab::default(),
+            tab: app.mcp_browser_tab,
             resources: &mcp_resources,
             prompts: &mcp_prompts,
         };

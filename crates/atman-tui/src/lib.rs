@@ -4044,41 +4044,6 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.last_task_panel_rect = None;
         app.last_task_panel_hitmap = crate::task_panel::TaskPanelHitMap::default();
     }
-    if !app.wm.panels.is_empty() {
-        let close_armed = app
-            .panel_close_armed_id
-            .clone()
-            .zip(Some(app.panel_close_arm_expired()));
-        let max_canvas = app.maximized_canvas();
-        let modal_open = app.modal_open();
-        app.last_wm_hitmap = crate::wm::render(
-            f,
-            l.transcript,
-            &mut app.wm,
-            &app.task_snapshots,
-            &app.items,
-            &app.activity_nodes,
-            &app.hovered_panel_btn,
-            &app.hovered_history_row,
-            app.animation_frame,
-            close_armed.as_ref().map(|(id, exp)| (id.as_str(), *exp)),
-            max_canvas,
-            modal_open,
-            &app.context.mcp_servers,
-            &app.expanded_mcp_servers,
-            app.mcp_selected,
-            &app.hovered_mcp_row,
-            &crate::mcp_manager::McpBrowserState {
-                tab: app.mcp_browser_tab,
-                resources: &app.mcp_resources_cache,
-                prompts: &app.mcp_prompts_cache,
-            },
-            app.items_version,
-            app.expanded_version,
-        );
-    } else {
-        app.last_wm_hitmap = crate::wm::WmHitmap::default();
-    }
     if intro_active && let Some(intro) = app.startup_intro.as_ref() {
         output::render_startup_intro_fade(
             f,
@@ -4219,6 +4184,42 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
         app.has_running_workflow(),
         border_color,
     );
+
+    if !app.wm.panels.is_empty() {
+        let close_armed = app
+            .panel_close_armed_id
+            .clone()
+            .zip(Some(app.panel_close_arm_expired()));
+        let max_canvas = app.maximized_canvas();
+        let modal_open = app.modal_open();
+        app.last_wm_hitmap = crate::wm::render(
+            f,
+            l.transcript,
+            &mut app.wm,
+            &app.task_snapshots,
+            &app.items,
+            &app.activity_nodes,
+            &app.hovered_panel_btn,
+            &app.hovered_history_row,
+            app.animation_frame,
+            close_armed.as_ref().map(|(id, exp)| (id.as_str(), *exp)),
+            max_canvas,
+            modal_open,
+            &app.context.mcp_servers,
+            &app.expanded_mcp_servers,
+            app.mcp_selected,
+            &app.hovered_mcp_row,
+            &crate::mcp_manager::McpBrowserState {
+                tab: app.mcp_browser_tab,
+                resources: &app.mcp_resources_cache,
+                prompts: &app.mcp_prompts_cache,
+            },
+            app.items_version,
+            app.expanded_version,
+        );
+    } else {
+        app.last_wm_hitmap = crate::wm::WmHitmap::default();
+    }
 
     app.sync_modal_stack();
     if app.trust_mode_picker_open {
