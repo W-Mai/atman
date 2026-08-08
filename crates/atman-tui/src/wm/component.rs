@@ -5,7 +5,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use crate::keys::KeyAction;
+use crate::app::{NoteLevel, ToastPosition};
 use crate::wm::PanelBtn;
+use crate::wm::window::{ContentKey, FocusPolicy, OpenPolicy, WindowContent};
 
 use super::window::WindowId;
 
@@ -35,8 +37,75 @@ pub enum WmCommand {
     OpenTaskPanel {
         handle: String,
         maximized: bool,
+        background: bool,
     },
-    PushToast(String),
+    OpenPanel(PanelOpenSpec),
+    PushToast {
+        message: String,
+        level: NoteLevel,
+        ttl: std::time::Duration,
+        position: ToastPosition,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct PanelOpenSpec {
+    pub label: String,
+    pub content_key: ContentKey,
+    pub content_kind: WindowContent,
+    pub title: String,
+    pub canvas: Rect,
+    pub width: u16,
+    pub height: u16,
+    pub maximized: bool,
+    pub open_policy: OpenPolicy,
+    pub focus_policy: FocusPolicy,
+    pub component: PanelComponentKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum PanelComponentKind {
+    Bash { handle: String },
+    Terminal { handle: String },
+    Flow { handle: String },
+    Mermaid { item_id: String },
+    Mcp,
+    History,
+    Activity { run_id: String, node_id: String },
+    Cheatsheet,
+}
+
+impl PanelComponentKind {
+    pub fn build(&self) -> Box<dyn WindowComponent> {
+        match self {
+            Self::Bash { handle } => Box::new(crate::window::bash_panel::BashPanelContent {
+                handle: handle.clone(),
+                scroll: 0,
+            }),
+            Self::Terminal { handle } => Box::new(crate::window::terminal_panel::TerminalPanelContent {
+                handle: handle.clone(),
+                scroll: 0,
+            }),
+            Self::Flow { handle } => Box::new(crate::window::flow_panel::FlowPanelContent {
+                handle: handle.clone(),
+                scroll: 0,
+                render_cache: None,
+            }),
+            Self::Mermaid { item_id } => Box::new(crate::window::mermaid_panel::MermaidPanelContent {
+                item_id: item_id.clone(),
+                scroll: 0,
+                h_scroll: 0,
+                split: false,
+            }),
+            Self::Mcp => Box::new(crate::window::mcp_panel::McpPanelContent { scroll: 0 }),
+            Self::History => Box::new(crate::window::history_panel::HistoryPanelContent { scroll: 0 }),
+            Self::Activity { run_id, node_id } => Box::new(crate::window::activity_panel::ActivityPanelContent {
+                run_id: format!("{run_id}:{node_id}"),
+                scroll: 0,
+            }),
+            Self::Cheatsheet => Box::new(crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 }),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
