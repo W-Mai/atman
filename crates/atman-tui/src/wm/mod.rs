@@ -81,6 +81,7 @@ pub struct PanelRenderCache {
 
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) regions: Vec<crate::output::NodeRegion>,
+    pub(crate) tool_headers: Vec<crate::output::ToolHeaderSpot>,
     pub(crate) wf_offset: u32,
 }
 

@@ -46,6 +46,48 @@ pub fn build_lines(items: &[OutputItem], ctx: &RenderCtx<'_>) -> Vec<Line<'stati
     out
 }
 
+/// A collapsible tool-output block rendered into the transcript. `row` is the
+/// block's header line relative to the enclosing `build_lines` output, and
+/// `tool_id` identifies the block for hit-testing (expand/collapse).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolHeaderSpot {
+    pub row: u32,
+    pub tool_id: String,
+}
+
+/// Like [`build_lines`] but also reports the header row of every collapsible
+/// tool-output block so callers can build clickable hit regions.
+pub fn build_lines_with_tool_headers(
+    items: &[OutputItem],
+    ctx: &RenderCtx<'_>,
+) -> (Vec<Line<'static>>, Vec<ToolHeaderSpot>) {
+    let mut out = Vec::with_capacity(items.len() * 3);
+    let mut spots = Vec::new();
+    for item in items {
+        let start = out.len() as u32;
+        out.extend(render_item(item, ctx));
+        if let Some(tool_id) = tool_block_id(item) {
+            // Every collapsible block renderer emits a blank row at `start`,
+            // then its header at `start + 1`.
+            spots.push(ToolHeaderSpot {
+                row: start.saturating_add(1),
+                tool_id,
+            });
+        }
+    }
+    (out, spots)
+}
+
+fn tool_block_id(item: &OutputItem) -> Option<String> {
+    match item {
+        OutputItem::Bash { handle, .. } | OutputItem::Terminal { handle, .. } => {
+            Some(handle.clone())
+        }
+        OutputItem::DiffPreview { title, .. } => Some(title.clone()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemRange {
     pub item_index: usize,

@@ -137,6 +137,7 @@ impl WindowComponent for FlowPanelContent {
                 expanded_tools_len: 0,
                 lines: lines.clone(),
                 regions: regions.clone(),
+                tool_headers: Vec::new(),
                 wf_offset: 0,
             });
             frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), area);
@@ -234,6 +235,21 @@ pub(crate) fn render_sub_agent_panel(
                 });
             }
         }
+        for r in &cache.tool_headers {
+            let row = area.y as u32 + (r.row + cache.wf_offset).saturating_sub(*scroll as u32);
+            if row < area.y as u32 || row >= area.y as u32 + area.height as u32 {
+                continue;
+            }
+            hitmap_out.push(HitRegion {
+                target: HitTarget::ToolHeader(r.tool_id.clone()),
+                rect: Rect {
+                    x: area.x,
+                    y: row as u16,
+                    width: area.width,
+                    height: 1,
+                },
+            });
+        }
         f.render_widget(
             Paragraph::new(cache.lines.clone()).scroll((*scroll, 0)),
             area,
@@ -319,7 +335,8 @@ pub(crate) fn render_sub_agent_panel(
         panel_width: area.width,
         hovered_thinking_idx: None,
     };
-    let doc_lines = crate::output::build_lines(&items, &render_ctx);
+    let (doc_lines, tool_headers) =
+        crate::output::build_lines_with_tool_headers(&items, &render_ctx);
     lines.extend(doc_lines);
 
     let max_scroll = (lines.len() as u16).saturating_sub(area.height);
@@ -342,6 +359,24 @@ pub(crate) fn render_sub_agent_panel(
             });
         }
     }
+    for r in &tool_headers {
+        let row = area.y as u32 + (r.row + wf_offset).saturating_sub(*scroll as u32);
+        if row < area.y as u32 {
+            continue;
+        }
+        if row >= area.y as u32 + area.height as u32 {
+            continue;
+        }
+        hitmap_out.push(HitRegion {
+            target: HitTarget::ToolHeader(r.tool_id.clone()),
+            rect: Rect {
+                x: area.x,
+                y: row as u16,
+                width: area.width,
+                height: 1,
+            },
+        });
+    }
 
     *render_cache = Some(PanelRenderCache {
         items_version,
@@ -353,6 +388,7 @@ pub(crate) fn render_sub_agent_panel(
         expanded_tools_len: expanded_tools.len(),
         lines: lines.clone(),
         regions: regions.clone(),
+        tool_headers,
         wf_offset,
     });
 
