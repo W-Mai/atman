@@ -22,6 +22,8 @@ pub fn render_panel_content(
     hovered_history_row: &Option<String>,
     hitmap_out: &mut WmHitmap,
     animation_frame: u32,
+    is_focused: bool,
+    modal_open: bool,
     mcp_servers: &[atman_runtime::mcp::McpServerStatus],
     expanded_mcp_servers: &std::collections::HashSet<String>,
     mcp_selected: usize,
@@ -36,6 +38,10 @@ pub fn render_panel_content(
     }
 
     if let Some(ref mut content) = panel.content {
+        if !is_focused && modal_open && !content.wants_background_updates() {
+            return;
+        }
+        panel.content_version = content.content_version();
         content.sync_state(panel.scroll, panel.h_scroll, panel.split);
         let regions = content.render_content(
             area,

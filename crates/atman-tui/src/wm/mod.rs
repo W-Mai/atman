@@ -39,7 +39,8 @@ pub use shadow::{
     render_top_fade,
 };
 pub use window::{
-    ContentKey, OpenPolicy, WindowCapabilities, WindowContent, WindowId, WindowMode, WindowState,
+    ContentKey, FocusPolicy, OpenPolicy, WindowCapabilities, WindowContent, WindowId, WindowMode,
+    WindowState,
 };
 pub struct WindowInstance {
     pub id: WindowId,
@@ -57,6 +58,9 @@ pub struct WindowInstance {
     pub split: bool,
     pub expanded_tools: HashSet<String>,
     pub render_cache: Option<PanelRenderCache>,
+    /// Latest `WindowComponent::content_version()`, tracked each frame.
+    /// Used for future background-update rendering decisions.
+    pub content_version: u64,
 }
 
 /// Cached render output for sub-agent / workflow floating panels.
@@ -161,6 +165,69 @@ impl WindowManager {
         h: u16,
         maximized: bool,
     ) -> WindowId {
+        self.open_with_policy(
+            FocusPolicy::Steal,
+            label,
+            content_key,
+            policy,
+            content_kind,
+            title,
+            canvas,
+            w,
+            h,
+            maximized,
+        )
+    }
+
+    /// Focus-preserving open. Steals focus only when no floating panel is
+    /// currently focused (used for background task completions). When a
+    /// panel is already focused, the new panel still opens
+    /// and comes to the front, but the user's current focus is untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_background_with_size(
+        &mut self,
+        label: &str,
+        content_key: ContentKey,
+        policy: OpenPolicy,
+        content_kind: WindowContent,
+        title: &str,
+        canvas: Rect,
+        w: u16,
+        h: u16,
+        maximized: bool,
+    ) -> WindowId {
+        self.open_with_policy(
+            if self.focused_id().is_some() {
+                FocusPolicy::Preserve
+            } else {
+                FocusPolicy::Steal
+            },
+            label,
+            content_key,
+            policy,
+            content_kind,
+            title,
+            canvas,
+            w,
+            h,
+            maximized,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_with_policy(
+        &mut self,
+        focus_policy: FocusPolicy,
+        label: &str,
+        content_key: ContentKey,
+        policy: OpenPolicy,
+        content_kind: WindowContent,
+        title: &str,
+        canvas: Rect,
+        w: u16,
+        h: u16,
+        maximized: bool,
+    ) -> WindowId {
         let (w, h) = if w == 0 || h == 0 {
             (DEFAULT_PANEL_W, DEFAULT_PANEL_H)
         } else {
@@ -194,8 +261,10 @@ impl WindowManager {
                 p.rect = maximized_rect(canvas);
                 p.maximized = true;
             }
-            self.focus.focus(existing_id);
             self.bring_to_front(existing_id);
+            if matches!(focus_policy, FocusPolicy::Steal) {
+                self.focus.focus(existing_id);
+            }
             return existing_id;
         }
         self.z_counter += 1;
@@ -235,9 +304,12 @@ impl WindowManager {
             split: false,
             expanded_tools: HashSet::new(),
             render_cache: None,
+            content_version: 0,
         };
         self.panels.push(panel);
-        self.focus.focus(id);
+        if matches!(focus_policy, FocusPolicy::Steal) {
+            self.focus.focus(id);
+        }
         id
     }
 
@@ -360,6 +432,7 @@ pub fn render(
     animation_frame: u32,
     panel_close_armed: Option<(&str, bool)>,
     max_canvas: Rect,
+    modal_open: bool,
     mcp_servers: &[atman_runtime::mcp::McpServerStatus],
     expanded_mcp_servers: &std::collections::HashSet<String>,
     mcp_selected: usize,
@@ -422,6 +495,8 @@ pub fn render(
                 hovered_history_row,
                 &mut panel_hitmap,
                 animation_frame,
+                is_focused,
+                modal_open,
                 mcp_servers,
                 expanded_mcp_servers,
                 mcp_selected,
@@ -547,6 +622,64 @@ mod tests {
         fp.focus(id(&fp, "a"));
         let z_a = fp.panels.iter().find(|p| p.id == id(&fp, "a")).unwrap().z;
         assert!(z_a > z_b_before);
+    }
+
+    #[test]
+    fn open_background_preserves_focus_when_panel_focused() {
+        let mut fp = WindowManager::default();
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            task_content("a"),
+            "a",
+            canvas(),
+        );
+        assert_eq!(fp.focused(), Some("a".to_string()));
+
+        // Background open while "a" is focused must NOT steal focus.
+        fp.open_background_with_size(
+            "b",
+            ContentKey::Task("b".to_string()),
+            OpenPolicy::AlwaysNew,
+            task_content("b"),
+            "b",
+            canvas(),
+            0,
+            0,
+            false,
+        );
+        assert_eq!(fp.panels.len(), 2);
+        assert_eq!(fp.focused(), Some("a".to_string()), "must keep focus on a");
+    }
+
+    #[test]
+    fn open_background_steals_focus_when_none_focused() {
+        let mut fp = WindowManager::default();
+        let id_a = fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            task_content("a"),
+            "a",
+            canvas(),
+        );
+        fp.focus.blur();
+        assert_eq!(fp.focused_id(), None);
+
+        fp.open_background_with_size(
+            "b",
+            ContentKey::Task("b".to_string()),
+            OpenPolicy::AlwaysNew,
+            task_content("b"),
+            "b",
+            canvas(),
+            0,
+            0,
+            false,
+        );
+        assert_eq!(fp.focused().as_deref(), Some("b"), "should focus b");
+        fp.close(id_a);
+        assert_eq!(fp.panels.len(), 1);
+        assert_eq!(fp.focused().as_deref(), Some("b"));
     }
 
     #[test]

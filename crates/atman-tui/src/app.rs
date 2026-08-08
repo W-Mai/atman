@@ -381,12 +381,29 @@ impl AppState {
     }
 
     pub fn open_task_panel(&mut self, handle: &str, canvas: ratatui::layout::Rect) {
-        self.open_task_panel_impl(handle, canvas, false);
+        self.open_task_panel_impl(handle, canvas, false, false);
     }
 
     pub fn open_task_panel_maximized(&mut self, handle: &str) {
         let canvas = self.maximized_canvas();
-        self.open_task_panel_impl(handle, canvas, true);
+        self.open_task_panel_impl(handle, canvas, true, false);
+    }
+
+    /// Background-task-completion open: never steals focus from a focused
+    /// floating panel; if a panel is focused, keep its focus and notify via
+    /// toast.
+    pub fn open_task_panel_background(&mut self, handle: &str) {
+        let canvas = self.maximized_canvas();
+        let focused_before = self.wm.focused_id();
+        let opened = self.open_task_panel_impl(handle, canvas, false, true);
+        if focused_before.is_some() && opened {
+            self.push_toast(
+                format!("background task ready — see panel {handle}"),
+                NoteLevel::Info,
+                std::time::Duration::from_secs(4),
+                ToastPosition::TopRight,
+            );
+        }
     }
 
     fn open_task_panel_impl(
@@ -394,7 +411,8 @@ impl AppState {
         handle: &str,
         canvas: ratatui::layout::Rect,
         maximized: bool,
-    ) {
+        background: bool,
+    ) -> bool {
         let item = self
             .items
             .iter()
@@ -480,20 +498,40 @@ impl AppState {
             }
         };
 
-        let window_id = self.wm.open_with_size(
-            handle,
-            crate::wm::ContentKey::Task(handle.to_string()),
-            crate::wm::OpenPolicy::ReuseExisting,
-            crate::wm::WindowContent::Task {
-                handle: handle.to_string(),
-                kind,
-            },
-            &label,
-            canvas,
-            pw,
-            ph,
-            maximized,
-        );
+        let existing_ids: std::collections::HashSet<crate::wm::WindowId> =
+            self.wm.panels.iter().map(|p| p.id).collect();
+        let window_id = if background {
+            self.wm.open_background_with_size(
+                handle,
+                crate::wm::ContentKey::Task(handle.to_string()),
+                crate::wm::OpenPolicy::ReuseExisting,
+                crate::wm::WindowContent::Task {
+                    handle: handle.to_string(),
+                    kind,
+                },
+                &label,
+                canvas,
+                pw,
+                ph,
+                maximized,
+            )
+        } else {
+            self.wm.open_with_size(
+                handle,
+                crate::wm::ContentKey::Task(handle.to_string()),
+                crate::wm::OpenPolicy::ReuseExisting,
+                crate::wm::WindowContent::Task {
+                    handle: handle.to_string(),
+                    kind,
+                },
+                &label,
+                canvas,
+                pw,
+                ph,
+                maximized,
+            )
+        };
+        let is_new = !existing_ids.contains(&window_id);
         if let Some(panel) = self
             .wm
             .panels
@@ -502,6 +540,7 @@ impl AppState {
         {
             panel.content = Some(content);
         }
+        is_new
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
@@ -3080,6 +3119,60 @@ mod terminal_stream_tests {
         assert_eq!(app.wm.panels[0].label, "term_s_0");
         assert_eq!(app.wm.panels[1].label, "term_s_1");
     }
+
+    #[test]
+    fn open_task_panel_background_preserves_focus() {
+        use atman_runtime::tools::term::{TerminalCell, TerminalScreen};
+        let mut app = AppState::new("s".into(), None);
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
+        app.items.push(OutputItem::Terminal {
+            handle: "term_s_0".into(),
+            screen: TerminalScreen {
+                rows: 2,
+                cols: 5,
+                cells: vec![TerminalCell::default(); 10],
+                cursor: None,
+                alt_screen: false,
+            },
+            accumulated_bytes: b"hi".to_vec(),
+            mode: TerminalViewMode::Capture,
+            done: true,
+            expanded: false,
+            scroll_offset: None,
+        });
+        app.items.push(OutputItem::Terminal {
+            handle: "term_s_1".into(),
+            screen: TerminalScreen {
+                rows: 3,
+                cols: 7,
+                cells: vec![TerminalCell::default(); 21],
+                cursor: None,
+                alt_screen: false,
+            },
+            accumulated_bytes: b"bye".to_vec(),
+            mode: TerminalViewMode::Capture,
+            done: true,
+            expanded: false,
+            scroll_offset: None,
+        });
+        let canvas = ratatui::layout::Rect::new(0, 0, 80, 24);
+
+        // Open the first panel via a foreground click (steals focus).
+        app.open_task_panel("term_s_0", canvas);
+        let focused_a = app.wm.focused_id();
+        assert!(focused_a.is_some());
+
+        // A background completion for term_s_1 must NOT change focus.
+        app.open_task_panel_background("term_s_1");
+        assert_eq!(app.wm.panels.len(), 2);
+        assert_eq!(app.wm.focused_id(), focused_a, "must keep foreground focus");
+        assert!(
+            app.toasts
+                .iter()
+                .any(|t| t.message.contains("background task")),
+            "should push a toast when focus preserved"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3139,5 +3232,109 @@ mod terminal_e2e_tests {
             .collect::<String>();
         assert!(header.contains("term_s_0"), "header should contain handle");
         assert!(header.contains("capture"), "should be capture mode");
+    }
+
+    #[test]
+    fn bash_panel_from_history_renders_content() {
+        use ratatui::backend::TestBackend;
+        use std::collections::HashSet;
+
+        let mut app = AppState::new("s".into(), None);
+        app.last_transcript_rect = Some(ratatui::layout::Rect::new(0, 0, 80, 24));
+
+        // Simulate a completed bash task: item in items, snapshot in task_snapshots.
+        app.apply_stream_frame(StreamFrame::BashChunk {
+            handle: "bg_s_0".into(),
+            kind: "stdout".into(),
+            line: "hello from bash\n".into(),
+            run_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::BashExited {
+            handle: "bg_s_0".into(),
+            exit_code: Some(0),
+            run_id: None,
+        });
+        app.apply_task_event(atman_runtime::TaskEvent::Registered(
+            TaskSnapshotHolder::snap("bg_s_0"),
+        ));
+
+        let canvas = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.open_task_panel("bg_s_0", canvas);
+
+        // Find the opened panel.
+        let panel = app
+            .wm
+            .panels
+            .iter_mut()
+            .find(|p| p.label == "bg_s_0")
+            .unwrap();
+        assert!(
+            panel.content.is_some(),
+            "open_task_panel must set panel.content for bash"
+        );
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let mut hitmap = crate::wm::WmHitmap::default();
+                let empty_mcp: std::collections::HashSet<String> = HashSet::new();
+                let empty_resources = std::collections::HashMap::new();
+                let empty_prompts = std::collections::HashMap::new();
+                let browser = crate::mcp_manager::McpBrowserState {
+                    tab: crate::mcp_manager::McpBrowserTab::Resources,
+                    resources: &empty_resources,
+                    prompts: &empty_prompts,
+                };
+                crate::wm::content::render_panel_content(
+                    f,
+                    f.area(),
+                    &mut app.wm.panels[0],
+                    &app.task_snapshots,
+                    &app.items,
+                    &app.activity_nodes,
+                    &None,
+                    &None,
+                    &mut hitmap,
+                    0,
+                    true,
+                    false,
+                    &[],
+                    &empty_mcp,
+                    0,
+                    &None,
+                    &browser,
+                    app.items_version,
+                    app.expanded_version,
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let joined: String = buf
+            .content
+            .chunks(60)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(
+            joined.contains("hello from bash"),
+            "bash output must appear in panel, got: {joined}"
+        );
+    }
+
+    struct TaskSnapshotHolder;
+    impl TaskSnapshotHolder {
+        fn snap(src: &str) -> atman_runtime::TaskSnapshot {
+            atman_runtime::TaskSnapshot {
+                id: atman_runtime::TaskId::now(),
+                kind: atman_runtime::TaskKind::Bash,
+                label: format!("bash {src}"),
+                status: atman_runtime::TaskStatus::Ok,
+                started_at: std::time::Instant::now(),
+                ended_at: Some(std::time::Instant::now()),
+                source_handle: src.to_string(),
+                session_id: "s".to_string(),
+            }
+        }
     }
 }

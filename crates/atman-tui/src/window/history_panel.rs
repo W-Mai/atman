@@ -5,10 +5,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::OutputItem;
+use crate::wm::WmHitmap;
 use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
-use crate::wm::WmHitmap;
 
 pub struct HistoryPanelContent {
     pub scroll: u16,

@@ -46,7 +46,8 @@ impl LayerStack {
             .filter(|entry| !open_set.contains(&entry.kind))
             .and_then(|entry| entry.pre_modal_focus);
 
-        self.modal_stack.retain(|entry| open_set.contains(&entry.kind));
+        self.modal_stack
+            .retain(|entry| open_set.contains(&entry.kind));
         for kind in open {
             if self.modal_stack.iter().all(|entry| entry.kind != kind) {
                 let pre_modal_focus = if self.modal_stack.is_empty() {
@@ -120,15 +121,11 @@ impl LayerStack {
         for entry in &self.modal_stack {
             match entry.kind {
                 ModalKind::Form => FormModalWrapper { app }.render(frame, area, &ctx),
-                ModalKind::CompactReview => {
-                    CompactReviewWrapper { app }.render(frame, area, &ctx)
-                }
+                ModalKind::CompactReview => CompactReviewWrapper { app }.render(frame, area, &ctx),
                 ModalKind::SessionSwitcher => {
                     SessionSwitcherWrapper { app }.render(frame, area, &ctx)
                 }
-                ModalKind::HistorySearch => {
-                    HistorySearchWrapper { app }.render(frame, area, &ctx)
-                }
+                ModalKind::HistorySearch => HistorySearchWrapper { app }.render(frame, area, &ctx),
                 ModalKind::ProviderManager => {
                     ProviderManagerWrapper { app }.render(frame, area, &ctx)
                 }

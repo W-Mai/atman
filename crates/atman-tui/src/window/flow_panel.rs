@@ -10,10 +10,10 @@ use atman_runtime::message::Message;
 use atman_runtime::workflow::{WorkflowGraph, WorkflowNodeKind};
 
 use crate::app::OutputItem;
+use crate::wm::PanelRenderCache;
 use crate::wm::component::{
     EventCtx, HitRegion, HitTarget, RenderCtx, SizeHint, WindowComponent, WmEvent, WmEventResult,
 };
-use crate::wm::PanelRenderCache;
 
 pub struct FlowPanelContent {
     pub handle: String,

@@ -32,6 +32,17 @@ pub enum OpenPolicy {
     AlwaysNew,
 }
 
+/// Whether opening a window should steal floating-panel focus.
+/// Used to distinguish user-initiated opens (always steal) from
+/// background-completion opens (only steal when nothing is focused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusPolicy {
+    /// Focus the opened (or reused) window.
+    Steal,
+    /// Leave the current floating focus untouched.
+    Preserve,
+}
+
 /// What kind of content a window displays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowContent {

@@ -141,6 +141,7 @@ mod tests {
             split: false,
             expanded_tools: std::collections::HashSet::new(),
             render_cache: None,
+            content_version: 0,
         }
     }
 

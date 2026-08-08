@@ -154,12 +154,13 @@ fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::OutputItem;
     use atman_runtime::task_registry::{TaskSnapshot, TaskStatus};
     use std::collections::HashSet;
 
     fn snapshot(src: &str) -> TaskSnapshot {
         TaskSnapshot {
-            id: atman_runtime::TaskId::new(),
+            id: atman_runtime::TaskId::now(),
             kind: atman_runtime::TaskKind::Bash,
             label: format!("bash {src}"),
             status: TaskStatus::Ok,
@@ -170,8 +171,8 @@ mod tests {
         }
     }
 
-    fn bash_item(src: &str, output: &str, done: bool) -> OutputItem {
-        OutputItem::Bash {
+    fn bash_item(src: &str, output: &str, done: bool) -> crate::app::OutputItem {
+        crate::app::OutputItem::Bash {
             handle: src.to_string(),
             output: output.to_string(),
             done,
@@ -179,26 +180,29 @@ mod tests {
         }
     }
 
-    fn ctx<'a>(items: &'a [OutputItem], snaps: &'a [TaskSnapshot]) -> RenderCtx<'a> {
+    fn ctx<'a>(
+        items: &'a [OutputItem],
+        snaps: &'a [TaskSnapshot],
+        hovered: &'a Option<String>,
+        empty_tools: &'a HashSet<String>,
+        empty_mcp: &'a HashSet<String>,
+        browser: &'a crate::mcp_manager::McpBrowserState<'a>,
+    ) -> RenderCtx<'a> {
         RenderCtx {
             window_id: crate::wm::WindowId(1),
             snapshots: snaps,
             items,
             animation_frame: 0,
-            expanded_tools: &HashSet::new(),
+            expanded_tools: empty_tools,
             activity_nodes: &[],
             items_version: 0,
             expanded_version: 0,
             mcp_servers: &[],
-            expanded_mcp_servers: &HashSet::new(),
+            expanded_mcp_servers: empty_mcp,
             mcp_selected: 0,
             hovered_mcp_row: &None,
-            mcp_browser: &crate::mcp_manager::McpBrowserState {
-                tab: crate::mcp_manager::McpBrowserTab::Resources,
-                resources: &std::collections::HashMap::new(),
-                prompts: &std::collections::HashMap::new(),
-            },
-            hovered_history_row: &None,
+            mcp_browser: browser,
+            hovered_history_row: hovered,
         }
     }
 
@@ -227,7 +231,19 @@ mod tests {
             handle: "bg_s_1".into(),
             scroll: 0,
         };
-        let lines = render(&mut panel, &ctx(&items, &snaps));
+        let empty_tools: HashSet<String> = HashSet::new();
+        let empty_mcp: HashSet<String> = HashSet::new();
+        let empty_resources = std::collections::HashMap::new();
+        let empty_prompts = std::collections::HashMap::new();
+        let browser = crate::mcp_manager::McpBrowserState {
+            tab: crate::mcp_manager::McpBrowserTab::Resources,
+            resources: &empty_resources,
+            prompts: &empty_prompts,
+        };
+        let lines = render(
+            &mut panel,
+            &ctx(&items, &snaps, &None, &empty_tools, &empty_mcp, &browser),
+        );
         let joined = lines.join("\n");
         assert!(
             joined.contains("hello") && joined.contains("world"),

@@ -4048,6 +4048,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             .clone()
             .zip(Some(app.panel_close_arm_expired()));
         let max_canvas = app.maximized_canvas();
+        let modal_open = app.modal_open();
         app.last_wm_hitmap = crate::wm::render(
             f,
             l.transcript,
@@ -4060,6 +4061,7 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
             app.animation_frame,
             close_armed.as_ref().map(|(id, exp)| (id.as_str(), *exp)),
             max_canvas,
+            modal_open,
             &app.context.mcp_servers,
             &app.expanded_mcp_servers,
             app.mcp_selected,
