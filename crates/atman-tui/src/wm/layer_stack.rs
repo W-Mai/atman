@@ -25,8 +25,8 @@ impl LayerStack {
                 LayerKind::Docked,
                 LayerKind::Floating,
                 LayerKind::Modal,
-                LayerKind::Toast,
                 LayerKind::Blocking,
+                LayerKind::Toast,
             ],
             modal_stack: Vec::new(),
         }

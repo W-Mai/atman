@@ -102,6 +102,8 @@ pub struct WindowManager {
 
 const DEFAULT_PANEL_W: u16 = 88;
 const DEFAULT_PANEL_H: u16 = 29;
+const MIN_PANEL_W: u16 = 20;
+const MIN_PANEL_H: u16 = 6;
 
 impl WindowManager {
     pub fn focused(&self) -> Option<String> {
@@ -354,8 +356,26 @@ impl WindowManager {
 
     pub fn resize_panel(&mut self, id: WindowId, w: u16, h: u16, _canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
-            p.rect.width = w.max(20);
-            p.rect.height = h.max(6);
+            p.rect.width = w.max(MIN_PANEL_W);
+            p.rect.height = h.max(MIN_PANEL_H);
+        }
+    }
+
+    /// Clamp every floating panel rect so it stays inside (and within the max
+    /// size of) the terminal canvas. Guarantees a panel never renders larger
+    /// than the usable area nor off-canvas after a terminal resize.
+    pub fn clamp_to_canvas(&mut self, canvas: Rect) {
+        let max_w = canvas.width.saturating_sub(4).max(MIN_PANEL_W);
+        let max_h = canvas.height.saturating_sub(4).max(MIN_PANEL_H);
+        for panel in &mut self.panels {
+            panel.rect.width = panel.rect.width.min(max_w).max(MIN_PANEL_W);
+            panel.rect.height = panel.rect.height.min(max_h).max(MIN_PANEL_H);
+            if panel.rect.x + panel.rect.width > canvas.x + canvas.width {
+                panel.rect.x = canvas.x + canvas.width.saturating_sub(panel.rect.width);
+            }
+            if panel.rect.y + panel.rect.height > canvas.y + canvas.height {
+                panel.rect.y = canvas.y + canvas.height.saturating_sub(panel.rect.height);
+            }
         }
     }
 
@@ -971,6 +991,69 @@ mod tests {
             fp.focused(),
             Some("a".to_string()),
             "close should refocus by history, not panels.last()"
+        );
+    }
+
+    #[test]
+    fn layer_stack_layer_ordering() {
+        let stack = LayerStack::new();
+        assert_eq!(
+            stack.layers,
+            vec![
+                LayerKind::Base,
+                LayerKind::Docked,
+                LayerKind::Floating,
+                LayerKind::Modal,
+                LayerKind::Blocking,
+                LayerKind::Toast,
+            ],
+            "layers must be ordered lowest-priority (render) first"
+        );
+    }
+
+    #[test]
+    fn layer_stack_render_order_is_ascending_priority() {
+        // Render order is lowest priority first; the vector must already be in
+        // ascending render_order() order.
+        let stack = LayerStack::new();
+        let orders: Vec<u8> = stack.layers.iter().map(|l| l.render_order()).collect();
+        let mut sorted = orders.clone();
+        sorted.sort();
+        assert_eq!(orders, sorted, "layers must be in ascending render order");
+    }
+
+    #[test]
+    fn layer_stack_dispatch_key_none_without_modal() {
+        let stack = LayerStack::new();
+        assert!(
+            stack.dispatch_key().is_none(),
+            "with no modal open, dispatch_key must route to nothing"
+        );
+        assert!(stack.modal_stack.is_empty());
+    }
+
+    #[test]
+    fn clamp_to_canvas_fits_panel_after_resize() {
+        let mut fp = WindowManager::default();
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            task_content("a"),
+            "a",
+            canvas(),
+        );
+        fp.panels[0].rect = Rect::new(0, 0, 100, 50);
+        fp.clamp_to_canvas(Rect::new(0, 0, 80, 40));
+        let p = &fp.panels[0];
+        assert!(p.rect.width <= 80);
+        assert!(p.rect.height <= 40);
+        assert!(
+            p.rect.x + p.rect.width <= 80,
+            "panel right edge must stay inside canvas"
+        );
+        assert!(
+            p.rect.y + p.rect.height <= 40,
+            "panel bottom edge must stay inside canvas"
         );
     }
 }

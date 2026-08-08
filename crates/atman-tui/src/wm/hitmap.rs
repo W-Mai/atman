@@ -176,4 +176,29 @@ mod tests {
         // A point outside both panels resolves to none.
         assert!(wm.hit_test_panel(5, 5).is_none());
     }
+
+    #[test]
+    fn click_swallow_topmost_panel_blocks_lower() {
+        // Two fully-overlapping panels; a click inside both must resolve to the
+        // topmost (highest z) and never fall through to the covered panel.
+        let wm = WindowManager {
+            panels: vec![
+                panel(0, "a", rect(0, 0, 40, 20), 1),
+                panel(1, "b", rect(0, 0, 40, 20), 2),
+            ],
+            focus: FocusState::default(),
+            ..Default::default()
+        };
+        let hit = wm.hit_test_panel(5, 5);
+        assert_eq!(
+            hit.map(|p| p.id),
+            Some(WindowId(1)),
+            "click at (5,5) must resolve to topmost panel B"
+        );
+        assert_ne!(
+            hit.map(|p| p.id),
+            Some(WindowId(0)),
+            "covered panel A must not receive the click"
+        );
+    }
 }
