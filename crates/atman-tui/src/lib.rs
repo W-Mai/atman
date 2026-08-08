@@ -4224,27 +4224,9 @@ fn render_frame(f: &mut ratatui::Frame, app: &mut AppState, editor: &InputEditor
     }
     let layer_stack = std::mem::take(&mut app.layer_stack);
     layer_stack.render_modals(f, area, app);
+    layer_stack.render_blocking(f, area, app);
+    layer_stack.render_toasts(f, area, app);
     app.layer_stack = layer_stack;
-    // Modal notification overlay
-    if let Some(ref msg) = app.modal_notification {
-        render_notify_modal(f, area, msg);
-    }
-    if let Some(form) = &app.mcp_add_form {
-        let w = 60.min(area.width);
-        let h = 22.min(area.height);
-        let x = area.x + (area.width - w) / 2;
-        let y = area.y + (area.height - h) / 2;
-        let form_area = ratatui::layout::Rect {
-            x,
-            y,
-            width: w,
-            height: h,
-        };
-        crate::wm::render_shadow(f, form_area, &crate::theme::theme());
-        crate::mcp_manager::render_mcp_add_form(f, form_area, form);
-    }
-    // Toast notifications in top-right corner
-    render_toasts(f, area, app);
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
     }
@@ -4361,10 +4343,6 @@ fn render_trust_mode_picker(f: &mut ratatui::Frame, area: ratatui::layout::Rect,
         popup,
         &mut state,
     );
-}
-
-fn render_toasts(f: &mut ratatui::Frame, area: ratatui::layout::Rect, app: &AppState) {
-    render_toast_notes(f, area, &app.toasts);
 }
 
 /// Render a list of toast notes. Public so boot_animation can reuse it.

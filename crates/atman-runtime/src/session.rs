@@ -988,9 +988,11 @@ impl Session {
         ttft_ms: Option<u64>,
         tokens_per_sec: Option<f64>,
     ) {
-        self.compaction
-            .last_input_tokens
-            .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
+        if tokens_in > 0 {
+            self.compaction
+                .last_input_tokens
+                .store(tokens_in, std::sync::atomic::Ordering::Relaxed);
+        }
         self.watch.context.send_modify(|snap| {
             snap.model = model.to_string();
             snap.tokens_in = snap.tokens_in.saturating_add(tokens_in);

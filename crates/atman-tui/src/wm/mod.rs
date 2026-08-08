@@ -1056,4 +1056,36 @@ mod tests {
             "panel bottom edge must stay inside canvas"
         );
     }
+
+    #[test]
+    fn small_terminal_does_not_crash() {
+        let mut wm = WindowManager::default();
+        wm.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            task_content("a"),
+            "a",
+            Rect::new(0, 0, 50, 16),
+        );
+        assert_eq!(wm.panels.len(), 1);
+        let p = &wm.panels[0];
+        assert!(p.rect.width <= 50);
+        assert!(p.rect.height <= 16);
+    }
+
+    #[test]
+    fn clamp_to_canvas_very_small() {
+        let mut wm = WindowManager::default();
+        wm.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            task_content("a"),
+            "a",
+            Rect::new(0, 0, 200, 100),
+        );
+        wm.clamp_to_canvas(Rect::new(0, 0, 40, 10));
+        let p = &wm.panels[0];
+        assert!(p.rect.width <= 40);
+        assert!(p.rect.height <= 10);
+    }
 }
