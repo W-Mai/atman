@@ -97,5 +97,5 @@ pub trait ModalComponent: Send {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModalEntry {
     pub kind: ModalKind,
-    pub pre_modal_focus: Option<String>,
+    pub pre_modal_focus: Option<crate::wm::WindowId>,
 }

@@ -38,19 +38,19 @@ impl LayerStack {
         let saved_focus: HashMap<_, _> = self
             .modal_stack
             .iter()
-            .map(|entry| (entry.kind, entry.pre_modal_focus.clone()))
+            .map(|entry| (entry.kind, entry.pre_modal_focus))
             .collect();
         let restore_focus = self
             .modal_stack
             .first()
             .filter(|entry| !open_set.contains(&entry.kind))
-            .and_then(|entry| entry.pre_modal_focus.clone());
+            .and_then(|entry| entry.pre_modal_focus);
 
         self.modal_stack.retain(|entry| open_set.contains(&entry.kind));
         for kind in open {
             if self.modal_stack.iter().all(|entry| entry.kind != kind) {
                 let pre_modal_focus = if self.modal_stack.is_empty() {
-                    app.wm.focus.active.clone()
+                    app.wm.focus.active
                 } else {
                     None
                 };
@@ -70,7 +70,7 @@ impl LayerStack {
             if let Some(id) = restore_focus
                 && app.wm.panels.iter().any(|panel| panel.id == id)
             {
-                app.wm.focus(&id);
+                app.wm.focus(id);
             }
         } else {
             app.wm.focus.blur();
@@ -102,6 +102,7 @@ impl LayerStack {
             prompts: &mcp_prompts,
         };
         let ctx = RenderCtx {
+            window_id: app.wm.focused_id().unwrap_or(crate::wm::WindowId(0)),
             snapshots: &snapshots,
             items: &items,
             animation_frame: 0,
