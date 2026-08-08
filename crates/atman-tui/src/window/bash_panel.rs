@@ -39,7 +39,7 @@ impl WindowComponent for BashPanelContent {
         } else if let Some(snap) = snap {
             super::common::render_task_meta(frame, area, atman_runtime::TaskKind::Bash, snap);
         } else {
-            super::common::render_placeholder(frame, area, &self.handle);
+            render_bash_unavailable(frame, area, &self.handle);
         }
         Vec::new()
     }
@@ -114,6 +114,23 @@ fn render_bash_content(
         })
         .collect();
     f.render_widget(Paragraph::new(visible), body_area);
+}
+
+fn render_bash_unavailable(f: &mut Frame, area: Rect, title: &str) {
+    let t = crate::theme::theme();
+    let mut lines = vec![Line::from(""); area.height as usize / 2];
+    lines.push(Line::from(vec![
+        Span::styled(" ◐ ", Style::default().fg(t.subtle_fg.into())),
+        Span::styled(
+            "bash output unavailable",
+            Style::default().fg(t.subtle_fg.into()),
+        ),
+    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("task `{title}`: session log could not be loaded"),
+        Style::default().fg(t.meta_fg.into()),
+    )]));
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_bash_screen(f: &mut Frame, area: Rect, title: &str, output: &str, done: bool) {
