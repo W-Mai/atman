@@ -640,10 +640,12 @@ async fn run_frames(
                                 if let Some((panel_id, pr)) = topmost {
                                 if let Some(min_id) =
                                     app.wm.hit_test_minimize(me.column, me.row)
+                                    && min_id == panel_id
                                 {
                                     app.wm.close(min_id);
                                 } else if let Some(max_id) =
                                     app.wm.hit_test_maximize(me.column, me.row)
+                                    && max_id == panel_id
                                 {
                                     let canvas = app.maximized_canvas();
                                     app.wm.toggle_maximize(max_id, canvas);
