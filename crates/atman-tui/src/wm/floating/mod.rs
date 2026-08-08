@@ -232,8 +232,13 @@ impl WindowManager {
     }
 
     pub fn close(&mut self, id: &str) {
-        self.panels.retain(|p| p.id != id);
-        self.focus.remove_and_refocus(id, &self.panels);
+        if let Some(idx) = self.panels.iter().position(|p| p.id == id) {
+            if let Some(ref mut content) = self.panels[idx].content {
+                content.on_blur();
+            }
+            self.panels.remove(idx);
+            self.focus.remove_and_refocus(id, &self.panels);
+        }
     }
 
     pub fn focus(&mut self, id: &str) {
@@ -767,5 +772,40 @@ mod tests {
             Some("a"),
             "close should refocus by history, not panels.last()"
         );
+    }
+
+    #[test]
+    fn close_refocuses_most_recent_in_history() {
+        let mut fp = WindowManager::default();
+        fp.open(
+            "a",
+            ContentKey::Task("a".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "a",
+            canvas(),
+        );
+        fp.open(
+            "b",
+            ContentKey::Task("b".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "b",
+            canvas(),
+        );
+        fp.open(
+            "c",
+            ContentKey::Task("c".to_string()),
+            PanelKind::Task(TaskKind::Bash),
+            "c",
+            canvas(),
+        );
+        // focus order in history: a, b, c. Close the middle panel b.
+        fp.close("b");
+        assert_eq!(fp.panels.len(), 2);
+        // Focus goes to c (most recent), not a (panels.last()).
+        assert_eq!(fp.focused(), Some("c"));
+        // Close c. Focus goes to a (the remaining most-recent in history).
+        fp.close("c");
+        assert_eq!(fp.panels.len(), 1);
+        assert_eq!(fp.focused(), Some("a"));
     }
 }

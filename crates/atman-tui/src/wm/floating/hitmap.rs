@@ -108,3 +108,66 @@ impl WindowManager {
             .max_by_key(|p| p.z)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wm::{ContentKey, FocusState, PanelKind};
+    use ratatui::layout::Rect;
+
+    fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    fn panel(id: &str, rect: Rect, z: u32) -> WindowInstance {
+        WindowInstance {
+            id: id.to_string(),
+            window_id: crate::wm::WindowId(0),
+            content_key: ContentKey::Task(id.to_string()),
+            kind: PanelKind::Task(atman_runtime::TaskKind::Bash),
+            content: None,
+            title: id.to_string(),
+            rect,
+            z,
+            maximized: false,
+            prev_rect: None,
+            scroll: 0,
+            h_scroll: 0,
+            split: false,
+            expanded_tools: std::collections::HashSet::new(),
+            render_cache: None,
+        }
+    }
+
+    #[test]
+    fn hit_test_panel_returns_topmost() {
+        let wm = WindowManager {
+            panels: vec![
+                panel("a", rect(10, 10, 30, 10), 1),
+                panel("b", rect(10, 10, 30, 10), 2),
+            ],
+            focus: FocusState::default(),
+            ..Default::default()
+        };
+        let hit = wm.hit_test_panel(20, 15);
+        assert_eq!(hit.map(|p| p.id.as_str()), Some("b"));
+    }
+
+    #[test]
+    fn overlap_history_row_rect_uses_topmost_panel() {
+        let wm = WindowManager {
+            panels: vec![
+                panel("a", rect(10, 10, 30, 10), 1),
+                panel("b", rect(10, 10, 30, 10), 2),
+            ],
+            focus: FocusState::default(),
+            ..Default::default()
+        };
+        // A history row rect from the lower panel A is fully covered by the
+        // topmost panel B. A click at (20,15) must resolve to B, the topmost.
+        let hit = wm.hit_test_panel(20, 15);
+        assert_eq!(hit.map(|p| p.id.as_str()), Some("b"));
+        // A point outside both panels resolves to none.
+        assert!(wm.hit_test_panel(5, 5).is_none());
+    }
+}
