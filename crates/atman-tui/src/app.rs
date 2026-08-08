@@ -417,12 +417,19 @@ impl AppState {
             .items
             .iter()
             .rev()
-            .find(|it| it.handle() == Some(handle));
+            .find(|it| it.handle() == Some(handle))
+            .cloned();
         let snap = self
             .task_snapshots
             .iter()
             .find(|s| s.source_handle == handle)
             .cloned();
+
+        // A completed bash task may have left the in-memory item list (e.g.
+        // after a history restore) while its snapshot and session log file
+        // survive. Reconstruct the output so the panel shows real content
+        // instead of falling through to the empty placeholder.
+        let item = self.reconstruct_bash_item(&snap).or(item);
 
         let (kind, label, pw, ph) = if let Some(item) = item {
             match item {
@@ -437,7 +444,7 @@ impl AppState {
                     (atman_runtime::TaskKind::Terminal, label, pw, ph)
                 }
                 OutputItem::Bash { handle: h, .. } => {
-                    let (pw, ph) = self.panel_sizes.get(h).copied().unwrap_or((0, 0));
+                    let (pw, ph) = self.panel_sizes.get(&h).copied().unwrap_or((0, 0));
                     let label = snap
                         .as_ref()
                         .map(|s| s.label.clone())
@@ -541,6 +548,44 @@ impl AppState {
             panel.content = Some(content);
         }
         is_new
+    }
+
+    /// Rebuild an `OutputItem::Bash` for a completed bash task whose in-memory
+    /// item was evicted (e.g. after a history restore) but whose session log
+    /// file still exists on disk at `<session_dir>/bg_<handle>.log`. Returns
+    /// `None` when no snapshot/log is available.
+    fn reconstruct_bash_item(&mut self, snap: &Option<atman_runtime::TaskSnapshot>) -> Option<OutputItem> {
+        let snap = snap.as_ref()?;
+        if snap.kind != atman_runtime::TaskKind::Bash {
+            return None;
+        }
+        if snap.source_handle.is_empty() {
+            return None;
+        }
+        let log_path = std::path::Path::new(&self.session_dir)
+            .join(format!("bg_{}.log", snap.source_handle));
+        let raw = std::fs::read_to_string(&log_path).ok()?;
+        if raw.trim().is_empty() {
+            return None;
+        }
+        // The reader writes `[out] `/`[err] ` prefixes to the log, matching the
+        // `[err] `/no-prefix scheme used in the live `OutputItem::Bash.output`.
+        let output = raw
+            .lines()
+            .map(|l| {
+                l.strip_prefix("[out] ")
+                    .or_else(|| l.strip_prefix("[err] "))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| l.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(OutputItem::Bash {
+            handle: snap.source_handle.clone(),
+            output,
+            done: snap.status.is_terminal(),
+            expanded: false,
+        })
     }
 
     pub fn with_initial_items(mut self, items: Vec<OutputItem>) -> Self {
