@@ -6,6 +6,8 @@ use atman_runtime::TaskSnapshot;
 use crate::app::OutputItem;
 use crate::task_panel::ActivityNode;
 
+use crate::wm::WindowId;
+
 use super::{PanelBtn, WindowInstance, WmHitmap};
 
 #[allow(clippy::too_many_arguments)]
@@ -16,7 +18,7 @@ pub fn render_panel_content(
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
-    hovered_btn: &Option<(String, PanelBtn)>,
+    hovered_btn: &Option<(WindowId, PanelBtn)>,
     hovered_history_row: &Option<String>,
     hitmap_out: &mut WmHitmap,
     animation_frame: u32,
@@ -39,6 +41,7 @@ pub fn render_panel_content(
             area,
             f,
             &crate::wm::RenderCtx {
+                window_id: panel.id,
                 snapshots,
                 items,
                 animation_frame,
@@ -62,14 +65,12 @@ pub fn render_panel_content(
             match region.target {
                 crate::wm::component::HitTarget::HistoryRow(s) => hitmap_out
                     .history_row_rects
-                    .push((panel.id.clone(), s, region.rect)),
+                    .push((panel.id, s, region.rect)),
                 crate::wm::component::HitTarget::WorkflowNode(i, s) => hitmap_out
                     .workflow_node_rects
-                    .push((panel.id.clone(), i, s, region.rect)),
+                    .push((panel.id, i, s, region.rect)),
                 crate::wm::component::HitTarget::McpRow(s) => {
-                    hitmap_out
-                        .mcp_row_rects
-                        .push((panel.id.clone(), s, region.rect))
+                    hitmap_out.mcp_row_rects.push((panel.id, s, region.rect))
                 }
                 _ => {}
             }

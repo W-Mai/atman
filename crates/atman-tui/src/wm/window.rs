@@ -33,7 +33,7 @@ pub enum OpenPolicy {
 }
 
 /// What kind of content a window displays.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowContent {
     Task {
         handle: String,
@@ -59,6 +59,21 @@ impl WindowContent {
             WindowContent::Mermaid { item_id } => ContentKey::Mermaid(item_id.clone()),
             WindowContent::Cheatsheet => ContentKey::Cheatsheet,
             WindowContent::Mcp => ContentKey::Mcp,
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        match self {
+            WindowContent::Task { kind, .. } => match kind {
+                atman_runtime::TaskKind::Bash => "$",
+                atman_runtime::TaskKind::Terminal => "▶",
+                atman_runtime::TaskKind::Flow => "⬡",
+            },
+            WindowContent::History => "⊞",
+            WindowContent::Activity { .. } => "▸",
+            WindowContent::Mermaid { .. } => "◇",
+            WindowContent::Cheatsheet => "?",
+            WindowContent::Mcp => "⚡",
         }
     }
 }

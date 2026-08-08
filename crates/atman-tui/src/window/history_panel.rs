@@ -31,6 +31,7 @@ impl WindowComponent for HistoryPanelContent {
             &mut hitmap,
             ctx.hovered_history_row,
             self.scroll,
+            ctx.window_id,
         );
         hitmap
             .history_row_rects
@@ -71,6 +72,7 @@ fn render_history_content(
     hitmap: &mut WmHitmap,
     hovered_row: &Option<String>,
     scroll: u16,
+    window_id: crate::wm::WindowId,
 ) {
     let t = crate::theme::theme();
     let bar_color: Color = t.subtle_fg.into();
@@ -94,7 +96,7 @@ fn render_history_content(
         let is_hovered = hovered_row.as_deref() == Some(&snap.source_handle);
         if visible_i < visible_height {
             hitmap.history_row_rects.push((
-                String::new(),
+                window_id,
                 snap.source_handle.clone(),
                 Rect {
                     x: area.x,
@@ -112,7 +114,11 @@ fn render_history_content(
             t.subtle_fg.into()
         };
         let time_fg: Color = t.meta_fg.into();
-        let kind_icon = crate::wm::floating::task_kind_icon(snap.kind);
+        let kind_icon = crate::wm::WindowContent::Task {
+            handle: snap.source_handle.clone(),
+            kind: snap.kind,
+        }
+        .icon();
         let started = format_started_at(snap);
         let summary = task_summary_line(snap, items);
         let bar_str = format!("{bar} ");

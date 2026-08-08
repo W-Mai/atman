@@ -6,11 +6,11 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear};
 
-use atman_runtime::{TaskKind, TaskSnapshot};
+use atman_runtime::TaskSnapshot;
 
 use crate::app::OutputItem;
 use crate::task_panel::ActivityNode;
-use crate::wm::{ContentKey, OpenPolicy, WindowId};
+use crate::wm::{ContentKey, OpenPolicy, WindowContent, WindowId};
 
 pub mod content;
 pub mod focus;
@@ -26,10 +26,10 @@ pub use shadow::{
 };
 
 pub struct WindowInstance {
-    pub id: String,
-    pub window_id: WindowId,
+    pub id: WindowId,
+    pub label: String,
     pub content_key: ContentKey,
-    pub kind: PanelKind,
+    pub content_kind: WindowContent,
     pub content: Option<Box<dyn crate::wm::WindowComponent>>,
     pub title: String,
     pub rect: Rect,
@@ -65,42 +65,11 @@ pub struct PanelRenderCache {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PanelKind {
-    Task(TaskKind),
-    History,
-    Activity,
-    Mermaid,
-    Cheatsheet,
-    Mcp,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelBtn {
     Minimize,
     Maximize,
     Close,
     Resize,
-}
-
-impl PanelKind {
-    fn icon(self) -> &'static str {
-        match self {
-            PanelKind::Task(kind) => task_kind_icon(kind),
-            PanelKind::History => "⊞",
-            PanelKind::Activity => "▸",
-            PanelKind::Mermaid => "◇",
-            PanelKind::Cheatsheet => "?",
-            PanelKind::Mcp => "⚡",
-        }
-    }
-}
-
-pub fn task_kind_icon(kind: TaskKind) -> &'static str {
-    match kind {
-        TaskKind::Bash => "$",
-        TaskKind::Terminal => "▶",
-        TaskKind::Flow => "⬡",
-    }
 }
 
 #[derive(Default)]
@@ -115,44 +84,67 @@ const DEFAULT_PANEL_W: u16 = 88;
 const DEFAULT_PANEL_H: u16 = 29;
 
 impl WindowManager {
-    pub fn focused(&self) -> Option<&str> {
-        self.focus.active.as_deref()
+    pub fn focused(&self) -> Option<String> {
+        self.focus.active.and_then(|id| {
+            self.panels
+                .iter()
+                .find(|panel| panel.id == id)
+                .map(|panel| panel.label.clone())
+        })
+    }
+
+    pub fn focused_id(&self) -> Option<WindowId> {
+        self.focus.active
+    }
+
+    pub fn label(&self, id: WindowId) -> Option<&str> {
+        self.panels
+            .iter()
+            .find(|panel| panel.id == id)
+            .map(|panel| panel.label.as_str())
+    }
+
+    pub fn content_kind(&self, id: WindowId) -> Option<&WindowContent> {
+        self.panels
+            .iter()
+            .find(|panel| panel.id == id)
+            .map(|panel| &panel.content_kind)
     }
 
     pub fn open(
         &mut self,
-        id: &str,
+        label: &str,
         content_key: ContentKey,
-        kind: PanelKind,
+        content_kind: WindowContent,
         title: &str,
         canvas: Rect,
-    ) {
+    ) -> WindowId {
         self.open_with_size(
-            id,
+            label,
             content_key,
             OpenPolicy::ReuseExisting,
-            kind,
+            content_kind,
             title,
             canvas,
             0,
             0,
             false,
-        );
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn open_with_size(
         &mut self,
-        id: &str,
+        label: &str,
         content_key: ContentKey,
         policy: OpenPolicy,
-        kind: PanelKind,
+        content_kind: WindowContent,
         title: &str,
         canvas: Rect,
         w: u16,
         h: u16,
         maximized: bool,
-    ) {
+    ) -> WindowId {
         let (w, h) = if w == 0 || h == 0 {
             (DEFAULT_PANEL_W, DEFAULT_PANEL_H)
         } else {
@@ -163,7 +155,7 @@ impl WindowManager {
                 .panels
                 .iter()
                 .find(|p| p.content_key == content_key)
-                .map(|p| p.id.clone()),
+                .map(|p| p.id),
             OpenPolicy::AlwaysNew => None,
         };
         if let Some(existing_id) = reuse {
@@ -172,7 +164,8 @@ impl WindowManager {
                 .iter_mut()
                 .find(|p| p.id == existing_id)
                 .unwrap();
-            p.kind = kind;
+            p.label = label.to_string();
+            p.content_kind = content_kind;
             p.title = title.to_string();
             if !p.maximized && !maximized {
                 let w = w.min(canvas.width.saturating_sub(4));
@@ -185,9 +178,9 @@ impl WindowManager {
                 p.rect = maximized_rect(canvas);
                 p.maximized = true;
             }
-            self.focus.focus(&existing_id);
-            self.bring_to_front(&existing_id);
-            return;
+            self.focus.focus(existing_id);
+            self.bring_to_front(existing_id);
+            return existing_id;
         }
         self.z_counter += 1;
         let offset = (self.panels.len() as u16) * 3;
@@ -208,13 +201,13 @@ impl WindowManager {
         } else {
             None
         };
-        let window_id = WindowId(self.next_window_id);
+        let id = WindowId(self.next_window_id);
         self.next_window_id += 1;
         let panel = WindowInstance {
-            id: id.to_string(),
-            window_id,
+            id,
+            label: label.to_string(),
             content_key,
-            kind,
+            content_kind,
             content: None,
             title: title.to_string(),
             rect,
@@ -229,19 +222,20 @@ impl WindowManager {
         };
         self.panels.push(panel);
         self.focus.focus(id);
+        id
     }
 
-    pub fn close(&mut self, id: &str) {
+    pub fn close(&mut self, id: WindowId) {
         self.panels.retain(|p| p.id != id);
         self.focus.remove_and_refocus(id, &self.panels);
     }
 
-    pub fn focus(&mut self, id: &str) {
+    pub fn focus(&mut self, id: WindowId) {
         self.focus.focus(id);
         self.bring_to_front(id);
     }
 
-    fn bring_to_front(&mut self, id: &str) {
+    fn bring_to_front(&mut self, id: WindowId) {
         self.z_counter += 1;
         let z = self.z_counter;
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
@@ -249,7 +243,7 @@ impl WindowManager {
         }
     }
 
-    pub fn toggle_maximize(&mut self, id: &str, canvas: Rect) {
+    pub fn toggle_maximize(&mut self, id: WindowId, canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
             if p.maximized {
                 p.rect = p.prev_rect.take().unwrap_or_else(|| default_rect(canvas));
@@ -263,21 +257,21 @@ impl WindowManager {
         }
     }
 
-    pub fn move_panel(&mut self, id: &str, x: u16, y: u16, _canvas: Rect) {
+    pub fn move_panel(&mut self, id: WindowId, x: u16, y: u16, _canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
             p.rect.x = x;
             p.rect.y = y;
         }
     }
 
-    pub fn resize_panel(&mut self, id: &str, w: u16, h: u16, _canvas: Rect) {
+    pub fn resize_panel(&mut self, id: WindowId, w: u16, h: u16, _canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
             p.rect.width = w.max(20);
             p.rect.height = h.max(6);
         }
     }
 
-    pub fn unmaximize(&mut self, id: &str, canvas: Rect) {
+    pub fn unmaximize(&mut self, id: WindowId, canvas: Rect) {
         if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
             if p.maximized {
                 p.rect = p.prev_rect.take().unwrap_or_else(|| default_rect(canvas));
@@ -292,9 +286,7 @@ impl WindowManager {
         }
         let mut sorted: Vec<&WindowInstance> = self.panels.iter().collect();
         sorted.sort_by_key(|p| std::cmp::Reverse(p.z));
-        let current_idx = sorted
-            .iter()
-            .position(|p| Some(p.id.as_str()) == self.focus.active.as_deref());
+        let current_idx = sorted.iter().position(|p| Some(p.id) == self.focus.active);
         let next_idx = match current_idx {
             Some(i) => {
                 if forward {
@@ -306,9 +298,9 @@ impl WindowManager {
             None => 0,
         };
         if let Some(target) = sorted.get(next_idx) {
-            let id = target.id.clone();
-            self.focus.focus(&id);
-            self.bring_to_front(&id);
+            let id = target.id;
+            self.focus.focus(id);
+            self.bring_to_front(id);
         }
     }
 }
@@ -347,7 +339,7 @@ pub fn render(
     snapshots: &[TaskSnapshot],
     items: &[OutputItem],
     activity_nodes: &[ActivityNode],
-    hovered_btn: &Option<(String, PanelBtn)>,
+    hovered_btn: &Option<(WindowId, PanelBtn)>,
     hovered_history_row: &Option<String>,
     animation_frame: u32,
     panel_close_armed: Option<(&str, bool)>,
@@ -373,7 +365,7 @@ pub fn render(
     let t = crate::theme::theme();
     for &idx in &sorted {
         let panel = &mut panels.panels[idx];
-        let is_focused = panels.focus.active.as_deref() == Some(panel.id.as_str());
+        let is_focused = panels.focus.active == Some(panel.id);
         let btn_hover = hovered_btn
             .as_ref()
             .and_then(|(id, btn)| if id == &panel.id { Some(*btn) } else { None });
@@ -447,13 +439,20 @@ mod tests {
         Rect::new(0, 0, 100, 40)
     }
 
+    fn task_content(handle: &str) -> WindowContent {
+        WindowContent::Task {
+            handle: handle.to_string(),
+            kind: atman_runtime::TaskKind::Bash,
+        }
+    }
+
     #[test]
     fn open_creates_panel_and_focuses() {
         let mut fp = WindowManager::default();
         fp.open(
             "bg_1",
             ContentKey::Task("bg_1".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "cargo build",
             canvas(),
         );
@@ -467,14 +466,14 @@ mod tests {
         fp.open(
             "bg_1",
             ContentKey::Task("bg_1".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "cargo build",
             canvas(),
         );
         fp.open(
             "bg_1",
             ContentKey::Task("bg_1".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "cargo build",
             canvas(),
         );
@@ -487,14 +486,14 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
         fp.open(
             "b",
             ContentKey::Task("b".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "b",
             canvas(),
         );
@@ -509,14 +508,14 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
         fp.open(
             "b",
             ContentKey::Task("b".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "b",
             canvas(),
         );
@@ -532,7 +531,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
@@ -551,14 +550,14 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
         fp.open(
             "b",
             ContentKey::Task("b".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "b",
             canvas(),
         );
@@ -574,7 +573,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
@@ -590,7 +589,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
@@ -612,7 +611,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
@@ -656,7 +655,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
@@ -675,7 +674,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
@@ -701,7 +700,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
@@ -719,7 +718,7 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
@@ -737,21 +736,21 @@ mod tests {
         fp.open(
             "a",
             ContentKey::Task("a".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "a",
             canvas(),
         );
         fp.open(
             "b",
             ContentKey::Task("b".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "b",
             canvas(),
         );
         fp.open(
             "c",
             ContentKey::Task("c".to_string()),
-            PanelKind::Task(TaskKind::Bash),
+            task_content("a"),
             "c",
             canvas(),
         );

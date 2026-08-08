@@ -28,6 +28,7 @@ pub fn render_panel(
     hovered: &Option<String>,
     hitmap_out: &mut WmHitmap,
     browser: &McpBrowserState<'_>,
+    window_id: crate::wm::WindowId,
 ) {
     let t = theme();
     let mut lines: Vec<Line> = Vec::new();
@@ -145,7 +146,7 @@ pub fn render_panel(
             let abs_y = area.y + (lines.len() as u16).saturating_sub(*scroll);
             if abs_y >= area.y && abs_y < area.y + area.height {
                 hitmap_out.mcp_row_rects.push((
-                    String::new(),
+                    window_id,
                     s.name.clone(),
                     Rect {
                         x: area.x,

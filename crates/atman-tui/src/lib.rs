@@ -641,20 +641,27 @@ async fn run_frames(
                                 if let Some(min_id) =
                                     app.wm.hit_test_minimize(me.column, me.row)
                                 {
-                                    app.wm.close(&min_id);
+                                    app.wm.close(min_id);
                                 } else if let Some(max_id) =
                                     app.wm.hit_test_maximize(me.column, me.row)
                                 {
                                     let canvas = app.maximized_canvas();
-                                    app.wm.toggle_maximize(&max_id, canvas);
+                                    app.wm.toggle_maximize(max_id, canvas);
                                     if let Some(p) = app.wm.panels.iter().find(|p| p.id == max_id) {
-                                        if p.kind == crate::wm::PanelKind::Task(atman_runtime::TaskKind::Terminal) {
+                                        if matches!(p.content_kind, crate::wm::WindowContent::Task { kind: atman_runtime::TaskKind::Terminal, .. }) {
                                             let inner_cols = p.rect.width.saturating_sub(8);
                                             let inner_rows = p.rect.height.saturating_sub(5);
                                             if inner_cols > 0 && inner_rows > 0 {
                                                 if let Some(tx) = &handle.control_tx {
                                                     let _ = tx.send(TuiControl::TermResize {
-                                                        handle: max_id.clone(),
+                                                        handle: app
+                                                            .wm
+                                                            .content_kind(max_id)
+                                                            .and_then(|kind| match kind {
+                                                                crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
+                                                                _ => None,
+                                                            })
+                                                            .unwrap_or_default(),
                                                         rows: inner_rows,
                                                         cols: inner_cols,
                                                     });
@@ -665,13 +672,14 @@ async fn run_frames(
                                 } else if let Some(close_id) =
                                     app.wm.hit_test_close(me.column, me.row)
                                 {
-                                    let armed = app.panel_close_armed_id == Some(close_id.clone())
+                                    let close_label = app.wm.label(close_id).unwrap_or_default().to_string();
+                                    let armed = app.panel_close_armed_id.as_deref() == Some(close_label.as_str())
                                         && !app.panel_close_arm_expired();
                                     if armed {
                                         let tid = app
                                             .task_snapshots
                                             .iter()
-                                            .find(|s| s.source_handle == close_id)
+                                            .find(|s| s.source_handle == close_label)
                                             .map(|s| s.id.clone());
                                         if let (Some(tr), Some(tid)) = (&app.task_registry, tid) {
                                             tr.kill(&tid);
@@ -681,10 +689,10 @@ async fn run_frames(
                                         let label = app
                                             .task_snapshots
                                             .iter()
-                                            .find(|s| s.source_handle == close_id)
+                                            .find(|s| s.source_handle == close_label)
                                             .map(|s| s.label.clone())
                                             .unwrap_or_default();
-                                        app.arm_panel_close(close_id.clone());
+                                        app.arm_panel_close(close_label);
                                         app.push_note(
                                             format!("press ✕ again to kill {label}"),
                                             app::NoteLevel::Warn,
@@ -693,27 +701,27 @@ async fn run_frames(
                                 } else if let Some(resize_id) =
                                     app.wm.hit_test_resize(me.column, me.row)
                                 {
-                                    app.wm.focus(&resize_id);
+                                    app.wm.focus(resize_id);
                                     app.resize_target = Some(resize_id);
                                     app.resize_offset = (me.column, me.row);
                                 } else if let Some(fp) = app
                                     .wm
                                     .hit_test_titlebar(me.column, me.row)
                                 {
-                                    let id = fp.id.clone();
+                                    let id = fp.id;
                                     let now = std::time::Instant::now();
                                     let is_double = app
                                         .last_titlebar_click
                                         .as_ref()
                                         .is_some_and(|(prev_id, ts)| {
-                                            prev_id == &id && now.duration_since(*ts).as_millis() < 400
+                                            *prev_id == id && now.duration_since(*ts).as_millis() < 400
                                         });
                                     if is_double {
                                         let canvas = app.last_transcript_rect.unwrap_or_default();
-                                        app.wm.toggle_maximize(&id, canvas);
+                                        app.wm.toggle_maximize(id, canvas);
                                         app.last_titlebar_click = None;
                                     } else {
-                                        app.wm.focus(&id);
+                                        app.wm.focus(id);
                                         app.drag_target = Some(id.clone());
                                         app.drag_offset = (me.column, me.row);
                                         app.last_titlebar_click = Some((id, now));
@@ -764,7 +772,7 @@ async fn run_frames(
                                             app.toggle_workflow_node(panel_idx, &path);
                                         }
                                     } else {
-                                        app.wm.focus(&panel_id);
+                                        app.wm.focus(panel_id);
                                     }
                                 }
                             } else if app.modal_open() {
@@ -785,12 +793,12 @@ async fn run_frames(
                                     app.wm.open(
                                         "mcp-manager",
                                         crate::wm::ContentKey::Mcp,
-                                        crate::wm::PanelKind::Mcp,
+                                        crate::wm::WindowContent::Mcp,
                                         "MCP Servers",
                                         canvas,
                                     );
                                     if let Some(p) =
-                                        app.wm.panels.iter_mut().find(|p| p.id == "mcp-manager")
+                                        app.wm.panels.iter_mut().find(|p| p.content_key == crate::wm::ContentKey::Mcp)
                                     {
                                         p.content = Some(Box::new(
                                             crate::window::mcp_panel::McpPanelContent { scroll: 0 },
@@ -930,7 +938,7 @@ async fn run_frames(
                                             "__history__",
                                             crate::wm::ContentKey::History,
                                             crate::wm::OpenPolicy::ReuseExisting,
-                                            crate::wm::PanelKind::History,
+                                            crate::wm::WindowContent::History,
                                             "History",
                                             canvas,
                                             pw,
@@ -938,7 +946,7 @@ async fn run_frames(
                                             false,
                                         );
                                         if let Some(p) =
-                                            app.wm.panels.iter_mut().find(|p| p.id == "__history__")
+                                            app.wm.panels.iter_mut().find(|p| p.content_key == crate::wm::ContentKey::History)
                                         {
                                             p.content = Some(Box::new(
                                                 crate::window::history_panel::HistoryPanelContent {
@@ -962,7 +970,7 @@ async fn run_frames(
                                             app.wm.open(
                                                 &panel_id,
                                                 crate::wm::ContentKey::Activity(run_id.clone()),
-                                                crate::wm::PanelKind::Activity,
+                                                crate::wm::WindowContent::Activity { run_id: run_id.clone() },
                                                 &node.label,
                                                 canvas,
                                             );
@@ -970,7 +978,7 @@ async fn run_frames(
                                                 .wm
                                                 .panels
                                                 .iter_mut()
-                                                .find(|p| p.id == panel_id)
+                                                .find(|p| p.content_key == crate::wm::ContentKey::Activity(run_id.clone()))
                                             {
                                                 p.content = Some(Box::new(
                                                     crate::window::activity_panel::ActivityPanelContent {
@@ -1110,7 +1118,7 @@ async fn run_frames(
                                             .is_some_and(|p| p.maximized);
                                         if was_maximized {
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.wm.unmaximize(id, canvas);
+                                            app.wm.unmaximize(*id, canvas)
                                         }
                                         if let Some(p) = app
                                             .wm
@@ -1118,11 +1126,11 @@ async fn run_frames(
                                             .iter()
                                             .find(|p| &p.id == id)
                                         {
-                                            let is_term = p.kind == crate::wm::PanelKind::Task(atman_runtime::TaskKind::Terminal);
+                                            let is_term = matches!(p.content_kind, crate::wm::WindowContent::Task { kind: atman_runtime::TaskKind::Terminal, .. });
                                             let nw = (p.rect.width as i32 + dx).max(20) as u16;
                                             let nh = (p.rect.height as i32 + dy).max(6) as u16;
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.wm.resize_panel(id, nw, nh, canvas);
+                                            app.wm.resize_panel(*id, nw, nh, canvas);
                                             app.resize_offset = (me.column, me.row);
                                             if is_term {
                                                 let inner_cols = nw.saturating_sub(8);
@@ -1130,7 +1138,14 @@ async fn run_frames(
                                                 if inner_cols > 0 && inner_rows > 0 {
                                                     if let Some(tx) = &handle.control_tx {
                                                         let _ = tx.send(TuiControl::TermResize {
-                                                            handle: id.clone(),
+                                                            handle: app
+                                                                .wm
+                                                                .content_kind(*id)
+                                                                .and_then(|kind| match kind {
+                                                                    crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
+                                                                    _ => None,
+                                                                })
+                                                                .unwrap_or_default(),
                                                             rows: inner_rows,
                                                             cols: inner_cols,
                                                         });
@@ -1152,7 +1167,7 @@ async fn run_frames(
                                             .is_some_and(|p| p.maximized);
                                         if was_maximized {
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.wm.unmaximize(id, canvas);
+                                            app.wm.unmaximize(*id, canvas)
                                         }
                                         if let Some(p) = app
                                             .wm
@@ -1163,7 +1178,7 @@ async fn run_frames(
                                             let nx = (p.rect.x as i32 + dx).max(0) as u16;
                                             let ny = (p.rect.y as i32 + dy).max(0) as u16;
                                             let canvas = app.last_transcript_rect.unwrap_or_default();
-                                            app.wm.move_panel(id, nx, ny, canvas);
+                                            app.wm.move_panel(*id, nx, ny, canvas);
                                             app.drag_offset = (me.column, me.row);
                                         }
                                     }
@@ -1173,7 +1188,9 @@ async fn run_frames(
                                     let id = app.resize_target.clone();
                                     if let Some(id) = id {
                                         if let Some(p) = app.wm.panels.iter().find(|p| p.id == id) {
-                                            app.panel_sizes.insert(id.clone(), (p.rect.width, p.rect.height));
+                                            if let Some(label) = app.wm.label(id) {
+                                                app.panel_sizes.insert(label.to_string(), (p.rect.width, p.rect.height));
+                                            }
                                             app.save_ui_state();
                                         }
                                     }
@@ -2347,11 +2364,16 @@ fn dispatch_palette_entry(
             app.wm.open(
                 "mcp-manager",
                 crate::wm::ContentKey::Mcp,
-                crate::wm::PanelKind::Mcp,
+                crate::wm::WindowContent::Mcp,
                 "MCP Servers",
                 canvas,
             );
-            if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == "mcp-manager") {
+            if let Some(p) = app
+                .wm
+                .panels
+                .iter_mut()
+                .find(|p| p.content_key == crate::wm::ContentKey::Mcp)
+            {
                 p.content = Some(Box::new(crate::window::mcp_panel::McpPanelContent {
                     scroll: 0,
                 }));
@@ -2362,11 +2384,16 @@ fn dispatch_palette_entry(
             app.wm.open(
                 "cheatsheet",
                 crate::wm::ContentKey::Cheatsheet,
-                crate::wm::PanelKind::Cheatsheet,
+                crate::wm::WindowContent::Cheatsheet,
                 "Keybindings",
                 canvas,
             );
-            if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == "cheatsheet") {
+            if let Some(p) = app
+                .wm
+                .panels
+                .iter_mut()
+                .find(|p| p.content_key == crate::wm::ContentKey::Cheatsheet)
+            {
                 p.content = Some(Box::new(
                     crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
                 ));
@@ -3007,9 +3034,9 @@ fn handle_key(
     }
 
     if let KeyAction::Tab = action {
-        if let Some(id) = app.wm.focused().map(String::from)
+        if let Some(id) = app.wm.focused_id()
             && let Some(panel) = app.wm.panels.iter_mut().find(|p| p.id == id)
-            && panel.kind == crate::wm::PanelKind::Mermaid
+            && matches!(panel.content_kind, crate::wm::WindowContent::Mermaid { .. })
         {
             panel.split = !panel.split;
             app.mark_items_dirty();
@@ -3017,12 +3044,12 @@ fn handle_key(
         }
     }
 
-    if let Some(id) = app.wm.focused().map(String::from)
+    if let Some(id) = app.wm.focused_id()
         && app
             .wm
             .panels
             .iter()
-            .any(|p| p.id == id && p.kind == crate::wm::PanelKind::Mcp)
+            .any(|p| p.id == id && matches!(p.content_kind, crate::wm::WindowContent::Mcp))
     {
         let server_count = app.context.mcp_servers.len();
         match action {
@@ -3155,7 +3182,7 @@ fn handle_key(
                 return;
             }
             KeyAction::Char('q') => {
-                app.wm.close(&id);
+                app.wm.close(id);
                 return;
             }
             _ => {}
@@ -3440,7 +3467,7 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ScrollUp | KeyAction::PageUp => {
-            if let Some(id) = app.wm.focused().map(String::from)
+            if let Some(id) = app.wm.focused_id()
                 && let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id)
             {
                 p.scroll = p
@@ -3460,7 +3487,7 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::ScrollDown | KeyAction::PageDown => {
-            if let Some(id) = app.wm.focused().map(String::from)
+            if let Some(id) = app.wm.focused_id()
                 && let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id)
             {
                 p.scroll = p
@@ -3488,9 +3515,9 @@ fn handle_key(
             *interrupt_prompt = None;
         }
         KeyAction::Escape => {
-            if let Some(id) = app.wm.focused().map(String::from) {
+            if let Some(id) = app.wm.focused_id() {
                 if app.wm.panels.iter().any(|p| p.id == id) {
-                    app.wm.close(&id);
+                    app.wm.close(id);
                     return;
                 }
             }
@@ -3534,11 +3561,16 @@ fn handle_key(
             app.wm.open(
                 "cheatsheet",
                 crate::wm::ContentKey::Cheatsheet,
-                crate::wm::PanelKind::Cheatsheet,
+                crate::wm::WindowContent::Cheatsheet,
                 "Keybindings",
                 canvas,
             );
-            if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == "cheatsheet") {
+            if let Some(p) = app
+                .wm
+                .panels
+                .iter_mut()
+                .find(|p| p.content_key == crate::wm::ContentKey::Cheatsheet)
+            {
                 p.content = Some(Box::new(
                     crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
                 ));

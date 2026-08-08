@@ -279,12 +279,12 @@ pub struct AppState {
     pub task_panel_collapsed_groups: std::collections::HashSet<atman_runtime::TaskKind>,
     pub wm: crate::wm::WindowManager,
     pub layer_stack: crate::wm::LayerStack,
-    pub drag_target: Option<String>,
+    pub drag_target: Option<crate::wm::WindowId>,
     pub drag_offset: (u16, u16),
-    pub last_titlebar_click: Option<(String, std::time::Instant)>,
-    pub resize_target: Option<String>,
+    pub last_titlebar_click: Option<(crate::wm::WindowId, std::time::Instant)>,
+    pub resize_target: Option<crate::wm::WindowId>,
     pub resize_offset: (u16, u16),
-    pub hovered_panel_btn: Option<(String, crate::wm::PanelBtn)>,
+    pub hovered_panel_btn: Option<(crate::wm::WindowId, crate::wm::PanelBtn)>,
     pub panel_sizes: std::collections::HashMap<String, (u16, u16)>,
     pub hovered_history_row: Option<String>,
     pub hovered_mcp_row: Option<String>,
@@ -483,18 +483,26 @@ impl AppState {
             }
         };
 
-        self.wm.open_with_size(
+        let window_id = self.wm.open_with_size(
             handle,
             crate::wm::ContentKey::Task(handle.to_string()),
             crate::wm::OpenPolicy::ReuseExisting,
-            crate::wm::PanelKind::Task(kind),
+            crate::wm::WindowContent::Task {
+                handle: handle.to_string(),
+                kind,
+            },
             &label,
             canvas,
             pw,
             ph,
             maximized,
         );
-        if let Some(panel) = self.wm.panels.iter_mut().find(|panel| panel.id == handle) {
+        if let Some(panel) = self
+            .wm
+            .panels
+            .iter_mut()
+            .find(|panel| panel.id == window_id)
+        {
             panel.content = Some(content);
         }
     }
@@ -604,14 +612,21 @@ impl AppState {
             &id,
             crate::wm::ContentKey::Mermaid(id.clone()),
             crate::wm::OpenPolicy::ReuseExisting,
-            crate::wm::PanelKind::Mermaid,
+            crate::wm::WindowContent::Mermaid {
+                item_id: id.clone(),
+            },
             "Mermaid Diagram",
             canvas,
             pw,
             ph,
             false,
         );
-        if let Some(p) = self.wm.panels.iter_mut().find(|p| p.id == id) {
+        if let Some(p) = self
+            .wm
+            .panels
+            .iter_mut()
+            .find(|p| p.content_key == crate::wm::ContentKey::Mermaid(id.clone()))
+        {
             p.content = Some(Box::new(
                 crate::window::mermaid_panel::MermaidPanelContent {
                     item_id: id.clone(),
