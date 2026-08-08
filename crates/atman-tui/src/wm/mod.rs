@@ -316,8 +316,13 @@ impl WindowManager {
     }
 
     pub fn close(&mut self, id: WindowId) {
-        self.panels.retain(|p| p.id != id);
-        self.focus.remove_and_refocus(id, &self.panels);
+        if let Some(idx) = self.panels.iter().position(|p| p.id == id) {
+            if let Some(ref mut content) = self.panels[idx].content {
+                content.on_blur();
+            }
+            self.panels.remove(idx);
+            self.focus.remove_and_refocus(id, &self.panels);
+        }
     }
 
     pub fn focus(&mut self, id: WindowId) {
