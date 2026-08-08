@@ -773,6 +773,21 @@ async fn run_frames(
                                         } else {
                                             app.toggle_workflow_node(panel_idx, &path);
                                         }
+                                    } else if let Some((_pid, tool_id, _)) = app
+                                        .last_wm_hitmap
+                                        .tool_header_rects
+                                        .iter()
+                                        .find(|(pid, _, r)| {
+                                            pid == &panel_id
+                                                && rect_contains(*r, me.column, me.row)
+                                        })
+                                        .cloned()
+                                    {
+                                        if !app.expanded_tools.remove(&tool_id) {
+                                            app.expanded_tools.insert(tool_id);
+                                        }
+                                        app.expanded_version =
+                                            app.expanded_version.wrapping_add(1);
                                     } else {
                                         app.wm.focus(panel_id);
                                     }
@@ -1211,10 +1226,16 @@ async fn run_frames(
                                     .hit_test_panel(me.column, me.row)
                                     .map(|p| (p.id, p.rect));
                                 if let Some((panel_id, pr)) = topmost_panel {
-                                    // floating panel button hover
+                                    // floating panel button hover (topmost only)
                                     let btn_hover = app
                                         .wm
-                                        .hit_test_btn(me.column, me.row);
+                                        .hit_test_btn(me.column, me.row)
+                                        .filter(|(id, _)| {
+                                            topmost_panel
+                                                .as_ref()
+                                                .map(|(pid, _)| id == pid)
+                                                .unwrap_or(false)
+                                        });
                                     if app.hovered_panel_btn != btn_hover {
                                         app.hovered_panel_btn = btn_hover;
                                         app.wm_visual_version = app.wm_visual_version.wrapping_add(1);
