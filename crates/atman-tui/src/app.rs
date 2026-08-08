@@ -554,7 +554,10 @@ impl AppState {
     /// item was evicted (e.g. after a history restore) but whose session log
     /// file still exists on disk at `<session_dir>/bg_<handle>.log`. Returns
     /// `None` when no snapshot/log is available.
-    fn reconstruct_bash_item(&mut self, snap: &Option<atman_runtime::TaskSnapshot>) -> Option<OutputItem> {
+    fn reconstruct_bash_item(
+        &mut self,
+        snap: &Option<atman_runtime::TaskSnapshot>,
+    ) -> Option<OutputItem> {
         let snap = snap.as_ref()?;
         if snap.kind != atman_runtime::TaskKind::Bash {
             return None;
@@ -562,8 +565,8 @@ impl AppState {
         if snap.source_handle.is_empty() {
             return None;
         }
-        let log_path = std::path::Path::new(&self.session_dir)
-            .join(format!("bg_{}.log", snap.source_handle));
+        let log_path =
+            std::path::Path::new(&self.session_dir).join(format!("bg_{}.log", snap.source_handle));
         let raw = std::fs::read_to_string(&log_path).ok()?;
         if raw.trim().is_empty() {
             return None;
