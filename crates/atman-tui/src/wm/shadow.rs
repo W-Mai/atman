@@ -70,6 +70,25 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
     }
 }
 
+pub fn render_backdrop(f: &mut Frame, t: &crate::theme::Theme) {
+    let buf = f.buffer_mut();
+    let area = *buf.area();
+    let shadow = t.shadow.into();
+    let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, 0.65);
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let cell = &mut buf[(x, y)];
+            if matches!(cell.bg, Color::Reset) {
+                continue;
+            }
+            cell.bg = multiply_color(cell.bg, factor);
+            if !matches!(cell.fg, Color::Reset) {
+                cell.fg = multiply_color(cell.fg, factor);
+            }
+        }
+    }
+}
+
 pub fn lerp_color(a: Color, b: Color, t: f64) -> Color {
     let mode = crate::theme::current_mode();
     fn to_rgb(c: Color, mode: crate::theme::ThemeMode) -> (u8, u8, u8) {

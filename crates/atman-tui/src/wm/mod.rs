@@ -639,6 +639,12 @@ impl WindowManager {
             );
         }
 
+        let modal_open = !self.layers.modal_stack.is_empty()
+            || app.modal_notification.is_some()
+            || app.trust_mode_picker_open;
+        if modal_open {
+            crate::wm::shadow::render_backdrop(frame, &crate::theme::theme());
+        }
         if app.trust_mode_picker_open {
             crate::render_trust_mode_picker(frame, canvas, app);
         }
