@@ -1389,4 +1389,148 @@ mod tests {
         assert!(p.rect.width <= 40);
         assert!(p.rect.height <= 10);
     }
+
+    #[test]
+    fn cheatsheet_panel_renders_content() {
+        let mut wm = WindowManager::default();
+        let canvas = Rect::new(0, 0, 100, 40);
+        let id = wm.open(
+            "cheatsheet",
+            ContentKey::Cheatsheet,
+            WindowContent::Cheatsheet,
+            "Keybindings",
+            canvas,
+        );
+
+        if let Some(p) = wm.panels.iter_mut().find(|p| p.id == id) {
+            p.content = Some(Box::new(
+                crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+            ));
+        }
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+
+        let snapshots: &[atman_runtime::TaskSnapshot] = &[];
+        let items: &[crate::app::OutputItem] = &[];
+        let activity_nodes: &[crate::task_panel::ActivityNode] = &[];
+        let hovered_btn: Option<(WindowId, PanelBtn)> = None;
+        let hovered_history_row: Option<String> = None;
+        let expanded_mcp_servers: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let hovered_mcp_row: Option<String> = None;
+        let mcp_resources: std::collections::HashMap<String, Vec<atman_runtime::mcp::McpResource>> =
+            std::collections::HashMap::new();
+        let mcp_prompts: std::collections::HashMap<String, Vec<atman_runtime::mcp::McpPrompt>> =
+            std::collections::HashMap::new();
+        let mcp_browser = crate::mcp_manager::McpBrowserState {
+            tab: crate::mcp_manager::McpBrowserTab::default(),
+            resources: &mcp_resources,
+            prompts: &mcp_prompts,
+        };
+
+        terminal
+            .draw(|f| {
+                crate::wm::render(
+                    f,
+                    f.area(),
+                    &mut wm,
+                    snapshots,
+                    items,
+                    activity_nodes,
+                    &hovered_btn,
+                    &hovered_history_row,
+                    0,        // animation_frame
+                    None,     // panel_close_armed
+                    f.area(), // max_canvas
+                    false,    // modal_open
+                    &[],      // mcp_servers
+                    &expanded_mcp_servers,
+                    0, // mcp_selected
+                    &hovered_mcp_row,
+                    &mcp_browser,
+                    0, // items_version
+                    0, // expanded_version
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = buffer.content.iter().map(|c| c.symbol()).collect();
+        assert!(
+            content.contains("Ctrl")
+                || content.contains("Enter")
+                || content.contains("Keybindings"),
+            "cheatsheet panel should render keybinding content, got empty or placeholder"
+        );
+    }
+
+    #[test]
+    fn panel_without_content_shows_placeholder() {
+        let mut wm = WindowManager::default();
+        let canvas = Rect::new(0, 0, 100, 40);
+        wm.open(
+            "empty",
+            ContentKey::History,
+            WindowContent::History,
+            "History",
+            canvas,
+        );
+        // Do NOT set content — the render path must fall back to the
+        // placeholder rather than crashing (Bug 1 fix in content.rs).
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+
+        let snapshots: &[atman_runtime::TaskSnapshot] = &[];
+        let items: &[crate::app::OutputItem] = &[];
+        let activity_nodes: &[crate::task_panel::ActivityNode] = &[];
+        let hovered_btn: Option<(WindowId, PanelBtn)> = None;
+        let hovered_history_row: Option<String> = None;
+        let expanded_mcp_servers: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let hovered_mcp_row: Option<String> = None;
+        let mcp_resources: std::collections::HashMap<String, Vec<atman_runtime::mcp::McpResource>> =
+            std::collections::HashMap::new();
+        let mcp_prompts: std::collections::HashMap<String, Vec<atman_runtime::mcp::McpPrompt>> =
+            std::collections::HashMap::new();
+        let mcp_browser = crate::mcp_manager::McpBrowserState {
+            tab: crate::mcp_manager::McpBrowserTab::default(),
+            resources: &mcp_resources,
+            prompts: &mcp_prompts,
+        };
+
+        terminal
+            .draw(|f| {
+                crate::wm::render(
+                    f,
+                    f.area(),
+                    &mut wm,
+                    snapshots,
+                    items,
+                    activity_nodes,
+                    &hovered_btn,
+                    &hovered_history_row,
+                    0,        // animation_frame
+                    None,     // panel_close_armed
+                    f.area(), // max_canvas
+                    false,    // modal_open
+                    &[],      // mcp_servers
+                    &expanded_mcp_servers,
+                    0, // mcp_selected
+                    &hovered_mcp_row,
+                    &mcp_browser,
+                    0, // items_version
+                    0, // expanded_version
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = buffer.content.iter().map(|c| c.symbol()).collect();
+        assert!(
+            content.contains("no data"),
+            "panel without content should render the placeholder, got: {content:?}"
+        );
+    }
 }
