@@ -4,7 +4,7 @@ use crate::UiState;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryArea {
@@ -163,101 +163,6 @@ impl HistorySearchModal {
     }
 }
 
-pub(crate) fn handle_history_search_key(action: &KeyAction, app: &mut UiState) {
-    use crate::history_search_modal::{HistoryHit, HistorySearchScope};
-    match action {
-        KeyAction::Escape => app.wm.modals.history_search.close(),
-        KeyAction::HistoryUp | KeyAction::CursorLeft => {
-            app.wm.modals.history_search.move_up();
-            refresh_history_preview(app);
-        }
-        KeyAction::HistoryDown | KeyAction::CursorRight => {
-            app.wm.modals.history_search.move_down();
-            refresh_history_preview(app);
-        }
-        KeyAction::PageUp => {
-            app.wm.modals.history_search.scroll_preview(true, 10);
-        }
-        KeyAction::PageDown => {
-            app.wm.modals.history_search.scroll_preview(false, 10);
-        }
-        KeyAction::ScrollUp => {
-            app.wm.modals.history_search.scroll_preview(true, 3);
-        }
-        KeyAction::ScrollDown => {
-            app.wm.modals.history_search.scroll_preview(false, 3);
-        }
-        KeyAction::Tab => {
-            app.wm.modals.history_search.scope = app.wm.modals.history_search.scope.toggle();
-        }
-        KeyAction::Submit => {
-            let query = app.wm.modals.history_search.editor.buf().trim().to_string();
-            if query.is_empty() {
-                app.wm.modals.history_search.set_error("empty query".into());
-                return;
-            }
-            let Some(session) = app.session.as_ref() else {
-                app.wm
-                    .modals
-                    .history_search
-                    .set_error("no session in context".into());
-                return;
-            };
-            let Some(idx) = session.project_index() else {
-                app.wm
-                    .modals
-                    .history_search
-                    .set_error("project index unavailable".into());
-                return;
-            };
-            let session_filter = match app.wm.modals.history_search.scope {
-                HistorySearchScope::Session => Some(session.id().to_string()),
-                HistorySearchScope::Project => None,
-            };
-            let rows = match idx.fts_search_project_events(&query, session_filter.as_deref(), 50) {
-                Ok(rows) => rows,
-                Err(e) => {
-                    app.wm
-                        .modals
-                        .history_search
-                        .set_error(format!("search failed: {e}"));
-                    return;
-                }
-            };
-            let hits: Vec<HistoryHit> = rows
-                .into_iter()
-                .map(|row| {
-                    let snippet = extract_event_snippet(&row.kind, &row.payload);
-                    HistoryHit {
-                        session_id: row.session_id,
-                        seq: row.seq,
-                        ts: row.ts,
-                        kind: row.kind,
-                        snippet,
-                    }
-                })
-                .collect();
-            app.wm.modals.history_search.set_results(hits, query);
-            refresh_history_preview(app);
-        }
-        KeyAction::Char(c) => {
-            if *c == 'j' && app.wm.modals.history_search.editor.buf().is_empty() {
-                app.wm.modals.history_search.move_down();
-                refresh_history_preview(app);
-            } else if *c == 'k' && app.wm.modals.history_search.editor.buf().is_empty() {
-                app.wm.modals.history_search.move_up();
-                refresh_history_preview(app);
-            } else {
-                app.wm.modals.history_search.editor.insert_char(*c);
-            }
-        }
-        KeyAction::Backspace => {
-            app.wm.modals.history_search.editor.backspace();
-        }
-        _ => {}
-    }
-}
-
 pub(crate) fn refresh_history_preview(app: &mut UiState) {
     let (session_id, seq) = match app.wm.modals.history_search.selected_hit() {
         Some(hit) => (hit.session_id.clone(), hit.seq),
@@ -333,80 +238,6 @@ pub(crate) fn extract_event_text(kind: &str, payload: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn extract_event_snippet(kind: &str, payload: &str) -> String {
-    let text = extract_event_text(kind, payload).unwrap_or_else(|| format!("<{kind}>"));
-    text.chars()
-        .take(120)
-        .collect::<String>()
-        .replace('\n', " ")
-}
-
-pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal) {
-    let t = crate::theme::theme();
-    let w = area.width.saturating_sub(4).clamp(70, 140);
-    let h = area.height.saturating_sub(4).clamp(20, 42);
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
-    let scope_color = match modal.scope {
-        HistorySearchScope::Session => t.accent,
-        HistorySearchScope::Project => t.warn,
-    };
-    let title = Line::from(vec![
-        Span::styled(
-            "Search History · ",
-            Style::default()
-                .fg(t.accent.into())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            modal.scope.label(),
-            Style::default()
-                .fg(scope_color.into())
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    let inner =
-        crate::wm::shell::render_overlay_shell(f, rect, title, "⌕", t.accent.into(), true, &t);
-    if inner.height < 8 {
-        return;
-    }
-    let help_h = 1u16;
-    let content_h = inner.height.saturating_sub(help_h);
-    let content_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: content_h,
-    };
-    let help_area = Rect {
-        x: inner.x,
-        y: inner.y + content_h,
-        width: inner.width,
-        height: help_h,
-    };
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(6),
-            Constraint::Min(8),
-        ])
-        .split(content_area);
-    render_query_row(f, rows[0], modal);
-    render_results_row(f, rows[1], modal);
-    render_preview_row(f, rows[2], modal);
-    modal.results_rect = Some(rows[1]);
-    modal.preview_rect = Some(rows[2]);
-    render_help_bar(f, help_area);
-}
 
 impl crate::wm::modal::ModalOverlay for HistorySearchModal {
     fn render_content(

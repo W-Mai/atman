@@ -163,98 +163,6 @@ fn selectable_models() -> Vec<String> {
     models
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
-    if area.width < 60 || area.height < 20 {
-        render_minimal(f, area, state);
-        return;
-    }
-    let w = area.width.saturating_sub(4).clamp(54, 82);
-    let h = area.height.saturating_sub(2).clamp(18, 30);
-    let rect = Rect {
-        x: area.x + area.width.saturating_sub(w) / 2,
-        y: area.y + area.height.saturating_sub(h) / 2,
-        width: w,
-        height: h,
-    };
-
-    crate::sanitize_widget_edges(f, rect);
-
-    let theme = crate::theme::theme();
-    let inner = crate::wm::shell::render_overlay_shell(
-        f,
-        rect,
-        Line::from("Welcome to atman"),
-        "✦",
-        theme.accent.into(),
-        true,
-        &theme,
-    );
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(10),
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(2),
-        ])
-        .split(inner);
-
-    let banner: Vec<Line> = crate::output::STARTUP_BANNER
-        .iter()
-        .map(|row| {
-            Line::from(Span::styled(
-                *row,
-                Style::default()
-                    .fg(theme.accent.into())
-                    .add_modifier(Modifier::BOLD),
-            ))
-        })
-        .chain(std::iter::once(Line::from("")))
-        .chain(std::iter::once(Line::from(Span::styled(
-            "Welcome to atman — let's get set up",
-            Style::default().fg(theme.meta_fg.into()),
-        ))))
-        .collect();
-    f.render_widget(
-        Paragraph::new(banner).alignment(ratatui::layout::Alignment::Center),
-        rows[0],
-    );
-
-    f.render_widget(Paragraph::new(""), rows[1]);
-
-    match state.step {
-        OnboardingStep::ProviderSelect => render_provider_step(f, rows[2], state),
-        OnboardingStep::ModelSelect => render_model_step(f, rows[2], state),
-    }
-
-    let footer = if let Some(error) = state.error.as_deref() {
-        Line::from(Span::styled(error, Style::default().fg(theme.error.into())))
-    } else {
-        match state.step {
-            OnboardingStep::ProviderSelect => Line::from(vec![
-                key_span("Enter"),
-                help_span(" add provider  "),
-                key_span("q"),
-                help_span(" skip"),
-            ]),
-            OnboardingStep::ModelSelect => Line::from(vec![
-                key_span("↑↓/j/k"),
-                help_span(" navigate  "),
-                key_span("Enter"),
-                help_span(" finish  "),
-                key_span("Esc"),
-                help_span(" back"),
-            ]),
-        }
-    };
-    f.render_widget(
-        Paragraph::new(footer)
-            .wrap(Wrap { trim: true })
-            .alignment(ratatui::layout::Alignment::Right),
-        rows[3],
-    );
-}
 
 impl crate::wm::modal::ModalOverlay for OnboardingState {
     fn render_content(
@@ -358,6 +266,7 @@ impl crate::wm::modal::ModalOverlay for OnboardingState {
     }
 }
 
+#[allow(dead_code)]
 fn render_minimal(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let theme = crate::theme::theme();
     let mut lines = vec![

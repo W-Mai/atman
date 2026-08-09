@@ -1,9 +1,4 @@
 use crate::UiState;
-use crate::compact_review_modal::handle_compact_review_key;
-use crate::form_modal::handle_form_key;
-use crate::history_search_modal::handle_history_search_key;
-use crate::palette::handle_palette_key;
-use crate::session_switcher::handle_session_switcher_key;
 use tokio::sync::mpsc;
 
 use super::TuiControl;
@@ -138,6 +133,7 @@ pub(crate) fn count_message_events(path: &std::path::Path) -> (usize, usize) {
     (user, total)
 }
 
+#[allow(dead_code)]
 pub(crate) fn copy_last_message(app: &mut AppState) {
     let text = app.items.iter().rev().find_map(|item| match item {
         app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
@@ -156,6 +152,7 @@ pub(crate) fn copy_last_message(app: &mut AppState) {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn copy_last_tool(app: &mut AppState) {
     let text = app.items.iter().rev().find_map(|item| match item {
         app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
@@ -328,151 +325,6 @@ pub(crate) fn handle_approval_key(
     }
 }
 
-pub(crate) fn handle_modal_key(
-    kind: crate::wm::ModalKind,
-    action: &KeyAction,
-    ui: &mut UiState,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
-) -> bool {
-    if kind == crate::wm::ModalKind::Form && ui.wm.modals.form_modal.open {
-        handle_form_key(action, ui, control_tx);
-        return true;
-    }
-    if kind == crate::wm::ModalKind::CompactReview && ui.wm.modals.compact_review.is_some() {
-        handle_compact_review_key(action, ui, control_tx);
-        return true;
-    }
-    if kind == crate::wm::ModalKind::SessionSwitcher && ui.wm.modals.session_switcher.open {
-        handle_session_switcher_key(action, ui, control_tx);
-        return true;
-    }
-    if kind == crate::wm::ModalKind::HistorySearch && ui.wm.modals.history_search.open {
-        handle_history_search_key(action, ui);
-        return true;
-    }
-    if kind == crate::wm::ModalKind::ProviderManager && ui.wm.modals.provider_manager.open {
-        ui.wm.modals.provider_manager.handle_key(action, control_tx);
-        if let Some(model) = ui.wm.modals.provider_manager.open_alias_model.take() {
-            ui.wm.modals.alias_manager.open_form_with_model(&model);
-        }
-        if ui.wm.modals.provider_manager.add_just_completed {
-            ui.wm.modals.provider_manager.add_just_completed = false;
-            if ui.wm.modals.onboarding_open {
-                let name = ui.wm.modals.provider_manager.last_added_name.take();
-                ui.wm.modals.onboarding.provider_added(name.as_deref());
-            }
-        }
-        if ui.wm.modals.provider_manager.refresh_just_triggered {
-            ui.wm.modals.provider_manager.refresh_just_triggered = false;
-            ui.push_toast(
-                "refreshing models…",
-                app::NoteLevel::Info,
-                std::time::Duration::from_secs(2),
-                app::ToastPosition::TopRight,
-            );
-        }
-        if ui.wm.modals.provider_manager.test_just_triggered {
-            ui.wm.modals.provider_manager.test_just_triggered = false;
-            ui.push_toast(
-                "testing endpoint…",
-                app::NoteLevel::Info,
-                std::time::Duration::from_secs(5),
-                app::ToastPosition::TopRight,
-            );
-        }
-        if ui.wm.modals.onboarding_open && !ui.wm.modals.provider_manager.open {
-            ui.wm.modals.onboarding.check_provider_manager_closed();
-        }
-        return true;
-    }
-    if kind == crate::wm::ModalKind::AliasManager && ui.wm.modals.alias_manager.open {
-        ui.wm.modals.alias_manager.handle_key(action, control_tx);
-        return true;
-    }
-    if kind == crate::wm::ModalKind::ModelPicker && ui.wm.modals.model_picker.open {
-        ui.wm.modals.model_picker.handle_key(action);
-        if let Some(model) = ui.wm.modals.model_picker.picked.take() {
-            if let Some(tx) = control_tx {
-                let _ = tx.send(TuiControl::SwitchModel {
-                    model: model.clone(),
-                });
-            }
-            ui.context.model = model.clone();
-            ui.push_toast(
-                format!("model switched to {model}"),
-                app::NoteLevel::Success,
-                std::time::Duration::from_secs(3),
-                app::ToastPosition::TopRight,
-            );
-        }
-        return true;
-    }
-    if kind == crate::wm::ModalKind::Onboarding && ui.wm.modals.onboarding_open {
-        match ui.wm.modals.onboarding.handle_key(action) {
-            crate::onboarding::OnboardingEvent::None => {}
-            crate::onboarding::OnboardingEvent::OpenProviderManager => {
-                ui.wm.modals.provider_manager.open_add();
-            }
-            crate::onboarding::OnboardingEvent::Completed => {
-                ui.wm.modals.onboarding_open = false;
-                ui.hints_dismissed = false;
-                ui.save_ui_state();
-                ui.push_toast(
-                    "Setup complete — smart model configured".to_string(),
-                    app::NoteLevel::Success,
-                    std::time::Duration::from_secs(4),
-                    app::ToastPosition::TopRight,
-                );
-            }
-            crate::onboarding::OnboardingEvent::Skipped => {
-                ui.wm.modals.onboarding_open = false;
-                ui.app.onboarding_skipped = true;
-                ui.save_ui_state();
-                ui.push_toast(
-                    "You can configure atman in ~/.config/atman/config.toml".to_string(),
-                    app::NoteLevel::Warn,
-                    std::time::Duration::from_secs(5),
-                    app::ToastPosition::TopRight,
-                );
-            }
-        }
-        return true;
-    }
-    if kind == crate::wm::ModalKind::Palette && ui.wm.modals.palette.open {
-        handle_palette_key(action, ui, control_tx);
-        return true;
-    }
-    if kind == crate::wm::ModalKind::ThemePicker && ui.wm.modals.theme_picker_open {
-        let themes = [
-            atman_runtime::trust::Theme::Default,
-            atman_runtime::trust::Theme::Wuxia,
-            atman_runtime::trust::Theme::Animal,
-            atman_runtime::trust::Theme::Weather,
-            atman_runtime::trust::Theme::Drink,
-        ];
-        let max = themes.len();
-        match action {
-            KeyAction::Escape => {
-                ui.wm.modals.theme_picker_open = false;
-            }
-            KeyAction::HistoryUp | KeyAction::CursorLeft => {
-                ui.picker_selected = ui.picker_selected.checked_sub(1).unwrap_or(max - 1);
-            }
-            KeyAction::HistoryDown | KeyAction::CursorRight => {
-                ui.picker_selected = (ui.picker_selected + 1) % max;
-            }
-            KeyAction::Submit | KeyAction::Char('\r') => {
-                ui.trust.theme = themes[ui.picker_selected.min(max - 1)];
-                ui.wm.modals.theme_picker_open = false;
-                ui.save_ui_state();
-            }
-            KeyAction::Quit => ui.should_quit = true,
-            _ => {}
-        }
-        return true;
-    }
-    false
-}
 
 pub(crate) fn handle_key(
     action: KeyAction,
@@ -787,12 +639,6 @@ pub(crate) fn handle_key(
         return;
     }
     app.wm.sync_modals();
-    if let Some(kind) = app.wm.layers.dispatch_key()
-        && handle_modal_key(kind, &action, app, control_tx)
-    {
-        app.wm.sync_modals();
-        return;
-    }
     if let KeyAction::OpenCommandPalette = action {
         app.wm.modals.palette.open();
         return;

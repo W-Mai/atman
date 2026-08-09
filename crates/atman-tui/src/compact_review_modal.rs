@@ -69,6 +69,7 @@ impl CompactReviewModal {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn handle_compact_review_key(
     action: &KeyAction,
     app: &mut UiState,
@@ -119,38 +120,6 @@ pub(crate) fn handle_compact_review_key(
     }
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut CompactReviewModal) {
-    let w = area.width.saturating_sub(4).clamp(60, 140);
-    let h = area.height.saturating_sub(4).clamp(16, 40);
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    crate::sanitize_widget_edges(f, rect);
-    let theme = crate::theme::theme();
-    let title = Line::from(format!(
-        " Review Compaction — slice {}..{} ({} msgs, ~{} tokens) ",
-        modal.pending.range_start,
-        modal.pending.range_end,
-        modal.pending.slice_count,
-        modal.pending.tokens_before,
-    ));
-    let inner = crate::wm::shell::render_overlay_shell(
-        f,
-        rect,
-        title,
-        "◫",
-        theme.warn.into(),
-        true,
-        &theme,
-    );
-    use crate::wm::modal::ModalOverlay;
-    modal.render_content(f, inner, &crate::app::AppState::default(), &theme);
-}
 
 fn render_content_body(
     f: &mut ratatui::Frame,

@@ -4,7 +4,6 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
-use crate::app::AppState;
 use crate::input::{InputEditor, input_paragraph};
 use crate::{approval_bar, completion, layout, output, sidebar, status};
 
@@ -614,78 +613,6 @@ pub(crate) fn render_startup_hints(
     );
 }
 
-pub(crate) fn render_trust_mode_picker(
-    f: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    app: &AppState,
-) {
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Clear, List, ListItem, ListState};
-
-    let modes = atman_runtime::trust::TrustMode::all();
-    let t = crate::theme::theme();
-    let items: Vec<ListItem> = modes
-        .iter()
-        .map(|&m| {
-            let d = app.trust.theme.display(m);
-            let color = match d.color {
-                atman_runtime::trust::ModeColor::Cyan => t.accent.into(),
-                atman_runtime::trust::ModeColor::Green => t.success.into(),
-                atman_runtime::trust::ModeColor::Yellow => t.warn.into(),
-                atman_runtime::trust::ModeColor::Orange => ratatui::style::Color::Rgb(208, 135, 22),
-                atman_runtime::trust::ModeColor::Red => t.error.into(),
-            };
-            let marker = if m == app.trust.mode {
-                "← current"
-            } else {
-                ""
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" {} ", d.emoji), Style::default().fg(color)),
-                Span::styled(
-                    format!("{:<14}", d.name),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!("  {}  ", d.description)),
-                Span::raw(marker),
-            ]))
-        })
-        .collect();
-
-    let h = items.len() as u16 + 4;
-    let w = 70u16.min(area.width);
-    let popup = ratatui::layout::Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
-        width: w,
-        height: h,
-    };
-    f.render_widget(Clear, popup);
-    let inner = crate::wm::shell::render_overlay_shell(
-        f,
-        popup,
-        Line::from(Span::styled(
-            "Trust Mode",
-            Style::default().fg(t.tinted_fg.into()),
-        )),
-        "⚡",
-        t.accent.into(),
-        true,
-        &t,
-    );
-    let mut state = ListState::default();
-    state.select(Some(app.picker_selected.min(items.len() - 1)));
-    f.render_stateful_widget(
-        List::new(items).highlight_style(
-            Style::default()
-                .bg(t.highlight_bg.into())
-                .add_modifier(Modifier::BOLD),
-        ),
-        inner,
-        &mut state,
-    );
-}
 
 pub(crate) fn render_notify_modal(
     f: &mut ratatui::Frame,
@@ -749,71 +676,6 @@ pub(crate) fn render_notify_modal(
     f.render_widget(hint, hint_rect);
 }
 
-pub(crate) fn render_theme_picker(
-    f: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    app: &AppState,
-) {
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Clear, List, ListItem, ListState};
-
-    let t = crate::theme::theme();
-    let themes = [
-        ("default", "calm / steady / eager / reckless"),
-        ("wuxia", "守拙 / 行云 / 破竹 / 逍遥"),
-        ("animal", "🦔 hedgehog / 🐱 cat / 🐶 dog / 🦡 honey-badger"),
-        ("weather", "🌧 drizzle / ☀️ clear / ⛈ storm / 🌪 tornado"),
-        ("drink", "💧 water / ☕ coffee / ☕ espresso / 🧪 bleach"),
-    ];
-    let items: Vec<ListItem> = themes
-        .iter()
-        .map(|(id, desc)| {
-            let is_current = app.trust.theme.to_string() == *id;
-            let marker = if is_current { "  ← current" } else { "" };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {:<10}", id),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!("  {}{}", desc, marker)),
-            ]))
-        })
-        .collect();
-
-    let h = items.len() as u16 + 4;
-    let w = 70u16.min(area.width);
-    let popup = ratatui::layout::Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
-        width: w,
-        height: h,
-    };
-    f.render_widget(Clear, popup);
-    let inner = crate::wm::shell::render_overlay_shell(
-        f,
-        popup,
-        Line::from(Span::styled(
-            "Theme",
-            Style::default().fg(t.tinted_fg.into()),
-        )),
-        "◐",
-        t.accent.into(),
-        true,
-        &t,
-    );
-    let mut state = ListState::default();
-    state.select(Some(app.picker_selected.min(items.len() - 1)));
-    f.render_stateful_widget(
-        List::new(items).highlight_style(
-            Style::default()
-                .fg(t.tinted_fg.into())
-                .add_modifier(Modifier::BOLD),
-        ),
-        inner,
-        &mut state,
-    );
-}
 
 pub(crate) async fn check_latest_release() -> Option<String> {
     let url = "https://api.github.com/repos/W-Mai/atman/releases/latest";

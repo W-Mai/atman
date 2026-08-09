@@ -22,7 +22,6 @@ pub mod hitmap;
 pub mod layer;
 pub mod layer_stack;
 pub mod modal;
-pub mod modal_wrappers;
 pub mod shadow;
 pub mod shell;
 pub mod window;

@@ -209,7 +209,7 @@ impl ModalManager {
 
     /// Handle a key for the topmost modal. Returns true if consumed.
     /// Handles simple modals; complex modals (palette, form, etc.) return false
-    /// and fall through to handle_modal_key in key_handler.
+    /// so the key falls through to generic window dispatch.
     pub fn handle_key_top(
         &mut self,
         kind: ModalKind,
@@ -327,7 +327,7 @@ impl ModalManager {
                 }
                 true
             }
-            // Complex modals — fall through to handle_modal_key
+            // Complex modals — fall through to generic dispatch
             _ => false,
         }
     }

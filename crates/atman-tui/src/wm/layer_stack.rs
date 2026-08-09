@@ -4,14 +4,8 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use crate::app::AppState;
-use crate::wm::WindowId;
 use crate::wm::layer::LayerKind;
-use crate::wm::modal_wrappers::{
-    AliasManagerWrapper, CompactReviewWrapper, FormModalWrapper, HistorySearchWrapper,
-    ModelPickerWrapper, OnboardingWrapper, PaletteWrapper, ProviderManagerWrapper,
-    SessionSwitcherWrapper, ThemePickerWrapper, TrustModePickerWrapper,
-};
-use crate::wm::{ModalComponent, ModalEntry, ModalKind, RenderCtx};
+use crate::wm::{ModalEntry, ModalKind};
 
 pub struct LayerStack {
     pub layers: Vec<LayerKind>,
@@ -62,71 +56,6 @@ impl LayerStack {
         self.modal_stack.last().map(|entry| entry.kind)
     }
 
-    pub fn render_modals(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        app: &mut AppState,
-        modals: &mut crate::wm::ModalManager,
-        focused_id: WindowId,
-    ) {
-        let snapshots = Vec::new();
-        let items = Vec::new();
-        let expanded_tools = HashSet::new();
-        let activity_nodes = Vec::new();
-        let mcp_servers = Vec::new();
-        let expanded_mcp_servers = HashSet::new();
-        let hovered_mcp_row = None;
-        let hovered_history_row = None;
-        let mcp_resources = app.mcp_resources_cache.clone();
-        let mcp_prompts = app.mcp_prompts_cache.clone();
-        let mcp_browser = crate::mcp_manager::McpBrowserState {
-            tab: app.mcp_browser_tab,
-            resources: &mcp_resources,
-            prompts: &mcp_prompts,
-        };
-        let ctx = RenderCtx {
-            window_id: focused_id,
-            snapshots: &snapshots,
-            items: &items,
-            animation_frame: 0,
-            expanded_tools: &expanded_tools,
-            activity_nodes: &activity_nodes,
-            items_version: 0,
-            expanded_version: 0,
-            mcp_servers: &mcp_servers,
-            expanded_mcp_servers: &expanded_mcp_servers,
-            mcp_selected: 0,
-            hovered_mcp_row: &hovered_mcp_row,
-            mcp_browser: &mcp_browser,
-            hovered_history_row: &hovered_history_row,
-        };
-        for entry in &self.modal_stack {
-            match entry.kind {
-                ModalKind::Form => FormModalWrapper { app, modals }.render(frame, area, &ctx),
-                ModalKind::CompactReview => {
-                    CompactReviewWrapper { app, modals }.render(frame, area, &ctx)
-                }
-                ModalKind::SessionSwitcher => {
-                    SessionSwitcherWrapper { app, modals }.render(frame, area, &ctx)
-                }
-                ModalKind::HistorySearch => {
-                    HistorySearchWrapper { app, modals }.render(frame, area, &ctx)
-                }
-                ModalKind::ProviderManager => {
-                    ProviderManagerWrapper { app, modals }.render(frame, area, &ctx)
-                }
-                ModalKind::AliasManager => AliasManagerWrapper { app, modals }.render(frame, area, &ctx),
-                ModalKind::ModelPicker => ModelPickerWrapper { app, modals }.render(frame, area, &ctx),
-                ModalKind::Onboarding => OnboardingWrapper { app, modals }.render(frame, area, &ctx),
-                ModalKind::Palette => PaletteWrapper { app, modals }.render(frame, area, &ctx),
-                ModalKind::ThemePicker => ThemePickerWrapper { app, modals }.render(frame, area, &ctx),
-                ModalKind::TrustModePicker => {
-                    TrustModePickerWrapper { app, modals }.render(frame, area, &ctx)
-                }
-            }
-        }
-    }
 
     pub fn render_blocking(&self, f: &mut Frame, area: Rect, app: &AppState) {
         if let Some(ref msg) = app.modal_notification {

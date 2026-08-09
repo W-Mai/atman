@@ -9,7 +9,6 @@ fn provider_types() -> Vec<&'static str> {
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
-use crate::wm::modal::ModalOverlay;
 
 #[derive(Debug, Clone)]
 pub struct ProviderEntry {
@@ -876,33 +875,6 @@ impl ProviderManager {
     }
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &mut ProviderManager) {
-    let w = area.width.saturating_sub(4).clamp(60, 90);
-    let h = area.height.saturating_sub(2).clamp(10, 24);
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-
-    crate::sanitize_widget_edges(f, rect);
-
-    let theme = crate::theme::theme();
-    let inner = crate::wm::shell::render_overlay_shell(
-        f,
-        rect,
-        Line::from("Provider Manager"),
-        "⚙",
-        theme.accent.into(),
-        true,
-        &theme,
-    );
-
-    mgr.render_content(f, inner, &crate::app::AppState::default(), &theme);
-}
 
 fn render_provider_list(
     f: &mut ratatui::Frame,

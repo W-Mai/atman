@@ -241,14 +241,8 @@ impl AliasManager {
     }
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
-    if !mgr.show_form {
-        render_alias_list(f, area, mgr);
-        return;
-    }
-    render_alias_form(f, area, mgr);
-}
 
+#[allow(dead_code)]
 fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     let w = area.width.saturating_sub(4).clamp(40, 60);
     let h = area.height.saturating_sub(2).clamp(8, 20);
@@ -313,6 +307,7 @@ fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     f.render_widget(footer, footer_area);
 }
 
+#[allow(dead_code)]
 fn render_alias_form(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
     let w = area.width.saturating_sub(4).clamp(60, 84);
     let h = area.height.saturating_sub(2).clamp(14, 24);
