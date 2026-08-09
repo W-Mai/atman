@@ -3,6 +3,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
+use crate::wm::modal::ModalAction;
+
 use crate::keys::KeyAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,8 +193,6 @@ pub struct CommandPalette {
     /// Display items include group headers. Only Entry variants are selectable.
     display: Vec<PaletteItem>,
     pub last_input_rect: Option<Rect>,
-    /// Entry selected on Submit, awaiting dispatch after the palette closes.
-    pub pending_entry: Option<PaletteEntryId>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +213,6 @@ impl CommandPalette {
         self.open = true;
         self.input.clear();
         self.selected = 0;
-        self.pending_entry = None;
         self.refresh();
     }
 
@@ -222,7 +221,6 @@ impl CommandPalette {
         self.input.clear();
         self.filtered.clear();
         self.display.clear();
-        self.pending_entry = None;
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -404,7 +402,8 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
         action: &crate::keys::KeyAction,
         _app: &mut crate::app::AppState,
         _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool {
+    ) -> Option<ModalAction> {
+        use crate::wm::modal::ModalAction;
         match action {
             KeyAction::Escape => self.close(),
             KeyAction::HistoryUp | KeyAction::CursorLeft => self.move_up(),
@@ -412,15 +411,14 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
             KeyAction::Backspace => self.backspace(),
             KeyAction::Char(c) => self.push_char(*c),
             KeyAction::Submit => {
-                let id = self.selected();
-                self.close();
-                // close() clears pending_entry; store the pick after so it
-                // survives for the WindowManager to dispatch in the same frame.
-                self.pending_entry = id;
+                if let Some(id) = self.selected() {
+                    self.close();
+                    return Some(ModalAction::Dispatched(id));
+                }
             }
             _ => {}
         }
-        true
+        Some(ModalAction::Consumed)
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {

@@ -1,3 +1,5 @@
+use crate::wm::modal::ModalAction;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -380,7 +382,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
         tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool {
+    ) -> Option<ModalAction> {
         if self.rename_mode {
             match action {
                 KeyAction::Escape => {
@@ -406,7 +408,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 KeyAction::Char(c) => self.rename_push(*c),
                 _ => {}
             }
-            return true;
+            return Some(ModalAction::Consumed);
         }
         if self.filter_mode {
             match action {
@@ -417,7 +419,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 KeyAction::Char(c) => self.filter_push(*c),
                 _ => {}
             }
-            return true;
+            return Some(ModalAction::Consumed);
         }
         if let KeyAction::Char('d') | KeyAction::Char('D') = action {
             if self.delete_armed_matches_selected() {
@@ -440,7 +442,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     None => app.push_note("no session selected", crate::app::NoteLevel::Warn),
                 }
             }
-            return true;
+            return Some(ModalAction::Consumed);
         }
         if self.delete_armed.is_some() {
             self.clear_delete_arm();
@@ -448,17 +450,17 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         }
         if let KeyAction::Char('s') | KeyAction::Char('S') = action {
             self.toggle_sort();
-            return true;
+            return Some(ModalAction::Consumed);
         }
         if let KeyAction::Char('f') | KeyAction::Char('F') = action {
             self.enter_filter_mode();
-            return true;
+            return Some(ModalAction::Consumed);
         }
         if let KeyAction::Char('r') | KeyAction::Char('R') = action {
             if self.begin_rename().is_none() {
                 app.push_note("no session selected", crate::app::NoteLevel::Warn);
             }
-            return true;
+            return Some(ModalAction::Consumed);
         }
         match action {
             KeyAction::Escape => self.close(),
@@ -478,7 +480,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             }
             _ => {}
         }
-        true
+        Some(ModalAction::Consumed)
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {

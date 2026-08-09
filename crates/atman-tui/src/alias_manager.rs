@@ -1,3 +1,5 @@
+use crate::wm::modal::ModalAction;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -467,9 +469,9 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
         action: &crate::keys::KeyAction,
         _app: &mut crate::app::AppState,
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool {
+    ) -> Option<ModalAction> {
         self.handle_key(action, tx);
-        true
+        Some(ModalAction::Consumed)
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {

@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
-use super::component::{EventCtx, HitRegion, RenderCtx, WmEvent, WmEventResult};
+use super::component::HitRegion;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModalKind {
     Form,
@@ -107,52 +107,20 @@ pub enum OutsideClickPolicy {
     Close,
 }
 
-/// A modal component — blocks input to lower layers.
-///
-/// Modals are stacked: opening a new modal pushes, closing pops.
-/// Only the topmost modal receives keyboard/mouse events.
-pub trait ModalComponent: Send {
-    /// Render the modal. Return hit regions for mouse dispatch.
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &RenderCtx);
-
-    /// Handle a key or mouse event. Return Consumed/Ignored.
-    fn handle_event(&mut self, event: &WmEvent, ctx: &mut EventCtx) -> WmEventResult;
-
-    /// Called when this modal is pushed onto the stack.
-    fn on_open(&mut self) {}
-
-    /// Called when this modal is popped from the stack.
-    fn on_close(&mut self) {}
-
-    /// Whether closing should be blocked (unsaved changes, etc.).
-    fn can_close(&self) -> super::component::CloseOutcome {
-        super::component::CloseOutcome::Close
-    }
-
-    /// Preferred rect relative to viewport.
-    fn preferred_rect(&self, viewport: Rect) -> Rect;
-
-    /// Hit-test a mouse position. Returns Inside with regions, or Outside.
-    fn hit_test(&self, col: u16, row: u16, viewport: Rect) -> HitTestResult {
-        let rect = self.preferred_rect(viewport);
-        if col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
-        {
-            HitTestResult::Inside(Vec::new())
-        } else {
-            HitTestResult::Outside
-        }
-    }
-
-    /// Policy for clicks outside the modal rect.
-    fn outside_click_policy(&self) -> OutsideClickPolicy {
-        OutsideClickPolicy::Consume
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModalEntry {
     pub kind: ModalKind,
     pub pre_modal_focus: Option<crate::wm::WindowId>,
+}
+
+/// Side effect a modal wants to carry out once it closes (or as it consumes a
+/// key event). `Some` means the key was consumed; `None` means it fell through.
+#[derive(Debug, Clone)]
+pub enum ModalAction {
+    /// Key consumed, no side effect beyond whatever the modal already did.
+    Consumed,
+    /// The palette closed on Submit, carrying the picked entry to dispatch.
+    Dispatched(crate::palette::PaletteEntryId),
 }
 
 pub trait ModalOverlay {
@@ -168,7 +136,7 @@ pub trait ModalOverlay {
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool;
+    ) -> Option<ModalAction>;
     fn cursor_position(&self) -> Option<(u16, u16)>;
     fn title(&self) -> ratatui::text::Line<'static>;
     fn icon(&self) -> &str;
@@ -206,16 +174,16 @@ impl ModalManager {
         }
     }
 
-    /// Handle a key for the topmost modal. Returns true if consumed.
-    /// Handles simple modals; complex modals (palette, form, etc.) return false
-    /// so the key falls through to generic window dispatch.
+    /// Handle a key for the topmost modal. Returns (consumed, carried action).
+    /// `consumed` is true if the key was handled and should not fall through.
+    /// `carried` is the modal's side-effect (e.g. a palette entry to dispatch).
     pub fn handle_key_top(
         &mut self,
         kind: ModalKind,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
         tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool {
+    ) -> (bool, Option<ModalAction>) {
         match kind {
             ModalKind::ModelPicker => {
                 if self.model_picker.open {
@@ -235,7 +203,7 @@ impl ModalManager {
                         );
                     }
                 }
-                true
+                (true, None)
             }
             ModalKind::Onboarding => {
                 if self.onboarding_open {
@@ -269,7 +237,7 @@ impl ModalManager {
                         }
                     }
                 }
-                true
+                (true, None)
             }
             ModalKind::ProviderManager => {
                 if self.provider_manager.open {
@@ -306,55 +274,66 @@ impl ModalManager {
                         self.onboarding.check_provider_manager_closed();
                     }
                 }
-                true
+                (true, None)
             }
             ModalKind::AliasManager => {
                 if self.alias_manager.open {
                     self.alias_manager.handle_key(action, tx);
                 }
-                true
+                (true, None)
             }
             ModalKind::ThemePicker => {
                 if self.theme_picker_open {
                     self.handle_theme_picker_key(action, app);
                 }
-                true
+                (true, None)
             }
             ModalKind::TrustModePicker => {
                 if self.trust_mode_picker_open {
                     self.handle_trust_mode_picker_key(action, app);
                 }
-                true
+                (true, None)
             }
             ModalKind::Palette => {
                 if self.palette.open {
-                    self.palette.handle_key(action, app, tx);
+                    let result = self.palette.handle_key(action, app, tx);
+                    let consumed = result.is_some();
+                    (consumed, result)
+                } else {
+                    (true, None)
                 }
-                true
             }
             ModalKind::HistorySearch => {
-                if self.history_search.open {
-                    self.history_search.handle_key(action, app, tx);
-                }
-                true
+                let result = if self.history_search.open {
+                    self.history_search.handle_key(action, app, tx)
+                } else {
+                    None
+                };
+                (result.is_some(), result)
             }
             ModalKind::Form => {
-                if self.form_modal.open {
-                    self.form_modal.handle_key(action, app, tx);
-                }
-                true
+                let result = if self.form_modal.open {
+                    self.form_modal.handle_key(action, app, tx)
+                } else {
+                    None
+                };
+                (result.is_some(), result)
             }
             ModalKind::CompactReview => {
-                if let Some(m) = &mut self.compact_review {
-                    m.handle_key(action, app, tx);
-                }
-                true
+                let result = if let Some(m) = &mut self.compact_review {
+                    m.handle_key(action, app, tx)
+                } else {
+                    None
+                };
+                (result.is_some(), result)
             }
             ModalKind::SessionSwitcher => {
-                if self.session_switcher.open {
-                    self.session_switcher.handle_key(action, app, tx);
-                }
-                true
+                let result = if self.session_switcher.open {
+                    self.session_switcher.handle_key(action, app, tx)
+                } else {
+                    None
+                };
+                (result.is_some(), result)
             }
         }
     }

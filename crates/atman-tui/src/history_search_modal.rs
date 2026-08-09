@@ -1,3 +1,5 @@
+use crate::wm::modal::ModalAction;
+
 use crate::UiState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
@@ -286,7 +288,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
         action: &crate::keys::KeyAction,
         _app: &mut crate::app::AppState,
         _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool {
+    ) -> Option<ModalAction> {
         match action {
             KeyAction::Escape => self.close(),
             KeyAction::HistoryUp | KeyAction::CursorLeft => {
@@ -316,7 +318,7 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             }
             _ => {}
         }
-        true
+        Some(ModalAction::Consumed)
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {

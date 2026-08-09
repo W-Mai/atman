@@ -1,3 +1,5 @@
+use crate::wm::modal::ModalAction;
+
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
 use atman_runtime::PendingCompactReview;
@@ -212,8 +214,8 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
         _action: &KeyAction,
         _app: &mut crate::app::AppState,
         _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool {
-        true
+    ) -> Option<ModalAction> {
+        Some(ModalAction::Consumed)
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {

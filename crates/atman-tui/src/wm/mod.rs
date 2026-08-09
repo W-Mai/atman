@@ -35,7 +35,7 @@ pub use hitmap::WmHitmap;
 pub use layer::{Layer, LayerKind};
 pub use layer_stack::LayerStack;
 pub use modal::{
-    HitTestResult, ModalComponent, ModalEntry, ModalKind, ModalManager, OutsideClickPolicy,
+    HitTestResult, ModalAction, ModalEntry, ModalKind, ModalManager, OutsideClickPolicy,
 };
 pub use shadow::{
     lerp_color, multiply_color, render_bottom_fade, render_input_shadow, render_shadow,
@@ -498,14 +498,16 @@ impl WindowManager {
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
         if let Some(kind) = self.layers.dispatch_key() {
-            let consumed = self.modals.handle_key_top(kind, action, _app, _control_tx);
-            // The palette closes on Submit and leaves a picked entry behind;
-            // dispatch it now that no modal is open atop it.
-            if let Some(entry) = self.modals.palette.pending_entry.take() {
-                let commands = self.dispatch_palette_entry(entry, _app, _control_tx);
-                return (consumed, commands);
-            }
-            return (consumed, Vec::new());
+            let (consumed, carried) = self.modals.handle_key_top(kind, action, _app, _control_tx);
+            let commands = carried
+                .and_then(|a| match a {
+                    crate::wm::ModalAction::Dispatched(id) => {
+                        Some(self.apply_palette_action(id, _app, _control_tx))
+                    }
+                    crate::wm::ModalAction::Consumed => None,
+                })
+                .unwrap_or_default();
+            return (consumed, commands);
         }
         match action {
             crate::keys::KeyAction::CyclePanelForward => {
@@ -569,7 +571,7 @@ impl WindowManager {
     /// Execute a picked command-palette entry. Called right after the palette
     /// closes on Submit; opens the target modal, mutates app state, and emits
     /// control/session commands.
-    fn dispatch_palette_entry(
+    fn apply_palette_action(
         &mut self,
         id: crate::palette::PaletteEntryId,
         app: &mut crate::app::AppState,

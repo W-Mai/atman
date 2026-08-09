@@ -1,3 +1,5 @@
+use crate::wm::modal::ModalAction;
+
 use atman_runtime::form::{FormAnswer, FormKind, PendingForm};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -603,10 +605,10 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         action: &crate::keys::KeyAction,
         _app: &mut crate::app::AppState,
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) -> bool {
+    ) -> Option<ModalAction> {
         use atman_runtime::form::FormKind;
         let Some(form_id) = self.active_form_id().map(String::from) else {
-            return true;
+            return Some(ModalAction::Consumed);
         };
         let is_text = matches!(
             self.pending.as_ref().map(|p| &p.kind),
@@ -712,7 +714,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             }
             _ => {}
         }
-        true
+        Some(ModalAction::Consumed)
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
