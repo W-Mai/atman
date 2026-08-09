@@ -1,5 +1,8 @@
 use crate::message::{Message, MessagePart, MessageRole};
 
+pub const KEEP_RECENT_MESSAGES: usize = 20;
+pub const KEEP_RECENT_USER_TURNS: usize = 5;
+
 pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     let mut chars = 0usize;
     for part in &msg.parts {
@@ -58,58 +61,44 @@ pub fn is_compaction_summary(msg: &Message) -> bool {
         .any(|part| matches!(part, MessagePart::CompactSummary { .. }))
 }
 
+fn find_kth_recent_user(messages: &[Message], k: usize) -> usize {
+    let mut user_count = 0;
+    for (index, message) in messages.iter().enumerate().rev() {
+        if message.role == MessageRole::User {
+            user_count += 1;
+            if user_count == k {
+                return index;
+            }
+        }
+    }
+    0
+}
+
 pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRange> {
     let total = estimate_tokens_for_messages(messages);
     if total <= budget || messages.len() < 4 {
         return None;
     }
-    let end = messages.len().saturating_sub(2);
-    if let Some(anchor) = messages.iter().rposition(is_compaction_summary) {
-        if anchor + 2 > end {
-            return None;
-        }
-        let tokens_saved = messages[anchor..end]
-            .iter()
-            .map(estimate_tokens_for_message)
-            .sum();
-        return Some(CompactRange {
-            start: anchor,
-            end,
-            tokens_saved_estimate: tokens_saved,
-        });
-    }
-    if end < 2 {
+
+    let start = messages
+        .iter()
+        .rposition(is_compaction_summary)
+        .unwrap_or(0);
+    let message_end = messages.len().saturating_sub(KEEP_RECENT_MESSAGES);
+    let end = message_end.min(find_kth_recent_user(messages, KEEP_RECENT_USER_TURNS));
+    if end < start + 2 {
         return None;
     }
-    let mut best: Option<CompactRange> = None;
-    let mut idx = 0;
-    while idx < end {
-        while idx < end && is_plan_related(&messages[idx]) {
-            idx += 1;
-        }
-        let segment_start = idx;
-        while idx < end && !is_plan_related(&messages[idx]) {
-            idx += 1;
-        }
-        if idx >= segment_start + 2 {
-            let tokens_saved = messages[segment_start..idx]
-                .iter()
-                .map(estimate_tokens_for_message)
-                .sum();
-            let candidate = CompactRange {
-                start: segment_start,
-                end: idx,
-                tokens_saved_estimate: tokens_saved,
-            };
-            if best
-                .as_ref()
-                .is_none_or(|range| candidate.tokens_saved_estimate > range.tokens_saved_estimate)
-            {
-                best = Some(candidate);
-            }
-        }
-    }
-    best
+
+    let tokens_saved_estimate = messages[start..end]
+        .iter()
+        .map(estimate_tokens_for_message)
+        .sum();
+    Some(CompactRange {
+        start,
+        end,
+        tokens_saved_estimate,
+    })
 }
 
 pub fn estimate_compacted_message_tokens(
@@ -650,26 +639,92 @@ mod tests {
     }
 
     #[test]
+    fn find_kth_recent_user_handles_exact_excess_and_mixed_history() {
+        let exact = vec![
+            user("u0"),
+            assistant("a0"),
+            system("s0"),
+            tool_result("call-0", "result", false),
+            user("u1"),
+            assistant("a1"),
+            user("u2"),
+            system("s1"),
+            user("u3"),
+            assistant("a3"),
+            user("u4"),
+        ];
+        // With exactly five users, the fifth recent user is the first message.
+        assert_eq!(find_kth_recent_user(&exact, KEEP_RECENT_USER_TURNS), 0);
+
+        let mut excess = exact.clone();
+        excess.push(user("u5"));
+        assert_eq!(find_kth_recent_user(&excess, KEEP_RECENT_USER_TURNS), 4);
+
+        let too_few = vec![user("a"), assistant("b"), assistant("c")];
+        assert_eq!(find_kth_recent_user(&too_few, KEEP_RECENT_USER_TURNS), 0);
+    }
+
+    #[test]
+    fn find_compact_range_preserves_recent_messages_without_anchor() {
+        let mut msgs = vec![system("head")];
+        msgs.extend((0..25).map(|index| assistant(&format!("old {index}"))));
+        msgs.extend(
+            (0..6).flat_map(|index| [user(&format!("user {index}")), assistant("assistant")]),
+        );
+        let range = find_compact_range(&msgs, 1).expect("range");
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, msgs.len() - KEEP_RECENT_MESSAGES);
+    }
+
+    #[test]
+    fn find_compact_range_preserves_recent_user_turns_after_anchor() {
+        let mut msgs = vec![system("head"), compaction_summary("summary")];
+        msgs.extend((0..6).flat_map(|index| {
+            [
+                user(&format!("user {index}")),
+                assistant("assistant"),
+                assistant("tool fragment"),
+            ]
+        }));
+        msgs.extend((0..12).map(|_| assistant("recent fragment")));
+        let range = find_compact_range(&msgs, 1).expect("range");
+        assert_eq!(range.start, 1);
+        assert_eq!(range.end, 5);
+        assert_eq!(msgs[range.end].role, MessageRole::User);
+    }
+
+    #[test]
+    fn find_compact_range_returns_none_when_end_cannot_cover_two_messages() {
+        let msgs = vec![
+            system("head"),
+            compaction_summary("summary"),
+            assistant("tail"),
+            user("tail"),
+        ];
+        assert!(find_compact_range(&msgs, 1).is_none());
+    }
+
+    #[test]
     fn compact_messages_on_handle_replaces_range_in_place() {
+        let mut messages = vec![system("head")];
+        messages.extend((0..9).map(|index| assistant(&format!("old {index}"))));
+        messages.extend(
+            (0..6).flat_map(|index| [user(&format!("user {index}")), assistant(&"x".repeat(4000))]),
+        );
+        messages.extend((0..10).map(|index| assistant(&format!("recent {index}"))));
+        messages.push(user("tail"));
         let handle: std::sync::Arc<std::sync::Mutex<Vec<Message>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(vec![
-                system("head"),
-                user(&"a".repeat(4000)),
-                assistant(&"b".repeat(4000)),
-                user(&"c".repeat(4000)),
-                assistant(&"d".repeat(4000)),
-                user("tail"),
-            ]));
-        // budget tiny → forces compaction. find_compact_range with no prior
-        // summary anchor returns start=0, end=len-2=4, so the result is
-        // [summary, messages[4..]] = [summary, assistant(d), user(tail)].
+            std::sync::Arc::new(std::sync::Mutex::new(messages));
+        // The recent-message and recent-user limits meet at the fifth recent user.
+        // The compacted prefix is replaced by one summary while the tail remains.
         let result = compact_messages_on_handle(&handle, "gist".into(), 100);
         let result = result.expect("should compact");
         assert!(result.after_tokens < result.before_tokens);
         let msgs = handle.lock().unwrap();
-        assert_eq!(msgs.len(), 3, "summary + remaining two tail messages");
-        assert_eq!(msgs[0].role, MessageRole::System);
-        assert_eq!(msgs[2].text_concat(), "tail");
+        assert_eq!(result.compacted_start, 0);
+        assert_eq!(result.compacted_end, 12);
+        assert!(is_compaction_summary(&msgs[0]));
+        assert_eq!(msgs.last().unwrap().text_concat(), "tail");
     }
 
     #[test]
@@ -744,14 +799,14 @@ mod tests {
 
     #[test]
     fn find_compact_range_anchors_on_latest_structured_summary() {
-        let msgs = vec![
+        let mut msgs = vec![
             system("head"),
             Message::system_compact_summary(TurnId::now(), "old", 0, 1, 2),
-            user("m1"),
-            assistant("m2"),
-            user("m3"),
-            assistant("m4"),
         ];
+        msgs.extend(
+            (0..6).flat_map(|index| [user(&format!("user {index}")), assistant("assistant")]),
+        );
+        msgs.extend((0..12).map(|index| assistant(&format!("recent {index}"))));
         let range = find_compact_range(&msgs, 1).expect("range");
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 4);
@@ -868,19 +923,17 @@ mod tests {
 
     #[test]
     fn find_compact_range_spans_across_compaction_summaries() {
-        let msgs = vec![
+        let mut msgs = vec![
             system("head"),
             user(&"x".repeat(3000)),
             assistant(&"y".repeat(3000)),
             user(&"z".repeat(3000)),
             compaction_summary("first compaction summary"),
-            user(&"a".repeat(3000)),
-            assistant(&"b".repeat(3000)),
-            user(&"c".repeat(3000)),
-            assistant(&"d".repeat(3000)),
-            user("tail"),
-            assistant("tail"),
         ];
+        msgs.extend(
+            (0..6).flat_map(|index| [user(&format!("user {index}")), assistant(&"x".repeat(3000))]),
+        );
+        msgs.extend((0..10).map(|index| assistant(&format!("recent {index}"))));
         let range = find_compact_range(&msgs, 500).expect("expected range across summary");
         assert_eq!(
             range.start, 4,
@@ -899,38 +952,40 @@ mod tests {
 
     #[test]
     fn find_compact_starts_from_summary() {
-        let msgs = vec![
-            user("a"),
-            assistant("b"),
-            compaction_summary("summary 1"),
-            user("c"),
-            assistant("d"),
-            user("e"),
-        ];
+        let mut msgs = vec![user("a"), assistant("b"), compaction_summary("summary 1")];
+        msgs.extend(
+            (0..6).flat_map(|index| [user(&format!("user {index}")), assistant("assistant")]),
+        );
+        msgs.extend((0..12).map(|index| assistant(&format!("recent {index}"))));
         let range = find_compact_range(&msgs, 10).expect("expected range");
         assert_eq!(
             range.start, 2,
             "should start from the compact summary anchor"
         );
-        assert_eq!(range.end, 4, "should end at len-2");
+        assert_eq!(range.end, 5, "the fifth recent user is retained");
     }
 
     #[test]
     fn find_compact_range_includes_older_compaction_summaries() {
-        let msgs = vec![
-            compaction_summary("summary 0"),
-            user(&"x".repeat(2000)),
-            assistant(&"y".repeat(2000)),
-            compaction_summary("summary 1"),
-            user(&"z".repeat(2000)),
-            assistant(&"w".repeat(2000)),
-            user("tail"),
-            assistant("tail"),
-        ];
+        let mut msgs = vec![compaction_summary("summary 0")];
+        msgs.extend((0..6).flat_map(|index| {
+            [
+                user(&format!("old user {index}")),
+                assistant(&"x".repeat(2000)),
+            ]
+        }));
+        msgs.push(compaction_summary("summary 1"));
+        msgs.extend((0..6).flat_map(|index| {
+            [
+                user(&format!("new user {index}")),
+                assistant(&"z".repeat(2000)),
+            ]
+        }));
+        msgs.extend((0..10).map(|index| assistant(&format!("tail {index}"))));
         let range = find_compact_range(&msgs, 500).expect("expected range");
-        assert_eq!(range.start, 3, "should compact from the latest summary");
+        assert_eq!(range.start, 13, "should compact from the latest summary");
         assert!(
-            range.end > 3,
+            range.end > range.start,
             "should include work after the latest summary"
         );
     }
@@ -954,16 +1009,15 @@ mod tests {
 
     #[test]
     fn find_compact_starts_from_zero_without_summary() {
-        let msgs = vec![
-            user("a"),
-            assistant("b"),
-            user("c"),
-            assistant("d"),
-            user("e"),
-        ];
+        let mut msgs = (0..26)
+            .map(|index| assistant(&format!("old {index}")))
+            .collect::<Vec<_>>();
+        msgs.extend(
+            (0..6).flat_map(|index| [user(&format!("user {index}")), assistant("assistant")]),
+        );
         let range = find_compact_range(&msgs, 10).expect("expected range");
         assert_eq!(range.start, 0, "should start from 0 without summary");
-        assert_eq!(range.end, 3, "should end at len-2");
+        assert_eq!(range.end, 18, "the recent-message limit is retained");
     }
 
     #[test]
