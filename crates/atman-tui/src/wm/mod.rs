@@ -496,6 +496,7 @@ impl WindowManager {
         _app: &mut crate::app::AppState,
         _control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> (bool, Vec<WmCommand>) {
+        self.sync_modals();
         if let Some(kind) = self.layers.dispatch_key() {
             return (
                 self.modals.handle_key_top(kind, action, _app, _control_tx),

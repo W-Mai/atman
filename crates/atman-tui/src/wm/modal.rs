@@ -326,8 +326,36 @@ impl ModalManager {
                 }
                 true
             }
-            // Complex modals — fall through to generic dispatch
-            _ => false,
+            ModalKind::Palette => {
+                if self.palette.open {
+                    self.palette.handle_key(action, app, tx);
+                }
+                true
+            }
+            ModalKind::HistorySearch => {
+                if self.history_search.open {
+                    self.history_search.handle_key(action, app, tx);
+                }
+                true
+            }
+            ModalKind::Form => {
+                if self.form_modal.open {
+                    self.form_modal.handle_key(action, app, tx);
+                }
+                true
+            }
+            ModalKind::CompactReview => {
+                if let Some(m) = &mut self.compact_review {
+                    m.handle_key(action, app, tx);
+                }
+                true
+            }
+            ModalKind::SessionSwitcher => {
+                if self.session_switcher.open {
+                    self.session_switcher.handle_key(action, app, tx);
+                }
+                true
+            }
         }
     }
 
