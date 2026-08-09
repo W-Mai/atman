@@ -163,45 +163,6 @@ impl HistorySearchModal {
         self.selected = 0;
         self.preview_lines.clear();
     }
-
-    pub fn run_search(&mut self, app: &crate::app::AppState) {
-        let query = self.editor.buf().to_string();
-        if query.is_empty() {
-            self.results.clear();
-            self.last_query.clear();
-            self.preview_lines.clear();
-            self.error = None;
-            return;
-        }
-        let Some(session) = app.session.as_ref() else {
-            return;
-        };
-        let Some(idx) = session.project_index() else {
-            return;
-        };
-        let session_filter = match self.scope {
-            HistorySearchScope::Session => Some(session.id().to_string()),
-            HistorySearchScope::Project => None,
-        };
-        match idx.fts_search_project_events(&query, session_filter.as_deref(), 50) {
-            Ok(rows) => {
-                let hits: Vec<HistoryHit> = rows
-                    .into_iter()
-                    .map(|r| HistoryHit {
-                        session_id: r.session_id,
-                        seq: r.seq,
-                        ts: r.ts,
-                        kind: r.kind,
-                        snippet: extract_snippet(&r.payload, &query),
-                    })
-                    .collect();
-                self.set_results(hits, query);
-            }
-            Err(e) => {
-                self.set_error(format!("search failed: {e}"));
-            }
-        }
-    }
 }
 
 pub(crate) fn refresh_history_preview(app: &mut UiState) {
@@ -242,53 +203,6 @@ pub(crate) fn refresh_history_preview(app: &mut UiState) {
         })
         .collect();
     app.wm.modals.history_search.set_preview(lines);
-}
-
-/// Extract a short text snippet from an event payload, windowed around the
-/// query terms so matches are visible in the results list.
-fn extract_snippet(payload: &str, query: &str) -> String {
-    let text = extract_text_generic(payload);
-    let needle = query.to_lowercase();
-    let text_lower = text.to_lowercase();
-    match text_lower.find(&needle) {
-        Some(pos) => {
-            let start = pos.saturating_sub(40);
-            let end = (pos + needle.len() + 40).min(text.len());
-            text.get(start..end).unwrap_or("").to_string()
-        }
-        None => text.chars().take(80).collect(),
-    }
-}
-
-/// Best-effort plain-text extraction from a payload JSON without needing the
-/// event kind. Falls back to stripping JSON syntax.
-fn extract_text_generic(payload: &str) -> String {
-    match extract_event_text("", payload) {
-        Some(t) => t,
-        None => {
-            let text = serde_json::from_str::<serde_json::Value>(payload)
-                .ok()
-                .and_then(|v| v.get("message").and_then(|m| m.get("parts")).cloned())
-                .and_then(|parts| {
-                    parts.as_array().map(|arr| {
-                        arr.iter()
-                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                })
-                .unwrap_or_default();
-            if text.is_empty() {
-                payload
-                    .trim_matches(|c| c == '{' || c == '}' || c == '"')
-                    .chars()
-                    .take(80)
-                    .collect()
-            } else {
-                text
-            }
-        }
-    }
 }
 
 pub(crate) fn extract_event_text(kind: &str, payload: &str) -> Option<String> {
@@ -372,15 +286,11 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
     fn handle_key(
         &mut self,
         action: &crate::keys::KeyAction,
-        app: &mut crate::app::AppState,
+        _app: &mut crate::app::AppState,
         _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
         match action {
             KeyAction::Escape => self.close(),
-            KeyAction::Submit => {
-                // Close the search; the user has already picked with j/k.
-                self.close();
-            }
             KeyAction::HistoryUp | KeyAction::CursorLeft => {
                 self.move_up();
             }
@@ -393,7 +303,6 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             KeyAction::ScrollDown => self.scroll_preview(false, 3),
             KeyAction::Tab => {
                 self.scope = self.scope.toggle();
-                self.run_search(app);
             }
             KeyAction::Char(c) => {
                 if *c == 'j' && self.editor.buf().is_empty() {
@@ -402,12 +311,10 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
                     self.move_up();
                 } else {
                     self.editor.insert_char(*c);
-                    self.run_search(app);
                 }
             }
             KeyAction::Backspace => {
                 self.editor.backspace();
-                self.run_search(app);
             }
             _ => {}
         }
