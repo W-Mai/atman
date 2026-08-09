@@ -1102,7 +1102,41 @@ pub(crate) async fn run_frames(
                             }
                             interrupt_prompt = None;
                         }
-                        Some(Ok(CtEvent::Resize(_, _))) => {}
+                        Some(Ok(CtEvent::Resize(cols, rows))) => {
+                            let canvas = ratatui::layout::Rect::new(0, 0, cols, rows);
+                            app.wm.clamp_to_canvas(canvas);
+                            // Keep the focused terminal panel's PTY in sync with its
+                            // clamped size after the terminal resize.
+                            if let Some(id) = app.wm.focused_id() {
+                                if app.wm.panels.iter().find(|p| p.id == id).is_some_and(|p| {
+                                    matches!(p.content_kind,
+                                        crate::wm::WindowContent::Task {
+                                            kind: atman_runtime::TaskKind::Terminal,
+                                            ..
+                                        })
+                                }) {
+                                    if let Some(p) = app.wm.panels.iter().find(|p| p.id == id) {
+                                        let inner_cols = p.rect.width.saturating_sub(8);
+                                        let inner_rows = p.rect.height.saturating_sub(5);
+                                        if inner_cols > 0 && inner_rows > 0 {
+                                            if let Some(tx) = &handle.control_tx {
+                                                let _ = tx.send(TuiControl::TermResize {
+                                                    handle: app.wm
+                                                        .content_kind(id)
+                                                        .and_then(|kind| match kind {
+                                                            crate::wm::WindowContent::Task { handle, .. } => Some(handle.clone()),
+                                                            _ => None,
+                                                        })
+                                                        .unwrap_or_default(),
+                                                    rows: inner_rows,
+                                                    cols: inner_cols,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                     drained = drained.saturating_add(1);
