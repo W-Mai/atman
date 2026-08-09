@@ -407,6 +407,7 @@ pub(crate) async fn run_frames(
                                     }
                                 } else if let Some(resize_id) =
                                     app.wm.hit_test_resize(me.column, me.row)
+                                    && resize_id == panel_id
                                 {
                                     app.wm.focus(resize_id);
                                     app.wm.interaction.resize_target = Some(resize_id);
