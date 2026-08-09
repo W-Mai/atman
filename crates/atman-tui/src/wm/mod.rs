@@ -613,23 +613,24 @@ impl WindowManager {
                     title,
                     window_content,
                 } => {
-                    let canvas = app.last_transcript_rect.unwrap_or_else(|| app.maximized_canvas());
+                    let canvas = app
+                        .last_transcript_rect
+                        .unwrap_or_else(|| app.maximized_canvas());
                     let id = self.open(&label, key, window_content.clone(), &title, canvas);
-                    let content: Option<Box<dyn crate::wm::WindowComponent>> =
-                        match window_content {
-                            crate::wm::WindowContent::Mcp => Some(Box::new(
-                                crate::window::mcp_panel::McpPanelContent { scroll: 0 },
-                            )),
-                            crate::wm::WindowContent::Cheatsheet => Some(Box::new(
-                                crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
-                            )),
-                            _ => None,
-                        };
-                    if let Some((p, content)) = self
-                        .panels
-                        .iter_mut()
-                        .find(|p| p.id == id)
-                        .zip(content)
+                    let content: Option<Box<dyn crate::wm::WindowComponent>> = match window_content
+                    {
+                        crate::wm::WindowContent::Mcp => {
+                            Some(Box::new(crate::window::mcp_panel::McpPanelContent {
+                                scroll: 0,
+                            }))
+                        }
+                        crate::wm::WindowContent::Cheatsheet => Some(Box::new(
+                            crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+                        )),
+                        _ => None,
+                    };
+                    if let Some((p, content)) =
+                        self.panels.iter_mut().find(|p| p.id == id).zip(content)
                     {
                         p.content = Some(content);
                     }

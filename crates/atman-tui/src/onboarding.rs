@@ -163,7 +163,6 @@ fn selectable_models() -> Vec<String> {
     models
 }
 
-
 impl crate::wm::modal::ModalOverlay for OnboardingState {
     fn render_content(
         &mut self,
@@ -264,53 +263,6 @@ impl crate::wm::modal::ModalOverlay for OnboardingState {
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
         t.accent.into()
     }
-}
-
-#[allow(dead_code)]
-fn render_minimal(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
-    let theme = crate::theme::theme();
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "atman setup",
-            Style::default()
-                .fg(theme.accent.into())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
-    match state.step {
-        OnboardingStep::ProviderSelect => {
-            lines.push(Line::from("1. Add a provider"));
-            lines.push(Line::from("   > Add provider"));
-            lines.push(Line::from("   > Skip for now"));
-        }
-        OnboardingStep::ModelSelect => {
-            let models = selectable_models();
-            lines.push(Line::from("2. Choose your default model"));
-            if models.is_empty() {
-                lines.push(Line::from(
-                    "   No configured models found — Esc to add a provider.",
-                ));
-            } else {
-                for (i, model) in models.iter().enumerate() {
-                    let mark = if i == state.selected_model { ">" } else { " " };
-                    lines.push(Line::from(format!("   {mark} {model}")));
-                }
-            }
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(match state.step {
-        OnboardingStep::ProviderSelect => "Enter: add provider   q: skip",
-        OnboardingStep::ModelSelect => "up/down: navigate   Enter: finish   Esc: back",
-    }));
-    if let Some(error) = state.error.as_deref() {
-        lines.push(Line::from(Span::styled(
-            error,
-            Style::default().fg(theme.error.into()),
-        )));
-    }
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn render_provider_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {

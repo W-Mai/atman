@@ -267,7 +267,6 @@ fn row_matches_filter(row: &SessionPickerRow, needle: &str) -> bool {
     false
 }
 
-
 impl crate::wm::modal::ModalOverlay for SessionSwitcher {
     fn render_content(
         &mut self,
@@ -279,10 +278,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         if area.height == 0 {
             return;
         }
-        if !self.rename_mode
-            && self.delete_armed.is_none()
-            && !self.filter_mode
-            && area.height >= 2
+        if !self.rename_mode && self.delete_armed.is_none() && !self.filter_mode && area.height >= 2
         {
             let footer_rect = Rect {
                 x: area.x,
@@ -350,10 +346,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                         format!("{updated:<19}  "),
                         Style::default().fg(t.accent.into()),
                     ),
-                    Span::styled(
-                        project_label,
-                        Style::default().fg(t.success.into()),
-                    ),
+                    Span::styled(project_label, Style::default().fg(t.success.into())),
                     Span::styled(
                         format!("  {goal_snippet}"),
                         Style::default().fg(t.tinted_fg.into()),
@@ -432,7 +425,10 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                     if let Some(tx) = tx {
                         let _ = tx.send(TuiControl::DeleteSession(sid.clone()));
                     }
-                    app.push_note(format!("deleted session {sid}"), crate::app::NoteLevel::Info);
+                    app.push_note(
+                        format!("deleted session {sid}"),
+                        crate::app::NoteLevel::Info,
+                    );
                 }
             } else {
                 let armed = self.arm_delete().map(str::to_owned);

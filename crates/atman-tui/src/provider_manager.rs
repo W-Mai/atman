@@ -875,7 +875,6 @@ impl ProviderManager {
     }
 }
 
-
 fn render_provider_list(
     f: &mut ratatui::Frame,
     area: Rect,

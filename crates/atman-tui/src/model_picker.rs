@@ -79,7 +79,6 @@ impl ModelPicker {
     }
 }
 
-
 impl crate::wm::modal::ModalOverlay for ModelPicker {
     fn render_content(
         &mut self,

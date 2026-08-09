@@ -1,5 +1,3 @@
-use crate::TuiControl;
-use crate::UiState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
 use atman_runtime::PendingCompactReview;
@@ -7,7 +5,6 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
-use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactReviewMode {
@@ -68,58 +65,6 @@ impl CompactReviewModal {
         self.scroll = self.scroll.saturating_add(4);
     }
 }
-
-#[allow(dead_code)]
-pub(crate) fn handle_compact_review_key(
-    action: &KeyAction,
-    app: &mut UiState,
-    control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
-) {
-    let Some(modal) = app.wm.modals.compact_review.as_mut() else {
-        return;
-    };
-    use crate::compact_review_modal::CompactReviewMode;
-    match modal.mode {
-        CompactReviewMode::Viewing => match action {
-            KeyAction::Submit => {
-                let review_id = modal.pending.review_id.clone();
-                let edited = if modal.summary_is_dirty() {
-                    Some(modal.edited_summary())
-                } else {
-                    None
-                };
-                if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::CompactReviewAccept { review_id, edited });
-                }
-                app.wm.modals.compact_review = None;
-            }
-            KeyAction::Char('e') => modal.enter_editing(),
-            KeyAction::Char('r') | KeyAction::Escape => {
-                let review_id = modal.pending.review_id.clone();
-                if let Some(tx) = control_tx {
-                    let _ = tx.send(TuiControl::CompactReviewReject { review_id });
-                }
-                app.wm.modals.compact_review = None;
-            }
-            KeyAction::PageUp => modal.scroll_up(),
-            KeyAction::PageDown => modal.scroll_down(),
-            _ => {}
-        },
-        CompactReviewMode::Editing => match action {
-            KeyAction::Escape => modal.leave_editing(),
-            KeyAction::Char(c) => modal.editor.insert_char(*c),
-            KeyAction::Backspace => modal.editor.backspace(),
-            KeyAction::DeleteWordBackward => modal.editor.delete_word_backward(),
-            KeyAction::Newline | KeyAction::Submit => modal.editor.insert_newline(),
-            KeyAction::CursorLeft => modal.editor.move_left(),
-            KeyAction::CursorRight => modal.editor.move_right(),
-            KeyAction::CursorHome => modal.editor.move_home(),
-            KeyAction::CursorEnd => modal.editor.move_end(),
-            _ => {}
-        },
-    }
-}
-
 
 fn render_content_body(
     f: &mut ratatui::Frame,

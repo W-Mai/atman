@@ -321,9 +321,6 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     true
 }
 
-
-
-
 impl crate::wm::modal::ModalOverlay for CommandPalette {
     fn render_content(
         &mut self,

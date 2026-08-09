@@ -133,40 +133,6 @@ pub(crate) fn count_message_events(path: &std::path::Path) -> (usize, usize) {
     (user, total)
 }
 
-#[allow(dead_code)]
-pub(crate) fn copy_last_message(app: &mut AppState) {
-    let text = app.items.iter().rev().find_map(|item| match item {
-        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
-        _ => None,
-    });
-    match text {
-        Some(t) if !t.is_empty() => {
-            let n = t.chars().count();
-            crate::clipboard::write_osc52(&t);
-            app.push_note(
-                format!("copied {n} chars from last message"),
-                app::NoteLevel::Info,
-            );
-        }
-        _ => app.push_note("no assistant message to copy", app::NoteLevel::Warn),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn copy_last_tool(app: &mut AppState) {
-    let text = app.items.iter().rev().find_map(|item| match item {
-        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
-        _ => None,
-    });
-    match text {
-        Some(t) if !t.is_empty() => {
-            crate::clipboard::write_osc52(&t);
-            app.push_note("copied last tool output", app::NoteLevel::Info);
-        }
-        _ => app.push_note("no tool output to copy", app::NoteLevel::Warn),
-    }
-}
-
 pub(crate) fn handle_yank_key(action: &KeyAction, app: &mut AppState) -> bool {
     let cands = yank_candidate_indices(app);
     if cands.is_empty() {
@@ -324,7 +290,6 @@ pub(crate) fn handle_approval_key(
         _ => false,
     }
 }
-
 
 pub(crate) fn handle_key(
     action: KeyAction,

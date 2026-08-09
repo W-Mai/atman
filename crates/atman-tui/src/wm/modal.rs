@@ -175,7 +175,6 @@ pub trait ModalOverlay {
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color;
 }
 
-
 // ── ModalManager dispatch methods ──
 
 impl ModalManager {
@@ -354,11 +353,15 @@ impl ModalManager {
             }
             ModalKind::Form => {
                 let outer_width = (canvas.width.saturating_mul(3) / 4).clamp(50, 100);
-                let content_lines = self.form_modal.pending.as_ref()
-                    .map(|f| crate::form_modal::estimate_height(&f.kind, &self.form_modal.multi_selected))
+                let content_lines = self
+                    .form_modal
+                    .pending
+                    .as_ref()
+                    .map(|f| {
+                        crate::form_modal::estimate_height(&f.kind, &self.form_modal.multi_selected)
+                    })
                     .unwrap_or(6);
-                let outer_height = (content_lines + 6)
-                    .min(canvas.height.saturating_sub(4).max(6));
+                let outer_height = (content_lines + 6).min(canvas.height.saturating_sub(4).max(6));
                 center_rect(canvas, outer_width, outer_height)
             }
             ModalKind::CompactReview => {
@@ -488,7 +491,9 @@ impl ModalManager {
                 };
                 Line::from(Span::styled(
                     title,
-                    Style::default().fg(color.into()).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(color.into())
+                        .add_modifier(Modifier::BOLD),
                 ))
             }
             ModalKind::HistorySearch => Line::from(vec![
@@ -566,12 +571,10 @@ impl ModalManager {
                     t.accent.into()
                 }
             }
-            ModalKind::HistorySearch => {
-                match self.history_search.scope {
-                    crate::history_search_modal::HistorySearchScope::Session => t.accent.into(),
-                    crate::history_search_modal::HistorySearchScope::Project => t.warn.into(),
-                }
-            }
+            ModalKind::HistorySearch => match self.history_search.scope {
+                crate::history_search_modal::HistorySearchScope::Session => t.accent.into(),
+                crate::history_search_modal::HistorySearchScope::Project => t.warn.into(),
+            },
             _ => t.accent.into(),
         }
     }

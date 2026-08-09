@@ -1,6 +1,6 @@
+use crate::UiState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
-use crate::UiState;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -237,7 +237,6 @@ pub(crate) fn extract_event_text(kind: &str, payload: &str) -> Option<String> {
         _ => None,
     }
 }
-
 
 impl crate::wm::modal::ModalOverlay for HistorySearchModal {
     fn render_content(

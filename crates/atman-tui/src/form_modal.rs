@@ -353,7 +353,6 @@ impl FormModal {
     }
 }
 
-
 impl crate::wm::modal::ModalOverlay for FormModal {
     fn render_content(
         &mut self,
@@ -367,7 +366,10 @@ impl crate::wm::modal::ModalOverlay for FormModal {
         };
         let hint_area = Rect {
             x: area.x,
-            y: area.y.checked_add(area.height).map_or(area.y, |l| l.saturating_sub(1)),
+            y: area
+                .y
+                .checked_add(area.height)
+                .map_or(area.y, |l| l.saturating_sub(1)),
             width: area.width,
             height: 1,
         };
@@ -539,16 +541,12 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                     prompt_style
                 };
                 let content_w = inner_w.saturating_sub(2);
-                let col = crate::input::wrapped_cursor_col(
-                    buf,
-                    self.text_editor.cursor(),
-                    content_w,
-                ) as u16;
-                let row = crate::input::wrapped_cursor_row(
-                    buf,
-                    self.text_editor.cursor(),
-                    content_w,
-                ) as u16;
+                let col =
+                    crate::input::wrapped_cursor_col(buf, self.text_editor.cursor(), content_w)
+                        as u16;
+                let row =
+                    crate::input::wrapped_cursor_row(buf, self.text_editor.cursor(), content_w)
+                        as u16;
                 text_cursor = Some((inner.x + 2 + col, inner.y + 2 + row));
                 self.last_input_rect = Some(Rect {
                     x: inner.x + 2,
@@ -635,11 +633,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
                             if let Some(a) = answer
                                 && let Some(tx) = tx
                             {
-                                let id = self
-                                    .batch_ids
-                                    .get(i)
-                                    .cloned()
-                                    .unwrap_or_default();
+                                let id = self.batch_ids.get(i).cloned().unwrap_or_default();
                                 let _ = tx.send(TuiControl::FormSubmit {
                                     form_id: id,
                                     answer: a.clone(),

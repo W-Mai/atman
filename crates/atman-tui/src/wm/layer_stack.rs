@@ -56,7 +56,6 @@ impl LayerStack {
         self.modal_stack.last().map(|entry| entry.kind)
     }
 
-
     pub fn render_blocking(&self, f: &mut Frame, area: Rect, app: &AppState) {
         if let Some(ref msg) = app.modal_notification {
             crate::render_notify_modal(f, area, msg);

@@ -613,7 +613,6 @@ pub(crate) fn render_startup_hints(
     );
 }
 
-
 pub(crate) fn render_notify_modal(
     f: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
@@ -675,7 +674,6 @@ pub(crate) fn render_notify_modal(
     };
     f.render_widget(hint, hint_rect);
 }
-
 
 pub(crate) async fn check_latest_release() -> Option<String> {
     let url = "https://api.github.com/repos/W-Mai/atman/releases/latest";
