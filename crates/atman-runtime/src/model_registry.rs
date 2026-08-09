@@ -863,4 +863,13 @@ smart = { model = "Codex:codex/gpt-5" }
         );
         assert_eq!(resolve_alias("smart"), "Codex:codex/gpt-5");
     }
+
+    #[test]
+    fn add_alias_preserves_comments() {
+        let toml = "# top comment\n[alias]\n# smart line comment\nsmart = { model = \"claude\" }\n";
+        let out = upsert_alias_comment_preserving(toml, "smart", "claude-opus-4.7");
+        assert!(out.contains("# top comment"));
+        assert!(out.contains("# smart line comment"));
+        assert!(out.contains("model = \"claude-opus-4.7\""));
+    }
 }

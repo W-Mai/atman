@@ -35,6 +35,7 @@ impl Default for OnboardingState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingEvent {
     None,
     OpenProviderManager,
@@ -498,4 +499,70 @@ fn selected_button_style() -> Style {
         .fg(theme.accent.into())
         .bg(theme.panel_bg.into())
         .add_modifier(Modifier::BOLD)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::KeyAction;
+
+    #[test]
+    fn provider_select_skip() {
+        let mut state = OnboardingState::default();
+        let event = state.handle_key(&KeyAction::Quit);
+        assert_eq!(event, OnboardingEvent::Skipped);
+    }
+
+    #[test]
+    fn provider_select_add() {
+        let mut state = OnboardingState::default();
+        let event = state.handle_key(&KeyAction::Submit);
+        assert_eq!(event, OnboardingEvent::OpenProviderManager);
+    }
+
+    #[test]
+    fn model_select_esc_back() {
+        let mut state = OnboardingState::default();
+        state.step = OnboardingStep::ModelSelect;
+        let event = state.handle_key(&KeyAction::Escape);
+        assert_eq!(event, OnboardingEvent::None);
+        assert_eq!(state.step, OnboardingStep::ProviderSelect);
+    }
+
+    #[test]
+    fn model_select_empty_list_enter() {
+        let mut state = OnboardingState::default();
+        state.step = OnboardingStep::ModelSelect;
+        let event = state.handle_key(&KeyAction::Submit);
+        assert_ne!(event, OnboardingEvent::Completed);
+        assert!(state.error.is_some());
+    }
+
+    #[test]
+    fn provider_added_sets_pending() {
+        let mut state = OnboardingState::default();
+        state.provider_added(Some("example"));
+        assert!(state.pending_model_select);
+        assert_eq!(state.step, OnboardingStep::ProviderSelect);
+    }
+
+    #[test]
+    fn try_advance_to_model_select() {
+        let mut cfg = atman_runtime::model_registry::ModelConfig::default();
+        cfg.models.insert(
+            "example-model".into(),
+            atman_runtime::model_registry::ModelEntry {
+                model: "example-model".into(),
+                enabled: Some(true),
+                context_budget: Some(1000),
+                ..Default::default()
+            },
+        );
+        atman_runtime::model_registry::set_model_config(cfg);
+
+        let mut state = OnboardingState::default();
+        state.pending_model_select = true;
+        state.try_advance_to_model_select();
+        assert_eq!(state.step, OnboardingStep::ModelSelect);
+    }
 }
