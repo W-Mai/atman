@@ -401,10 +401,10 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal
 
 fn section_inner(rect: Rect) -> Rect {
     Rect {
-        x: rect.x.saturating_add(1),
+        x: rect.x,
         y: rect.y.saturating_add(2),
-        width: rect.width.saturating_sub(2),
-        height: rect.height.saturating_sub(3),
+        width: rect.width,
+        height: rect.height.saturating_sub(2),
     }
 }
 
@@ -452,6 +452,14 @@ fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchMod
     let text = format!("{}{cursor_indicator}", modal.editor.buf());
     let para = Paragraph::new(text).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
+    let content_w = inner.width as usize;
+    let col =
+        crate::input::wrapped_cursor_col(modal.editor.buf(), modal.editor.cursor(), content_w)
+            as u16;
+    let row =
+        crate::input::wrapped_cursor_row(modal.editor.buf(), modal.editor.cursor(), content_w)
+            as u16;
+    f.set_cursor_position((inner.x + col, inner.y + row));
 }
 
 fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {

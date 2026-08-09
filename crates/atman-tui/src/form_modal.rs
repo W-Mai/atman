@@ -542,6 +542,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
     let idle_row_style = Style::default()
         .fg(t.tinted_fg.into())
         .bg(t.panel_bg.into());
+    let mut text_cursor: Option<(u16, u16)> = None;
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         form.kind.prompt().to_string(),
@@ -685,6 +686,12 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
             } else {
                 prompt_style
             };
+            let content_w = inner_w.saturating_sub(2);
+            let col =
+                crate::input::wrapped_cursor_col(buf, modal.text_editor.cursor(), content_w) as u16;
+            let row =
+                crate::input::wrapped_cursor_row(buf, modal.text_editor.cursor(), content_w) as u16;
+            text_cursor = Some((inner.x + 2 + col, inner.y + 2 + row));
             let row_style = Style::default()
                 .fg(text_style.fg.unwrap_or(t.tinted_fg.into()))
                 .bg(t.panel_bg.into());
@@ -724,6 +731,9 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
         .alignment(Alignment::Left)
         .wrap(Wrap { trim: false });
     f.render_widget(para, inner);
+    if let Some((cx, cy)) = text_cursor {
+        f.set_cursor_position((cx, cy));
+    }
 }
 
 fn render_full_row<'a>(width: usize, text: &str, style: Style, fallback_bg: Color) -> Line<'a> {

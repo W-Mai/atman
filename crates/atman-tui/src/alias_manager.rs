@@ -423,6 +423,10 @@ fn render_tree_panel(
     }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    if mgr.focus == Focus::NameInput {
+        let cursor_x = area.x + 6 + crate::width::width(mgr.editor.buf()) as u16;
+        f.set_cursor_position((cursor_x, area.y));
+    }
 }
 
 fn render_preview_panel(

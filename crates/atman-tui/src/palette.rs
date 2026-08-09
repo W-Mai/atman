@@ -506,6 +506,8 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
         Span::styled(" _", Style::default().fg(t.accent.into())),
     ]);
     f.render_widget(Paragraph::new(hint_line), input_rect);
+    let cursor_x = input_rect.x + 2 + crate::width::width(&palette.input) as u16;
+    f.set_cursor_position((cursor_x, input_rect.y));
     let list_rect = Rect {
         x: inner.x,
         y: inner.y.saturating_add(1),
