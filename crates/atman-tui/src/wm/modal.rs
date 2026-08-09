@@ -214,6 +214,7 @@ impl ModalManager {
                         }
                         crate::onboarding::OnboardingEvent::Completed => {
                             self.onboarding_open = false;
+                            app.onboarding_skipped = true;
                             app.hints_dismissed = false;
                             app.save_ui_state();
                             app.push_toast(
