@@ -3,13 +3,13 @@ use std::collections::{HashMap, HashSet};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
-use crate::app::{AppState, ModalOpenFlags};
+use crate::app::AppState;
 use crate::wm::WindowId;
 use crate::wm::layer::LayerKind;
 use crate::wm::modal_wrappers::{
     AliasManagerWrapper, CompactReviewWrapper, FormModalWrapper, HistorySearchWrapper,
     ModelPickerWrapper, OnboardingWrapper, PaletteWrapper, ProviderManagerWrapper,
-    SessionSwitcherWrapper, ThemePickerWrapper,
+    SessionSwitcherWrapper, ThemePickerWrapper, TrustModePickerWrapper,
 };
 use crate::wm::{ModalComponent, ModalEntry, ModalKind, RenderCtx};
 
@@ -33,8 +33,7 @@ impl LayerStack {
         }
     }
 
-    pub fn sync_modals(&mut self, flags: &ModalOpenFlags) {
-        let open = Self::open_modals(flags);
+    pub fn sync_from_kinds(&mut self, open: &[ModalKind]) {
         let open_set: HashSet<_> = open.iter().copied().collect();
         let saved_focus: HashMap<_, _> = self
             .modal_stack
@@ -44,7 +43,7 @@ impl LayerStack {
 
         self.modal_stack
             .retain(|entry| open_set.contains(&entry.kind));
-        for kind in open {
+        for &kind in open {
             if self.modal_stack.iter().all(|entry| entry.kind != kind) {
                 self.modal_stack.push(ModalEntry {
                     kind,
@@ -68,6 +67,7 @@ impl LayerStack {
         frame: &mut Frame,
         area: Rect,
         app: &mut AppState,
+        modals: &mut crate::wm::ModalManager,
         focused_id: WindowId,
     ) {
         let snapshots = Vec::new();
@@ -103,20 +103,27 @@ impl LayerStack {
         };
         for entry in &self.modal_stack {
             match entry.kind {
-                ModalKind::Form => FormModalWrapper { app }.render(frame, area, &ctx),
-                ModalKind::CompactReview => CompactReviewWrapper { app }.render(frame, area, &ctx),
+                ModalKind::Form => FormModalWrapper { app, modals }.render(frame, area, &ctx),
+                ModalKind::CompactReview => {
+                    CompactReviewWrapper { app, modals }.render(frame, area, &ctx)
+                }
                 ModalKind::SessionSwitcher => {
-                    SessionSwitcherWrapper { app }.render(frame, area, &ctx)
+                    SessionSwitcherWrapper { app, modals }.render(frame, area, &ctx)
                 }
-                ModalKind::HistorySearch => HistorySearchWrapper { app }.render(frame, area, &ctx),
+                ModalKind::HistorySearch => {
+                    HistorySearchWrapper { app, modals }.render(frame, area, &ctx)
+                }
                 ModalKind::ProviderManager => {
-                    ProviderManagerWrapper { app }.render(frame, area, &ctx)
+                    ProviderManagerWrapper { app, modals }.render(frame, area, &ctx)
                 }
-                ModalKind::AliasManager => AliasManagerWrapper { app }.render(frame, area, &ctx),
-                ModalKind::ModelPicker => ModelPickerWrapper { app }.render(frame, area, &ctx),
-                ModalKind::Onboarding => OnboardingWrapper { app }.render(frame, area, &ctx),
-                ModalKind::Palette => PaletteWrapper { app }.render(frame, area, &ctx),
-                ModalKind::ThemePicker => ThemePickerWrapper { app }.render(frame, area, &ctx),
+                ModalKind::AliasManager => AliasManagerWrapper { app, modals }.render(frame, area, &ctx),
+                ModalKind::ModelPicker => ModelPickerWrapper { app, modals }.render(frame, area, &ctx),
+                ModalKind::Onboarding => OnboardingWrapper { app, modals }.render(frame, area, &ctx),
+                ModalKind::Palette => PaletteWrapper { app, modals }.render(frame, area, &ctx),
+                ModalKind::ThemePicker => ThemePickerWrapper { app, modals }.render(frame, area, &ctx),
+                ModalKind::TrustModePicker => {
+                    TrustModePickerWrapper { app, modals }.render(frame, area, &ctx)
+                }
             }
         }
     }
@@ -147,25 +154,6 @@ impl LayerStack {
 
     pub fn dispatch_mouse(&self) -> bool {
         false
-    }
-
-    fn open_modals(flags: &ModalOpenFlags) -> Vec<ModalKind> {
-        const MODALS: [ModalKind; 10] = [
-            ModalKind::ThemePicker,
-            ModalKind::Palette,
-            ModalKind::SessionSwitcher,
-            ModalKind::Onboarding,
-            ModalKind::ProviderManager,
-            ModalKind::ModelPicker,
-            ModalKind::AliasManager,
-            ModalKind::CompactReview,
-            ModalKind::HistorySearch,
-            ModalKind::Form,
-        ];
-        MODALS
-            .into_iter()
-            .filter(|kind| kind.is_open(flags))
-            .collect()
     }
 }
 

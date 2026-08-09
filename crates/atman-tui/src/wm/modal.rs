@@ -14,22 +14,76 @@ pub enum ModalKind {
     Onboarding,
     Palette,
     ThemePicker,
+    TrustModePicker,
 }
 
-impl ModalKind {
-    pub fn is_open(self, flags: &crate::app::ModalOpenFlags) -> bool {
-        match self {
-            Self::Form => flags.form,
-            Self::CompactReview => flags.compact_review,
-            Self::SessionSwitcher => flags.session_switcher,
-            Self::HistorySearch => flags.history_search,
-            Self::ProviderManager => flags.provider_manager,
-            Self::AliasManager => flags.alias_manager,
-            Self::ModelPicker => flags.model_picker,
-            Self::Onboarding => flags.onboarding,
-            Self::Palette => flags.palette,
-            Self::ThemePicker => flags.theme_picker,
+#[derive(Default)]
+pub struct ModalManager {
+    pub palette: crate::palette::CommandPalette,
+    pub form_modal: crate::form_modal::FormModal,
+    pub provider_manager: crate::provider_manager::ProviderManager,
+    pub alias_manager: crate::alias_manager::AliasManager,
+    pub model_picker: crate::model_picker::ModelPicker,
+    pub session_switcher: crate::session_switcher::SessionSwitcher,
+    pub history_search: crate::history_search_modal::HistorySearchModal,
+    pub onboarding: crate::onboarding::OnboardingState,
+    pub onboarding_open: bool,
+    pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
+    pub theme_picker_open: bool,
+    pub trust_mode_picker_open: bool,
+}
+
+impl ModalManager {
+    pub fn any_open(&self) -> bool {
+        self.palette.open
+            || self.form_modal.open
+            || self.provider_manager.open
+            || self.alias_manager.open
+            || self.model_picker.open
+            || self.session_switcher.open
+            || self.history_search.open
+            || self.onboarding_open
+            || self.compact_review.is_some()
+            || self.theme_picker_open
+            || self.trust_mode_picker_open
+    }
+
+    pub fn open_kinds(&self) -> Vec<ModalKind> {
+        let mut kinds = Vec::new();
+        if self.form_modal.open {
+            kinds.push(ModalKind::Form);
         }
+        if self.compact_review.is_some() {
+            kinds.push(ModalKind::CompactReview);
+        }
+        if self.session_switcher.open {
+            kinds.push(ModalKind::SessionSwitcher);
+        }
+        if self.history_search.open {
+            kinds.push(ModalKind::HistorySearch);
+        }
+        if self.provider_manager.open {
+            kinds.push(ModalKind::ProviderManager);
+        }
+        if self.alias_manager.open {
+            kinds.push(ModalKind::AliasManager);
+        }
+        if self.model_picker.open {
+            kinds.push(ModalKind::ModelPicker);
+        }
+        if self.onboarding_open {
+            kinds.push(ModalKind::Onboarding);
+        }
+        if self.palette.open {
+            kinds.push(ModalKind::Palette);
+        }
+        if self.theme_picker_open {
+            kinds.push(ModalKind::ThemePicker);
+        }
+        if self.trust_mode_picker_open {
+            kinds.push(ModalKind::TrustModePicker);
+        }
+        kinds
     }
 }
 

@@ -320,16 +320,16 @@ pub(crate) fn handle_palette_key(
     ui: &mut UiState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
-    let app = &mut ui.app;
+    let _app = &mut ui.app;
     match action {
-        KeyAction::Escape => app.palette.close(),
-        KeyAction::HistoryUp | KeyAction::CursorLeft => app.palette.move_up(),
-        KeyAction::HistoryDown | KeyAction::CursorRight => app.palette.move_down(),
-        KeyAction::Backspace => app.palette.backspace(),
-        KeyAction::Char(c) => app.palette.push_char(*c),
+        KeyAction::Escape => ui.wm.modals.palette.close(),
+        KeyAction::HistoryUp | KeyAction::CursorLeft => ui.wm.modals.palette.move_up(),
+        KeyAction::HistoryDown | KeyAction::CursorRight => ui.wm.modals.palette.move_down(),
+        KeyAction::Backspace => ui.wm.modals.palette.backspace(),
+        KeyAction::Char(c) => ui.wm.modals.palette.push_char(*c),
         KeyAction::Submit => {
-            if let Some(id) = app.palette.selected() {
-                app.palette.close();
+            if let Some(id) = ui.wm.modals.palette.selected() {
+                ui.wm.modals.palette.close();
                 dispatch_palette_entry(id, ui, control_tx);
             }
         }
@@ -369,7 +369,7 @@ pub(crate) fn dispatch_palette_entry(
         PaletteEntryId::SwitchSession => {
             let scope = crate::session_switcher::SessionScope::Project;
             let rows = enumerate_session_rows(app, scope);
-            app.session_switcher.open_with(rows, scope);
+            ui.wm.modals.session_switcher.open_with(rows, scope);
         }
         PaletteEntryId::NewSession => {
             if let Some(tx) = control_tx {
@@ -396,23 +396,23 @@ pub(crate) fn dispatch_palette_entry(
         PaletteEntryId::DeleteSession => {
             let scope = crate::session_switcher::SessionScope::Project;
             let rows = enumerate_session_rows(app, scope);
-            app.session_switcher.open_with(rows, scope);
+            ui.wm.modals.session_switcher.open_with(rows, scope);
         }
         PaletteEntryId::SearchHistory => {
-            app.history_search.open();
+            ui.wm.modals.history_search.open();
         }
         PaletteEntryId::ToggleSidebar => {
             app.sidebar_mode = app.sidebar_mode.toggle();
             app.save_ui_state();
         }
         PaletteEntryId::ManageProviders => {
-            app.provider_manager.toggle();
+            ui.wm.modals.provider_manager.toggle();
         }
         PaletteEntryId::ManageAliases => {
-            app.alias_manager.toggle();
+            ui.wm.modals.alias_manager.toggle();
         }
         PaletteEntryId::SwitchModel => {
-            app.model_picker.open();
+            ui.wm.modals.model_picker.open();
         }
         PaletteEntryId::ManageMcp => {
             let canvas = app.last_transcript_rect.unwrap_or_default();
@@ -455,10 +455,10 @@ pub(crate) fn dispatch_palette_entry(
             }
         }
         PaletteEntryId::SetTrustMode => {
-            app.trust_mode_picker_open = true;
+            ui.wm.modals.trust_mode_picker_open = true;
         }
         PaletteEntryId::SetModeTheme => {
-            app.theme_picker_open = true;
+            ui.wm.modals.theme_picker_open = true;
         }
     }
 }

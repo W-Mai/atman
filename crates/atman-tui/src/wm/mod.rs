@@ -35,7 +35,9 @@ pub use focus::FocusState;
 pub use hitmap::WmHitmap;
 pub use layer::{Layer, LayerKind};
 pub use layer_stack::LayerStack;
-pub use modal::{HitTestResult, ModalComponent, ModalEntry, ModalKind, OutsideClickPolicy};
+pub use modal::{
+    HitTestResult, ModalComponent, ModalEntry, ModalKind, ModalManager, OutsideClickPolicy,
+};
 pub use shadow::{
     lerp_color, multiply_color, render_bottom_fade, render_input_shadow, render_shadow,
     render_top_fade,
@@ -116,6 +118,7 @@ pub struct WindowManager {
     pub focus: FocusState,
     pub layers: LayerStack,
     pub interaction: WmInteractionState,
+    pub modals: ModalManager,
     z_counter: u32,
     next_window_id: u64,
 }
@@ -138,7 +141,7 @@ impl WindowManager {
         }
     }
 
-    pub fn sync_modals(&mut self, flags: &crate::app::ModalOpenFlags) {
+    pub fn sync_modals(&mut self) {
         let was_open = !self.layers.modal_stack.is_empty();
         let focused_id = self.focused_id();
         let restore_focus = self
@@ -146,7 +149,7 @@ impl WindowManager {
             .modal_stack
             .first()
             .and_then(|entry| entry.pre_modal_focus);
-        self.layers.sync_modals(flags);
+        self.layers.sync_from_kinds(&self.modals.open_kinds());
         if self.layers.modal_stack.is_empty() {
             if was_open
                 && let Some(id) = restore_focus
@@ -160,6 +163,14 @@ impl WindowManager {
             }
             self.focus.blur();
         }
+    }
+
+    pub fn top_kind(&self) -> Option<ModalKind> {
+        self.layers.modal_stack.last().map(|entry| entry.kind)
+    }
+
+    pub fn any_modal_open(&self) -> bool {
+        self.modals.any_open()
     }
 }
 
@@ -605,7 +616,7 @@ impl WindowManager {
     }
 
     pub fn render(&mut self, frame: &mut Frame, canvas: Rect, app: &mut crate::app::AppState) {
-        self.sync_modals(&app.modal_open_flags());
+        self.sync_modals();
         if self.panels.is_empty() {
             self.interaction.last_hitmap = WmHitmap::default();
         } else {
@@ -641,15 +652,13 @@ impl WindowManager {
 
         let modal_open = !self.layers.modal_stack.is_empty()
             || app.modal_notification.is_some()
-            || app.trust_mode_picker_open;
+            || self.modals.trust_mode_picker_open;
         if modal_open {
             crate::wm::shadow::render_backdrop(frame, &crate::theme::theme());
         }
-        if app.trust_mode_picker_open {
-            crate::render_trust_mode_picker(frame, canvas, app);
-        }
+        let focused = self.focused_id().unwrap_or(WindowId(0));
         let layers = std::mem::take(&mut self.layers);
-        layers.render_modals(frame, canvas, app, self.focused_id().unwrap_or(WindowId(0)));
+        layers.render_modals(frame, canvas, app, &mut self.modals, focused);
         layers.render_blocking(frame, canvas, app);
         layers.render_toasts(frame, canvas, app);
         self.layers = layers;

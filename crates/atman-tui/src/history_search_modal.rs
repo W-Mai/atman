@@ -1,4 +1,4 @@
-use crate::app::AppState;
+use crate::UiState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -162,56 +162,56 @@ impl HistorySearchModal {
     }
 }
 
-pub(crate) fn handle_history_search_key(action: &KeyAction, app: &mut AppState) {
+pub(crate) fn handle_history_search_key(action: &KeyAction, app: &mut UiState) {
     use crate::history_search_modal::{HistoryHit, HistorySearchScope};
     match action {
-        KeyAction::Escape => app.history_search.close(),
+        KeyAction::Escape => app.wm.modals.history_search.close(),
         KeyAction::HistoryUp | KeyAction::CursorLeft => {
-            app.history_search.move_up();
+            app.wm.modals.history_search.move_up();
             refresh_history_preview(app);
         }
         KeyAction::HistoryDown | KeyAction::CursorRight => {
-            app.history_search.move_down();
+            app.wm.modals.history_search.move_down();
             refresh_history_preview(app);
         }
         KeyAction::PageUp => {
-            app.history_search.scroll_preview(true, 10);
+            app.wm.modals.history_search.scroll_preview(true, 10);
         }
         KeyAction::PageDown => {
-            app.history_search.scroll_preview(false, 10);
+            app.wm.modals.history_search.scroll_preview(false, 10);
         }
         KeyAction::ScrollUp => {
-            app.history_search.scroll_preview(true, 3);
+            app.wm.modals.history_search.scroll_preview(true, 3);
         }
         KeyAction::ScrollDown => {
-            app.history_search.scroll_preview(false, 3);
+            app.wm.modals.history_search.scroll_preview(false, 3);
         }
         KeyAction::Tab => {
-            app.history_search.scope = app.history_search.scope.toggle();
+            app.wm.modals.history_search.scope = app.wm.modals.history_search.scope.toggle();
         }
         KeyAction::Submit => {
-            let query = app.history_search.editor.buf().trim().to_string();
+            let query = app.wm.modals.history_search.editor.buf().trim().to_string();
             if query.is_empty() {
-                app.history_search.set_error("empty query".into());
+                app.wm.modals.history_search.set_error("empty query".into());
                 return;
             }
             let Some(session) = app.session.as_ref() else {
-                app.history_search.set_error("no session in context".into());
+                app.wm.modals.history_search.set_error("no session in context".into());
                 return;
             };
             let Some(idx) = session.project_index() else {
-                app.history_search
+                app.wm.modals.history_search
                     .set_error("project index unavailable".into());
                 return;
             };
-            let session_filter = match app.history_search.scope {
+            let session_filter = match app.wm.modals.history_search.scope {
                 HistorySearchScope::Session => Some(session.id().to_string()),
                 HistorySearchScope::Project => None,
             };
             let rows = match idx.fts_search_project_events(&query, session_filter.as_deref(), 50) {
                 Ok(rows) => rows,
                 Err(e) => {
-                    app.history_search.set_error(format!("search failed: {e}"));
+                    app.wm.modals.history_search.set_error(format!("search failed: {e}"));
                     return;
                 }
             };
@@ -228,32 +228,32 @@ pub(crate) fn handle_history_search_key(action: &KeyAction, app: &mut AppState) 
                     }
                 })
                 .collect();
-            app.history_search.set_results(hits, query);
+            app.wm.modals.history_search.set_results(hits, query);
             refresh_history_preview(app);
         }
         KeyAction::Char(c) => {
-            if *c == 'j' && app.history_search.editor.buf().is_empty() {
-                app.history_search.move_down();
+            if *c == 'j' && app.wm.modals.history_search.editor.buf().is_empty() {
+                app.wm.modals.history_search.move_down();
                 refresh_history_preview(app);
-            } else if *c == 'k' && app.history_search.editor.buf().is_empty() {
-                app.history_search.move_up();
+            } else if *c == 'k' && app.wm.modals.history_search.editor.buf().is_empty() {
+                app.wm.modals.history_search.move_up();
                 refresh_history_preview(app);
             } else {
-                app.history_search.editor.insert_char(*c);
+                app.wm.modals.history_search.editor.insert_char(*c);
             }
         }
         KeyAction::Backspace => {
-            app.history_search.editor.backspace();
+            app.wm.modals.history_search.editor.backspace();
         }
         _ => {}
     }
 }
 
-pub(crate) fn refresh_history_preview(app: &mut AppState) {
-    let (session_id, seq) = match app.history_search.selected_hit() {
+pub(crate) fn refresh_history_preview(app: &mut UiState) {
+    let (session_id, seq) = match app.wm.modals.history_search.selected_hit() {
         Some(hit) => (hit.session_id.clone(), hit.seq),
         None => {
-            app.history_search.set_preview(Vec::new());
+            app.wm.modals.history_search.set_preview(Vec::new());
             return;
         }
     };
@@ -266,7 +266,7 @@ pub(crate) fn refresh_history_preview(app: &mut AppState) {
     let rows = match idx.find_project_events_around(&session_id, seq, 3) {
         Ok(r) => r,
         Err(_) => {
-            app.history_search.set_preview(Vec::new());
+            app.wm.modals.history_search.set_preview(Vec::new());
             return;
         }
     };
@@ -286,7 +286,7 @@ pub(crate) fn refresh_history_preview(app: &mut AppState) {
             ))
         })
         .collect();
-    app.history_search.set_preview(lines);
+    app.wm.modals.history_search.set_preview(lines);
 }
 
 pub(crate) fn extract_event_text(kind: &str, payload: &str) -> Option<String> {

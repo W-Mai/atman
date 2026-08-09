@@ -38,7 +38,7 @@ pub(crate) async fn run_frames(
     let ui_state = crate::states::PersistedUiState::load();
     ui_state.apply(&mut app.app);
     if handle.onboarding_recommended && !app.app.onboarding_skipped {
-        app.app.onboarding_open = true;
+        app.wm.modals.onboarding_open = true;
         if let Some(tx) = handle.control_tx.as_ref() {
             let _ = tx.send(TuiControl::OnboardingInit);
         }
@@ -165,37 +165,37 @@ pub(crate) async fn run_frames(
                 loop {
                     match current {
                         Some(Ok(CtEvent::Mouse(me)))
-                            if app.app.history_search.open =>
+                            if app.wm.modals.history_search.open =>
                         {
                             match me.kind {
                                 MouseEventKind::ScrollUp => {
                                     if let Some(crate::history_search_modal::HistoryArea::Preview) =
-                                        app.app.history_search.hit_test(me.column, me.row)
+                                        app.wm.modals.history_search.hit_test(me.column, me.row)
                                     {
-                                        app.app.history_search.scroll_preview(true, 3);
+                                        app.wm.modals.history_search.scroll_preview(true, 3);
                                     } else {
-                                        app.app.history_search.move_up();
-                                        crate::history_search_modal::refresh_history_preview(&mut app.app);
+                                        app.wm.modals.history_search.move_up();
+                                        crate::history_search_modal::refresh_history_preview(&mut app);
                                     }
                                 }
                                 MouseEventKind::ScrollDown => {
                                     if let Some(crate::history_search_modal::HistoryArea::Preview) =
-                                        app.app.history_search.hit_test(me.column, me.row)
+                                        app.wm.modals.history_search.hit_test(me.column, me.row)
                                     {
-                                        app.app.history_search.scroll_preview(false, 3);
+                                        app.wm.modals.history_search.scroll_preview(false, 3);
                                     } else {
-                                        app.app.history_search.move_down();
-                                        crate::history_search_modal::refresh_history_preview(&mut app.app);
+                                        app.wm.modals.history_search.move_down();
+                                        crate::history_search_modal::refresh_history_preview(&mut app);
                                     }
                                 }
                                 MouseEventKind::Down(MouseButton::Left) => {
                                     if let Some(idx) =
-                                        app.app.history_search.click_result(me.column, me.row)
+                                        app.wm.modals.history_search.click_result(me.column, me.row)
                                     {
-                                        if app.app.history_search.selected != idx {
-                                            app.app.history_search.selected = idx;
-                                            app.app.history_search.preview_scroll = 0;
-                                            crate::history_search_modal::refresh_history_preview(&mut app.app);
+                                        if app.wm.modals.history_search.selected != idx {
+                                            app.wm.modals.history_search.selected = idx;
+                                            app.wm.modals.history_search.preview_scroll = 0;
+                                            crate::history_search_modal::refresh_history_preview(&mut app);
                                         }
                                     }
                                 }
@@ -300,7 +300,7 @@ pub(crate) async fn run_frames(
                             app.app.refresh_popup(editor.buf());
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
-                            app.wm.sync_modals(&app.app.modal_open_flags());
+                            app.wm.sync_modals();
                             let (consumed, commands) = app.wm.dispatch_mouse(
                                 &me,
                                 &mut app.app,
@@ -316,16 +316,16 @@ pub(crate) async fn run_frames(
                             // on overlapping panels don't pass through to the input box.
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind
                                 && !(app.wm.hit_test_panel(me.column, me.row).is_some()
-                                    || app.app.form_modal.open
-                                    || app.app.compact_review.is_some()
-                                    || app.app.session_switcher.open
-                                    || app.app.history_search.open
-                                    || app.app.provider_manager.open
-                                    || app.app.alias_manager.open
-                                    || app.app.model_picker.open
-                                    || app.app.onboarding_open
-                                    || app.app.palette.open
-                                    || app.app.theme_picker_open)
+                                    || app.wm.modals.form_modal.open
+                                    || app.wm.modals.compact_review.is_some()
+                                    || app.wm.modals.session_switcher.open
+                                    || app.wm.modals.history_search.open
+                                    || app.wm.modals.provider_manager.open
+                                    || app.wm.modals.alias_manager.open
+                                    || app.wm.modals.model_picker.open
+                                    || app.wm.modals.onboarding_open
+                                    || app.wm.modals.palette.open
+                                    || app.wm.modals.theme_picker_open)
                                 && let Some(rect) = app.app.input_rect
                                 && rect_contains(rect, me.column, me.row)
                             {
@@ -1231,25 +1231,27 @@ pub(crate) async fn run_frames(
             _ = wait_compact_review_change(handle.compact_review_rx.as_mut()) => {
                 if let Some(rx) = handle.compact_review_rx.as_mut() {
                     let latest = rx.borrow().clone();
-                    match (latest, app.app.compact_review.is_some()) {
+                    match (latest, app.wm.modals.compact_review.is_some()) {
                         (Some(pending), false) => {
-                            app.app.compact_review = Some(
+                            app.wm.modals.compact_review = Some(
                                 crate::compact_review_modal::CompactReviewModal::new(pending),
                             );
                         }
                         (Some(pending), true) => {
                             if app
+                                .wm
+                                .modals
                                 .compact_review
                                 .as_ref()
                                 .is_some_and(|m| m.pending.review_id != pending.review_id)
                             {
-                                app.app.compact_review = Some(
+                                app.wm.modals.compact_review = Some(
                                     crate::compact_review_modal::CompactReviewModal::new(pending),
                                 );
                             }
                         }
                         (None, _) => {
-                            app.app.compact_review = None;
+                            app.wm.modals.compact_review = None;
                         }
                     }
                 }
@@ -1258,23 +1260,23 @@ pub(crate) async fn run_frames(
                 if let Some(rx) = handle.form_rx.as_mut() {
                     let latest = rx.borrow().clone();
                     if latest.is_empty() {
-                        if !app.app.form_modal.try_show_confirm(true)
-                            && app.app.form_modal.confirm_form.is_none()
+                        if !app.wm.modals.form_modal.try_show_confirm(true)
+                            && app.wm.modals.form_modal.confirm_form.is_none()
                         {
-                            app.app.form_modal.end_batch();
+                            app.wm.modals.form_modal.end_batch();
                         }
                     } else {
                         let ids: Vec<String> =
                             latest.iter().map(|p| p.form_id.clone()).collect();
-                        app.app.form_modal.merge_batch_ids(&ids);
-                        let current = app.app.form_modal.active_form_id().map(String::from);
+                        app.wm.modals.form_modal.merge_batch_ids(&ids);
+                        let current = app.wm.modals.form_modal.active_form_id().map(String::from);
                         let want: Option<String> = current
                             .filter(|id| ids.iter().any(|x| x == id))
                             .or_else(|| {
-                                app.app.form_modal
+                                app.wm.modals.form_modal
                                     .batch_ids
                                     .iter()
-                                    .zip(app.app.form_modal.batch_statuses.iter())
+                                    .zip(app.wm.modals.form_modal.batch_statuses.iter())
                                     .find(|(_, s)| matches!(s, crate::form_modal::BatchStatus::Pending))
                                     .map(|(id, _)| id.clone())
                                     .filter(|id| ids.iter().any(|x| x == id))
@@ -1283,9 +1285,9 @@ pub(crate) async fn run_frames(
                         if let Some(want_id) = want
                             && let Some(target) =
                                 latest.iter().find(|p| p.form_id == want_id).cloned()
-                            && app.app.form_modal.active_form_id() != Some(target.form_id.as_str())
+                            && app.wm.modals.form_modal.active_form_id() != Some(target.form_id.as_str())
                         {
-                            app.app.form_modal.attach(target, &ids);
+                            app.wm.modals.form_modal.attach(target, &ids);
                         }
                     }
                 }
@@ -1299,16 +1301,16 @@ pub(crate) async fn run_frames(
                         TuiCommand::OpenSessionSwitcher => {
                             let scope = crate::session_switcher::SessionScope::Project;
                             let rows = key_handler::enumerate_session_rows(&app, scope);
-                            app.app.session_switcher.open_with(rows, scope);
+                            app.wm.modals.session_switcher.open_with(rows, scope);
                         }
                         TuiCommand::OpenTrustModePicker => {
-                            app.app.trust_mode_picker_open = true;
+                            app.wm.modals.trust_mode_picker_open = true;
                         }
                         TuiCommand::OpenThemePicker => {
-                            app.app.theme_picker_open = true;
+                            app.wm.modals.theme_picker_open = true;
                         }
                         TuiCommand::OpenModelPicker => {
-                            app.app.model_picker.open();
+                            app.wm.modals.model_picker.open();
                         }
                         TuiCommand::CycleOutside => {
                             if app.app.trust.mode == atman_runtime::trust::TrustMode::Eager {
@@ -1319,9 +1321,9 @@ pub(crate) async fn run_frames(
                             }
                         }
                         TuiCommand::ProviderModelsUpdated => {
-                            app.app.provider_manager.refresh_list();
-                            if app.app.onboarding_open {
-                                app.app.onboarding.try_advance_to_model_select();
+                            app.wm.modals.provider_manager.refresh_list();
+                            if app.wm.modals.onboarding_open {
+                                app.wm.modals.onboarding.try_advance_to_model_select();
                             }
                             app.app.push_toast(
                                 "models refreshed",

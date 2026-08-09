@@ -516,7 +516,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     );
     let raw_row = crate::input::wrapped_cursor_row(editor.buf(), editor.cursor(), content_w) as u16;
     let raw_col = crate::input::wrapped_cursor_col(editor.buf(), editor.cursor(), content_w) as u16;
-    if !intro_active && !app.onboarding_open && !app.provider_manager.open {
+    if !intro_active && !ui.wm.modals.onboarding_open && !ui.wm.modals.provider_manager.open {
         let inner_x = input_rect.x.saturating_add(layout::INPUT_LEFT);
         let inner_y = input_rect.y.saturating_add(1);
         let mut placed = false;
@@ -542,7 +542,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     if app.popup.is_open() {
         completion::render_popup(f, input_rect, &app.popup);
     }
-    if startup_active && !app.onboarding_open && !app.hints_dismissed {
+    if startup_active && !ui.wm.modals.onboarding_open && !app.hints_dismissed {
         render_startup_hints(
             f,
             l.transcript,

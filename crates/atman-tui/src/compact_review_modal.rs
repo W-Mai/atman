@@ -1,5 +1,5 @@
 use crate::TuiControl;
-use crate::app::AppState;
+use crate::UiState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
 use atman_runtime::PendingCompactReview;
@@ -71,10 +71,10 @@ impl CompactReviewModal {
 
 pub(crate) fn handle_compact_review_key(
     action: &KeyAction,
-    app: &mut AppState,
+    app: &mut UiState,
     control_tx: Option<&mpsc::UnboundedSender<TuiControl>>,
 ) {
-    let Some(modal) = app.compact_review.as_mut() else {
+    let Some(modal) = app.wm.modals.compact_review.as_mut() else {
         return;
     };
     use crate::compact_review_modal::CompactReviewMode;
@@ -90,7 +90,7 @@ pub(crate) fn handle_compact_review_key(
                 if let Some(tx) = control_tx {
                     let _ = tx.send(TuiControl::CompactReviewAccept { review_id, edited });
                 }
-                app.compact_review = None;
+                app.wm.modals.compact_review = None;
             }
             KeyAction::Char('e') => modal.enter_editing(),
             KeyAction::Char('r') | KeyAction::Escape => {
@@ -98,7 +98,7 @@ pub(crate) fn handle_compact_review_key(
                 if let Some(tx) = control_tx {
                     let _ = tx.send(TuiControl::CompactReviewReject { review_id });
                 }
-                app.compact_review = None;
+                app.wm.modals.compact_review = None;
             }
             KeyAction::PageUp => modal.scroll_up(),
             KeyAction::PageDown => modal.scroll_down(),

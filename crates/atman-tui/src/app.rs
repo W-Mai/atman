@@ -167,37 +167,6 @@ pub struct ToastNote {
     pub fade_started: Option<std::time::Instant>,
 }
 
-#[derive(Clone, Copy)]
-pub struct ModalOpenFlags {
-    pub form: bool,
-    pub compact_review: bool,
-    pub session_switcher: bool,
-    pub history_search: bool,
-    pub provider_manager: bool,
-    pub alias_manager: bool,
-    pub model_picker: bool,
-    pub onboarding: bool,
-    pub palette: bool,
-    pub theme_picker: bool,
-}
-
-impl AppState {
-    pub fn modal_open_flags(&self) -> ModalOpenFlags {
-        ModalOpenFlags {
-            form: self.form_modal.open,
-            compact_review: self.compact_review.is_some(),
-            session_switcher: self.session_switcher.open,
-            history_search: self.history_search.open,
-            provider_manager: self.provider_manager.open,
-            alias_manager: self.alias_manager.open,
-            model_picker: self.model_picker.open,
-            onboarding: self.onboarding_open,
-            palette: self.palette.open,
-            theme_picker: self.theme_picker_open,
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct AppState {
     pub items: Vec<OutputItem>,
@@ -221,12 +190,6 @@ pub struct AppState {
     pub pending_injections: Vec<atman_runtime::injection::Injection>,
     pub yank_mode: bool,
     pub yank_index: usize,
-    pub palette: crate::palette::CommandPalette,
-    pub provider_manager: crate::provider_manager::ProviderManager,
-    pub alias_manager: crate::alias_manager::AliasManager,
-    pub session_switcher: crate::session_switcher::SessionSwitcher,
-    pub compact_review: Option<crate::compact_review_modal::CompactReviewModal>,
-    pub history_search: crate::history_search_modal::HistorySearchModal,
     pub sidebar_mode: crate::sidebar::SidebarMode,
     pub popup: crate::completion::PopupState,
     pub flow_names: Vec<(String, String)>,
@@ -239,8 +202,6 @@ pub struct AppState {
     pub modal_notification: Option<String>,
     pub session: Option<std::sync::Arc<atman_runtime::Session>>,
     pub trust: atman_runtime::trust::TrustConfig,
-    pub trust_mode_picker_open: bool,
-    pub theme_picker_open: bool,
     pub picker_selected: usize,
     pub last_item_ranges: Vec<crate::output::ItemRange>,
     pub last_node_regions: Vec<crate::output::NodeRegion>,
@@ -258,12 +219,8 @@ pub struct AppState {
     pub kill_armed_id: Option<atman_runtime::TaskId>,
     pub kill_armed_at: Option<Instant>,
     pub startup_intro: Option<StartupIntro>,
-    pub onboarding_open: bool,
-    pub onboarding: crate::onboarding::OnboardingState,
     pub onboarding_skipped: bool,
     pub hints_dismissed: bool,
-    pub model_picker: crate::model_picker::ModelPicker,
-    pub form_modal: crate::form_modal::FormModal,
     pub animation_frame: u32,
     pub deny_arm: Option<std::time::Instant>,
     pub items_version: u64,
