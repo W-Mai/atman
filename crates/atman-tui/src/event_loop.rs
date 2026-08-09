@@ -378,6 +378,7 @@ pub(crate) async fn run_frames(
                                     }
                                 } else if let Some(close_id) =
                                     app.wm.hit_test_close(me.column, me.row)
+                                    && close_id == panel_id
                                 {
                                     let close_label = app.wm.label(close_id).unwrap_or_default().to_string();
                                     let armed = app.wm.interaction.panel_close_armed_id.as_deref() == Some(close_label.as_str())
@@ -414,6 +415,7 @@ pub(crate) async fn run_frames(
                                     app.wm.interaction.resize_offset = (me.column, me.row);
                                 } else if let Some(fp) = app.wm
                                     .hit_test_titlebar(me.column, me.row)
+                                    && fp.id == panel_id
                                 {
                                     let id = fp.id;
                                     let now = std::time::Instant::now();
