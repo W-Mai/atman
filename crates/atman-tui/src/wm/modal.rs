@@ -153,3 +153,23 @@ pub struct ModalEntry {
     pub kind: ModalKind,
     pub pre_modal_focus: Option<crate::wm::WindowId>,
 }
+
+pub trait ModalOverlay {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    );
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        app: &mut crate::app::AppState,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool;
+    fn cursor_position(&self) -> Option<(u16, u16)>;
+    fn title(&self) -> ratatui::text::Line<'static>;
+    fn icon(&self) -> &str;
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color;
+}

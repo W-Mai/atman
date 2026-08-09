@@ -196,6 +196,7 @@ pub struct CommandPalette {
     pub selected: usize,
     /// Display items include group headers. Only Entry variants are selectable.
     display: Vec<PaletteItem>,
+    pub last_input_rect: Option<Rect>,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +206,13 @@ enum PaletteItem {
 }
 
 impl CommandPalette {
+    pub fn new() -> Self {
+        Self {
+            last_input_rect: None,
+            ..Self::default()
+        }
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         self.input.clear();
@@ -551,6 +559,119 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, palette: &CommandPalette) {
         state.select(Some(palette.selected));
     }
     f.render_stateful_widget(list, list_rect, &mut state);
+}
+
+impl crate::wm::modal::ModalOverlay for CommandPalette {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        if area.height == 0 {
+            return;
+        }
+        let input_rect = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        };
+        self.last_input_rect = Some(input_rect);
+        let hint_line = Line::from(vec![
+            Span::styled("▸ ", Style::default().fg(t.subtle_fg.into())),
+            Span::styled(
+                self.input.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" _", Style::default().fg(t.accent.into())),
+        ]);
+        f.render_widget(Paragraph::new(hint_line), input_rect);
+        let cursor_x = input_rect.x + 2 + crate::width::width(&self.input) as u16;
+        f.set_cursor_position((cursor_x, input_rect.y));
+        let list_rect = Rect {
+            x: area.x,
+            y: area.y.saturating_add(1),
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        };
+        let items: Vec<ListItem<'static>> = self
+            .display
+            .iter()
+            .map(|item| match item {
+                PaletteItem::GroupHeader { name } => ListItem::new(Line::from(Span::styled(
+                    format!("  {name}"),
+                    Style::default()
+                        .fg(t.subtle_fg.into())
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                PaletteItem::Entry { id } => {
+                    let line = Line::from(vec![
+                        Span::styled(
+                            format!("    {:<26}", id.label()),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            id.hint().to_string(),
+                            Style::default().fg(t.subtle_fg.into()),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                }
+            })
+            .collect();
+        let list = List::new(items)
+            .highlight_style(
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+        let mut state = ListState::default();
+        if !self.display.is_empty() {
+            state.select(Some(self.selected));
+        }
+        f.render_stateful_widget(list, list_rect, &mut state);
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        _app: &mut crate::app::AppState,
+        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        match action {
+            KeyAction::Escape => self.close(),
+            KeyAction::HistoryUp | KeyAction::CursorLeft => self.move_up(),
+            KeyAction::HistoryDown | KeyAction::CursorRight => self.move_down(),
+            KeyAction::Backspace => self.backspace(),
+            KeyAction::Char(c) => self.push_char(*c),
+            KeyAction::Submit => self.close(),
+            _ => {}
+        }
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        self.last_input_rect
+            .map(|r| (r.x + 2 + self.input.chars().count() as u16, r.y))
+    }
+
+    fn title(&self) -> Line<'static> {
+        Line::from(Span::styled(
+            "Command Palette (Esc to close)",
+            Style::default(),
+        ))
+    }
+
+    fn icon(&self) -> &str {
+        "⌘"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
 }
 
 #[cfg(test)]
