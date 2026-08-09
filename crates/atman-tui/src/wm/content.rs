@@ -88,5 +88,7 @@ pub fn render_panel_content(
                 _ => {}
             }
         }
+        return;
     }
+    crate::window::common::render_placeholder(f, area, &panel.title);
 }
