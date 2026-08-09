@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use tokio::sync::mpsc;
 
@@ -381,8 +381,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         width: w,
         height: h,
     };
-    crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
+    let t = crate::theme::theme();
     let title = if switcher.rename_mode {
         format!(
             " Rename · {}▏ · Enter save · Esc cancel ",
@@ -396,23 +395,26 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
         format!(" Sessions · {} ", switcher.scope.label())
     };
     let border_color = if switcher.rename_mode {
-        crate::theme::theme().warn
+        t.warn
     } else if switcher.delete_armed.is_some() {
-        crate::theme::theme().error
+        t.error
     } else {
-        crate::theme::theme().accent
+        t.accent
     };
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color.into()))
-        .title(Span::styled(
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        Line::from(Span::styled(
             title,
             Style::default()
                 .fg(border_color.into())
                 .add_modifier(Modifier::BOLD),
-        ));
-    let inner = outer.inner(rect);
-    f.render_widget(outer, rect);
+        )),
+        "▣",
+        border_color.into(),
+        true,
+        &t,
+    );
     if inner.height == 0 {
         return;
     }
@@ -505,7 +507,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(crate::theme::theme().subtle_fg.into())
+                .fg(crate::theme::theme().tinted_fg.into())
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");

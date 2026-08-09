@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::keys::KeyAction;
 
@@ -89,21 +89,19 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, picker: &ModelPicker, current:
         height: h,
     };
 
-    crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
-
     let theme = crate::theme::theme();
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent.into()))
-        .title(Span::styled(
-            " Switch Model ",
-            Style::default()
-                .fg(theme.accent.into())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = outer.inner(rect);
-    f.render_widget(outer, rect);
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        Line::from(Span::styled(
+            "Switch Model",
+            Style::default().fg(theme.tinted_fg.into()),
+        )),
+        "◆",
+        theme.accent.into(),
+        true,
+        &theme,
+    );
 
     let rows = Layout::default()
         .direction(Direction::Vertical)

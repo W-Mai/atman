@@ -268,13 +268,26 @@ pub fn render_overlay_shell(
     );
     f.render_widget(
         ratatui::widgets::Paragraph::new(title_line),
-        Rect { x: rect.x, y: rect.y, width: rect.width, height: 1 },
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: 1,
+        },
     );
 
     let sep = std::iter::repeat_n('─', rect.width as usize).collect::<String>();
     f.render_widget(
-        ratatui::widgets::Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(t.border.into()).bg(bg)))),
-        Rect { x: rect.x, y: rect.y + 1, width: rect.width, height: 1 },
+        ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+            sep,
+            Style::default().fg(t.border.into()).bg(bg),
+        ))),
+        Rect {
+            x: rect.x,
+            y: rect.y + 1,
+            width: rect.width,
+            height: 1,
+        },
     );
 
     Rect {
@@ -285,12 +298,7 @@ pub fn render_overlay_shell(
     }
 }
 
-pub fn render_section_header(
-    f: &mut Frame,
-    area: Rect,
-    title: Line<'_>,
-    t: &crate::theme::Theme,
-) {
+pub fn render_section_header(f: &mut Frame, area: Rect, title: Line<'_>, t: &crate::theme::Theme) {
     let bg: Color = t.modal_bg.lerp(t.highlight_bg, 0.15);
     let line = Line::from(
         std::iter::once(Span::styled(" ", Style::default().bg(bg)))
@@ -299,29 +307,40 @@ pub fn render_section_header(
     );
     f.render_widget(
         ratatui::widgets::Paragraph::new(line),
-        Rect { x: area.x, y: area.y, width: area.width, height: 1 },
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 1,
+        },
     );
     if area.height > 1 {
         let sep = "─".repeat(area.width as usize);
         f.render_widget(
-            ratatui::widgets::Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(t.border.into()).bg(bg)))),
-            Rect { x: area.x, y: area.y + 1, width: area.width, height: 1 },
+            ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+                sep,
+                Style::default().fg(t.border.into()).bg(bg),
+            ))),
+            Rect {
+                x: area.x,
+                y: area.y + 1,
+                width: area.width,
+                height: 1,
+            },
         );
     }
 }
 
-pub fn render_column_divider(
-    f: &mut Frame,
-    x: u16,
-    y: u16,
-    height: u16,
-    t: &crate::theme::Theme,
-) {
+pub fn render_column_divider(f: &mut Frame, x: u16, y: u16, height: u16, t: &crate::theme::Theme) {
     let bg: Color = t.modal_bg.lerp(t.highlight_bg, 0.15);
     let buf_area = f.buffer_mut().area;
     for ry in 0..height {
         let py = y + ry;
-        if x < buf_area.x || x >= buf_area.x + buf_area.width || py < buf_area.y || py >= buf_area.y + buf_area.height {
+        if x < buf_area.x
+            || x >= buf_area.x + buf_area.width
+            || py < buf_area.y
+            || py >= buf_area.y + buf_area.height
+        {
             continue;
         }
         let cell = &mut f.buffer_mut()[(x, py)];

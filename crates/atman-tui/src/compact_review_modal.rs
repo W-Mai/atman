@@ -6,7 +6,7 @@ use atman_runtime::PendingCompactReview;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,24 +131,23 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
         height: h,
     };
     crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().warn.into()))
-        .title(Span::styled(
-            format!(
-                " Review Compaction — slice {}..{} ({} msgs, ~{} tokens) ",
-                modal.pending.range_start,
-                modal.pending.range_end,
-                modal.pending.slice_count,
-                modal.pending.tokens_before,
-            ),
-            Style::default()
-                .fg(crate::theme::theme().warn.into())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = outer.inner(rect);
-    f.render_widget(outer, rect);
+    let theme = crate::theme::theme();
+    let title = Line::from(format!(
+        " Review Compaction — slice {}..{} ({} msgs, ~{} tokens) ",
+        modal.pending.range_start,
+        modal.pending.range_end,
+        modal.pending.slice_count,
+        modal.pending.tokens_before,
+    ));
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        title,
+        "◫",
+        theme.warn.into(),
+        true,
+        &theme,
+    );
     if inner.height < 4 {
         return;
     }
@@ -165,6 +164,13 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(body_rect);
     render_slice_pane(f, cols[0], modal);
+    crate::wm::shell::render_column_divider(
+        f,
+        cols[0].right(),
+        cols[0].y,
+        cols[0].height,
+        &crate::theme::theme(),
+    );
     render_summary_pane(f, cols[1], modal);
     let footer_rect = Rect {
         x: inner.x,
@@ -176,12 +182,14 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
 }
 
 fn render_slice_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into()))
-        .title(" Being replaced ");
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let theme = crate::theme::theme();
+    crate::wm::shell::render_section_header(f, rect, Line::from("Slice"), &theme);
+    let inner = Rect {
+        x: rect.x,
+        y: rect.y + 2,
+        width: rect.width,
+        height: rect.height.saturating_sub(2).saturating_sub(1),
+    };
     let text = &modal.pending.slice_preview;
     let para = Paragraph::new(text.as_str())
         .wrap(Wrap { trim: false })
@@ -190,16 +198,18 @@ fn render_slice_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewMo
 }
 
 fn render_summary_pane(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal) {
-    let (title, colour) = match modal.mode {
-        CompactReviewMode::Viewing => (" Summary ", crate::theme::theme().tinted_fg),
-        CompactReviewMode::Editing => (" Summary — editing ", crate::theme::theme().success),
+    let theme = crate::theme::theme();
+    let title = match modal.mode {
+        CompactReviewMode::Viewing => "Summary",
+        CompactReviewMode::Editing => "Summary — editing",
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(colour.into()))
-        .title(title);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    crate::wm::shell::render_section_header(f, rect, Line::from(title), &theme);
+    let inner = Rect {
+        x: rect.x,
+        y: rect.y + 2,
+        width: rect.width,
+        height: rect.height.saturating_sub(2).saturating_sub(1),
+    };
     let content = if modal.mode == CompactReviewMode::Editing {
         modal.editor.buf().to_string()
     } else {

@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 fn provider_types() -> Vec<&'static str> {
     atman_runtime::model_registry::config_provider_types()
@@ -887,20 +887,17 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
     };
 
     crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
 
     let theme = crate::theme::theme();
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent.into()))
-        .title(Span::styled(
-            " Provider Manager ",
-            Style::default()
-                .fg(theme.accent.into())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = outer.inner(rect);
-    f.render_widget(outer, rect);
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        Line::from("Provider Manager"),
+        "⚙",
+        theme.accent.into(),
+        true,
+        &theme,
+    );
 
     if inner.height < 4 {
         return;
@@ -928,6 +925,13 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
         .split(main);
 
     render_provider_list(f, columns[0], mgr, &theme);
+    crate::wm::shell::render_column_divider(
+        f,
+        columns[0].right(),
+        columns[0].y,
+        columns[0].height,
+        &theme,
+    );
     render_model_detail(f, columns[1], mgr, &theme);
 
     // Footer help
@@ -1000,12 +1004,13 @@ fn render_provider_list(
         .collect();
 
     let mut state = ListState::default().with_selected(Some(mgr.selected));
-    let block = Block::default()
-        .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(theme.border.into()))
-        .title(" Providers ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    crate::wm::shell::render_section_header(f, area, Line::from("Providers"), theme);
+    let inner = Rect {
+        x: area.x,
+        y: area.y + 2,
+        width: area.width,
+        height: area.height.saturating_sub(2).saturating_sub(1),
+    };
     f.render_stateful_widget(List::new(items), inner, &mut state);
 }
 
@@ -1015,9 +1020,13 @@ fn render_model_detail(
     mgr: &ProviderManager,
     theme: &crate::theme::Theme,
 ) {
-    let block = Block::default().borders(Borders::NONE).title(" Details ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    crate::wm::shell::render_section_header(f, area, Line::from("Details"), theme);
+    let inner = Rect {
+        x: area.x,
+        y: area.y + 2,
+        width: area.width,
+        height: area.height.saturating_sub(2).saturating_sub(1),
+    };
 
     let provider = mgr.providers.get(mgr.selected);
     let mut lines = vec![];
@@ -1126,11 +1135,13 @@ fn render_add_dialog(
     mgr: &ProviderManager,
     theme: &crate::theme::Theme,
 ) {
-    let block = Block::default()
-        .borders(Borders::NONE)
-        .title(" Add Provider ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    crate::wm::shell::render_section_header(f, area, Line::from("Add Provider"), theme);
+    let inner = Rect {
+        x: area.x,
+        y: area.y + 2,
+        width: area.width,
+        height: area.height.saturating_sub(2).saturating_sub(1),
+    };
     let mut lines = vec![];
     let mut cursor_pos: Option<(u16, u16)> = None;
     if mgr.in_form {
@@ -1168,36 +1179,54 @@ fn render_add_dialog(
             } else {
                 display_val.clone()
             };
-            if *label == "API Key" && inner.bottom().saturating_sub(y) >= 3 {
-                let input_rect = Rect {
+            if *label == "API Key" && inner.bottom().saturating_sub(y) >= 2 {
+                let label_rect = Rect {
                     x: inner.x,
                     y,
                     width: inner.width,
-                    height: 3,
+                    height: 1,
                 };
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(if active {
-                        Style::default().fg(theme.accent.into())
-                    } else {
-                        Style::default().fg(theme.border.into())
-                    })
-                    .title(Span::styled(" API Key ", style));
-                let input_inner = block.inner(input_rect);
-                f.render_widget(block, input_rect);
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(" API Key:", style))),
+                    label_rect,
+                );
+                y = y.saturating_add(1);
+                let value_rect = Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                };
                 f.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        display_val.clone(),
+                        format!("  {display_val}"),
                         Style::default().fg(theme.tinted_fg.into()),
                     ))),
-                    input_inner,
+                    value_rect,
+                );
+                let underline = "─".repeat(inner.width as usize);
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        underline,
+                        Style::default().fg(if active {
+                            theme.accent.into()
+                        } else {
+                            theme.border.into()
+                        }),
+                    ))),
+                    Rect {
+                        x: inner.x,
+                        y,
+                        width: inner.width,
+                        height: 1,
+                    },
                 );
                 if active {
                     let display_w =
-                        crate::width::width(&display_val).min(input_inner.width as usize) as u16;
-                    cursor_pos = Some((input_inner.x + display_w, input_inner.y));
+                        crate::width::width(&display_val).min(inner.width as usize) as u16;
+                    cursor_pos = Some((inner.x + 2 + display_w, y));
                 }
-                y = y.saturating_add(3);
+                y = y.saturating_add(2);
                 continue;
             }
 
@@ -1286,13 +1315,9 @@ fn render_add_dialog(
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(1)])
             .split(inner);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border.into()))
-            .title(" Providers ");
         let mut state = ListState::default().with_selected(Some(mgr.kind_selected));
         f.render_stateful_widget(
-            List::new(items).block(block).highlight_style(
+            List::new(items).highlight_style(
                 Style::default()
                     .fg(theme.accent.into())
                     .bg(theme.panel_bg.into())
@@ -1347,12 +1372,25 @@ fn render_confirm_dialog(
         None => ("Remove", ""),
     };
     let title = format!("{action} provider \"{}\"?", mgr.confirm_provider_name);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.warn.into()))
-        .title(format!(" {action}? "));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let w = area.width.saturating_sub(4).clamp(40, 60);
+    let h = 9u16;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let dlg = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        dlg,
+        Line::from(format!(" {action}? ")),
+        "⚠",
+        theme.warn.into(),
+        true,
+        theme,
+    );
     let lines = vec![
         Line::from(Span::styled(
             title.as_str(),

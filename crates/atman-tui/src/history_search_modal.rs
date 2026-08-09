@@ -4,7 +4,7 @@ use crate::keys::KeyAction;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryArea {
@@ -352,7 +352,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal
     };
     let title = Line::from(vec![
         Span::styled(
-            " Search History · ",
+            "Search History · ",
             Style::default()
                 .fg(t.accent.into())
                 .add_modifier(Modifier::BOLD),
@@ -363,14 +363,9 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal
                 .fg(scope_color.into())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" ", Style::default().fg(t.accent.into())),
     ]);
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent.into()))
-        .title(title);
-    let inner = outer.inner(rect);
-    f.render_widget(outer, rect);
+    let inner =
+        crate::wm::shell::render_overlay_shell(f, rect, title, "⌕", t.accent.into(), true, &t);
     if inner.height < 8 {
         return;
     }
@@ -402,6 +397,15 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal
     modal.results_rect = Some(rows[1]);
     modal.preview_rect = Some(rows[2]);
     render_help_bar(f, help_area);
+}
+
+fn section_inner(rect: Rect) -> Rect {
+    Rect {
+        x: rect.x.saturating_add(1),
+        y: rect.y.saturating_add(2),
+        width: rect.width.saturating_sub(2),
+        height: rect.height.saturating_sub(3),
+    }
 }
 
 fn render_help_bar(f: &mut ratatui::Frame, area: Rect) {
@@ -436,12 +440,14 @@ fn render_help_bar(f: &mut ratatui::Frame, area: Rect) {
 }
 
 fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().warn.into()))
-        .title(" Query ");
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let t = crate::theme::theme();
+    crate::wm::shell::render_section_header(
+        f,
+        rect,
+        Line::from(Span::styled("Query", Style::default().fg(t.warn.into()))),
+        &t,
+    );
+    let inner = section_inner(rect);
     let cursor_indicator = "▏";
     let text = format!("{}{cursor_indicator}", modal.editor.buf());
     let para = Paragraph::new(text).wrap(Wrap { trim: false });
@@ -449,18 +455,17 @@ fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchMod
 }
 
 fn render_results_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchModal) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into()))
-        .title(match modal.error {
-            Some(_) => Span::styled(
-                " Error ",
-                Style::default().fg(crate::theme::theme().error.into()),
-            ),
-            None => Span::raw(format!(" Results ({}) ", modal.results.len())),
-        });
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let t = crate::theme::theme();
+    crate::wm::shell::render_section_header(
+        f,
+        rect,
+        Line::from(Span::styled(
+            "Results",
+            Style::default().fg(t.subtle_fg.into()),
+        )),
+        &t,
+    );
+    let inner = section_inner(rect);
     if let Some(err) = &modal.error {
         let para = Paragraph::new(err.as_str()).wrap(Wrap { trim: false });
         f.render_widget(para, inner);
@@ -596,12 +601,17 @@ fn highlight_snippet(snippet: &str, query: &str) -> Vec<Span<'static>> {
 }
 
 fn render_preview_row(f: &mut ratatui::Frame, rect: Rect, modal: &mut HistorySearchModal) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::theme().subtle_fg.into()))
-        .title(" Context (±3 events) ");
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let t = crate::theme::theme();
+    crate::wm::shell::render_section_header(
+        f,
+        rect,
+        Line::from(Span::styled(
+            "Preview",
+            Style::default().fg(t.subtle_fg.into()),
+        )),
+        &t,
+    );
+    let inner = section_inner(rect);
     let text = if modal.preview_lines.is_empty() {
         modal
             .selected_hit()

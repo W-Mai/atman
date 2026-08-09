@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::keys::KeyAction;
 
@@ -178,20 +178,17 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     };
 
     crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
 
     let theme = crate::theme::theme();
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent.into()))
-        .title(Span::styled(
-            " Welcome to atman ",
-            Style::default()
-                .fg(theme.accent.into())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = outer.inner(rect);
-    f.render_widget(outer, rect);
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        Line::from("Welcome to atman"),
+        "✦",
+        theme.accent.into(),
+        true,
+        &theme,
+    );
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -348,15 +345,16 @@ fn render_provider_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingSt
         ),
     ];
     let mut list_state = ListState::default().with_selected(Some(state.selected_action));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border.into()))
-        .title(" Actions ");
+    crate::wm::shell::render_section_header(f, rows[2], Line::from("Actions"), &theme);
+    let list_inner = Rect {
+        x: rows[2].x,
+        y: rows[2].y + 2,
+        width: rows[2].width,
+        height: rows[2].height.saturating_sub(2).saturating_sub(1),
+    };
     f.render_stateful_widget(
-        List::new(actions)
-            .block(block)
-            .highlight_style(selected_button_style()),
-        rows[2],
+        List::new(actions).highlight_style(selected_button_style()),
+        list_inner,
         &mut list_state,
     );
 
@@ -431,10 +429,13 @@ fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState
         Some(state.selected_model.min(items.len().saturating_sub(1)))
     };
     let mut list_state = ListState::default().with_selected(selected);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border.into()))
-        .title(" Models ");
+    crate::wm::shell::render_section_header(f, rows[2], Line::from("Models"), &theme);
+    let list_inner = Rect {
+        x: rows[2].x,
+        y: rows[2].y + 2,
+        width: rows[2].width,
+        height: rows[2].height.saturating_sub(2).saturating_sub(1),
+    };
     if items.is_empty() {
         let text = if let Some(name) = state.pending_provider_name.as_deref() {
             Line::from(vec![
@@ -451,16 +452,11 @@ fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState
                 help_span(" back to add a provider."),
             ])
         };
-        f.render_widget(
-            Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
-            rows[2],
-        );
+        f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), list_inner);
     } else {
         f.render_stateful_widget(
-            List::new(items)
-                .block(block)
-                .highlight_style(selected_button_style()),
-            rows[2],
+            List::new(items).highlight_style(selected_button_style()),
+            list_inner,
             &mut list_state,
         );
     }

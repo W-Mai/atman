@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
@@ -256,21 +256,19 @@ fn render_alias_list(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
         height: h,
     };
 
-    crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
-
     let theme = crate::theme::theme();
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent.into()))
-        .title(Span::styled(
-            " Aliases ",
-            Style::default()
-                .fg(theme.accent.into())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = outer.inner(rect);
-    f.render_widget(outer, rect);
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        Line::from(Span::styled(
+            "Aliases",
+            Style::default().fg(theme.tinted_fg.into()),
+        )),
+        "@",
+        theme.accent.into(),
+        true,
+        &theme,
+    );
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -322,26 +320,19 @@ fn render_alias_form(f: &mut ratatui::Frame, area: Rect, mgr: &AliasManager) {
         height: h,
     };
 
-    crate::sanitize_widget_edges(f, rect);
-    f.render_widget(Clear, rect);
-
     let theme = crate::theme::theme();
-    let title = if mgr.is_edit {
-        " Edit Alias "
-    } else {
-        " Add Alias "
-    };
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent.into()))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(theme.accent.into())
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = outer.inner(rect);
-    f.render_widget(outer, rect);
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        Line::from(Span::styled(
+            "Alias Form",
+            Style::default().fg(theme.tinted_fg.into()),
+        )),
+        "@",
+        theme.accent.into(),
+        true,
+        &theme,
+    );
     if inner.height < 5 {
         return;
     }
@@ -440,14 +431,24 @@ fn render_preview_panel(
     mgr: &AliasManager,
     theme: &crate::theme::Theme,
 ) {
-    let block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme.border.into()))
-        .title(" Preview ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    crate::wm::shell::render_column_divider(f, area.x, area.y, area.height, theme);
+    crate::wm::shell::render_section_header(
+        f,
+        Rect {
+            x: area.x + 3,
+            y: area.y,
+            width: area.width.saturating_sub(3),
+            height: 1,
+        },
+        Line::from(Span::styled(
+            "Preview",
+            Style::default().fg(theme.tinted_fg.into()),
+        )),
+        theme,
+    );
 
     let mut lines = vec![];
+    let content_x = area.x.saturating_add(3);
 
     // Show current alias mapping if editing alias name
     if mgr.focus == Focus::NameInput && !mgr.editor.buf().trim().is_empty() {
@@ -491,5 +492,14 @@ fn render_preview_panel(
         )));
     }
 
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let content_area = Rect {
+        x: content_x,
+        y: area.y + 2,
+        width: area.width.saturating_sub(3),
+        height: area.height.saturating_sub(2),
+    };
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        content_area,
+    );
 }
