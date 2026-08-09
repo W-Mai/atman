@@ -17,69 +17,67 @@ pub struct WmHitmap {
 
 impl WindowManager {
     pub fn hit_test_titlebar(&self, col: u16, row: u16) -> Option<&WindowInstance> {
+        let p = self.hit_test_panel(col, row)?;
         // draggable = panel rect + shadow ring (2 cols left/right, 1 row top/bottom)
         // EXCEPT content area and button hit areas
-        self.panels
-            .iter()
-            .filter(|p| {
-                // expanded rect including shadow ring
-                let sx0 = p.rect.x.saturating_sub(2);
-                let sx1 = p.rect.x + p.rect.width + 1;
-                let sy0 = p.rect.y.saturating_sub(1);
-                let sy1 = p.rect.y + p.rect.height + 1;
-                col >= sx0 && col <= sx1 && row >= sy0 && row <= sy1
-            })
-            .filter(|p| {
-                // exclude content area: starts at y+2 (same as content_area.y)
-                let cx0 = p.rect.x + 2;
-                let cx1 = p.rect.x + p.rect.width.saturating_sub(2);
-                let cy0 = p.rect.y + 2;
-                let cy1 = p.rect.y + p.rect.height.saturating_sub(1);
-                !(col >= cx0 && col < cx1 && row >= cy0 && row < cy1)
-            })
-            .max_by_key(|p| p.z)
+        let sx0 = p.rect.x.saturating_sub(2);
+        let sx1 = p.rect.x + p.rect.width + 1;
+        let sy0 = p.rect.y.saturating_sub(1);
+        let sy1 = p.rect.y + p.rect.height + 1;
+        if !(col >= sx0 && col <= sx1 && row >= sy0 && row <= sy1) {
+            return None;
+        }
+        // exclude content area: starts at y+2 (same as content_area.y)
+        let cx0 = p.rect.x + 2;
+        let cx1 = p.rect.x + p.rect.width.saturating_sub(2);
+        let cy0 = p.rect.y + 2;
+        let cy1 = p.rect.y + p.rect.height.saturating_sub(1);
+        if col >= cx0 && col < cx1 && row >= cy0 && row < cy1 {
+            return None;
+        }
+        Some(p)
     }
 
     pub fn hit_test_minimize(&self, col: u16, row: u16) -> Option<WindowId> {
-        self.panels
-            .iter()
-            .filter(|p| col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 2)
-            .max_by_key(|p| p.z)
-            .map(|p| p.id)
+        let p = self.hit_test_panel(col, row)?;
+        if col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 2 {
+            Some(p.id)
+        } else {
+            None
+        }
     }
 
     pub fn hit_test_maximize(&self, col: u16, row: u16) -> Option<WindowId> {
-        self.panels
-            .iter()
-            .filter(|p| col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 3)
-            .max_by_key(|p| p.z)
-            .map(|p| p.id)
+        let p = self.hit_test_panel(col, row)?;
+        if col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 3 {
+            Some(p.id)
+        } else {
+            None
+        }
     }
 
     pub fn hit_test_close(&self, col: u16, row: u16) -> Option<WindowId> {
-        self.panels
-            .iter()
-            .filter(|p| {
-                p.rect.height >= 8 && col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 5
-            })
-            .max_by_key(|p| p.z)
-            .map(|p| p.id)
+        let p = self.hit_test_panel(col, row)?;
+        if p.rect.height >= 8 && col >= p.rect.x && col < p.rect.x + 3 && row == p.rect.y + 5 {
+            Some(p.id)
+        } else {
+            None
+        }
     }
 
     pub fn hit_test_resize(&self, col: u16, row: u16) -> Option<WindowId> {
-        // 3x3 area around the resize button at (x+w-1, y+h-1)
-        self.panels
-            .iter()
-            .filter(|p| {
-                let cx = p.rect.x + p.rect.width.saturating_sub(1);
-                let cy = p.rect.y + p.rect.height.saturating_sub(1);
-                col >= cx.saturating_sub(1)
-                    && col <= cx + 1
-                    && row >= cy.saturating_sub(1)
-                    && row <= cy + 1
-            })
-            .max_by_key(|p| p.z)
-            .map(|p| p.id)
+        let p = self.hit_test_panel(col, row)?;
+        let cx = p.rect.x + p.rect.width.saturating_sub(1);
+        let cy = p.rect.y + p.rect.height.saturating_sub(1);
+        if col >= cx.saturating_sub(1)
+            && col <= cx + 1
+            && row >= cy.saturating_sub(1)
+            && row <= cy + 1
+        {
+            Some(p.id)
+        } else {
+            None
+        }
     }
 
     pub fn hit_test_btn(&self, col: u16, row: u16) -> Option<(WindowId, PanelBtn)> {
