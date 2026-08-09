@@ -1320,6 +1320,9 @@ pub(crate) async fn run_frames(
                         }
                         TuiCommand::ProviderModelsUpdated => {
                             app.app.provider_manager.refresh_list();
+                            if app.app.onboarding_open {
+                                app.app.onboarding.try_advance_to_model_select();
+                            }
                             app.app.push_toast(
                                 "models refreshed",
                                 app::NoteLevel::Success,

@@ -359,7 +359,8 @@ pub(crate) fn handle_modal_key(
         if app.provider_manager.add_just_completed {
             app.provider_manager.add_just_completed = false;
             if app.onboarding_open {
-                app.onboarding.provider_added();
+                let name = app.provider_manager.last_added_name.take();
+                app.onboarding.provider_added(name.as_deref());
             }
         }
         if app.provider_manager.refresh_just_triggered {
@@ -379,6 +380,9 @@ pub(crate) fn handle_modal_key(
                 std::time::Duration::from_secs(5),
                 app::ToastPosition::TopRight,
             );
+        }
+        if app.onboarding_open && !app.provider_manager.open {
+            app.onboarding.check_provider_manager_closed();
         }
         return true;
     }

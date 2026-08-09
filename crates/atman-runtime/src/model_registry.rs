@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use crate::auth_store::AuthStore;
+
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub name: String,
@@ -368,25 +370,48 @@ fn reload_from_text(text: &str) {
 
 pub fn add_alias_to_config(alias: &str, model: &str) -> anyhow::Result<()> {
     let text = read_config_toml().unwrap_or_default();
-    let mut raw: toml::Value = if text.trim().is_empty() {
-        toml::Value::Table(toml::value::Table::new())
-    } else {
-        toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse config.toml: {e}"))?
-    };
-    let aliases = raw
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config.toml is not a table"))?
-        .entry("alias")
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-    if let Some(table) = aliases.as_table_mut() {
-        let mut entry = toml::value::Table::new();
-        entry.insert("model".to_string(), toml::Value::String(model.to_string()));
-        table.insert(alias.to_string(), toml::Value::Table(entry));
-    }
-    let new_text = toml::to_string_pretty(&raw).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+    let new_text = upsert_alias_comment_preserving(&text, alias, model);
     write_config_toml(&new_text)?;
     reload_from_text(&new_text);
     Ok(())
+}
+
+fn upsert_alias_comment_preserving(text: &str, alias: &str, model: &str) -> String {
+    let section_start = format!("[alias.{alias}]");
+    let model_line = format!("model = {model:?}");
+    let mut lines: Vec<String> = text.lines().map(String::from).collect();
+
+    if let Some(section) = lines
+        .iter()
+        .position(|l| l.trim().starts_with(&format!("[alias.{alias}")) && l.trim().ends_with(']'))
+    {
+        let mut inserted = false;
+        for line in lines.iter_mut().skip(section + 1) {
+            let t = line.trim();
+            if (t.starts_with("[alias.") || t == "[alias]") && t.ends_with(']') {
+                break;
+            }
+            if t.starts_with("model") && t.contains('=') {
+                *line = model_line.clone();
+                inserted = true;
+                break;
+            }
+        }
+        if !inserted {
+            lines.insert(section + 1, model_line);
+        }
+    } else {
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.pop();
+        }
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(section_start);
+        lines.push(model_line);
+    }
+
+    lines.join("\n")
 }
 
 pub fn upsert_model_config(
@@ -584,16 +609,20 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
 
 pub fn is_first_run() -> bool {
     let models = all_model_entries();
-    let has_configured = models.iter().any(|(_, e)| {
+    let config_configured = models.iter().any(|(_, e)| {
         e.api_key.as_deref().is_some_and(|k| !k.is_empty())
             && e.provider.is_some()
             && e.context_budget.unwrap_or(0) > 0
     });
+    let env_configured = std::env::var("ANTHROPIC_API_KEY").is_ok()
+        || std::env::var("OPENAI_API_KEY").is_ok();
+    let auth_configured = AuthStore::load()
+        .is_ok_and(|store| store.providers.iter().any(|provider| provider.enabled));
     let smart_resolves = {
         let resolved = resolve_alias("smart");
         resolved != "smart" && models.iter().any(|(n, _)| *n == resolved)
     };
-    !has_configured || !smart_resolves
+    !(config_configured || env_configured || auth_configured) || !smart_resolves
 }
 
 #[cfg(test)]

@@ -16,6 +16,9 @@ pub struct OnboardingState {
     pub selected_action: usize,
     pub selected_model: usize,
     pub error: Option<String>,
+    pub pending_provider_name: Option<String>,
+    provider_was_added: bool,
+    pending_model_select: bool,
 }
 
 impl Default for OnboardingState {
@@ -25,6 +28,9 @@ impl Default for OnboardingState {
             selected_action: 0,
             selected_model: 0,
             error: None,
+            pending_provider_name: None,
+            provider_was_added: false,
+            pending_model_select: false,
         }
     }
 }
@@ -45,9 +51,28 @@ impl OnboardingState {
         }
     }
 
-    pub fn provider_added(&mut self) {
-        self.step = OnboardingStep::ModelSelect;
-        self.selected_model = 0;
+    pub fn provider_added(&mut self, provider_name: Option<&str>) {
+        self.provider_was_added = true;
+        self.pending_provider_name = provider_name.map(String::from);
+        self.pending_model_select = true;
+    }
+
+    pub fn try_advance_to_model_select(&mut self) {
+        if self.pending_model_select && !selectable_models().is_empty() {
+            self.pending_model_select = false;
+            self.pending_provider_name = None;
+            self.step = OnboardingStep::ModelSelect;
+            self.selected_model = 0;
+        }
+    }
+
+    pub fn check_provider_manager_closed(&mut self) {
+        if self.step == OnboardingStep::ProviderSelect && !self.provider_was_added {
+            self.error = Some(
+                "No provider added — pick Add provider to try again, or press q to skip"
+                    .to_string(),
+            );
+        }
     }
 
     fn handle_provider_key(&mut self, action: &KeyAction) -> OnboardingEvent {
@@ -83,6 +108,7 @@ impl OnboardingState {
         match action {
             KeyAction::Escape => {
                 self.step = OnboardingStep::ProviderSelect;
+                self.pending_provider_name = None;
                 OnboardingEvent::None
             }
             KeyAction::HistoryUp | KeyAction::Char('k') if len > 0 => {
@@ -101,8 +127,12 @@ impl OnboardingState {
                 }
             },
             KeyAction::Submit => {
-                self.error = Some("Add a provider first".to_string());
-                OnboardingEvent::None
+                if self.pending_provider_name.is_some() {
+                    OnboardingEvent::None
+                } else {
+                    self.error = Some("Add a provider first".to_string());
+                    OnboardingEvent::None
+                }
             }
             _ => OnboardingEvent::None,
         }
@@ -133,6 +163,10 @@ fn selectable_models() -> Vec<String> {
 }
 
 pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
+    if area.width < 60 || area.height < 20 {
+        render_minimal(f, area, state);
+        return;
+    }
     let w = area.width.saturating_sub(4).clamp(54, 82);
     let h = area.height.saturating_sub(2).clamp(18, 30);
     let rect = Rect {
@@ -222,6 +256,52 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
             .alignment(ratatui::layout::Alignment::Right),
         rows[3],
     );
+}
+
+fn render_minimal(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
+    let theme = crate::theme::theme();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "atman setup",
+            Style::default()
+                .fg(theme.accent.into())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    match state.step {
+        OnboardingStep::ProviderSelect => {
+            lines.push(Line::from("1. Add a provider"));
+            lines.push(Line::from("   > Add provider"));
+            lines.push(Line::from("   > Skip for now"));
+        }
+        OnboardingStep::ModelSelect => {
+            let models = selectable_models();
+            lines.push(Line::from("2. Choose your default model"));
+            if models.is_empty() {
+                lines.push(Line::from(
+                    "   No configured models found — Esc to add a provider.",
+                ));
+            } else {
+                for (i, model) in models.iter().enumerate() {
+                    let mark = if i == state.selected_model { ">" } else { " " };
+                    lines.push(Line::from(format!("   {mark} {model}")));
+                }
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(match state.step {
+        OnboardingStep::ProviderSelect => "Enter: add provider   q: skip",
+        OnboardingStep::ModelSelect => "up/down: navigate   Enter: finish   Esc: back",
+    }));
+    if let Some(error) = state.error.as_deref() {
+        lines.push(Line::from(Span::styled(
+            error,
+            Style::default().fg(theme.error.into()),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn render_provider_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
@@ -355,14 +435,23 @@ fn render_model_step(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState
         .border_style(Style::default().fg(theme.border.into()))
         .title(" Models ");
     if items.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
+        let text = if let Some(name) = state.pending_provider_name.as_deref() {
+            Line::from(vec![
+                help_span("Waiting for models from "),
+                Span::styled(name, Style::default().fg(theme.accent.into())),
+                help_span("… "),
+                key_span("Esc"),
+                help_span(" back."),
+            ])
+        } else {
+            Line::from(vec![
                 help_span("No configured models found. "),
                 key_span("Esc"),
                 help_span(" back to add a provider."),
-            ]))
-            .block(block)
-            .wrap(Wrap { trim: true }),
+            ])
+        };
+        f.render_widget(
+            Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
             rows[2],
         );
     } else {

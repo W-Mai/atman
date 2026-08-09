@@ -75,6 +75,7 @@ pub struct ProviderManager {
     pub refresh_just_triggered: bool,
     pub test_just_triggered: bool,
     pub add_just_completed: bool,
+    pub last_added_name: Option<String>,
     show_add: bool,
     focus: ProviderFocus,
     add_options: Vec<AddProviderOption>,
@@ -748,6 +749,7 @@ impl ProviderManager {
                                 }
                                 self.show_add = false;
                                 self.open = false;
+                                self.last_added_name = Some(preset.name.to_string());
                                 self.add_just_completed = true;
                             } else {
                                 self.open_preset_form(idx);
@@ -808,7 +810,7 @@ impl ProviderManager {
         if let Some(tx) = control_tx {
             if self.editing_provider.is_some() {
                 let _ = tx.send(crate::TuiControl::UpdateConfigProvider {
-                    name,
+                    name: name.clone(),
                     provider_type,
                     api_key,
                     base_url,
@@ -819,7 +821,7 @@ impl ProviderManager {
                 });
             } else {
                 let _ = tx.send(crate::TuiControl::AddConfigProvider {
-                    name,
+                    name: name.clone(),
                     provider_type,
                     api_key,
                     base_url,
@@ -833,6 +835,7 @@ impl ProviderManager {
         self.show_add = false;
         self.in_form = false;
         self.editing_provider = None;
+        self.last_added_name = Some(name);
         self.add_just_completed = true;
     }
 
@@ -858,11 +861,15 @@ impl ProviderManager {
             _ => return,
         };
         if let Some(tx) = control_tx {
-            let _ = tx.send(crate::TuiControl::AuthLogin { kind, name });
+            let _ = tx.send(crate::TuiControl::AuthLogin {
+                kind,
+                name: name.clone(),
+            });
         }
         self.show_add = false;
         self.open = false;
         self.name_focused = false;
+        self.last_added_name = Some(name);
         self.add_just_completed = true;
     }
 }

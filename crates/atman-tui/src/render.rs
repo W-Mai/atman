@@ -588,7 +588,7 @@ pub(crate) fn render_startup_hints(
     };
     f.render_widget(ratatui::widgets::Clear, rect);
     let msg = if missing_provider {
-        "⚠ No provider configured — run atman config or use Manage Providers"
+        "⚠ No provider configured — press Ctrl+K → Manage Providers, or edit config.toml"
     } else {
         "💡 Type a message and press Enter · Shift+Enter newline · /help for cmds"
     };
