@@ -82,36 +82,7 @@ impl AnchorIndex {
         limit: usize,
     ) -> Result<Vec<ProjectEventRow>> {
         let conn = self.conn();
-        // CJK text doesn't tokenize well under unicode61 — use LIKE for CJK queries.
-        if query.chars().any(is_cjk_char) {
-            return self.search_events_like(query, session_filter, limit, &conn);
-        }
-        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match session_filter {
-            Some(sid) => (
-                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
-                 FROM events e JOIN events_fts f ON f.rowid = e.id \
-                 WHERE f.events_fts MATCH ?1 AND e.session_id = ?2 \
-                 ORDER BY e.id DESC LIMIT ?3"
-                    .into(),
-                vec![
-                    Box::new(query.to_string()),
-                    Box::new(sid.to_string()),
-                    Box::new(limit as i64),
-                ],
-            ),
-            None => (
-                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload \
-                 FROM events e JOIN events_fts f ON f.rowid = e.id \
-                 WHERE f.events_fts MATCH ?1 \
-                 ORDER BY e.id DESC LIMIT ?2"
-                    .into(),
-                vec![Box::new(query.to_string()), Box::new(limit as i64)],
-            ),
-        };
-        let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), project_event_row_from)?;
-        collect(rows)
+        self.search_events_like(query, session_filter, limit, &conn)
     }
 
     fn search_events_like(
