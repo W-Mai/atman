@@ -212,32 +212,17 @@ pub(crate) async fn run_frames(
                                     | MouseEventKind::ScrollRight
                             ) =>
                         {
-                            let over_floating = app.wm
-                                .hit_test_panel(me.column, me.row)
-                                .is_some();
-                            if over_floating {
-                                let id = app.wm
-                                    .hit_test_panel(me.column, me.row)
-                                    .unwrap()
-                                    .id;
-                                if let Some(p) = app.wm.panels.iter_mut().find(|p| p.id == id) {
-                                    match me.kind {
-                                        MouseEventKind::ScrollUp => {
-                                            p.scroll = p.scroll.saturating_sub(3);
-                                        }
-                                        MouseEventKind::ScrollDown => {
-                                            p.scroll = p.scroll.saturating_add(3);
-                                        }
-                                        MouseEventKind::ScrollLeft => {
-                                            p.h_scroll = p.h_scroll.saturating_sub(3);
-                                        }
-                                        MouseEventKind::ScrollRight => {
-                                            p.h_scroll = p.h_scroll.saturating_add(3);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            } else {
+                            let (consumed, commands) = app.wm.dispatch_mouse(
+                                &me,
+                                &mut app.app,
+                                handle.control_tx.as_ref(),
+                            );
+                            app.wm.apply_commands(
+                                &mut app.app,
+                                commands,
+                                handle.control_tx.as_ref(),
+                            );
+                            if !consumed {
                             let over_input = app
                                 .input_rect
                                 .map(|r| rect_contains(r, me.column, me.row))
@@ -287,14 +272,27 @@ pub(crate) async fn run_frames(
                         Some(Ok(CtEvent::Key(ke)))
                             if matches!(ke.kind, crossterm::event::KeyEventKind::Press) =>
                         {
-                            key_handler::handle_key(
-                                map_key(ke),
-                                &mut app,
-                                &mut editor,
-                                &mut interrupt_prompt,
-                                handle.submit_tx.as_ref(),
+                            let action = map_key(ke);
+                            let (consumed, commands) = app.wm.dispatch_key(
+                                &action,
+                                &mut app.app,
                                 handle.control_tx.as_ref(),
                             );
+                            app.wm.apply_commands(
+                                &mut app.app,
+                                commands,
+                                handle.control_tx.as_ref(),
+                            );
+                            if !consumed {
+                                key_handler::handle_key(
+                                    action,
+                                    &mut app,
+                                    &mut editor,
+                                    &mut interrupt_prompt,
+                                    handle.submit_tx.as_ref(),
+                                    handle.control_tx.as_ref(),
+                                );
+                            }
                         }
                         Some(Ok(CtEvent::Paste(s))) => {
                             editor.ingest_paste(&s);
@@ -303,6 +301,17 @@ pub(crate) async fn run_frames(
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
                             app.wm.sync_modals(&app.app.modal_open_flags());
+                            let (consumed, commands) = app.wm.dispatch_mouse(
+                                &me,
+                                &mut app.app,
+                                handle.control_tx.as_ref(),
+                            );
+                            app.wm.apply_commands(
+                                &mut app.app,
+                                commands,
+                                handle.control_tx.as_ref(),
+                            );
+                            if !consumed {
                             // Check floating panels/modals BEFORE input_rect so clicks
                             // on overlapping panels don't pass through to the input box.
                             if let MouseEventKind::Down(MouseButton::Left) = me.kind
@@ -1097,6 +1106,7 @@ pub(crate) async fn run_frames(
                                 }
                                 }
                                 } // if !skip_hover
+                            }
                             }
                             interrupt_prompt = None;
                         }

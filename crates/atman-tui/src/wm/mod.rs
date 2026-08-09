@@ -2,11 +2,13 @@
 
 use std::collections::HashSet;
 
+use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear};
+use tokio::sync::mpsc;
 
 use atman_runtime::TaskSnapshot;
 
@@ -476,6 +478,175 @@ impl WindowManager {
             self.focus.focus(id);
             self.bring_to_front(id);
         }
+    }
+
+    pub fn dispatch_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        _app: &mut crate::app::AppState,
+        _control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> (bool, Vec<WmCommand>) {
+        if !self.layers.modal_stack.is_empty() {
+            return (false, Vec::new());
+        }
+        match action {
+            crate::keys::KeyAction::CyclePanelForward => {
+                self.cycle_focus(true);
+                return (true, Vec::new());
+            }
+            crate::keys::KeyAction::CyclePanelBackward => {
+                self.cycle_focus(false);
+                return (true, Vec::new());
+            }
+            _ => {}
+        }
+
+        let Some(id) = self.focused_id() else {
+            return (false, Vec::new());
+        };
+        let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) else {
+            return (false, Vec::new());
+        };
+
+        match action {
+            crate::keys::KeyAction::ScrollUp | crate::keys::KeyAction::PageUp => {
+                panel.scroll = panel.scroll.saturating_sub(
+                    if matches!(action, crate::keys::KeyAction::PageUp) {
+                        10
+                    } else {
+                        3
+                    },
+                );
+                return (true, Vec::new());
+            }
+            crate::keys::KeyAction::ScrollDown | crate::keys::KeyAction::PageDown => {
+                panel.scroll = panel.scroll.saturating_add(
+                    if matches!(action, crate::keys::KeyAction::PageDown) {
+                        10
+                    } else {
+                        3
+                    },
+                );
+                return (true, Vec::new());
+            }
+            crate::keys::KeyAction::Escape => {
+                return (true, vec![WmCommand::CloseWindow(id)]);
+            }
+            _ => {}
+        }
+
+        let Some(content) = panel.content.as_mut() else {
+            return (false, Vec::new());
+        };
+        let mut ctx = EventCtx {
+            scroll: &mut panel.scroll,
+            h_scroll: &mut panel.h_scroll,
+        };
+        match content.handle_event(&WmEvent::Key(action.clone()), &mut ctx) {
+            WmEventResult::Consumed(commands) => (true, commands),
+            WmEventResult::Ignored => (false, Vec::new()),
+        }
+    }
+
+    pub fn dispatch_mouse(
+        &mut self,
+        event: &MouseEvent,
+        _app: &mut crate::app::AppState,
+        _control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> (bool, Vec<WmCommand>) {
+        let Some(id) = self
+            .hit_test_panel(event.column, event.row)
+            .map(|panel| panel.id)
+        else {
+            return (false, Vec::new());
+        };
+        let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) else {
+            return (false, Vec::new());
+        };
+        match event.kind {
+            MouseEventKind::ScrollUp => panel.scroll = panel.scroll.saturating_sub(3),
+            MouseEventKind::ScrollDown => panel.scroll = panel.scroll.saturating_add(3),
+            MouseEventKind::ScrollLeft => panel.h_scroll = panel.h_scroll.saturating_sub(3),
+            MouseEventKind::ScrollRight => panel.h_scroll = panel.h_scroll.saturating_add(3),
+            _ => return (false, Vec::new()),
+        }
+        (true, Vec::new())
+    }
+
+    pub fn apply_commands(
+        &mut self,
+        app: &mut crate::app::AppState,
+        commands: Vec<WmCommand>,
+        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        for command in commands {
+            match command {
+                WmCommand::FocusWindow(id) => self.focus(id),
+                WmCommand::CloseWindow(id) => self.close(id),
+                WmCommand::ToggleMaximize(id) => {
+                    self.toggle_maximize(id, app.maximized_canvas());
+                }
+                WmCommand::TermResize { handle, rows, cols } => {
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(crate::TuiControl::TermResize { handle, rows, cols });
+                    }
+                }
+                WmCommand::OpenTaskPanel { handle, maximized } => {
+                    app.open_task_panel(self, &handle, app.maximized_canvas(), maximized, false);
+                }
+                WmCommand::PushToast(message) => app.push_toast(
+                    message,
+                    crate::app::NoteLevel::Info,
+                    std::time::Duration::from_secs(3),
+                    crate::app::ToastPosition::TopRight,
+                ),
+            }
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame, canvas: Rect, app: &mut crate::app::AppState) {
+        self.sync_modals(&app.modal_open_flags());
+        if self.panels.is_empty() {
+            self.interaction.last_hitmap = WmHitmap::default();
+        } else {
+            let hovered_panel_btn = self.interaction.hovered_panel_btn;
+            let hovered_history_row = self.interaction.hovered_history_row.clone();
+            let hovered_mcp_row = self.interaction.hovered_mcp_row.clone();
+            let close_armed_id = self.interaction.panel_close_armed_id.clone();
+            let close_armed = close_armed_id
+                .as_deref()
+                .map(|id| (id, self.panel_close_arm_expired()));
+            self.interaction.last_hitmap = render(
+                frame,
+                canvas,
+                self,
+                &app.task_snapshots,
+                &app.items,
+                &app.activity_nodes,
+                &hovered_panel_btn,
+                &hovered_history_row,
+                app.animation_frame,
+                close_armed,
+                app.maximized_canvas(),
+                !self.layers.modal_stack.is_empty(),
+                &app.context.mcp_servers,
+                &app.expanded_mcp_servers,
+                app.mcp_selected,
+                &hovered_mcp_row,
+                &app.mcp_browser_state(),
+                app.items_version,
+                app.expanded_version,
+            );
+        }
+
+        if app.trust_mode_picker_open {
+            crate::render_trust_mode_picker(frame, canvas, app);
+        }
+        let layers = std::mem::take(&mut self.layers);
+        layers.render_modals(frame, canvas, app, self.focused_id().unwrap_or(WindowId(0)));
+        layers.render_blocking(frame, canvas, app);
+        layers.render_toasts(frame, canvas, app);
+        self.layers = layers;
     }
 }
 

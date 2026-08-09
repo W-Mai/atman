@@ -558,61 +558,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         border_color,
     );
 
-    if !ui.wm.panels.is_empty() {
-        let hovered_panel_btn = ui.wm.interaction.hovered_panel_btn;
-        let hovered_history_row = ui.wm.interaction.hovered_history_row.clone();
-        let hovered_mcp_row = ui.wm.interaction.hovered_mcp_row.clone();
-        let close_armed = ui
-            .wm
-            .interaction
-            .panel_close_armed_id
-            .clone()
-            .zip(Some(ui.wm.panel_close_arm_expired()));
-        let max_canvas = app.maximized_canvas();
-        let modal_open = !ui.wm.layers.modal_stack.is_empty();
-        ui.wm.interaction.last_hitmap = crate::wm::render(
-            f,
-            l.transcript,
-            &mut ui.wm,
-            &app.task_snapshots,
-            &app.items,
-            &app.activity_nodes,
-            &hovered_panel_btn,
-            &hovered_history_row,
-            app.animation_frame,
-            close_armed.as_ref().map(|(id, exp)| (id.as_str(), *exp)),
-            max_canvas,
-            modal_open,
-            &app.context.mcp_servers,
-            &app.expanded_mcp_servers,
-            app.mcp_selected,
-            &hovered_mcp_row,
-            &crate::mcp_manager::McpBrowserState {
-                tab: app.mcp_browser_tab,
-                resources: &app.mcp_resources_cache,
-                prompts: &app.mcp_prompts_cache,
-            },
-            app.items_version,
-            app.expanded_version,
-        );
-    } else {
-        ui.wm.interaction.last_hitmap = crate::wm::WmHitmap::default();
-    }
-
-    ui.wm.sync_modals(&app.modal_open_flags());
-    if app.trust_mode_picker_open {
-        render_trust_mode_picker(f, area, app);
-    }
-    let layer_stack = std::mem::take(&mut ui.wm.layers);
-    layer_stack.render_modals(
-        f,
-        area,
-        app,
-        ui.wm.focused_id().unwrap_or(crate::wm::WindowId(0)),
-    );
-    layer_stack.render_blocking(f, area, app);
-    layer_stack.render_toasts(f, area, app);
-    ui.wm.layers = layer_stack;
+    ui.wm.render(f, area, app);
     if intro_progress >= 1.0 && app.startup_intro.is_some() {
         app.startup_intro = None;
     }
