@@ -60,6 +60,7 @@ pub struct HistorySearchModal {
     pub preview_rect: Option<Rect>,
     pub results_rect: Option<Rect>,
     pub last_input_rect: Option<Rect>,
+    pub input_focused: bool,
 }
 
 impl std::fmt::Debug for HistorySearchModal {
@@ -85,6 +86,7 @@ impl HistorySearchModal {
         self.preview_scroll = 0;
         self.preview_rect = None;
         self.results_rect = None;
+        self.input_focused = true;
     }
 
     pub fn close(&mut self) {
@@ -340,9 +342,11 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
                 self.move_down();
             }
             KeyAction::CursorLeft => {
+                self.input_focused = true;
                 self.editor.move_left();
             }
             KeyAction::CursorRight => {
+                self.input_focused = true;
                 self.editor.move_right();
             }
             KeyAction::PageUp => self.scroll_preview(true, 10),
@@ -353,19 +357,16 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
                 self.scope = self.scope.toggle();
             }
             KeyAction::Char(c) => {
-                if *c == 'j' && self.editor.buf().is_empty() {
-                    self.move_down();
-                } else if *c == 'k' && self.editor.buf().is_empty() {
-                    self.move_up();
-                } else {
-                    self.editor.insert_char(*c);
-                }
+                self.input_focused = true;
+                self.editor.insert_char(*c);
             }
             KeyAction::Backspace => {
+                self.input_focused = true;
                 self.editor.backspace();
             }
             KeyAction::Submit => {
                 self.run_search(app);
+                self.input_focused = false;
             }
             _ => {}
         }
@@ -373,6 +374,9 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
+        if !self.input_focused {
+            return None;
+        }
         self.last_input_rect.map(|r| {
             let before_cursor = &self.editor.buf()[..self.editor.cursor()];
             let col = crate::width::width(before_cursor) as u16;
@@ -424,7 +428,7 @@ fn render_help_bar(f: &mut ratatui::Frame, area: Rect) {
     let t = crate::theme::theme();
     let hints = [
         ("Enter", "search"),
-        ("↑↓/jk", "navigate"),
+        ("↑↓", "navigate"),
         ("Tab", "scope"),
         ("Esc", "close"),
         ("regex", "/pattern/"),
