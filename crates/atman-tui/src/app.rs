@@ -688,11 +688,7 @@ impl AppState {
             )
         };
         let is_new = !existing_ids.contains(&window_id);
-        if let Some(panel) = wm
-            .panels
-            .iter_mut()
-            .find(|panel| panel.id == window_id)
-        {
+        if let Some(panel) = wm.panels.iter_mut().find(|panel| panel.id == window_id) {
             panel.content = Some(content);
         }
         is_new

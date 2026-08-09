@@ -1,9 +1,9 @@
+use crate::UiState;
 use crate::compact_review_modal::handle_compact_review_key;
 use crate::form_modal::handle_form_key;
 use crate::history_search_modal::handle_history_search_key;
 use crate::palette::handle_palette_key;
 use crate::session_switcher::handle_session_switcher_key;
-use crate::UiState;
 use tokio::sync::mpsc;
 
 use super::TuiControl;

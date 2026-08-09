@@ -6,10 +6,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use tokio::sync::mpsc;
 
+use crate::TuiControl;
 use crate::app::AppState;
 use crate::input::InputEditor;
 use crate::keys::{self, KeyAction};
-use crate::TuiControl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchStatus {

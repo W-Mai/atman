@@ -1,13 +1,13 @@
+use crate::TuiControl;
 use crate::app::AppState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
-use crate::TuiControl;
-use tokio::sync::mpsc;
 use atman_runtime::PendingCompactReview;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactReviewMode {
