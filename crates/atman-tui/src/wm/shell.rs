@@ -222,3 +222,110 @@ pub fn render_shell(
         }
     }
 }
+
+pub fn render_overlay_shell(
+    f: &mut Frame,
+    rect: Rect,
+    title: Line<'_>,
+    icon: &str,
+    accent: Color,
+    show_header: bool,
+    t: &crate::theme::Theme,
+) -> Rect {
+    let bg: Color = t.modal_bg.lerp(t.highlight_bg, 0.15);
+
+    let sanitize_rect = Rect {
+        x: rect.x.saturating_sub(2),
+        y: rect.y.saturating_sub(1),
+        width: rect.width.saturating_add(4),
+        height: rect.height.saturating_add(2),
+    };
+    crate::sanitize_widget_edges(f, sanitize_rect);
+    crate::wm::shadow::render_shadow(f, rect, t);
+
+    f.render_widget(ratatui::widgets::Clear, rect);
+    f.render_widget(
+        ratatui::widgets::Block::default().style(ratatui::style::Style::default().bg(bg)),
+        rect,
+    );
+
+    if !show_header {
+        return Rect {
+            x: rect.x + 1,
+            y: rect.y,
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(1),
+        };
+    }
+
+    let title_line = Line::from(
+        std::iter::once(Span::styled(
+            format!(" {} ", icon),
+            Style::default().fg(accent).bg(bg),
+        ))
+        .chain(title.spans)
+        .collect::<Vec<_>>(),
+    );
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(title_line),
+        Rect { x: rect.x, y: rect.y, width: rect.width, height: 1 },
+    );
+
+    let sep = std::iter::repeat_n('─', rect.width as usize).collect::<String>();
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(t.border.into()).bg(bg)))),
+        Rect { x: rect.x, y: rect.y + 1, width: rect.width, height: 1 },
+    );
+
+    Rect {
+        x: rect.x + 1,
+        y: rect.y + 2,
+        width: rect.width.saturating_sub(2),
+        height: rect.height.saturating_sub(3),
+    }
+}
+
+pub fn render_section_header(
+    f: &mut Frame,
+    area: Rect,
+    title: Line<'_>,
+    t: &crate::theme::Theme,
+) {
+    let bg: Color = t.modal_bg.lerp(t.highlight_bg, 0.15);
+    let line = Line::from(
+        std::iter::once(Span::styled(" ", Style::default().bg(bg)))
+            .chain(title.spans)
+            .collect::<Vec<_>>(),
+    );
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(line),
+        Rect { x: area.x, y: area.y, width: area.width, height: 1 },
+    );
+    if area.height > 1 {
+        let sep = "─".repeat(area.width as usize);
+        f.render_widget(
+            ratatui::widgets::Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(t.border.into()).bg(bg)))),
+            Rect { x: area.x, y: area.y + 1, width: area.width, height: 1 },
+        );
+    }
+}
+
+pub fn render_column_divider(
+    f: &mut Frame,
+    x: u16,
+    y: u16,
+    height: u16,
+    t: &crate::theme::Theme,
+) {
+    let bg: Color = t.modal_bg.lerp(t.highlight_bg, 0.15);
+    let buf_area = f.buffer_mut().area;
+    for ry in 0..height {
+        let py = y + ry;
+        if x < buf_area.x || x >= buf_area.x + buf_area.width || py < buf_area.y || py >= buf_area.y + buf_area.height {
+            continue;
+        }
+        let cell = &mut f.buffer_mut()[(x, py)];
+        cell.set_symbol("│");
+        cell.set_style(Style::default().fg(t.border.into()).bg(bg));
+    }
+}
