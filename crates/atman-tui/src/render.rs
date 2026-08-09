@@ -619,10 +619,9 @@ pub(crate) fn render_trust_mode_picker(
     area: ratatui::layout::Rect,
     app: &AppState,
 ) {
-    use ratatui::layout::Alignment;
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
+    use ratatui::widgets::{Clear, List, ListItem, ListState};
 
     let modes = atman_runtime::trust::TrustMode::all();
     let t = crate::theme::theme();
@@ -663,20 +662,27 @@ pub(crate) fn render_trust_mode_picker(
         height: h,
     };
     f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Trust Mode — j/k select, Enter confirm, Esc cancel ")
-        .title_alignment(Alignment::Center);
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        popup,
+        Line::from(Span::styled(
+            "Trust Mode",
+            Style::default().fg(t.tinted_fg.into()),
+        )),
+        "⚡",
+        t.accent.into(),
+        true,
+        &t,
+    );
     let mut state = ListState::default();
     state.select(Some(app.picker_selected.min(items.len() - 1)));
     f.render_stateful_widget(
-        List::new(items).block(block).highlight_style(
+        List::new(items).highlight_style(
             Style::default()
                 .bg(t.highlight_bg.into())
                 .add_modifier(Modifier::BOLD),
         ),
-        popup,
+        inner,
         &mut state,
     );
 }
@@ -689,7 +695,7 @@ pub(crate) fn render_notify_modal(
     use ratatui::layout::Alignment;
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+    use ratatui::widgets::{Clear, Paragraph, Wrap};
 
     let theme = crate::theme::theme();
     let w = 60u16.min(area.width.saturating_sub(8));
@@ -705,19 +711,15 @@ pub(crate) fn render_notify_modal(
     };
 
     f.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Thick)
-        .border_style(Style::default().fg(theme.error.into()))
-        .title(Span::styled(
-            " ⚠ ERROR ",
-            Style::default()
-                .fg(theme.error.into())
-                .add_modifier(Modifier::BOLD),
-        ))
-        .style(Style::default().bg(theme.note_error_bg.into()));
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        Line::default(),
+        "",
+        theme.accent.into(),
+        false,
+        &theme,
+    );
 
     let text = Paragraph::new(Line::from(Span::styled(
         message,
@@ -752,10 +754,9 @@ pub(crate) fn render_theme_picker(
     area: ratatui::layout::Rect,
     app: &AppState,
 ) {
-    use ratatui::layout::Alignment;
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState};
+    use ratatui::widgets::{Clear, List, ListItem, ListState};
 
     let t = crate::theme::theme();
     let themes = [
@@ -789,20 +790,27 @@ pub(crate) fn render_theme_picker(
         height: h,
     };
     f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Theme — j/k select, Enter confirm, Esc cancel ")
-        .title_alignment(Alignment::Center);
+    let inner = crate::wm::shell::render_overlay_shell(
+        f,
+        popup,
+        Line::from(Span::styled(
+            "Theme",
+            Style::default().fg(t.tinted_fg.into()),
+        )),
+        "◐",
+        t.accent.into(),
+        true,
+        &t,
+    );
     let mut state = ListState::default();
     state.select(Some(app.picker_selected.min(items.len() - 1)));
     f.render_stateful_widget(
-        List::new(items).block(block).highlight_style(
+        List::new(items).highlight_style(
             Style::default()
-                .bg(t.highlight_bg.into())
+                .fg(t.tinted_fg.into())
                 .add_modifier(Modifier::BOLD),
         ),
-        popup,
+        inner,
         &mut state,
     );
 }

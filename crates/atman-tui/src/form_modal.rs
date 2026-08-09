@@ -2,7 +2,7 @@ use atman_runtime::form::{FormAnswer, FormKind, PendingForm};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use tokio::sync::mpsc;
 
@@ -502,22 +502,37 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
     };
     crate::sanitize_widget_edges(f, rect);
     f.render_widget(Clear, rect);
-    let title_spans = build_title_spans(form.kind.discriminator(), modal);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(t.accent.into()))
-        .style(Style::default().bg(t.modal_bg.into()))
-        .title(Line::from(title_spans))
-        .title_bottom(
-            Line::from(Span::styled(
-                hint_for(&form.kind),
-                Style::default().fg(t.subtle_fg.into()),
-            ))
-            .right_aligned(),
-        );
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let title_line = Line::from(build_title_spans(form.kind.discriminator(), modal));
+    let shell_inner = crate::wm::shell::render_overlay_shell(
+        f,
+        rect,
+        title_line,
+        "✎",
+        t.accent.into(),
+        true,
+        &t,
+    );
+    // Reserve a bottom line for the keyboard shortcut hint.
+    let hint_area = Rect {
+        x: shell_inner.x,
+        y: shell_inner.y + shell_inner.height.saturating_sub(1),
+        width: shell_inner.width,
+        height: 1,
+    };
+    let inner = Rect {
+        x: shell_inner.x,
+        y: shell_inner.y,
+        width: shell_inner.width,
+        height: shell_inner.height.saturating_sub(1),
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint_for(&form.kind),
+            Style::default().fg(t.subtle_fg.into()),
+        )))
+        .alignment(Alignment::Right),
+        hint_area,
+    );
 
     let inner_w = inner.width as usize;
     let prompt_style = Style::default()
