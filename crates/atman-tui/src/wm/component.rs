@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use crate::keys::KeyAction;
 use crate::wm::PanelBtn;
 
-use super::window::WindowId;
+use super::window::{ContentKey, WindowContent, WindowId};
 
 #[derive(Debug, Clone)]
 pub enum WmEvent {
@@ -35,6 +35,12 @@ pub enum WmCommand {
     OpenTaskPanel {
         handle: String,
         maximized: bool,
+    },
+    OpenContentPanel {
+        label: String,
+        key: ContentKey,
+        title: String,
+        window_content: WindowContent,
     },
     PushToast(String),
 }

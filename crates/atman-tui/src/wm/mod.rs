@@ -497,8 +497,11 @@ impl WindowManager {
         _app: &mut crate::app::AppState,
         _control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> (bool, Vec<WmCommand>) {
-        if !self.layers.modal_stack.is_empty() {
-            return (false, Vec::new());
+        if let Some(kind) = self.layers.dispatch_key() {
+            return (
+                self.modals.handle_key_top(kind, action, _app, _control_tx),
+                Vec::new(),
+            );
         }
         match action {
             crate::keys::KeyAction::CyclePanelForward => {
@@ -604,6 +607,33 @@ impl WindowManager {
                 }
                 WmCommand::OpenTaskPanel { handle, maximized } => {
                     app.open_task_panel(self, &handle, app.maximized_canvas(), maximized, false);
+                }
+                WmCommand::OpenContentPanel {
+                    label,
+                    key,
+                    title,
+                    window_content,
+                } => {
+                    let canvas = app.last_transcript_rect.unwrap_or_else(|| app.maximized_canvas());
+                    let id = self.open(&label, key, window_content.clone(), &title, canvas);
+                    let content: Option<Box<dyn crate::wm::WindowComponent>> =
+                        match window_content {
+                            crate::wm::WindowContent::Mcp => Some(Box::new(
+                                crate::window::mcp_panel::McpPanelContent { scroll: 0 },
+                            )),
+                            crate::wm::WindowContent::Cheatsheet => Some(Box::new(
+                                crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+                            )),
+                            _ => None,
+                        };
+                    if let Some((p, content)) = self
+                        .panels
+                        .iter_mut()
+                        .find(|p| p.id == id)
+                        .zip(content)
+                    {
+                        p.content = Some(content);
+                    }
                 }
                 WmCommand::PushToast(message) => app.push_toast(
                     message,
