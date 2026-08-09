@@ -1,5 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use tokio::sync::mpsc;
 
 use super::component::{EventCtx, HitRegion, RenderCtx, WmEvent, WmEventResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,4 +173,590 @@ pub trait ModalOverlay {
     fn title(&self) -> ratatui::text::Line<'static>;
     fn icon(&self) -> &str;
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color;
+}
+
+
+// ── ModalManager dispatch methods ──
+
+impl ModalManager {
+    /// Render the topmost modal's content inside the shell-provided area.
+    pub fn render_top(
+        &mut self,
+        kind: ModalKind,
+        f: &mut Frame,
+        area: Rect,
+        app: &mut crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        match kind {
+            ModalKind::Palette => self.palette.render_content(f, area, app, t),
+            ModalKind::Form => self.form_modal.render_content(f, area, app, t),
+            ModalKind::CompactReview => {
+                if let Some(m) = self.compact_review.as_mut() {
+                    m.render_content(f, area, app, t);
+                }
+            }
+            ModalKind::SessionSwitcher => self.session_switcher.render_content(f, area, app, t),
+            ModalKind::HistorySearch => self.history_search.render_content(f, area, app, t),
+            ModalKind::ProviderManager => self.provider_manager.render_content(f, area, app, t),
+            ModalKind::AliasManager => self.alias_manager.render_content(f, area, app, t),
+            ModalKind::ModelPicker => self.model_picker.render_content(f, area, app, t),
+            ModalKind::Onboarding => self.onboarding.render_content(f, area, app, t),
+            ModalKind::ThemePicker => self.render_theme_picker_content(f, area, app, t),
+            ModalKind::TrustModePicker => self.render_trust_mode_picker_content(f, area, app, t),
+        }
+    }
+
+    /// Handle a key for the topmost modal. Returns true if consumed.
+    /// Handles simple modals; complex modals (palette, form, etc.) return false
+    /// and fall through to handle_modal_key in key_handler.
+    pub fn handle_key_top(
+        &mut self,
+        kind: ModalKind,
+        action: &crate::keys::KeyAction,
+        app: &mut crate::app::AppState,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        match kind {
+            ModalKind::ModelPicker => {
+                if self.model_picker.open {
+                    self.model_picker.handle_key(action);
+                    if let Some(model) = self.model_picker.picked.take() {
+                        if let Some(tx) = tx {
+                            let _ = tx.send(crate::TuiControl::SwitchModel {
+                                model: model.clone(),
+                            });
+                        }
+                        app.context.model = model.clone();
+                        app.push_toast(
+                            format!("model switched to {model}"),
+                            crate::app::NoteLevel::Success,
+                            std::time::Duration::from_secs(3),
+                            crate::app::ToastPosition::TopRight,
+                        );
+                    }
+                }
+                true
+            }
+            ModalKind::Onboarding => {
+                if self.onboarding_open {
+                    match self.onboarding.handle_key(action) {
+                        crate::onboarding::OnboardingEvent::None => {}
+                        crate::onboarding::OnboardingEvent::OpenProviderManager => {
+                            self.provider_manager.open_add();
+                        }
+                        crate::onboarding::OnboardingEvent::Completed => {
+                            self.onboarding_open = false;
+                            app.hints_dismissed = false;
+                            app.save_ui_state();
+                            app.push_toast(
+                                "Setup complete — smart model configured".to_string(),
+                                crate::app::NoteLevel::Success,
+                                std::time::Duration::from_secs(4),
+                                crate::app::ToastPosition::TopRight,
+                            );
+                        }
+                        crate::onboarding::OnboardingEvent::Skipped => {
+                            self.onboarding_open = false;
+                            app.onboarding_skipped = true;
+                            app.save_ui_state();
+                            app.push_toast(
+                                "You can configure atman in ~/.config/atman/config.toml"
+                                    .to_string(),
+                                crate::app::NoteLevel::Warn,
+                                std::time::Duration::from_secs(5),
+                                crate::app::ToastPosition::TopRight,
+                            );
+                        }
+                    }
+                }
+                true
+            }
+            ModalKind::ProviderManager => {
+                if self.provider_manager.open {
+                    self.provider_manager.handle_key(action, tx);
+                    if let Some(model) = self.provider_manager.open_alias_model.take() {
+                        self.alias_manager.open_form_with_model(&model);
+                    }
+                    if self.provider_manager.add_just_completed {
+                        self.provider_manager.add_just_completed = false;
+                        if self.onboarding_open {
+                            let name = self.provider_manager.last_added_name.take();
+                            self.onboarding.provider_added(name.as_deref());
+                        }
+                    }
+                    if self.provider_manager.refresh_just_triggered {
+                        self.provider_manager.refresh_just_triggered = false;
+                        app.push_toast(
+                            "refreshing models…",
+                            crate::app::NoteLevel::Info,
+                            std::time::Duration::from_secs(2),
+                            crate::app::ToastPosition::TopRight,
+                        );
+                    }
+                    if self.provider_manager.test_just_triggered {
+                        self.provider_manager.test_just_triggered = false;
+                        app.push_toast(
+                            "testing endpoint…",
+                            crate::app::NoteLevel::Info,
+                            std::time::Duration::from_secs(5),
+                            crate::app::ToastPosition::TopRight,
+                        );
+                    }
+                    if self.onboarding_open && !self.provider_manager.open {
+                        self.onboarding.check_provider_manager_closed();
+                    }
+                }
+                true
+            }
+            ModalKind::AliasManager => {
+                if self.alias_manager.open {
+                    self.alias_manager.handle_key(action, tx);
+                }
+                true
+            }
+            ModalKind::ThemePicker => {
+                if self.theme_picker_open {
+                    self.handle_theme_picker_key(action, app);
+                }
+                true
+            }
+            ModalKind::TrustModePicker => {
+                if self.trust_mode_picker_open {
+                    self.handle_trust_mode_picker_key(action, app);
+                }
+                true
+            }
+            // Complex modals — fall through to handle_modal_key
+            _ => false,
+        }
+    }
+
+    /// Get cursor position for the topmost modal.
+    pub fn cursor_position(&self, kind: ModalKind) -> Option<(u16, u16)> {
+        match kind {
+            ModalKind::Palette => self.palette.cursor_position(),
+            ModalKind::HistorySearch => self.history_search.cursor_position(),
+            ModalKind::Form => self.form_modal.cursor_position(),
+            ModalKind::AliasManager => self.alias_manager.cursor_position(),
+            _ => None,
+        }
+    }
+
+    /// Compute the modal's centered rect within the viewport.
+    pub fn compute_modal_rect(&self, kind: ModalKind, canvas: Rect) -> Rect {
+        match kind {
+            ModalKind::Palette => {
+                let w = canvas.width.saturating_sub(4).clamp(40, 80);
+                let desired = 4 + self.palette.display_len() as u16 + 2;
+                let h = canvas.height.saturating_sub(4).min(desired).max(6);
+                center_rect(canvas, w, h)
+            }
+            ModalKind::Form => {
+                let outer_width = (canvas.width.saturating_mul(3) / 4).clamp(50, 100);
+                let content_lines = self.form_modal.pending.as_ref()
+                    .map(|f| crate::form_modal::estimate_height(&f.kind, &self.form_modal.multi_selected))
+                    .unwrap_or(6);
+                let outer_height = (content_lines + 6)
+                    .min(canvas.height.saturating_sub(4).max(6));
+                center_rect(canvas, outer_width, outer_height)
+            }
+            ModalKind::CompactReview => {
+                let w = canvas.width.saturating_sub(4).clamp(60, 140);
+                let h = canvas.height.saturating_sub(4).clamp(16, 40);
+                center_rect(canvas, w, h)
+            }
+            ModalKind::SessionSwitcher => {
+                let w = canvas.width.saturating_sub(4).clamp(60, 100);
+                let desired = 3 + self.session_switcher.rows.len().max(1) as u16 + 2;
+                let h = canvas.height.saturating_sub(4).min(desired).max(8);
+                center_rect(canvas, w, h)
+            }
+            ModalKind::HistorySearch => {
+                let w = canvas.width.saturating_sub(4).clamp(70, 140);
+                let h = canvas.height.saturating_sub(4).clamp(20, 42);
+                center_rect(canvas, w, h)
+            }
+            ModalKind::ProviderManager => {
+                let w = canvas.width.saturating_sub(4).clamp(60, 90);
+                let h = canvas.height.saturating_sub(2).clamp(10, 24);
+                center_rect(canvas, w, h)
+            }
+            ModalKind::AliasManager => {
+                if self.alias_manager.show_form {
+                    let w = canvas.width.saturating_sub(4).clamp(60, 84);
+                    let h = canvas.height.saturating_sub(2).clamp(14, 24);
+                    center_rect(canvas, w, h)
+                } else {
+                    let w = canvas.width.saturating_sub(4).clamp(40, 60);
+                    let h = canvas.height.saturating_sub(2).clamp(8, 20);
+                    center_rect(canvas, w, h)
+                }
+            }
+            ModalKind::ModelPicker => {
+                let w = canvas.width.saturating_sub(4).clamp(48, 74);
+                let h = canvas.height.saturating_sub(2).clamp(10, 22);
+                center_rect(canvas, w, h)
+            }
+            ModalKind::Onboarding => {
+                if canvas.width < 60 || canvas.height < 20 {
+                    canvas
+                } else {
+                    let w = canvas.width.saturating_sub(4).clamp(54, 82);
+                    let h = canvas.height.saturating_sub(2).clamp(18, 30);
+                    center_rect(canvas, w, h)
+                }
+            }
+            ModalKind::ThemePicker => {
+                let h = 5u16 + 4;
+                let w = 70u16.min(canvas.width);
+                center_rect(canvas, w, h)
+            }
+            ModalKind::TrustModePicker => {
+                let h = atman_runtime::trust::TrustMode::all().len() as u16 + 4;
+                let w = 70u16.min(canvas.width);
+                center_rect(canvas, w, h)
+            }
+        }
+    }
+
+    /// Title for the modal shell header.
+    pub fn title_for(&self, kind: ModalKind) -> ratatui::text::Line<'static> {
+        let t = crate::theme::theme();
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        match kind {
+            ModalKind::Palette => Line::from(Span::styled(
+                "Command Palette (Esc to close)",
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            ModalKind::Form => {
+                let title = self
+                    .form_modal
+                    .pending
+                    .as_ref()
+                    .map(|f| match f.kind.discriminator() {
+                        "text" => "Text Input",
+                        "confirm" => "Confirm",
+                        "select" => "Select",
+                        _ => "Form",
+                    })
+                    .unwrap_or("Form");
+                Line::from(Span::styled(
+                    title.to_string(),
+                    Style::default().fg(t.tinted_fg.into()),
+                ))
+            }
+            ModalKind::CompactReview => {
+                if let Some(m) = &self.compact_review {
+                    Line::from(Span::styled(
+                        format!(
+                            "Review Compaction — slice {}..{} ({} msgs, ~{} tokens)",
+                            m.pending.range_start,
+                            m.pending.range_end,
+                            m.pending.slice_count,
+                            m.pending.tokens_before,
+                        ),
+                        Style::default().fg(t.warn.into()),
+                    ))
+                } else {
+                    Line::default()
+                }
+            }
+            ModalKind::SessionSwitcher => {
+                let title = if self.session_switcher.rename_mode {
+                    format!(
+                        " Rename · {}▏ · Enter save · Esc cancel ",
+                        self.session_switcher.rename_buf
+                    )
+                } else if self.session_switcher.delete_armed.is_some() {
+                    " Delete? · d again to confirm · any other key cancels ".to_string()
+                } else if self.session_switcher.filter_mode {
+                    format!(
+                        " Filter · {}▏ · Esc/Enter done ",
+                        self.session_switcher.filter
+                    )
+                } else {
+                    format!(" Sessions · {} ", self.session_switcher.scope.label())
+                };
+                let color = if self.session_switcher.rename_mode {
+                    t.warn
+                } else if self.session_switcher.delete_armed.is_some() {
+                    t.error
+                } else {
+                    t.accent
+                };
+                Line::from(Span::styled(
+                    title,
+                    Style::default().fg(color.into()).add_modifier(Modifier::BOLD),
+                ))
+            }
+            ModalKind::HistorySearch => Line::from(vec![
+                Span::styled(
+                    "Search History · ",
+                    Style::default()
+                        .fg(t.accent.into())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    self.history_search.scope.label().to_string(),
+                    Style::default()
+                        .fg(t.accent.into())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            ModalKind::ProviderManager => Line::from(Span::styled(
+                "Provider Manager",
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            ModalKind::AliasManager => Line::from(Span::styled(
+                if self.alias_manager.show_form {
+                    "Alias Form"
+                } else {
+                    "Aliases"
+                },
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            ModalKind::ModelPicker => Line::from(Span::styled(
+                "Switch Model",
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            ModalKind::Onboarding => Line::from(Span::styled(
+                "Welcome to atman",
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            ModalKind::ThemePicker => Line::from(Span::styled(
+                "Theme",
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            ModalKind::TrustModePicker => Line::from(Span::styled(
+                "Trust Mode",
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+        }
+    }
+
+    /// Icon for the modal shell header.
+    pub fn icon_for(&self, kind: ModalKind) -> &'static str {
+        match kind {
+            ModalKind::Palette => "⌘",
+            ModalKind::Form => "✎",
+            ModalKind::CompactReview => "◫",
+            ModalKind::SessionSwitcher => "▣",
+            ModalKind::HistorySearch => "⌕",
+            ModalKind::ProviderManager => "⚙",
+            ModalKind::AliasManager => "@",
+            ModalKind::ModelPicker => "◆",
+            ModalKind::Onboarding => "✦",
+            ModalKind::ThemePicker => "◐",
+            ModalKind::TrustModePicker => "⚡",
+        }
+    }
+
+    /// Accent color for the modal shell header.
+    pub fn accent_for(&self, kind: ModalKind, t: &crate::theme::Theme) -> ratatui::style::Color {
+        match kind {
+            ModalKind::CompactReview => t.warn.into(),
+            ModalKind::SessionSwitcher => {
+                if self.session_switcher.rename_mode {
+                    t.warn.into()
+                } else if self.session_switcher.delete_armed.is_some() {
+                    t.error.into()
+                } else {
+                    t.accent.into()
+                }
+            }
+            ModalKind::HistorySearch => {
+                match self.history_search.scope {
+                    crate::history_search_modal::HistorySearchScope::Session => t.accent.into(),
+                    crate::history_search_modal::HistorySearchScope::Project => t.warn.into(),
+                }
+            }
+            _ => t.accent.into(),
+        }
+    }
+
+    // ── Theme picker ──
+
+    fn render_theme_picker_content(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{List, ListItem, ListState};
+
+        let themes = [
+            ("default", "calm / steady / eager / reckless"),
+            ("wuxia", "守拙 / 行云 / 破竹 / 逍遥"),
+            ("animal", "🦔 hedgehog / 🐱 cat / 🐶 dog / 🦡 honey-badger"),
+            ("weather", "🌧 drizzle / ☀️ clear / ⛈ storm / 🌪 tornado"),
+            ("drink", "💧 water / ☕ coffee / ☕ espresso / 🧪 bleach"),
+        ];
+        let items: Vec<ListItem> = themes
+            .iter()
+            .map(|(id, desc)| {
+                let is_current = app.trust.theme.to_string() == *id;
+                let marker = if is_current { "  ← current" } else { "" };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {:<10}", id),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("  {}{}", desc, marker)),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(app.picker_selected.min(items.len() - 1)));
+        f.render_stateful_widget(
+            List::new(items).highlight_style(
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            area,
+            &mut state,
+        );
+    }
+
+    fn handle_theme_picker_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        app: &mut crate::app::AppState,
+    ) {
+        let themes = [
+            atman_runtime::trust::Theme::Default,
+            atman_runtime::trust::Theme::Wuxia,
+            atman_runtime::trust::Theme::Animal,
+            atman_runtime::trust::Theme::Weather,
+            atman_runtime::trust::Theme::Drink,
+        ];
+        let max = themes.len();
+        match action {
+            crate::keys::KeyAction::Escape => {
+                self.theme_picker_open = false;
+            }
+            crate::keys::KeyAction::HistoryUp | crate::keys::KeyAction::CursorLeft => {
+                app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
+            }
+            crate::keys::KeyAction::HistoryDown | crate::keys::KeyAction::CursorRight => {
+                app.picker_selected = (app.picker_selected + 1) % max;
+            }
+            crate::keys::KeyAction::Submit | crate::keys::KeyAction::Char('\r') => {
+                app.trust.theme = themes[app.picker_selected.min(max - 1)];
+                self.theme_picker_open = false;
+                app.save_ui_state();
+            }
+            crate::keys::KeyAction::Quit => app.should_quit = true,
+            _ => {}
+        }
+    }
+
+    // ── Trust mode picker ──
+
+    fn render_trust_mode_picker_content(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{List, ListItem, ListState};
+
+        let modes = atman_runtime::trust::TrustMode::all();
+        let items: Vec<ListItem> = modes
+            .iter()
+            .map(|&m| {
+                let d = app.trust.theme.display(m);
+                let color = match d.color {
+                    atman_runtime::trust::ModeColor::Cyan => t.accent.into(),
+                    atman_runtime::trust::ModeColor::Green => t.success.into(),
+                    atman_runtime::trust::ModeColor::Yellow => t.warn.into(),
+                    atman_runtime::trust::ModeColor::Orange => {
+                        ratatui::style::Color::Rgb(208, 135, 22)
+                    }
+                    atman_runtime::trust::ModeColor::Red => t.error.into(),
+                };
+                let marker = if m == app.trust.mode {
+                    "← current"
+                } else {
+                    ""
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", d.emoji), Style::default().fg(color)),
+                    Span::styled(
+                        format!("{:<14}", d.name),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("  {}  {}", d.description, marker)),
+                ]))
+            })
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(app.picker_selected.min(items.len() - 1)));
+        f.render_stateful_widget(
+            List::new(items).highlight_style(
+                Style::default()
+                    .bg(t.highlight_bg.into())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            area,
+            &mut state,
+        );
+    }
+
+    fn handle_trust_mode_picker_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        app: &mut crate::app::AppState,
+    ) {
+        let modes = atman_runtime::trust::TrustMode::all();
+        let max = modes.len();
+        match action {
+            crate::keys::KeyAction::Escape => {
+                self.trust_mode_picker_open = false;
+            }
+            crate::keys::KeyAction::HistoryUp | crate::keys::KeyAction::CursorLeft => {
+                app.picker_selected = app.picker_selected.checked_sub(1).unwrap_or(max - 1);
+            }
+            crate::keys::KeyAction::HistoryDown | crate::keys::KeyAction::CursorRight => {
+                app.picker_selected = (app.picker_selected + 1) % max;
+            }
+            crate::keys::KeyAction::Submit | crate::keys::KeyAction::Char('\r') => {
+                let new_mode = modes[app.picker_selected.min(max - 1)];
+                let prev = app.trust.mode;
+                app.trust.mode = new_mode;
+                self.trust_mode_picker_open = false;
+                app.save_ui_state();
+                if new_mode != prev {
+                    if let Some(sess) = app.session.as_ref() {
+                        sess.approval().set_auto_ceiling(new_mode.auto_ceiling());
+                    }
+                    let display = app.trust.theme.display(new_mode);
+                    if let Some(warning) = new_mode.warning(&display) {
+                        app.push_note(&warning, crate::app::NoteLevel::Warn);
+                    }
+                }
+            }
+            crate::keys::KeyAction::Quit => app.should_quit = true,
+            _ => {}
+        }
+    }
+}
+
+// ── Helpers ──
+
+fn center_rect(canvas: Rect, w: u16, h: u16) -> Rect {
+    Rect {
+        x: canvas.x + canvas.width.saturating_sub(w) / 2,
+        y: canvas.y + canvas.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    }
 }

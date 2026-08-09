@@ -41,6 +41,7 @@ pub struct FormModal {
     pub confirm_form: Option<PendingForm>,
     pub confirm_focus: usize,
     pub cached_forms: std::collections::HashMap<String, PendingForm>,
+    pub last_input_rect: Option<Rect>,
 }
 
 impl FormModal {
@@ -736,6 +737,394 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &FormModal) {
     }
 }
 
+impl crate::wm::modal::ModalOverlay for FormModal {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        let Some(form) = self.pending.as_ref() else {
+            return;
+        };
+        let hint_area = Rect {
+            x: area.x,
+            y: area.y.checked_add(area.height).map_or(area.y, |l| l.saturating_sub(1)),
+            width: area.width,
+            height: 1,
+        };
+        let inner = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint_for(&form.kind),
+                Style::default().fg(t.subtle_fg.into()),
+            )))
+            .alignment(Alignment::Right),
+            hint_area,
+        );
+
+        let inner_w = inner.width as usize;
+        let prompt_style = Style::default()
+            .fg(t.tinted_fg.into())
+            .add_modifier(Modifier::BOLD);
+        let dim_style = Style::default().fg(t.subtle_fg.into());
+        let idle_row_style = Style::default()
+            .fg(t.tinted_fg.into())
+            .bg(t.panel_bg.into());
+        let mut text_cursor: Option<(u16, u16)> = None;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            form.kind.prompt().to_string(),
+            prompt_style,
+        )));
+        lines.push(Line::from(""));
+
+        match &form.kind {
+            FormKind::Confirm { .. } => {
+                let yes_focused = self.confirm_focus == 0;
+                let no_focused = self.confirm_focus == 1;
+                let yes_style = if yes_focused {
+                    Style::default()
+                        .fg(t.code_bg.into())
+                        .bg(t.success.into())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(t.tinted_fg.into())
+                        .bg(t.panel_bg.into())
+                };
+                let no_style = if no_focused {
+                    Style::default()
+                        .fg(t.code_bg.into())
+                        .bg(t.error.into())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(t.tinted_fg.into())
+                        .bg(t.panel_bg.into())
+                };
+                let label = "  Yes  ";
+                let label_w = crate::width::width(label);
+                let gap = 3;
+                let no_label = "  No  ";
+                let no_w = crate::width::width(no_label);
+                let total = label_w + gap + no_w;
+                let left_pad = inner_w.saturating_sub(total) / 2;
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                if left_pad > 0 {
+                    spans.push(Span::styled(
+                        " ".repeat(left_pad),
+                        Style::default().bg(t.modal_bg.into()),
+                    ));
+                }
+                spans.push(Span::styled(label.to_string(), yes_style));
+                spans.push(Span::styled(
+                    " ".repeat(gap),
+                    Style::default().bg(t.modal_bg.into()),
+                ));
+                spans.push(Span::styled(no_label.to_string(), no_style));
+                lines.push(Line::from(spans));
+            }
+            FormKind::SingleSelect { options, .. } => {
+                for (i, label) in options.iter().enumerate() {
+                    let is_cursor = i == self.cursor;
+                    let row_style = if is_cursor {
+                        Style::default()
+                            .fg(t.code_bg.into())
+                            .bg(t.accent.into())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        idle_row_style
+                    };
+                    let prefix = if is_cursor { "▶ " } else { "  " };
+                    let text = format!(" {prefix}{label} ");
+                    lines.push(render_full_row(
+                        inner_w,
+                        &text,
+                        row_style,
+                        t.modal_bg.into(),
+                    ));
+                    if i + 1 < options.len() {
+                        lines.push(Line::from(""));
+                    }
+                }
+            }
+            FormKind::MultiSelect {
+                options, min, max, ..
+            } => {
+                for (i, label) in options.iter().enumerate() {
+                    let checked = self.multi_selected.get(i).copied().unwrap_or(false);
+                    let is_cursor = i == self.cursor;
+                    let check_glyph = if checked { "✓" } else { " " };
+                    let row_style = if is_cursor && checked {
+                        Style::default()
+                            .fg(t.code_bg.into())
+                            .bg(t.success.into())
+                            .add_modifier(Modifier::BOLD)
+                    } else if is_cursor {
+                        Style::default()
+                            .fg(t.code_bg.into())
+                            .bg(t.accent.into())
+                            .add_modifier(Modifier::BOLD)
+                    } else if checked {
+                        Style::default()
+                            .fg(t.code_bg.into())
+                            .bg(t.success.into())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        idle_row_style
+                    };
+                    let prefix = if is_cursor { "▶ " } else { "  " };
+                    let text = format!(" {prefix}[{check_glyph}] {label} ");
+                    lines.push(render_full_row(
+                        inner_w,
+                        &text,
+                        row_style,
+                        t.modal_bg.into(),
+                    ));
+                    if i + 1 < options.len() {
+                        lines.push(Line::from(""));
+                    }
+                }
+                let count = self.multi_selected.iter().filter(|&&b| b).count();
+                let bounds = match (min, max) {
+                    (Some(m), Some(mx)) => format!(" (min {m}, max {mx})"),
+                    (Some(m), None) => format!(" (min {m})"),
+                    (None, Some(mx)) => format!(" (max {mx})"),
+                    (None, None) => String::new(),
+                };
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  {count} selected{bounds}"),
+                    dim_style,
+                )));
+            }
+            FormKind::Text {
+                placeholder,
+                multiline,
+                ..
+            } => {
+                let buf = self.text_editor.buf();
+                let display: String = if buf.is_empty() {
+                    placeholder.clone().unwrap_or_default()
+                } else {
+                    buf.to_string()
+                };
+                let text_style = if buf.is_empty() {
+                    dim_style
+                } else {
+                    prompt_style
+                };
+                let content_w = inner_w.saturating_sub(2);
+                let col = crate::input::wrapped_cursor_col(
+                    buf,
+                    self.text_editor.cursor(),
+                    content_w,
+                ) as u16;
+                let row = crate::input::wrapped_cursor_row(
+                    buf,
+                    self.text_editor.cursor(),
+                    content_w,
+                ) as u16;
+                text_cursor = Some((inner.x + 2 + col, inner.y + 2 + row));
+                self.last_input_rect = Some(Rect {
+                    x: inner.x + 2,
+                    y: inner.y + 2,
+                    width: content_w as u16,
+                    height: 1,
+                });
+                let row_style = Style::default()
+                    .fg(text_style.fg.unwrap_or(t.tinted_fg.into()))
+                    .bg(t.panel_bg.into());
+                for row in display.split('\n') {
+                    let text = format!("  {row}");
+                    lines.push(render_full_row(
+                        inner_w,
+                        &text,
+                        row_style,
+                        t.modal_bg.into(),
+                    ));
+                }
+                if buf.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "  ▏",
+                        Style::default().add_modifier(Modifier::SLOW_BLINK),
+                    )));
+                }
+                if *multiline {
+                    lines.push(Line::from(Span::styled(
+                        "  (Ctrl+Enter to submit multi-line input)",
+                        dim_style,
+                    )));
+                }
+            }
+        }
+        if let Some(err) = &self.error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  ! {err}"),
+                Style::default()
+                    .fg(t.error.into())
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        let para = Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false });
+        f.render_widget(para, inner);
+        if let Some((cx, cy)) = text_cursor {
+            f.set_cursor_position((cx, cy));
+        }
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        _app: &mut crate::app::AppState,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        use atman_runtime::form::FormKind;
+        let Some(form_id) = self.active_form_id().map(String::from) else {
+            return true;
+        };
+        let is_text = matches!(
+            self.pending.as_ref().map(|p| &p.kind),
+            Some(FormKind::Text { .. })
+        );
+        let is_confirm = matches!(
+            self.pending.as_ref().map(|p| &p.kind),
+            Some(FormKind::Confirm { .. })
+        );
+        let is_multi = matches!(
+            self.pending.as_ref().map(|p| &p.kind),
+            Some(FormKind::MultiSelect { .. })
+        );
+        macro_rules! dispatch {
+            ($outcome:expr) => {{
+                match $outcome {
+                    SubmitOutcome::Single { form_id, answer } => {
+                        if let Some(tx) = tx {
+                            let _ = tx.send(TuiControl::FormSubmit { form_id, answer });
+                        }
+                    }
+                    SubmitOutcome::BatchConfirmed => {
+                        for (i, answer) in self.batch_answers.iter().enumerate() {
+                            if let Some(a) = answer
+                                && let Some(tx) = tx
+                            {
+                                let id = self
+                                    .batch_ids
+                                    .get(i)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let _ = tx.send(TuiControl::FormSubmit {
+                                    form_id: id,
+                                    answer: a.clone(),
+                                });
+                            }
+                        }
+                    }
+                    SubmitOutcome::BatchCancelled => {
+                        for id in &self.batch_ids {
+                            if id == "__batch_confirm" {
+                                continue;
+                            }
+                            if let Some(tx) = tx {
+                                let _ = tx.send(TuiControl::FormSubmit {
+                                    form_id: id.clone(),
+                                    answer: atman_runtime::form::FormAnswer::Cancelled,
+                                });
+                            }
+                        }
+                    }
+                    SubmitOutcome::None => {}
+                }
+            }};
+        }
+        match action {
+            KeyAction::Escape => {
+                let outcome = self.cancel();
+                dispatch!(outcome);
+            }
+            KeyAction::Submit => {
+                let outcome = self.submit();
+                dispatch!(outcome);
+            }
+            KeyAction::Char('y') | KeyAction::Char('Y') if is_confirm => {
+                let outcome = self.submit();
+                dispatch!(outcome);
+            }
+            KeyAction::Char('n') | KeyAction::Char('N') if is_confirm => {
+                let outcome = self.confirm_no();
+                dispatch!(outcome);
+            }
+            KeyAction::Char(' ') if is_multi => {
+                self.toggle_current();
+            }
+            KeyAction::Tab => {
+                if let Some(target_id) = self.switch_to(1)
+                    && target_id != form_id
+                    && self.cached_forms.contains_key(&target_id)
+                {
+                    if let Some(cached) = self.cached_forms.get(&target_id).cloned() {
+                        let ids = self.batch_ids.clone();
+                        self.attach(cached, &ids);
+                    }
+                }
+            }
+            KeyAction::HistoryUp | KeyAction::Char('k') if !is_text => {
+                self.move_cursor(-1);
+            }
+            KeyAction::HistoryDown | KeyAction::Char('j') if !is_text => {
+                self.move_cursor(1);
+            }
+            KeyAction::CursorLeft if is_confirm => {
+                self.move_cursor(-1);
+            }
+            KeyAction::CursorRight if is_confirm => {
+                self.move_cursor(1);
+            }
+            KeyAction::Char(c) if is_text => {
+                self.text_editor.insert_char(*c);
+            }
+            KeyAction::Backspace if is_text => {
+                self.text_editor.backspace();
+            }
+            KeyAction::Newline if is_text => {
+                self.text_editor.insert_newline();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        self.last_input_rect
+            .map(|r| (r.x + self.text_editor.buf().chars().count() as u16, r.y))
+    }
+
+    fn title(&self) -> Line<'static> {
+        match self.pending.as_ref() {
+            Some(form) => Line::from(build_title_spans(form.kind.discriminator(), self)),
+            None => Line::from(""),
+        }
+    }
+
+    fn icon(&self) -> &str {
+        "📋"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
+}
+
 fn render_full_row<'a>(width: usize, text: &str, style: Style, fallback_bg: Color) -> Line<'a> {
     let text_w = crate::width::width(text);
     let pad = width.saturating_sub(text_w);
@@ -791,7 +1180,7 @@ fn build_title_spans(kind_name: &str, modal: &FormModal) -> Vec<Span<'static>> {
     spans
 }
 
-fn estimate_height(kind: &FormKind, _multi: &[bool]) -> u16 {
+pub fn estimate_height(kind: &FormKind, _multi: &[bool]) -> u16 {
     match kind {
         FormKind::Confirm { .. } => 3,
         FormKind::SingleSelect { options, .. } => options.len().min(12) as u16 * 2 + 1,

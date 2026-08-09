@@ -18,7 +18,8 @@ pub struct AliasManager {
     pub open: bool,
     pub aliases: Vec<(String, String)>,
     pub selected: usize,
-    show_form: bool,
+    pub show_form: bool,
+    pub last_input_rect: Option<Rect>,
     is_edit: bool,
     editor: InputEditor,
     edit_original: Option<String>,
@@ -45,6 +46,10 @@ impl AliasManager {
     pub fn close(&mut self) {
         self.open = false;
         self.show_form = false;
+    }
+
+    pub fn show_form(&self) -> bool {
+        self.show_form
     }
 
     pub fn refresh_list(&mut self) {
@@ -506,4 +511,114 @@ fn render_preview_panel(
         Paragraph::new(lines).wrap(Wrap { trim: false }),
         content_area,
     );
+}
+
+impl crate::wm::modal::ModalOverlay for AliasManager {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        if !self.show_form {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(area);
+            let list_area = rows[0];
+            let footer_area = rows[1];
+            let items: Vec<ListItem> = self
+                .aliases
+                .iter()
+                .enumerate()
+                .map(|(i, (a, m))| {
+                    let style = if i == self.selected {
+                        Style::default()
+                            .fg(t.accent.into())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Line::from(Span::styled(format!(" {} → {}", a, m), style)))
+                })
+                .collect();
+            let mut state = ListState::default().with_selected(Some(self.selected));
+            f.render_stateful_widget(List::new(items), list_area, &mut state);
+            let help = if self.aliases.is_empty() {
+                "a:add alias · e:edit · d:delete · Esc:close  (no aliases yet)"
+            } else {
+                "a:add  e:edit  d:delete  ↑↓:navigate  Esc:close"
+            };
+            let footer = Paragraph::new(Line::from(Span::styled(
+                help,
+                Style::default().fg(t.meta_fg.into()),
+            )))
+            .alignment(ratatui::layout::Alignment::Right);
+            f.render_widget(footer, footer_area);
+            return;
+        }
+        if area.height < 5 {
+            return;
+        }
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area);
+        let panels = rows[0];
+        let footer_area = rows[1];
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(panels);
+        self.last_input_rect = Some(Rect {
+            x: cols[0].x.saturating_add(6),
+            y: cols[0].y,
+            width: cols[0].width.saturating_sub(6),
+            height: 1,
+        });
+        render_tree_panel(f, cols[0], self, t);
+        render_preview_panel(f, cols[1], self, t);
+        let help = match self.focus {
+            Focus::NameInput => "Tab:model tree  Enter:save  Esc:cancel",
+            Focus::Tree => "Tab:name input  ↑↓/jk:navigate  Enter:save  Esc:cancel",
+        };
+        let footer = Paragraph::new(Line::from(Span::styled(
+            help,
+            Style::default().fg(t.meta_fg.into()),
+        )))
+        .alignment(ratatui::layout::Alignment::Right);
+        f.render_widget(footer, footer_area);
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        _app: &mut crate::app::AppState,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        self.handle_key(action, tx);
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        self.last_input_rect
+            .map(|r| (r.x + self.editor.buf().chars().count() as u16, r.y))
+    }
+
+    fn title(&self) -> Line<'static> {
+        Line::from(if self.show_form {
+            "Alias Form"
+        } else {
+            "Aliases"
+        })
+    }
+
+    fn icon(&self) -> &str {
+        "@"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
 }

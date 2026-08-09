@@ -156,3 +156,94 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, picker: &ModelPicker, current:
         rows[2],
     );
 }
+
+impl crate::wm::modal::ModalOverlay for ModelPicker {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("current: ", Style::default().fg(t.meta_fg.into())),
+                Span::styled(&app.context.model, Style::default().fg(t.accent.into())),
+            ])),
+            rows[0],
+        );
+
+        let picker_rows = self.rows();
+        let items: Vec<ListItem> = picker_rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let selected = i == self.selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(t.accent.into())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let line = match row {
+                    PickerRow::Alias { name, model } => Line::from(vec![
+                        Span::styled(format!(" {name:<10}"), style),
+                        Span::styled(" → ", Style::default().fg(t.meta_fg.into())),
+                        Span::styled(model.clone(), style),
+                    ]),
+                    PickerRow::Model { slug } => {
+                        Line::from(Span::styled(format!(" {slug}"), style))
+                    }
+                };
+                ListItem::new(line)
+            })
+            .collect();
+        let mut state = ListState::default().with_selected(Some(self.selected));
+        f.render_stateful_widget(List::new(items), rows[1], &mut state);
+
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "↑↓/j/k navigate · Enter select · Esc cancel",
+                Style::default().fg(t.meta_fg.into()),
+            )))
+            .alignment(ratatui::layout::Alignment::Right),
+            rows[2],
+        );
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        _app: &mut crate::app::AppState,
+        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        self.handle_key(action);
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        None
+    }
+
+    fn title(&self) -> Line<'static> {
+        Line::from("Switch Model")
+    }
+
+    fn icon(&self) -> &str {
+        "◆"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
+}

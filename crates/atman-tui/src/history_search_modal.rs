@@ -1,6 +1,6 @@
-use crate::UiState;
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
+use crate::UiState;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -57,6 +57,7 @@ pub struct HistorySearchModal {
     pub preview_scroll: u16,
     pub preview_rect: Option<Rect>,
     pub results_rect: Option<Rect>,
+    pub last_input_rect: Option<Rect>,
 }
 
 impl std::fmt::Debug for HistorySearchModal {
@@ -196,11 +197,16 @@ pub(crate) fn handle_history_search_key(action: &KeyAction, app: &mut UiState) {
                 return;
             }
             let Some(session) = app.session.as_ref() else {
-                app.wm.modals.history_search.set_error("no session in context".into());
+                app.wm
+                    .modals
+                    .history_search
+                    .set_error("no session in context".into());
                 return;
             };
             let Some(idx) = session.project_index() else {
-                app.wm.modals.history_search
+                app.wm
+                    .modals
+                    .history_search
                     .set_error("project index unavailable".into());
                 return;
             };
@@ -211,7 +217,10 @@ pub(crate) fn handle_history_search_key(action: &KeyAction, app: &mut UiState) {
             let rows = match idx.fts_search_project_events(&query, session_filter.as_deref(), 50) {
                 Ok(rows) => rows,
                 Err(e) => {
-                    app.wm.modals.history_search.set_error(format!("search failed: {e}"));
+                    app.wm
+                        .modals
+                        .history_search
+                        .set_error(format!("search failed: {e}"));
                     return;
                 }
             };
@@ -399,6 +408,123 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut HistorySearchModal
     render_help_bar(f, help_area);
 }
 
+impl crate::wm::modal::ModalOverlay for HistorySearchModal {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        _t: &crate::theme::Theme,
+    ) {
+        let content_h = area.height.saturating_sub(1);
+        let content_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: content_h,
+        };
+        let help_area = Rect {
+            x: area.x,
+            y: area.y + content_h,
+            width: area.width,
+            height: 1,
+        };
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(6),
+                Constraint::Min(8),
+            ])
+            .split(content_area);
+        self.last_input_rect = Some(Rect {
+            x: rows[0].x,
+            y: rows[0].y.saturating_add(2),
+            width: rows[0].width,
+            height: 1,
+        });
+        render_query_row(f, rows[0], self);
+        render_results_row(f, rows[1], self);
+        render_preview_row(f, rows[2], self);
+        self.results_rect = Some(rows[1]);
+        self.preview_rect = Some(rows[2]);
+        render_help_bar(f, help_area);
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        _app: &mut crate::app::AppState,
+        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        match action {
+            KeyAction::Escape => self.close(),
+            KeyAction::HistoryUp | KeyAction::CursorLeft => {
+                self.move_up();
+            }
+            KeyAction::HistoryDown | KeyAction::CursorRight => {
+                self.move_down();
+            }
+            KeyAction::PageUp => self.scroll_preview(true, 10),
+            KeyAction::PageDown => self.scroll_preview(false, 10),
+            KeyAction::ScrollUp => self.scroll_preview(true, 3),
+            KeyAction::ScrollDown => self.scroll_preview(false, 3),
+            KeyAction::Tab => {
+                self.scope = self.scope.toggle();
+            }
+            KeyAction::Char(c) => {
+                if *c == 'j' && self.editor.buf().is_empty() {
+                    self.move_down();
+                } else if *c == 'k' && self.editor.buf().is_empty() {
+                    self.move_up();
+                } else {
+                    self.editor.insert_char(*c);
+                }
+            }
+            KeyAction::Backspace => {
+                self.editor.backspace();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        self.last_input_rect
+            .map(|r| (r.x + self.editor.buf().chars().count() as u16, r.y))
+    }
+
+    fn title(&self) -> Line<'static> {
+        let t = crate::theme::theme();
+        let scope_color = match self.scope {
+            HistorySearchScope::Session => t.accent,
+            HistorySearchScope::Project => t.warn,
+        };
+        Line::from(vec![
+            Span::styled(
+                "Search History · ",
+                Style::default()
+                    .fg(t.accent.into())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                self.scope.label(),
+                Style::default()
+                    .fg(scope_color.into())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    }
+
+    fn icon(&self) -> &str {
+        "⌕"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
+}
+
 fn section_inner(rect: Rect) -> Rect {
     Rect {
         x: rect.x,
@@ -453,12 +579,10 @@ fn render_query_row(f: &mut ratatui::Frame, rect: Rect, modal: &HistorySearchMod
     let para = Paragraph::new(text).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
     let content_w = inner.width as usize;
-    let col =
-        crate::input::wrapped_cursor_col(modal.editor.buf(), modal.editor.cursor(), content_w)
-            as u16;
-    let row =
-        crate::input::wrapped_cursor_row(modal.editor.buf(), modal.editor.cursor(), content_w)
-            as u16;
+    let col = crate::input::wrapped_cursor_col(modal.editor.buf(), modal.editor.cursor(), content_w)
+        as u16;
+    let row = crate::input::wrapped_cursor_row(modal.editor.buf(), modal.editor.cursor(), content_w)
+        as u16;
     f.set_cursor_position((inner.x + col, inner.y + row));
 }
 

@@ -265,6 +265,10 @@ impl CommandPalette {
         }
     }
 
+    pub fn display_len(&self) -> usize {
+        self.display.len()
+    }
+
     pub fn selected(&self) -> Option<PaletteEntryId> {
         match self.display.get(self.selected) {
             Some(PaletteItem::Entry { id }) => Some(*id),

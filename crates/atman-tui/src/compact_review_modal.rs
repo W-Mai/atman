@@ -119,7 +119,7 @@ pub(crate) fn handle_compact_review_key(
     }
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
+pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &mut CompactReviewModal) {
     let w = area.width.saturating_sub(4).clamp(60, 140);
     let h = area.height.saturating_sub(4).clamp(16, 40);
     let x = area.x + area.width.saturating_sub(w) / 2;
@@ -148,6 +148,16 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, modal: &CompactReviewModal) {
         true,
         &theme,
     );
+    use crate::wm::modal::ModalOverlay;
+    modal.render_content(f, inner, &crate::app::AppState::default(), &theme);
+}
+
+fn render_content_body(
+    f: &mut ratatui::Frame,
+    inner: Rect,
+    modal: &mut CompactReviewModal,
+    _theme: &crate::theme::Theme,
+) {
     if inner.height < 4 {
         return;
     }
@@ -270,6 +280,43 @@ fn render_footer(f: &mut ratatui::Frame, rect: Rect, modal: &CompactReviewModal)
         ]),
     };
     f.render_widget(Paragraph::new(line), rect);
+}
+
+impl crate::wm::modal::ModalOverlay for CompactReviewModal {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        render_content_body(f, area, self, t);
+    }
+
+    fn handle_key(
+        &mut self,
+        _action: &KeyAction,
+        _app: &mut crate::app::AppState,
+        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        None
+    }
+
+    fn title(&self) -> Line<'static> {
+        Line::from("Review Compaction")
+    }
+
+    fn icon(&self) -> &str {
+        "◫"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.warn.into()
+    }
 }
 
 #[cfg(test)]

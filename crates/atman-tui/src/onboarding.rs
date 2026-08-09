@@ -256,6 +256,108 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     );
 }
 
+impl crate::wm::modal::ModalOverlay for OnboardingState {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        _t: &crate::theme::Theme,
+    ) {
+        let theme = crate::theme::theme();
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(2),
+            ])
+            .split(area);
+
+        let banner: Vec<Line> = crate::output::STARTUP_BANNER
+            .iter()
+            .map(|row| {
+                Line::from(Span::styled(
+                    *row,
+                    Style::default()
+                        .fg(theme.accent.into())
+                        .add_modifier(Modifier::BOLD),
+                ))
+            })
+            .chain(std::iter::once(Line::from("")))
+            .chain(std::iter::once(Line::from(Span::styled(
+                "Welcome to atman — let's get set up",
+                Style::default().fg(theme.meta_fg.into()),
+            ))))
+            .collect();
+        f.render_widget(
+            Paragraph::new(banner).alignment(ratatui::layout::Alignment::Center),
+            rows[0],
+        );
+
+        f.render_widget(Paragraph::new(""), rows[1]);
+
+        match self.step {
+            OnboardingStep::ProviderSelect => render_provider_step(f, rows[2], self),
+            OnboardingStep::ModelSelect => render_model_step(f, rows[2], self),
+        }
+
+        let footer = if let Some(error) = self.error.as_deref() {
+            Line::from(Span::styled(error, Style::default().fg(theme.error.into())))
+        } else {
+            match self.step {
+                OnboardingStep::ProviderSelect => Line::from(vec![
+                    key_span("Enter"),
+                    help_span(" add provider  "),
+                    key_span("q"),
+                    help_span(" skip"),
+                ]),
+                OnboardingStep::ModelSelect => Line::from(vec![
+                    key_span("↑↓/j/k"),
+                    help_span(" navigate  "),
+                    key_span("Enter"),
+                    help_span(" finish  "),
+                    key_span("Esc"),
+                    help_span(" back"),
+                ]),
+            }
+        };
+        f.render_widget(
+            Paragraph::new(footer)
+                .wrap(Wrap { trim: true })
+                .alignment(ratatui::layout::Alignment::Right),
+            rows[3],
+        );
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        _app: &mut crate::app::AppState,
+        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        self.handle_key(action);
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        None
+    }
+
+    fn title(&self) -> Line<'static> {
+        Line::from("Welcome to atman")
+    }
+
+    fn icon(&self) -> &str {
+        "✦"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
+}
+
 fn render_minimal(f: &mut ratatui::Frame, area: Rect, state: &OnboardingState) {
     let theme = crate::theme::theme();
     let mut lines = vec![

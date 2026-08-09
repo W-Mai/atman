@@ -38,7 +38,7 @@ modal_wrapper!(CompactReviewWrapper, |_app: &mut AppState,
                                     modals: &mut ModalManager,
                                     frame: &mut Frame,
                                     area: Rect| {
-    if let Some(modal) = &modals.compact_review {
+    if let Some(modal) = &mut modals.compact_review {
         crate::compact_review_modal::render(frame, area, modal);
     }
 });
@@ -61,7 +61,7 @@ modal_wrapper!(ProviderManagerWrapper, |_app: &mut AppState,
                                     modals: &mut ModalManager,
                                     frame: &mut Frame,
                                     area: Rect| {
-    crate::provider_manager::render(frame, area, &modals.provider_manager);
+    crate::provider_manager::render(frame, area, &mut modals.provider_manager);
 });
 
 modal_wrapper!(AliasManagerWrapper, |_app: &mut AppState,

@@ -531,6 +531,251 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, switcher: &SessionSwitcher) {
     f.render_stateful_widget(list, list_rect, &mut state);
 }
 
+impl crate::wm::modal::ModalOverlay for SessionSwitcher {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        if area.height == 0 {
+            return;
+        }
+        if !self.rename_mode
+            && self.delete_armed.is_none()
+            && !self.filter_mode
+            && area.height >= 2
+        {
+            let footer_rect = Rect {
+                x: area.x,
+                y: area.y + area.height.saturating_sub(1),
+                width: area.width,
+                height: 1,
+            };
+            let footer = Line::from(Span::styled(
+                " s:sort  f:filter  r:rename  Enter:open  d:delete  Tab:scope  Esc:close ",
+                Style::default().fg(t.subtle_fg.into()),
+            ));
+            f.render_widget(Paragraph::new(footer), footer_rect);
+        }
+        let list_height = if !self.rename_mode
+            && self.delete_armed.is_none()
+            && !self.filter_mode
+            && area.height >= 2
+        {
+            area.height.saturating_sub(1)
+        } else {
+            area.height
+        };
+        if self.rows.is_empty() {
+            let hint = match self.scope {
+                SessionScope::Project => {
+                    "no sessions found in this project · press Tab to see all projects"
+                }
+                SessionScope::All => "no other sessions exist yet",
+            };
+            f.render_widget(
+                ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+                    hint,
+                    Style::default().fg(t.subtle_fg.into()),
+                ))),
+                area,
+            );
+            return;
+        }
+        let items: Vec<ListItem<'static>> = self
+            .rows
+            .iter()
+            .map(|row| {
+                let sid_short: String = row.id.chars().take(8).collect();
+                let goal_snippet: String = row
+                    .goal
+                    .as_deref()
+                    .unwrap_or("-")
+                    .chars()
+                    .take(50)
+                    .collect();
+                let project_label = row.project.clone().unwrap_or_else(|| "-".into());
+                let updated: String = row.updated_at.chars().take(19).collect();
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("{sid_short:<10}"),
+                        Style::default()
+                            .fg(t.warn.into())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{:>5} msgs  ", row.message_count),
+                        Style::default().fg(t.subtle_fg.into()),
+                    ),
+                    Span::styled(
+                        format!("{updated:<19}  "),
+                        Style::default().fg(t.accent.into()),
+                    ),
+                    Span::styled(
+                        project_label,
+                        Style::default().fg(t.success.into()),
+                    ),
+                    Span::styled(
+                        format!("  {goal_snippet}"),
+                        Style::default().fg(t.tinted_fg.into()),
+                    ),
+                ]);
+                ListItem::new(line)
+            })
+            .collect();
+        let list = List::new(items)
+            .highlight_style(
+                Style::default()
+                    .fg(t.tinted_fg.into())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+        let mut state = ListState::default();
+        if !self.rows.is_empty() {
+            state.select(Some(self.selected));
+        }
+        let list_rect = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: list_height,
+        };
+        f.render_stateful_widget(list, list_rect, &mut state);
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        app: &mut crate::app::AppState,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        if self.rename_mode {
+            match action {
+                KeyAction::Escape => {
+                    self.cancel_rename();
+                    app.push_note("rename cancelled", crate::app::NoteLevel::Info);
+                }
+                KeyAction::Submit => {
+                    if let Some((sid, title)) = self.commit_rename() {
+                        if let Some(tx) = tx {
+                            let _ = tx.send(TuiControl::RenameSession {
+                                session_id: sid.clone(),
+                                title: title.clone(),
+                            });
+                        }
+                        let msg = match &title {
+                            Some(t) => format!("renamed {sid} → {t}"),
+                            None => format!("cleared title on {sid}"),
+                        };
+                        app.push_note(msg, crate::app::NoteLevel::Info);
+                    }
+                }
+                KeyAction::Backspace => self.rename_pop(),
+                KeyAction::Char(c) => self.rename_push(*c),
+                _ => {}
+            }
+            return true;
+        }
+        if self.filter_mode {
+            match action {
+                KeyAction::Escape | KeyAction::Submit => {
+                    self.leave_filter_mode();
+                }
+                KeyAction::Backspace => self.filter_pop(),
+                KeyAction::Char(c) => self.filter_push(*c),
+                _ => {}
+            }
+            return true;
+        }
+        if let KeyAction::Char('d') | KeyAction::Char('D') = action {
+            if self.delete_armed_matches_selected() {
+                if let Some(sid) = self.remove_selected() {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(TuiControl::DeleteSession(sid.clone()));
+                    }
+                    app.push_note(format!("deleted session {sid}"), crate::app::NoteLevel::Info);
+                }
+            } else {
+                let armed = self.arm_delete().map(str::to_owned);
+                match armed {
+                    Some(sid) => app.push_note(
+                        format!("press d again to confirm delete {sid}"),
+                        crate::app::NoteLevel::Warn,
+                    ),
+                    None => app.push_note("no session selected", crate::app::NoteLevel::Warn),
+                }
+            }
+            return true;
+        }
+        if self.delete_armed.is_some() {
+            self.clear_delete_arm();
+            app.push_note("delete cancelled", crate::app::NoteLevel::Info);
+        }
+        if let KeyAction::Char('s') | KeyAction::Char('S') = action {
+            self.toggle_sort();
+            return true;
+        }
+        if let KeyAction::Char('f') | KeyAction::Char('F') = action {
+            self.enter_filter_mode();
+            return true;
+        }
+        if let KeyAction::Char('r') | KeyAction::Char('R') = action {
+            if self.begin_rename().is_none() {
+                app.push_note("no session selected", crate::app::NoteLevel::Warn);
+            }
+            return true;
+        }
+        match action {
+            KeyAction::Escape => self.close(),
+            KeyAction::HistoryUp | KeyAction::CursorLeft => self.move_up(),
+            KeyAction::HistoryDown | KeyAction::CursorRight => self.move_down(),
+            KeyAction::Tab => {
+                let new_scope = self.scope.toggle();
+                let rows = enumerate_session_rows(app, new_scope);
+                self.scope = new_scope;
+                self.set_rows(rows);
+            }
+            KeyAction::Submit => {
+                if let Some(sid) = self.selected_id() {
+                    self.close();
+                    request_session_switch(app, tx, sid.clone());
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        None
+    }
+
+    fn title(&self) -> Line<'static> {
+        if self.rename_mode {
+            Line::from(format!(
+                " Rename · {}▏ · Enter save · Esc cancel ",
+                self.rename_buf
+            ))
+        } else if self.delete_armed.is_some() {
+            Line::from(" Delete? · d again to confirm · any other key cancels ")
+        } else if self.filter_mode {
+            Line::from(format!(" Filter · {}▏ · Esc/Enter done ", self.filter))
+        } else {
+            Line::from(format!(" Sessions · {} ", self.scope.label()))
+        }
+    }
+
+    fn icon(&self) -> &str {
+        "⟲"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

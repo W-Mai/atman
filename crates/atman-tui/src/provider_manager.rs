@@ -9,6 +9,7 @@ fn provider_types() -> Vec<&'static str> {
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
+use crate::wm::modal::ModalOverlay;
 
 #[derive(Debug, Clone)]
 pub struct ProviderEntry {
@@ -67,6 +68,7 @@ struct AddProviderOption {
 #[derive(Default)]
 pub struct ProviderManager {
     pub open: bool,
+    pub last_input_rect: Option<ratatui::layout::Rect>,
     pub providers: Vec<ProviderEntry>,
     pub selected: usize,
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
@@ -874,7 +876,7 @@ impl ProviderManager {
     }
 }
 
-pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
+pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &mut ProviderManager) {
     let w = area.width.saturating_sub(4).clamp(60, 90);
     let h = area.height.saturating_sub(2).clamp(10, 24);
     let x = area.x + area.width.saturating_sub(w) / 2;
@@ -899,54 +901,7 @@ pub fn render(f: &mut ratatui::Frame, area: Rect, mgr: &ProviderManager) {
         &theme,
     );
 
-    if inner.height < 4 {
-        return;
-    }
-
-    if mgr.show_confirm {
-        render_confirm_dialog(f, inner, mgr, &theme);
-        return;
-    }
-    if mgr.show_add {
-        render_add_dialog(f, inner, mgr, &theme);
-        return;
-    }
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(inner);
-    let main = rows[0];
-    let footer_area = rows[1];
-
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(main);
-
-    render_provider_list(f, columns[0], mgr, &theme);
-    crate::wm::shell::render_column_divider(
-        f,
-        columns[0].right(),
-        columns[0].y,
-        columns[0].height,
-        &theme,
-    );
-    render_model_detail(f, columns[1], mgr, &theme);
-
-    // Footer help
-    let help = match mgr.focus {
-        ProviderFocus::ProviderList => {
-            "a:add  e:enable/disable  d:delete  r:refresh  t:test  Enter:edit/logout  Tab:models  Esc:close"
-        }
-        ProviderFocus::ModelList => "Tab:providers  a:alias  Esc:back",
-    };
-    let footer = Paragraph::new(Line::from(Span::styled(
-        help,
-        Style::default().fg(theme.meta_fg.into()),
-    )))
-    .alignment(ratatui::layout::Alignment::Right);
-    f.render_widget(footer, footer_area);
+    mgr.render_content(f, inner, &crate::app::AppState::default(), &theme);
 }
 
 fn render_provider_list(
@@ -1411,4 +1366,83 @@ fn render_confirm_dialog(
         Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
         inner,
     );
+}
+
+impl crate::wm::modal::ModalOverlay for ProviderManager {
+    fn render_content(
+        &mut self,
+        f: &mut ratatui::Frame,
+        area: Rect,
+        _app: &crate::app::AppState,
+        t: &crate::theme::Theme,
+    ) {
+        if area.height < 4 {
+            return;
+        }
+        if self.show_confirm {
+            render_confirm_dialog(f, area, self, t);
+            return;
+        }
+        if self.show_add {
+            render_add_dialog(f, area, self, t);
+            return;
+        }
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(area);
+        let main = rows[0];
+        let footer_area = rows[1];
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+            .split(main);
+        render_provider_list(f, columns[0], self, t);
+        crate::wm::shell::render_column_divider(
+            f,
+            columns[0].right(),
+            columns[0].y,
+            columns[0].height,
+            t,
+        );
+        render_model_detail(f, columns[1], self, t);
+        let help = match self.focus {
+            ProviderFocus::ProviderList => {
+                "a:add  e:enable/disable  d:delete  r:refresh  t:test  Enter:edit/logout  Tab:models  Esc:close"
+            }
+            ProviderFocus::ModelList => "Tab:providers  a:alias  Esc:back",
+        };
+        let footer = Paragraph::new(Line::from(Span::styled(
+            help,
+            Style::default().fg(t.meta_fg.into()),
+        )))
+        .alignment(ratatui::layout::Alignment::Right);
+        f.render_widget(footer, footer_area);
+    }
+
+    fn handle_key(
+        &mut self,
+        action: &crate::keys::KeyAction,
+        _app: &mut crate::app::AppState,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> bool {
+        self.handle_key(action, tx);
+        true
+    }
+
+    fn cursor_position(&self) -> Option<(u16, u16)> {
+        None
+    }
+
+    fn title(&self) -> Line<'static> {
+        Line::from("Provider Manager")
+    }
+
+    fn icon(&self) -> &str {
+        "⚙"
+    }
+
+    fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
+        t.accent.into()
+    }
 }
