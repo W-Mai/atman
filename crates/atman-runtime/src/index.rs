@@ -82,6 +82,9 @@ impl AnchorIndex {
         limit: usize,
     ) -> Result<Vec<ProjectEventRow>> {
         let conn = self.conn();
+        if let Some(pattern) = parse_regex_query(query) {
+            return self.search_events_regex(&pattern, session_filter, limit, &conn);
+        }
         self.search_events_like(query, session_filter, limit, &conn)
     }
 
@@ -145,6 +148,62 @@ impl AnchorIndex {
         Ok(count as u64)
     }
 
+    fn search_events_regex(
+        &self,
+        pattern: &str,
+        session_filter: Option<&str>,
+        limit: usize,
+        conn: &std::sync::MutexGuard<'_, rusqlite::Connection>,
+    ) -> Result<Vec<ProjectEventRow>> {
+        let re = regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| anyhow::anyhow!("invalid regex: {e}"))?;
+        let (sql, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match session_filter {
+            Some(sid) => (
+                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload, \
+                 f.text_content \
+                 FROM events e JOIN events_fts f ON f.rowid = e.id \
+                 WHERE e.session_id = ?1 ORDER BY e.id DESC LIMIT 2000",
+                vec![Box::new(sid.to_string())],
+            ),
+            None => (
+                "SELECT e.session_id, e.seq, e.ts, e.kind, e.turn_id, e.flow_run_id, e.payload, \
+                 f.text_content \
+                 FROM events e JOIN events_fts f ON f.rowid = e.id \
+                 ORDER BY e.id DESC LIMIT 2000",
+                vec![],
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((
+                ProjectEventRow {
+                    session_id: row.get(0)?,
+                    seq: row.get::<_, i64>(1)? as u64,
+                    ts: row.get(2)?,
+                    kind: row.get(3)?,
+                    turn_id: row.get(4)?,
+                    flow_run_id: row.get(5)?,
+                    payload: row.get(6)?,
+                },
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (event, text) = row?;
+            if re.is_match(&text) {
+                hits.push(event);
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(hits)
+    }
+
     pub fn read_events_paginated(
         &self,
         session_id: &str,
@@ -189,6 +248,11 @@ impl AnchorIndex {
 
     pub fn count_search_hits(&self, query: &str, session_filter: Option<&str>) -> Result<u64> {
         let conn = self.conn();
+        if let Some(pattern) = parse_regex_query(query) {
+            return Ok(self
+                .search_events_regex(&pattern, session_filter, 10000, &conn)?
+                .len() as u64);
+        }
         if query.chars().any(is_cjk_char) {
             return self.count_search_hits_like(query, session_filter, &conn);
         }
@@ -471,6 +535,15 @@ fn collect<T>(
         out.push(r.map_err(|e| anyhow::anyhow!(e))?);
     }
     Ok(out)
+}
+
+fn parse_regex_query(query: &str) -> Option<String> {
+    let q = query.trim();
+    if q.len() >= 2 && q.starts_with('/') && q.ends_with('/') {
+        Some(q[1..q.len() - 1].to_string())
+    } else {
+        None
+    }
 }
 
 fn is_cjk_char(ch: char) -> bool {
