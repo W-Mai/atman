@@ -344,7 +344,7 @@ impl ModalManager {
     }
 
     /// Compute the modal's centered rect within the viewport.
-    pub fn compute_modal_rect(&self, kind: ModalKind, canvas: Rect) -> Rect {
+    pub fn compute_rect(&self, kind: ModalKind, canvas: Rect) -> Rect {
         match kind {
             ModalKind::Palette => {
                 let w = canvas.width.saturating_sub(4).clamp(40, 80);

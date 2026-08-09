@@ -650,15 +650,33 @@ impl WindowManager {
             );
         }
 
-        let modal_open = !self.layers.modal_stack.is_empty()
-            || app.modal_notification.is_some()
-            || self.modals.trust_mode_picker_open;
+        self.sync_modals();
+        let modal_open = app.modal_notification.is_some() || self.top_kind().is_some();
         if modal_open {
             crate::wm::shadow::render_backdrop(frame, &crate::theme::theme());
         }
-        let focused = self.focused_id().unwrap_or(WindowId(0));
+        if let Some(kind) = self.top_kind() {
+            let t = crate::theme::theme();
+            let rect = self.modals.compute_rect(kind, canvas);
+            let title = self.modals.title_for(kind);
+            let icon = self.modals.icon_for(kind);
+            let accent = self.modals.accent_for(kind, &t);
+            let show_header = !matches!(kind, crate::wm::ModalKind::Form); // form_modal handles its own header
+            let content = crate::wm::shell::render_overlay_shell(
+                frame,
+                rect,
+                title,
+                icon,
+                accent,
+                show_header,
+                &t,
+            );
+            self.modals.render_top(kind, frame, content, app, &t);
+            if let Some((cx, cy)) = self.modals.cursor_position(kind) {
+                frame.set_cursor_position((cx, cy));
+            }
+        }
         let layers = std::mem::take(&mut self.layers);
-        layers.render_modals(frame, canvas, app, &mut self.modals, focused);
         layers.render_blocking(frame, canvas, app);
         layers.render_toasts(frame, canvas, app);
         self.layers = layers;
