@@ -191,6 +191,8 @@ pub struct CommandPalette {
     /// Display items include group headers. Only Entry variants are selectable.
     display: Vec<PaletteItem>,
     pub last_input_rect: Option<Rect>,
+    /// Entry selected on Submit, awaiting dispatch after the palette closes.
+    pub pending_entry: Option<PaletteEntryId>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +213,7 @@ impl CommandPalette {
         self.open = true;
         self.input.clear();
         self.selected = 0;
+        self.pending_entry = None;
         self.refresh();
     }
 
@@ -219,6 +222,7 @@ impl CommandPalette {
         self.input.clear();
         self.filtered.clear();
         self.display.clear();
+        self.pending_entry = None;
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -407,7 +411,13 @@ impl crate::wm::modal::ModalOverlay for CommandPalette {
             KeyAction::HistoryDown | KeyAction::CursorRight => self.move_down(),
             KeyAction::Backspace => self.backspace(),
             KeyAction::Char(c) => self.push_char(*c),
-            KeyAction::Submit => self.close(),
+            KeyAction::Submit => {
+                let id = self.selected();
+                self.close();
+                // close() clears pending_entry; store the pick after so it
+                // survives for the WindowManager to dispatch in the same frame.
+                self.pending_entry = id;
+            }
             _ => {}
         }
         true

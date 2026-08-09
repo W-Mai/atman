@@ -43,6 +43,42 @@ pub(crate) fn yank_selected_text(app: &AppState) -> Option<String> {
     }
 }
 
+pub(crate) fn copy_last_message(app: &mut AppState) {
+    let text = app.items.iter().rev().find_map(|item| match item {
+        app::OutputItem::AssistantMd { md, .. } => Some(md.clone()),
+        _ => None,
+    });
+    match text {
+        Some(t) if !t.is_empty() => {
+            let n = t.chars().count();
+            crate::clipboard::write_osc52(&t);
+            app.push_note(
+                format!("copied {n} chars from last message"),
+                app::NoteLevel::Info,
+            );
+        }
+        _ => app.push_note("no assistant message to copy", app::NoteLevel::Warn),
+    }
+}
+
+pub(crate) fn copy_last_tool(app: &mut AppState) {
+    let text = app.items.iter().rev().find_map(|item| match item {
+        app::OutputItem::Bash { output, .. } if !output.trim().is_empty() => Some(output.clone()),
+        _ => None,
+    });
+    match text {
+        Some(t) => {
+            let n = t.chars().count();
+            crate::clipboard::write_osc52(&t);
+            app.push_note(
+                format!("copied {n} chars from last tool output"),
+                app::NoteLevel::Info,
+            );
+        }
+        _ => app.push_note("no tool output to copy", app::NoteLevel::Warn),
+    }
+}
+
 pub(crate) fn enumerate_session_rows(
     app: &AppState,
     scope: crate::session_switcher::SessionScope,

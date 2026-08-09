@@ -498,10 +498,14 @@ impl WindowManager {
     ) -> (bool, Vec<WmCommand>) {
         self.sync_modals();
         if let Some(kind) = self.layers.dispatch_key() {
-            return (
-                self.modals.handle_key_top(kind, action, _app, _control_tx),
-                Vec::new(),
-            );
+            let consumed = self.modals.handle_key_top(kind, action, _app, _control_tx);
+            // The palette closes on Submit and leaves a picked entry behind;
+            // dispatch it now that no modal is open atop it.
+            if let Some(entry) = self.modals.palette.pending_entry.take() {
+                let commands = self.dispatch_palette_entry(entry, _app, _control_tx);
+                return (consumed, commands);
+            }
+            return (consumed, Vec::new());
         }
         match action {
             crate::keys::KeyAction::CyclePanelForward => {
@@ -560,6 +564,137 @@ impl WindowManager {
             WmEventResult::Consumed(commands) => (true, commands),
             WmEventResult::Ignored => (false, Vec::new()),
         }
+    }
+
+    /// Execute a picked command-palette entry. Called right after the palette
+    /// closes on Submit; opens the target modal, mutates app state, and emits
+    /// control/session commands.
+    fn dispatch_palette_entry(
+        &mut self,
+        id: crate::palette::PaletteEntryId,
+        app: &mut crate::app::AppState,
+        control_tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) -> Vec<WmCommand> {
+        use crate::palette::PaletteEntryId;
+        match id {
+            PaletteEntryId::YankMode => {
+                let cands = crate::key_handler::yank_candidate_indices(app);
+                if cands.is_empty() {
+                    app.push_note("nothing to yank yet", crate::app::NoteLevel::Warn);
+                } else {
+                    app.yank_mode = true;
+                    app.yank_index = cands.len().saturating_sub(1);
+                    app.push_note(
+                        "yank mode — j/k to move, Enter to copy, Esc to cancel",
+                        crate::app::NoteLevel::Info,
+                    );
+                }
+            }
+            PaletteEntryId::CopyLastMessage => crate::key_handler::copy_last_message(app),
+            PaletteEntryId::CopyLastTool => crate::key_handler::copy_last_tool(app),
+            PaletteEntryId::CompactNow => {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(crate::TuiControl::CompactNow);
+                    app.push_note(
+                        "requested transcript compaction",
+                        crate::app::NoteLevel::Info,
+                    );
+                }
+            }
+            PaletteEntryId::SwitchSession => {
+                let scope = crate::session_switcher::SessionScope::Project;
+                let rows = crate::key_handler::enumerate_session_rows(app, scope);
+                self.modals.session_switcher.open_with(rows, scope);
+            }
+            PaletteEntryId::NewSession => {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(crate::TuiControl::NewSession);
+                }
+            }
+            PaletteEntryId::MoveSession => {
+                if let (Some(tx), Some(session)) = (control_tx, app.session.as_ref()) {
+                    let form = atman_runtime::form::PendingForm {
+                        form_id: "session_move_path".to_string(),
+                        run_id: atman_runtime::event::FlowRunId::now(),
+                        tool_use_id: "session_move_path".to_string(),
+                        kind: atman_runtime::form::FormKind::Text {
+                            prompt: "New working directory:".to_string(),
+                            placeholder: Some("/path/to/project".to_string()),
+                            multiline: false,
+                        },
+                        emitted_at: chrono::Utc::now(),
+                    };
+                    session.forms().request(form);
+                    let _ = tx.send(crate::TuiControl::MoveSession);
+                }
+            }
+            PaletteEntryId::DeleteSession => {
+                let scope = crate::session_switcher::SessionScope::Project;
+                let rows = crate::key_handler::enumerate_session_rows(app, scope);
+                self.modals.session_switcher.open_with(rows, scope);
+            }
+            PaletteEntryId::SearchHistory => {
+                self.modals.history_search.open();
+            }
+            PaletteEntryId::ToggleSidebar => {
+                app.sidebar_mode = app.sidebar_mode.toggle();
+                app.save_ui_state();
+            }
+            PaletteEntryId::ManageProviders => {
+                self.modals.provider_manager.toggle();
+            }
+            PaletteEntryId::ManageAliases => {
+                self.modals.alias_manager.toggle();
+            }
+            PaletteEntryId::SwitchModel => {
+                self.modals.model_picker.open();
+            }
+            PaletteEntryId::ManageMcp => {
+                let canvas = app.last_transcript_rect.unwrap_or_default();
+                self.open(
+                    "mcp-manager",
+                    crate::wm::ContentKey::Mcp,
+                    crate::wm::WindowContent::Mcp,
+                    "MCP Servers",
+                    canvas,
+                );
+                if let Some(p) = self
+                    .panels
+                    .iter_mut()
+                    .find(|p| p.content_key == crate::wm::ContentKey::Mcp)
+                {
+                    p.content = Some(Box::new(crate::window::mcp_panel::McpPanelContent {
+                        scroll: 0,
+                    }));
+                }
+            }
+            PaletteEntryId::ShowHelp => {
+                let canvas = app.last_transcript_rect.unwrap_or_default();
+                self.open(
+                    "cheatsheet",
+                    crate::wm::ContentKey::Cheatsheet,
+                    crate::wm::WindowContent::Cheatsheet,
+                    "Keybindings",
+                    canvas,
+                );
+                if let Some(p) = self
+                    .panels
+                    .iter_mut()
+                    .find(|p| p.content_key == crate::wm::ContentKey::Cheatsheet)
+                {
+                    p.content = Some(Box::new(
+                        crate::window::cheatsheet_panel::CheatsheetPanelContent { scroll: 0 },
+                    ));
+                }
+            }
+            PaletteEntryId::SetTrustMode => {
+                self.modals.trust_mode_picker_open = true;
+            }
+            PaletteEntryId::SetModeTheme => {
+                self.modals.theme_picker_open = true;
+            }
+        }
+        Vec::new()
     }
 
     pub fn dispatch_mouse(
