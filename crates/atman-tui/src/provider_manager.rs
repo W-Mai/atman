@@ -1107,7 +1107,7 @@ fn render_add_dialog(
             } else {
                 display_val.clone()
             };
-            if *label == "API Key" && inner.bottom().saturating_sub(y) >= 2 {
+            if *label == "API Key" && inner.bottom().saturating_sub(y) >= 3 {
                 let label_rect = Rect {
                     x: inner.x,
                     y,
@@ -1132,6 +1132,12 @@ fn render_add_dialog(
                     ))),
                     value_rect,
                 );
+                if active {
+                    let display_w =
+                        crate::width::width(&display_val).min(inner.width as usize) as u16;
+                    cursor_pos = Some((inner.x + 2 + display_w, y));
+                }
+                y = y.saturating_add(1);
                 let underline = "─".repeat(inner.width as usize);
                 f.render_widget(
                     Paragraph::new(Line::from(Span::styled(
@@ -1149,12 +1155,7 @@ fn render_add_dialog(
                         height: 1,
                     },
                 );
-                if active {
-                    let display_w =
-                        crate::width::width(&display_val).min(inner.width as usize) as u16;
-                    cursor_pos = Some((inner.x + 2 + display_w, y));
-                }
-                y = y.saturating_add(2);
+                y = y.saturating_add(1);
                 continue;
             }
 
