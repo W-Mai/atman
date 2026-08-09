@@ -163,6 +163,48 @@ impl HistorySearchModal {
         self.selected = 0;
         self.preview_lines.clear();
     }
+
+    /// Execute a search using the current editor content as query.
+    /// Called on Enter (Submit).
+    pub fn run_search(&mut self, app: &crate::app::AppState) {
+        let query = self.editor.buf().to_string();
+        if query.trim().is_empty() {
+            self.results.clear();
+            self.last_query.clear();
+            self.preview_lines.clear();
+            return;
+        }
+        let Some(session) = app.session.as_ref() else {
+            return;
+        };
+        let Some(idx) = session.project_index() else {
+            return;
+        };
+        let sid = session.id().0.to_string();
+        let session_filter = match self.scope {
+            HistorySearchScope::Session => Some(sid.as_str()),
+            HistorySearchScope::Project => None,
+        };
+        match idx.fts_search_project_events(&query, session_filter, 50) {
+            Ok(rows) => {
+                let hits: Vec<HistoryHit> = rows
+                    .into_iter()
+                    .map(|r| HistoryHit {
+                        session_id: r.session_id,
+                        seq: r.seq,
+                        ts: r.ts,
+                        kind: r.kind.clone(),
+                        snippet: extract_event_text(&r.kind, &r.payload)
+                            .unwrap_or_else(|| r.payload.chars().take(80).collect()),
+                    })
+                    .collect();
+                self.set_results(hits, query);
+            }
+            Err(e) => {
+                self.set_error(format!("search failed: {e}"));
+            }
+        }
+    }
 }
 
 pub(crate) fn refresh_history_preview(app: &mut UiState) {
@@ -286,16 +328,22 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
     fn handle_key(
         &mut self,
         action: &crate::keys::KeyAction,
-        _app: &mut crate::app::AppState,
+        app: &mut crate::app::AppState,
         _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
         match action {
             KeyAction::Escape => self.close(),
-            KeyAction::HistoryUp | KeyAction::CursorLeft => {
+            KeyAction::HistoryUp => {
                 self.move_up();
             }
-            KeyAction::HistoryDown | KeyAction::CursorRight => {
+            KeyAction::HistoryDown => {
                 self.move_down();
+            }
+            KeyAction::CursorLeft => {
+                self.editor.move_left();
+            }
+            KeyAction::CursorRight => {
+                self.editor.move_right();
             }
             KeyAction::PageUp => self.scroll_preview(true, 10),
             KeyAction::PageDown => self.scroll_preview(false, 10),
@@ -316,14 +364,20 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             KeyAction::Backspace => {
                 self.editor.backspace();
             }
+            KeyAction::Submit => {
+                self.run_search(app);
+            }
             _ => {}
         }
         Some(ModalAction::Consumed)
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
-        self.last_input_rect
-            .map(|r| (r.x + self.editor.buf().chars().count() as u16, r.y))
+        self.last_input_rect.map(|r| {
+            let before_cursor = &self.editor.buf()[..self.editor.cursor()];
+            let col = crate::width::width(before_cursor) as u16;
+            (r.x + col, r.y)
+        })
     }
 
     fn title(&self) -> Line<'static> {
