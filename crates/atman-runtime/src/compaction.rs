@@ -734,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn find_compact_range_expands_recent_window_for_large_tool_result() {
+    fn find_compact_range_preserves_minimum_window_for_large_tool_result() {
         let mut msgs = vec![user(&"h".repeat(500_000))];
         for index in 1..31 {
             if matches!(index, 20 | 22 | 24 | 26 | 28 | 30) {
@@ -743,14 +743,19 @@ mod tests {
                 msgs.push(assistant(&"a".repeat(800)));
             }
         }
-        msgs.push(tool_result("call-large", &"t".repeat(5000), false));
+        msgs.push(tool_result("call-large", &"t".repeat(22_000), false));
 
-        let range = find_compact_range(&msgs, 120_000).expect("range");
-        assert!(range.end < msgs.len() - 20, "range was {range:?}");
+        let budget = 120_000;
+        let minimum_recent_tokens = (budget as f64 * KEEP_RECENT_TOKEN_FRACTION).ceil() as u64;
+        assert!(estimate_tokens_for_message(msgs.last().unwrap()) > minimum_recent_tokens);
+
+        let range = find_compact_range(&msgs, budget).expect("range");
         assert!(
-            estimate_tokens_for_messages(&msgs[range.end..])
-                >= (120_000.0 * KEEP_RECENT_TOKEN_FRACTION).ceil() as u64
+            range.end <= msgs.len() - KEEP_RECENT_MESSAGES,
+            "range was {range:?}"
         );
+        assert!(msgs.len() - range.end >= KEEP_RECENT_MESSAGES);
+        assert!(estimate_tokens_for_messages(&msgs[range.end..]) >= minimum_recent_tokens);
     }
 
     #[test]
