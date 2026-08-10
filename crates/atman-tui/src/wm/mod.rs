@@ -304,7 +304,18 @@ impl WindowManager {
         maximized: bool,
     ) -> WindowId {
         let (w, h) = if w == 0 || h == 0 {
-            (DEFAULT_PANEL_W, DEFAULT_PANEL_H)
+            let vp = Rect::new(0, 0, canvas.width, canvas.height);
+            let hint = self
+                .panels
+                .iter()
+                .find(|p| p.content_key == content_key)
+                .and_then(|p| p.content.as_ref())
+                .map(|c| c.preferred_size(vp))
+                .unwrap_or_default();
+            (
+                hint.preferred.0.max(DEFAULT_PANEL_W),
+                hint.preferred.1.max(DEFAULT_PANEL_H),
+            )
         } else {
             (w, h)
         };
@@ -391,6 +402,12 @@ impl WindowManager {
     pub fn close(&mut self, id: WindowId) {
         if let Some(idx) = self.panels.iter().position(|p| p.id == id) {
             if let Some(ref mut content) = self.panels[idx].content {
+                if matches!(
+                    content.on_close(),
+                    crate::wm::component::CloseOutcome::Block(_)
+                ) {
+                    return;
+                }
                 content.on_blur();
             }
             self.panels.remove(idx);
@@ -399,7 +416,21 @@ impl WindowManager {
     }
 
     pub fn focus(&mut self, id: WindowId) {
+        if let Some(old) = self.focus.active {
+            if old != id {
+                if let Some(p) = self.panels.iter_mut().find(|p| p.id == old) {
+                    if let Some(ref mut content) = p.content {
+                        content.on_blur();
+                    }
+                }
+            }
+        }
         self.focus.focus(id);
+        if let Some(p) = self.panels.iter_mut().find(|p| p.id == id) {
+            if let Some(ref mut content) = p.content {
+                content.on_focus();
+            }
+        }
         self.bring_to_front(id);
     }
 
@@ -420,6 +451,14 @@ impl WindowManager {
                 p.prev_rect = Some(p.rect);
                 p.rect = maximized_rect(canvas);
                 p.maximized = true;
+            }
+            if let Some(ref mut content) = p.content {
+                let area = content_area(p.rect);
+                let mut ctx = EventCtx {
+                    scroll: &mut p.scroll,
+                    h_scroll: &mut p.h_scroll,
+                };
+                content.on_resize(area, &mut ctx);
             }
             self.bring_to_front(id);
         }
@@ -861,6 +900,15 @@ fn maximized_rect(canvas: Rect) -> Rect {
         y,
         width: w,
         height: h,
+    }
+}
+
+fn content_area(rect: Rect) -> Rect {
+    Rect {
+        x: rect.x + 3,
+        y: rect.y + 2,
+        width: rect.width.saturating_sub(6),
+        height: rect.height.saturating_sub(3),
     }
 }
 

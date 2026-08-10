@@ -121,7 +121,6 @@ pub trait WindowComponent: Send {
     fn render_content(&mut self, area: Rect, frame: &mut Frame, ctx: &RenderCtx) -> Vec<HitRegion>;
 
     /// Handle a key or mouse event. Return Consumed/Ignored.
-    #[allow(dead_code)]
     fn handle_event(&mut self, event: &WmEvent, ctx: &mut EventCtx) -> WmEventResult;
 
     /// Preferred size for floating placement.
@@ -147,16 +146,10 @@ pub trait WindowComponent: Send {
     #[allow(dead_code)]
     fn on_resize(&mut self, _area: Rect, _ctx: &mut EventCtx) {}
 
-    /// Whether this window's content should update while not focused.
-    /// (e.g., live task output = true, static history = false)
-    #[allow(dead_code)]
     fn wants_background_updates(&self) -> bool {
         false
     }
 
-    /// Content version for cache invalidation. If this changes, the cache
-    /// is invalidated and content is re-rendered.
-    #[allow(dead_code)]
     fn content_version(&self) -> u64 {
         0
     }
