@@ -22,22 +22,20 @@ async fn look_into_fanout_subflow_synthesizes_via_mock_providers() {
         subflow(explore_module, question, "tests/"),
     ] collect: all
 
-    summary = llm {
-        model: "claude-opus-4.7"
-        prompt: "synthesize"
-        input: { question: question, findings: findings }
-        schema: Report
-    }
+    summary = llm.call(
+        model: "claude-opus-4.7",
+        prompt: "synthesize",
+        input: { question: question, findings: findings },
+    )
 
     return summary
 }
 
 flow explore_module(question: string, dir: string) -> Finding {
-    return llm {
-        model: "gpt-4o-mini"
-        prompt: "explore"
-        schema: Finding
-    }
+    return llm.call(
+        model: "gpt-4o-mini",
+        prompt: "explore",
+    )
 }
 "#;
 
