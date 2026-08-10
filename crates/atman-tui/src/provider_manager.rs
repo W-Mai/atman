@@ -914,14 +914,21 @@ fn render_provider_list(
             } else {
                 style
             };
+            let max_name_w = (area.width as usize).saturating_sub(3 + 8);
+            let name =
+                crate::width::pad_right(&crate::width::truncate(&p.name, max_name_w), max_name_w);
+            let tag_str = format!("[{}]", source_tag);
+            let used_w = 3 + max_name_w + crate::width::width(&tag_str);
             let detail = if p.detail.is_empty() {
                 String::new()
             } else {
-                format!("  {}", p.detail)
+                let remaining = (area.width as usize).saturating_sub(used_w + 2);
+                let trunc = crate::width::truncate(&p.detail, remaining);
+                format!("  {trunc}")
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!(" {} ", status_symbol), s),
-                Span::styled(format!("{:<20}", p.name), s),
+                Span::styled(name, s),
                 Span::styled(
                     format!("[{}]", source_tag),
                     Style::default().fg(theme.meta_fg.into()),
