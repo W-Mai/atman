@@ -584,7 +584,10 @@ pub(crate) fn handle_pending_injections(
                     partial_tokens: 0,
                 }
             }
-            crate::injection::InjectionLevel::L1Nudge => unreachable!(),
+            crate::injection::InjectionLevel::L1Nudge => {
+                crate::notify!(warn, "L1Nudge reached streaming injection handler");
+                RuntimeError::Cancelled("L1Nudge should not reach here".into())
+            }
         });
     }
     Ok(())

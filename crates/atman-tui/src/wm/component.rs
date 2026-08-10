@@ -162,7 +162,6 @@ pub trait WindowComponent: Send {
     }
 
     /// Optional suffix appended to the title (e.g., Mermaid's "Tab: split").
-    #[allow(dead_code)]
     fn title_suffix(&self) -> Option<String> {
         None
     }
