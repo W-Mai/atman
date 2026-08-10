@@ -548,6 +548,9 @@ impl WindowManager {
                 .unwrap_or_default();
             return (consumed, commands);
         }
+        if _app.mcp_add_form.is_some() {
+            return (false, Vec::new());
+        }
         match action {
             crate::keys::KeyAction::CyclePanelForward => {
                 self.cycle_focus(true);
