@@ -198,7 +198,6 @@ pub async fn parse_llm_args<'a>(
     })
 }
 
-#[expect(dead_code)] // wired into tool-based llm.call dispatch in a later wave
 pub fn parse_llm_args_from_toolargs(
     args: &ToolArgs,
     tools: &crate::tool::ToolRegistry,

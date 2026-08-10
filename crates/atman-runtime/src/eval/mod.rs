@@ -1,5 +1,6 @@
-mod llm_args;
 mod llm_context;
+pub(crate) mod llm_dispatch;
+pub(crate) mod llm_args;
 
 use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
@@ -47,7 +48,7 @@ pub(crate) enum ContextMode {
     SessionRecent(usize),
 }
 
-fn parse_context_mode(s: &str) -> ContextMode {
+pub(super) fn parse_context_mode(s: &str) -> ContextMode {
     match s.trim() {
         "session" => ContextMode::Session,
         "none" | "" => ContextMode::None,
@@ -65,7 +66,7 @@ fn parse_context_mode(s: &str) -> ContextMode {
     }
 }
 
-fn is_context_overflow_error(err: &RuntimeError) -> bool {
+pub(super) fn is_context_overflow_error(err: &RuntimeError) -> bool {
     let RuntimeError::ToolFailed(msg) = err else {
         return false;
     };
@@ -79,7 +80,7 @@ fn is_context_overflow_error(err: &RuntimeError) -> bool {
         || msg.contains("too many tokens")
 }
 
-fn rebuild_session_llm_messages(
+pub(super) fn rebuild_session_llm_messages(
     session: &crate::session::Session,
     context_mode: ContextMode,
     turn_id: &crate::event::TurnId,
@@ -107,7 +108,7 @@ fn rebuild_session_llm_messages(
     messages
 }
 
-async fn session_system_context(session: &crate::session::Session) -> Vec<String> {
+pub(super) async fn session_system_context(session: &crate::session::Session) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(goal) = session.goal() {
         parts.push(format!("[session goal]\n{goal}\n[/session goal]"));
@@ -126,7 +127,7 @@ async fn session_system_context(session: &crate::session::Session) -> Vec<String
     parts
 }
 
-fn append_system_context(system: &mut Option<String>, parts: Vec<String>) {
+pub(super) fn append_system_context(system: &mut Option<String>, parts: Vec<String>) {
     if parts.is_empty() {
         return;
     }
@@ -572,7 +573,7 @@ fn value_struct_string(value: &Value, name: &str) -> Option<String> {
 }
 
 #[derive(Default)]
-struct StreamCallCtx<'a> {
+pub(super) struct StreamCallCtx<'a> {
     session: Option<&'a crate::session::Session>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     flow_run_id: Option<&'a crate::event::FlowRunId>,
@@ -581,7 +582,7 @@ struct StreamCallCtx<'a> {
     turn_id: Option<crate::event::TurnId>,
 }
 
-async fn call_and_maybe_stream(
+pub(super) async fn call_and_maybe_stream(
     provider: &dyn crate::provider::Provider,
     req: crate::provider::LlmRequest,
     stream_ctx: StreamCallCtx<'_>,
@@ -1801,7 +1802,7 @@ async fn eval_message_node<'a>(
     })
 }
 
-fn render_injections(injections: &[crate::injection::Injection]) -> String {
+pub(super) fn render_injections(injections: &[crate::injection::Injection]) -> String {
     use crate::injection::{InjectionLevel, InjectionSource};
     let has_user = injections
         .iter()
@@ -1989,7 +1990,7 @@ pub(crate) fn parse_error_kind_list(
     Ok(out)
 }
 
-fn sanitize_tool_pairs(messages: Vec<crate::message::Message>) -> Vec<crate::message::Message> {
+pub(super) fn sanitize_tool_pairs(messages: Vec<crate::message::Message>) -> Vec<crate::message::Message> {
     use crate::message::{Message, MessagePart, MessageRole};
     use std::collections::HashMap;
     let mut result_by_id: HashMap<String, Message> = HashMap::new();
@@ -2239,7 +2240,7 @@ fn type_mismatch(expected: &str, l: &Value, r: &Value) -> Value {
     })
 }
 
-fn input_with_cache_for_window(usage: &crate::provider::TokenUsage) -> u64 {
+pub(super) fn input_with_cache_for_window(usage: &crate::provider::TokenUsage) -> u64 {
     usage.input + usage.cached_input
 }
 
