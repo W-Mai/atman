@@ -110,37 +110,37 @@ flow agent_loop(iteration: int) -> string {
     when iteration >= 200 {
         return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
     }
-    reply = llm {
-        model: "smart"
-        context: session
-        system: @"../prompts/system.md"
-        cache: true
-        retry: 12
+    reply = llm.call(
+        model: "smart",
+        context: "session",
+        system: @"../prompts/system.md",
+        cache: true,
+        retry: 12,
         tools: [
-            fs.read, fs.write, fs.edit, fs.list, fs.grep,
-            bash.spawn, bash.status, bash.output, bash.kill, bash.list,
-            term.spawn, term.input, term.capture, term.resize, term.kill, term.list,
-            term.find,
-            task.list, task.kill,
-            web.fetch, web.search,
-            hunk.review, hunk.apply, hunk.plan_edit,
-            git.diff, git.show, git.log, git.status, git.add, git.commit, git.branch, git.push, test.run,
-            memory.confess, memory.fetch_confessions,
-            memory.todo.set, memory.todo.done, memory.todo.cancel, memory.todo.delete, memory.todo.list,
-            memory.goal.get, memory.goal.set, memory.goal.clear,
-            memory.recent_turns, memory.history.search, memory.history.read,
-            memory.spec.status, memory.spec.update, memory.spec.deviate,
-            plan.write, plan.read, plan.tick,
-            flow.spawn, flow.status, flow.output, flow.kill, flow.interject, flow.list, flow.check,
-            form.ask,
-            help.show,
-            preview.push,
-            session.push, sleep,
-            message.user, message.assistant, message.system, message.tool,
-            watch, watcher.list, watcher.unwatch, wait_for_watcher, has_pending_injections,
+            "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
+            "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
+            "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list",
+            "term.find",
+            "task.list", "task.kill",
+            "web.fetch", "web.search",
+            "hunk.review", "hunk.apply", "hunk.plan_edit",
+            "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit", "git.branch", "git.push", "test.run",
+            "memory.confess", "memory.fetch_confessions",
+            "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
+            "memory.goal.get", "memory.goal.set", "memory.goal.clear",
+            "memory.recent_turns", "memory.history.search", "memory.history.read",
+            "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
+            "plan.write", "plan.read", "plan.tick",
+            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check",
+            "form.ask",
+            "help.show",
+            "preview.push",
+            "session.push", "sleep",
+            "message.user", "message.assistant", "message.system", "message.tool",
+            "watch", "watcher.list", "watcher.unwatch", "wait_for_watcher", "has_pending_injections",
             "mcp.*"
-        ]
-    }
+        ],
+    )
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         when has_pending_injections() {
@@ -187,22 +187,22 @@ flow research_loop(goal: string, model: string, max_iter: int, iteration: int) -
     when iteration == 0 {
         session.push(message.user(goal))
     }
-    reply = llm {
-        model: model
-        context: session
-        system: @"../prompts/system.md" + "\n\n## Your role: research\nYou are a research sub-agent. Read code before answering. Cite file:line. Don't guess — if uncertain, say so. Return findings as structured text. Trace the full data flow before concluding."
-        cache: true
-        retry: 12
+    reply = llm.call(
+        model: model,
+        context: "session",
+        system: @"../prompts/system.md" + "\n\n## Your role: research\nYou are a research sub-agent. Read code before answering. Cite file:line. Don't guess — if uncertain, say so. Return findings as structured text. Trace the full data flow before concluding.",
+        cache: true,
+        retry: 12,
         tools: [
-            fs.read, fs.list, fs.grep,
-            bash.spawn, bash.status, bash.output, bash.kill,
-            web.fetch, web.search,
-            git.diff, git.show, git.log, git.status,
-            memory.fetch_confessions,
-            plan.read,
-            flow.spawn, flow.status, flow.output, flow.kill, flow.interject
-        ]
-    }
+            "fs.read", "fs.list", "fs.grep",
+            "bash.spawn", "bash.status", "bash.output", "bash.kill",
+            "web.fetch", "web.search",
+            "git.diff", "git.show", "git.log", "git.status",
+            "memory.fetch_confessions",
+            "plan.read",
+            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+        ],
+    )
     session.push(reply)
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
@@ -220,23 +220,23 @@ flow verify_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
     when iteration == 0 {
         session.push(message.user(goal))
     }
-    reply = llm {
-        model: model
-        context: session
-        system: @"../prompts/system.md" + "\n\n## Your role: verify\nYou are a verification sub-agent. Reproduce the issue with a test. Trace the full data flow. Confirm root cause before concluding. Don't patch symptoms."
-        cache: true
-        retry: 12
+    reply = llm.call(
+        model: model,
+        context: "session",
+        system: @"../prompts/system.md" + "\n\n## Your role: verify\nYou are a verification sub-agent. Reproduce the issue with a test. Trace the full data flow. Confirm root cause before concluding. Don't patch symptoms.",
+        cache: true,
+        retry: 12,
         tools: [
-            fs.read, fs.list, fs.grep,
-            bash.spawn, bash.status, bash.output, bash.kill,
-            web.fetch, web.search,
-            git.diff, git.show, git.log, git.status,
-            test.run,
-            memory.fetch_confessions,
-            plan.read,
-            flow.spawn, flow.status, flow.output, flow.kill, flow.interject
-        ]
-    }
+            "fs.read", "fs.list", "fs.grep",
+            "bash.spawn", "bash.status", "bash.output", "bash.kill",
+            "web.fetch", "web.search",
+            "git.diff", "git.show", "git.log", "git.status",
+            "test.run",
+            "memory.fetch_confessions",
+            "plan.read",
+            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+        ],
+    )
     session.push(reply)
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
@@ -254,23 +254,23 @@ flow implement_loop(goal: string, model: string, max_iter: int, iteration: int) 
     when iteration == 0 {
         session.push(message.user(goal))
     }
-    reply = llm {
-        model: model
-        context: session
-        system: @"../prompts/system.md" + "\n\n## Your role: implement\nYou are an implementation sub-agent. Make the minimal change. Run quality gate (fmt+clippy+test) before returning. Fix root causes, not symptoms. Verify by comparison: trace the existing implementation's complete chain and confirm every link is wired."
-        cache: true
-        retry: 12
+    reply = llm.call(
+        model: model,
+        context: "session",
+        system: @"../prompts/system.md" + "\n\n## Your role: implement\nYou are an implementation sub-agent. Make the minimal change. Run quality gate (fmt+clippy+test) before returning. Fix root causes, not symptoms. Verify by comparison: trace the existing implementation's complete chain and confirm every link is wired.",
+        cache: true,
+        retry: 12,
         tools: [
-            fs.read, fs.write, fs.edit, fs.list, fs.grep,
-            bash.spawn, bash.status, bash.output, bash.kill, bash.list,
-            test.run,
-            git.diff, git.show, git.log, git.status, git.add, git.commit,
-            hunk.review, hunk.apply, hunk.plan_edit,
-            memory.fetch_confessions,
-            plan.write, plan.read, plan.tick,
-            flow.spawn, flow.status, flow.output, flow.kill, flow.interject
-        ]
-    }
+            "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
+            "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
+            "test.run",
+            "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit",
+            "hunk.review", "hunk.apply", "hunk.plan_edit",
+            "memory.fetch_confessions",
+            "plan.write", "plan.read", "plan.tick",
+            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+        ],
+    )
     session.push(reply)
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
@@ -288,19 +288,19 @@ flow review_loop(goal: string, model: string, max_iter: int, iteration: int) -> 
     when iteration == 0 {
         session.push(message.user(goal))
     }
-    reply = llm {
-        model: model
-        context: session
-        system: @"../prompts/system.md" + "\n\n## Your role: review\nYou are a review sub-agent. Trace the existing implementation's complete interaction chain. Compare against similar implementations. List every missing link. Don't approve until you've checked every link. Reading code finds gaps; running tests doesn't."
-        cache: true
-        retry: 12
+    reply = llm.call(
+        model: model,
+        context: "session",
+        system: @"../prompts/system.md" + "\n\n## Your role: review\nYou are a review sub-agent. Trace the existing implementation's complete interaction chain. Compare against similar implementations. List every missing link. Don't approve until you've checked every link. Reading code finds gaps; running tests doesn't.",
+        cache: true,
+        retry: 12,
         tools: [
-            fs.read, fs.list, fs.grep,
-            git.diff, git.show, git.log, git.status,
-            memory.fetch_confessions,
-            flow.spawn, flow.status, flow.output, flow.kill, flow.interject
-        ]
-    }
+            "fs.read", "fs.list", "fs.grep",
+            "git.diff", "git.show", "git.log", "git.status",
+            "memory.fetch_confessions",
+            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+        ],
+    )
     session.push(reply)
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {

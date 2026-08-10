@@ -15,14 +15,13 @@ flow review_code(file: path) -> Review {
         fetch_confessions(tag: "code-review"),
     ] collect: all
 
-    primary = llm {
-        model: "smart"
-        messages: [system_msg(@"prompts/code-review.md"), user_msg("Review the code and gathered context.")]
-        input: gather
-        schema: Review
-        cache: true
-        retry: 2
-    }
+    primary = llm.call(
+        model: "smart",
+        messages: [system_msg(@"prompts/code-review.md"), user_msg("Review the code and gathered context.")],
+        input: gather,
+        cache: true,
+        retry: 2,
+    )
 
     verify = llm {
         model: "cheap"

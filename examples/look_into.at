@@ -10,13 +10,12 @@ flow look_into(question: string) -> Report {
         subflow(explore_module, question, "tests/"),
     ] collect: all
 
-    summary = llm {
-        model: "smart"
-        messages: [system_msg(@"prompts/synthesize.md"), user_msg("Synthesize findings for the question.")]
-        input: { question: question, findings: findings }
-        schema: Report
-        cache: true
-    }
+    summary = llm.call(
+        model: "smart",
+        messages: [system_msg(@"prompts/synthesize.md"), user_msg("Synthesize findings for the question.")],
+        input: { question: question, findings: findings },
+        cache: true,
+    )
 
     audit = preview.push(
         topic: "look-into",
@@ -28,9 +27,8 @@ flow look_into(question: string) -> Report {
 }
 
 flow explore_module(question: string, dir: string) -> Finding {
-    return llm {
-        model: "cheap"
-        messages: [user_msg("Focus on: " + question + " in " + dir)]
-        schema: Finding
-    }
+    return llm.call(
+        model: "cheap",
+        messages: [user_msg("Focus on: " + question + " in " + dir)],
+    )
 }
