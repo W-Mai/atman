@@ -485,8 +485,10 @@ mod tests {
 
     #[test]
     fn model_select_esc_back() {
-        let mut state = OnboardingState::default();
-        state.step = OnboardingStep::ModelSelect;
+        let mut state = OnboardingState {
+            step: OnboardingStep::ModelSelect,
+            ..Default::default()
+        };
         let event = state.handle_key(&KeyAction::Escape);
         assert_eq!(event, OnboardingEvent::None);
         assert_eq!(state.step, OnboardingStep::ProviderSelect);
@@ -494,8 +496,10 @@ mod tests {
 
     #[test]
     fn model_select_empty_list_enter() {
-        let mut state = OnboardingState::default();
-        state.step = OnboardingStep::ModelSelect;
+        let mut state = OnboardingState {
+            step: OnboardingStep::ModelSelect,
+            ..Default::default()
+        };
         let event = state.handle_key(&KeyAction::Submit);
         assert_ne!(event, OnboardingEvent::Completed);
         assert!(state.error.is_some());
@@ -523,8 +527,10 @@ mod tests {
         );
         atman_runtime::model_registry::set_model_config(cfg);
 
-        let mut state = OnboardingState::default();
-        state.pending_model_select = true;
+        let mut state = OnboardingState {
+            pending_model_select: true,
+            ..Default::default()
+        };
         state.try_advance_to_model_select();
         assert_eq!(state.step, OnboardingStep::ModelSelect);
     }

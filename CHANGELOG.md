@@ -4,6 +4,49 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [1.7.0] — 2026-08-10
+
+Window Manager architecture overhaul, guided onboarding, history search with regex, command palette dispatch refactor, and 20+ bug fixes across modals, panels, and key event handling.
+
+---
+
+### ✨ Features
+
+- **Window Manager** — new `wm/` module with `WindowComponent` trait, `WindowId`, `LayerStack`, and `ModalManager`. All panel rendering migrated from centralized `content.rs` into per-type `window/*.rs` files. Panels now support lifecycle hooks (`on_focus`, `on_blur`, `on_close`, `on_resize`, `preferred_size`). Floating panels clamp to canvas on terminal resize.
+- **Modal system** — `ModalOverlay` trait with overlay shell rendering for all modals (palette, model picker, provider manager, alias manager, session switcher, history search, onboarding, compact review, form modal). Backdrop dimming when modal is open. Centralized modal key dispatch via `ModalManager`.
+- **Guided onboarding** — first-run setup flow: add provider → select model → save `smart` alias. Reuses Provider Manager form. Onboarding state machine with skip/complete paths.
+- **History search** — Ctrl+K opens full-text search across session or project history. Enter to search, ↑↓ to navigate, Tab to switch scope. Regex search with `/pattern/` syntax. Focus mode separates typing from result navigation.
+- **Command palette dispatch** — Ctrl+P Enter now executes the selected command. Refactored to `ModalAction` command-return pattern: modal says what it wants, `dispatch_key` executes it. All 17 palette entries wired up.
+- **Regex search** — `/pattern/` syntax in history search and `memory.history.search` tool. Case-insensitive by default, using the `regex` crate.
+- **flow_list default values** — `flow_list` now returns actual default values for parameters (e.g. `max_iter: 200`) instead of a boolean `has_default`.
+
+### 🐛 Fixes
+
+- **Palette Enter did nothing** — `dispatch_palette_entry` was deleted as "dead code" during modal refactoring. Restored with all 17 entries.
+- **History search never executed** — search API existed but was never called. Wired up `fts_search_project_events` on Enter.
+- **English search returned no results** — FTS5 MATCH syntax broke on queries with special characters. Unified to LIKE substring matching for all queries.
+- **History search cursor misaligned** — used `chars().count()` instead of `width::width()` for CJK-correct positioning. Arrow keys (←→) moved result selection instead of cursor. Fixed with focus mode: typing mode vs results mode.
+- **Onboarding repeated on every launch** — `onboarding_skipped` was only set on Skip, not on Complete. Fixed.
+- **Onboarding model selection showed wrong models** — filtered by `context_budget > 0` instead of API key presence. Newly added providers (no context budget) were hidden; built-in models without API keys were shown. Fixed to filter by API key.
+- **Esc closed wrong layer** — `dispatch_key` intercepted Esc before it reached `mcp_add_form` and `modal_notification` overlays. Fixed by bypassing `dispatch_key` when these overlays are open.
+- **MCP panel help bar scrolled with content** — help text was pushed into the scrolling `lines` vector. Now pinned to a fixed bottom area.
+- **Provider manager column divider broken** — underline overwrote the API Key value text; cursor was on the wrong line. Right column had no padding from the divider. Fixed rendering order and added 1px padding.
+- **Provider list overflow** — detail field overflowed into the divider. Removed detail from list (shown in right panel only). Provider names truncated with `width::truncate` for CJK-correct alignment.
+- **Panel hit test penetration** — clicks on overlapping panels triggered actions on panels below. Fixed by searching only the topmost panel in hit tests (close, titlebar, resize, button, hover).
+- **Panels off-screen after terminal resize** — `clamp_to_canvas` was never called at runtime. Wired into the resize event handler with focused terminal PTY sync.
+- **Fallback placeholder missing** — panels without `WindowComponent` content showed empty background. Restored placeholder rendering.
+- **L1Nudge unreachable!** — replaced `unreachable!()` with warn log in streaming injection handler.
+- **Compaction recent window** — was not token-aware, could retain too much or too little. Fixed with token-aware retention limits.
+
+### ♻️ Refactoring
+
+- **UiState extraction** — split `lib.rs` into `event_loop.rs`, `key_handler.rs`, `render.rs`, `ui_state.rs`. WM ownership moved from `AppState` to `UiState`.
+- **Panel rendering migration** — 949 lines of rendering logic moved from `content.rs` to per-type panel files (`bash_panel.rs`, `terminal_panel.rs`, `history_panel.rs`, etc.). Shared helpers in `window/common.rs`.
+- **Dead code cleanup** — removed `ModalComponent` trait (zero implementors), stale `#[allow(dead_code)]` on used methods, old modal rendering and key dispatch code.
+- **Palette dispatch** — replaced `pending_entry` field hack with `Option<ModalAction>` return type. Modal-to-modal opening follows existing `ProviderManager → AliasManager` pattern. Floating panels route through `WmCommand::OpenContentPanel`.
+
+---
+
 ## [1.6.0] — 2026-08-06
 
 Context restoration fix, LLM streaming unification, input wrapping accuracy, and sub-agent reliability improvements. Session restore no longer loses 99% of conversation history. The two duplicated LLM streaming code paths are merged into a single `LlmStream` object. Input box wrapping matches ratatui's renderer exactly via a faithful WordWrapper port.
