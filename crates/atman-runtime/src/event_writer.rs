@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -121,6 +122,47 @@ impl Drop for EventWriter {
     }
 }
 
+const MAX_BUFFERED: usize = 10_000;
+
+struct DegradedBuffer {
+    events: VecDeque<EventEnvelope>,
+    error: Option<String>,
+    dropped: u64,
+    max_buffered: usize,
+}
+
+impl DegradedBuffer {
+    fn new(max_buffered: usize) -> Self {
+        Self {
+            events: VecDeque::new(),
+            error: None,
+            dropped: 0,
+            max_buffered,
+        }
+    }
+
+    fn is_degraded(&self) -> bool {
+        self.error.is_some()
+    }
+
+    fn degrade(&mut self, event: EventEnvelope, error: impl Into<String>) {
+        self.error = Some(error.into());
+        self.buffer(event);
+    }
+
+    fn buffer(&mut self, event: EventEnvelope) {
+        if self.events.len() == self.max_buffered {
+            self.events.pop_front();
+            self.dropped += 1;
+        }
+        self.events.push_back(event);
+    }
+
+    fn recover(&mut self) {
+        self.error = None;
+    }
+}
+
 async fn writer_loop(
     mut rx: mpsc::UnboundedReceiver<EventEnvelope>,
     mut flush_rx: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
@@ -136,13 +178,20 @@ async fn writer_loop(
         .open(path)
         .await?;
     let indexer = project_index.zip(session_id);
+    let mut degraded = DegradedBuffer::new(MAX_BUFFERED);
 
     loop {
         tokio::select! {
             biased;
             _ = &mut stop_rx => {
                 while let Ok(event) = rx.try_recv() {
-                    write_event(&mut file, &event, indexer.as_ref(), redactor.as_deref()).await?;
+                    handle_event(
+                        &mut file,
+                        event,
+                        &mut degraded,
+                        indexer.as_ref(),
+                        redactor.as_deref(),
+                    ).await;
                 }
                 while let Ok(waiter) = flush_rx.try_recv() {
                     let _ = waiter.send(());
@@ -152,7 +201,13 @@ async fn writer_loop(
             maybe_event = rx.recv() => {
                 match maybe_event {
                     Some(event) => {
-                        write_event(&mut file, &event, indexer.as_ref(), redactor.as_deref()).await?;
+                        handle_event(
+                            &mut file,
+                            event,
+                            &mut degraded,
+                            indexer.as_ref(),
+                            redactor.as_deref(),
+                        ).await;
                     }
                     None => break,
                 }
@@ -161,9 +216,23 @@ async fn writer_loop(
                 match maybe_flush {
                     Some(waiter) => {
                         while let Ok(event) = rx.try_recv() {
-                            write_event(&mut file, &event, indexer.as_ref(), redactor.as_deref()).await?;
+                            handle_event(
+                                &mut file,
+                                event,
+                                &mut degraded,
+                                indexer.as_ref(),
+                                redactor.as_deref(),
+                            ).await;
                         }
-                        file.sync_data().await?;
+                        retry_buffered(
+                            &mut file,
+                            &mut degraded,
+                            indexer.as_ref(),
+                            redactor.as_deref(),
+                        ).await;
+                        if let Err(e) = file.sync_data().await {
+                            crate::notify!(error, "event writer flush failed: {e}");
+                        }
                         let _ = waiter.send(());
                     }
                     None => break,
@@ -171,8 +240,69 @@ async fn writer_loop(
             }
         }
     }
-    file.sync_data().await?;
+    retry_buffered(
+        &mut file,
+        &mut degraded,
+        indexer.as_ref(),
+        redactor.as_deref(),
+    )
+    .await;
+    if !degraded.events.is_empty() {
+        crate::notify!(
+            error,
+            "event writer stopped with {} buffered event(s) not persisted (dropped {}): {}",
+            degraded.events.len(),
+            degraded.dropped,
+            degraded.error.as_deref().unwrap_or("write failed")
+        );
+    }
+    if let Err(e) = file.sync_data().await {
+        crate::notify!(error, "event writer final sync failed: {e}");
+    }
     Ok(())
+}
+
+async fn handle_event(
+    file: &mut tokio::fs::File,
+    event: EventEnvelope,
+    degraded: &mut DegradedBuffer,
+    indexer: Option<&(Arc<AnchorIndex>, String)>,
+    redactor: Option<&Redactor>,
+) {
+    if degraded.is_degraded() {
+        degraded.buffer(event);
+        return;
+    }
+    if let Err(e) = write_event(file, &event, indexer, redactor).await {
+        crate::notify!(
+            error,
+            "event writer write failed (seq={}): {e}; buffering events in memory",
+            event.seq
+        );
+        degraded.degrade(event, e.to_string());
+    }
+}
+
+async fn retry_buffered(
+    file: &mut tokio::fs::File,
+    degraded: &mut DegradedBuffer,
+    indexer: Option<&(Arc<AnchorIndex>, String)>,
+    redactor: Option<&Redactor>,
+) {
+    while let Some(event) = degraded.events.pop_front() {
+        if let Err(e) = write_event(file, &event, indexer, redactor).await {
+            crate::notify!(
+                error,
+                "event writer retry failed (seq={}): {e}; {} event(s) remain buffered",
+                event.seq,
+                degraded.events.len() + 1
+            );
+            degraded.events.push_front(event);
+            degraded.error = Some(e.to_string());
+            return;
+        }
+    }
+    degraded.recover();
 }
 
 async fn write_event(
@@ -395,6 +525,51 @@ mod tests {
     use super::*;
     use crate::event::{Event, FlowRunId, FlowStatus};
     use tempfile::TempDir;
+
+    fn flow_start(seq: u64) -> EventEnvelope {
+        EventEnvelope::new(
+            seq,
+            Event::FlowStart {
+                run_id: FlowRunId::now(),
+                flow_name: format!("flow_{seq}"),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+            },
+        )
+    }
+
+    #[test]
+    fn degraded_buffer_keeps_later_events_and_drops_oldest_at_capacity() {
+        let mut degraded = DegradedBuffer::new(2);
+
+        degraded.degrade(flow_start(1), "disk full");
+        degraded.buffer(flow_start(2));
+
+        assert!(degraded.is_degraded());
+        assert_eq!(
+            degraded
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(degraded.dropped, 0);
+
+        degraded.buffer(flow_start(3));
+
+        assert_eq!(
+            degraded
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(degraded.dropped, 1);
+        assert_eq!(degraded.error.as_deref(), Some("disk full"));
+    }
 
     #[tokio::test]
     async fn writer_appends_events_as_jsonl() {
