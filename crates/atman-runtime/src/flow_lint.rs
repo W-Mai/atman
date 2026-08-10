@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn llm_without_fallback_is_intentional_and_clean() {
         let src = r#"flow t() -> string {
-    return llm { model: "mock", prompt: "hi" }
+    return llm.call(model: "mock", prompt: "hi")
 }
 "#;
         assert!(lint(src).is_empty());

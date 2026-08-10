@@ -23,7 +23,7 @@ fn strip_spans(s: String) -> String {
 fn fix_until_test_passes_parses_with_lazy_blocks() {
     let src = r#"flow attempt() -> string {
     return fix_until_test_passes {
-        edit_flow: llm { model: "m", prompt: "fix it" }
+        edit_flow: llm.call(model: "m", prompt: "fix it")
         test: bash.exec("cargo test")
         max_iters: 3
     }
@@ -45,7 +45,7 @@ fn fix_until_test_passes_parses_with_lazy_blocks() {
 fn fix_until_test_passes_roundtrips_through_print() {
     let src = r#"flow attempt() -> string {
     return fix_until_test_passes {
-        edit_flow: llm { model: "m", prompt: "fix" }
+        edit_flow: llm.call(model: "m", prompt: "fix")
         test: bash.exec("cargo test")
         max_iters: 5
         on_giveup: user_confirm("gave up, continue?")

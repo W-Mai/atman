@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn watch_on_llm_bind_with_token_event_is_ok() {
         let src = r#"flow r() -> string {
-    x = llm { model: "m", prompt: "hi" }
+    x = llm.call(model: "m", prompt: "hi")
     watch x { on token(match: "bad") { abort("no") } }
     return x
 }

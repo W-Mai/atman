@@ -2540,11 +2540,11 @@ mod tests {
         };
 
         let src = r#"flow t() {
-    return llm {
-        model: "mock"
-        prompt: "review please"
-        input: 1
-    }
+    return llm.call(
+        model: "mock",
+        prompt: "review please",
+        input: 1,
+    )
 }
 "#;
         let file = parse_file(src).unwrap();
@@ -2580,7 +2580,7 @@ mod tests {
             current_node_id: None,
             source_dir: None,
         };
-        let src = r#"flow t() { return llm { prompt: "hi" } }"#;
+        let src = r#"flow t() { return llm.call(prompt: "hi") }"#;
         let file = parse_file(src).unwrap();
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
@@ -2930,9 +2930,9 @@ flow parent(x: Int) -> Int {
 
         // Build tools list from DSL parse so we get valid spans.
         let src = r#"flow t() -> string {
-    reply = llm {
-        tools: [bash.exec, "mcp.*"]
-    }
+    reply = llm.call(
+        tools: ["bash.exec", "mcp.*"],
+    )
     return "ok"
 }"#;
         let file = atman_dsl::parse::parse_file(src).unwrap();

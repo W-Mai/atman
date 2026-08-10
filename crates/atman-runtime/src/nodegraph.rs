@@ -230,10 +230,10 @@ mod tests {
     #[test]
     fn extracts_llm_only_flow() {
         let src = r#"flow smoke() -> string {
-            x = llm {
-                model: "glm"
-                messages: []
-            }
+            x = llm.call(
+                model: "glm",
+                messages: [],
+            )
             return x
         }"#;
         let flow = parse_first_flow(src);
@@ -270,7 +270,7 @@ mod tests {
     fn extracts_when_body() {
         let src = r#"flow t() -> string {
             when true {
-                a = llm { model: "m" messages: [] }
+                a = llm.call(model: "m", messages: [])
             }
             return "x"
         }"#;

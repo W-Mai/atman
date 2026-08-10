@@ -1,15 +1,33 @@
-use atman_dsl::ast::{Expr, Literal, Node, Stmt};
+use atman_dsl::ast::{Arg, Expr, Literal, Node, Stmt};
 use atman_dsl::parse::parse_file;
 use atman_dsl::print::print_file;
+
+fn llm_call_args(value: &Expr) -> &[Arg] {
+    match value {
+        Expr::Node(Node::ToolCall { path, args })
+            if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
+        {
+            args
+        }
+        other => panic!("expected llm.call tool call, got {other:?}"),
+    }
+}
+
+fn named_arg<'a>(args: &'a [Arg], name: &str) -> &'a Expr {
+    let arg = args
+        .iter()
+        .find(|a| matches!(a, Arg::Named { name: n, .. } if n.name == name))
+        .unwrap_or_else(|| panic!("missing named arg `{name}`"));
+    match arg {
+        Arg::Named { value, .. } => value,
+        _ => unreachable!(),
+    }
+}
 
 #[test]
 fn retry_is_a_regular_kwarg() {
     let src = r#"flow t() -> Int {
-    primary = llm {
-        model: "m"
-        prompt: "hi"
-        retry: 3
-    }
+    primary = llm.call(model: "m", prompt: "hi", retry: 3)
     return primary
 }
 "#;
@@ -17,50 +35,14 @@ fn retry_is_a_regular_kwarg() {
     let Stmt::Bind { value, .. } = &file.flows[0].body[0] else {
         panic!();
     };
-    let Expr::Node(Node::Llm { kwargs }) = value else {
-        panic!();
-    };
-    let retry = kwargs.iter().find(|(k, _)| k.name == "retry").unwrap();
-    matches!(&retry.1, Expr::Literal(Literal::Int(3)));
+    let retry = named_arg(llm_call_args(value), "retry");
+    assert!(matches!(retry, Expr::Literal(Literal::Int(3))));
 }
 
 #[test]
-fn fallback_is_a_kwarg_holding_another_llm_node() {
+fn llm_call_roundtrips_through_print() {
     let src = r#"flow t() -> string {
-    primary = llm {
-        model: "opus"
-        prompt: "hi"
-        fallback: llm {
-            model: "mini"
-            prompt: "hi"
-        }
-    }
-    return primary
-}
-"#;
-    let file = parse_file(src).unwrap();
-    let Stmt::Bind { value, .. } = &file.flows[0].body[0] else {
-        panic!();
-    };
-    let Expr::Node(Node::Llm { kwargs }) = value else {
-        panic!();
-    };
-    let fb = kwargs.iter().find(|(k, _)| k.name == "fallback").unwrap();
-    assert!(matches!(&fb.1, Expr::Node(Node::Llm { .. })));
-}
-
-#[test]
-fn retry_and_fallback_roundtrip() {
-    let src = r#"flow t() -> string {
-    primary = llm {
-        model: "opus"
-        prompt: "hi"
-        retry: 2
-        fallback: llm {
-            model: "mini"
-            prompt: "hi"
-        }
-    }
+    primary = llm.call(model: "opus", prompt: "hi", retry: 2)
     return primary
 }
 "#;

@@ -47,25 +47,23 @@
 
 ### Special nodes
 
-#### `llm { kwargs }` — LLM call
+#### `llm.call(kwargs)` — LLM call
 
 ```
-llm {
+llm.call(
     model: "smart",                    // model alias or full name
-    context: session,                  // use session messages as context
+    context: "session",                // use session messages as context
     system: @"prompts/system.md",      // system prompt (string or @file)
     messages: [...],                   // explicit message list (alternative to context)
     prompt: "direct prompt",           // direct prompt (alternative to context/messages)
-    input: { file: file, content: code },  // structured input for schema
-    schema: Review,                    // output type name
+    input: { file: file, content: code },  // structured input
     cache: true,                       // enable prompt caching
     retry: 3,                          // retry count on failure
     retry_classified: [timeout],       // retry only specific error kinds
     context_budget: 8000,              // truncate prompt to token budget
     stall_timeout: 120,                // LLM stall timeout in seconds
-    tools: [fs.read, bash.spawn, "mcp.*"],  // tool allowlist, "mcp.*" = all MCP
-    fallback: "default response",      // fallback on failure
-}
+    tools: ["fs.read", "bash.spawn", "mcp.*"],  // tool allowlist, "mcp.*" = all MCP
+)
 ```
 
 #### `fanout [items] collect: all|first` — Parallel fanout
@@ -129,12 +127,11 @@ flow review_code(file: path) -> Review {
         scope { read: [project_root], write: [] }
     }
     gather = fanout [fs.read(file), fetch_rule("code-review")] collect: all
-    primary = llm {
+    primary = llm.call(
         model: "smart",
-        messages: [system_msg(@"prompts/review.md"), user_msg("Review.")]
-        input: gather
-        schema: Review
-    }
+        messages: [system_msg(@"prompts/review.md"), user_msg("Review.")],
+        input: gather,
+    )
     return primary
 }
 ```
