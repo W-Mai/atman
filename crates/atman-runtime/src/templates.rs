@@ -161,7 +161,7 @@ flow agent_loop(iteration: int) -> string {
 "#;
 
 pub const SUBAGENT_AT: &str = r#"flow describe() -> string {
-    return "Sub-agent flows for isolated research, verification, implementation, and review. Entry: subagent(goal, role, model, max_iter). Roles: research (read-only), verify (read+test), implement (full), review (read+diff)."
+    return "Sub-agent flows for isolated research, verification, implementation, and review. Entry: subagent(goal, role, model, max_iter). Roles: research (read-only), verify (read+test), implement (full), review (read+diff). max_iter defaults to 200 — omit it for most tasks. Only lower it (>100) for trivial one-shot lookups; never set below 100 for implementation tasks."
 }
 
 flow subagent(goal: string, role: string = "research", model: string = "smart", max_iter: int = 200) -> string {

@@ -123,7 +123,7 @@ fn scan_flow_file(path: &Path) -> Result<Value, RuntimeError> {
                     Value::Struct(vec![
                         ("name".into(), Value::Str(p.name.name.clone())),
                         ("ty".into(), Value::Str(format!("{:?}", p.ty))),
-                        ("has_default".into(), Value::Bool(p.default.is_some())),
+                        ("default".into(), expr_to_value(&p.default)),
                     ])
                 })
                 .collect();
@@ -155,4 +155,15 @@ fn extract_return_string_literal(flow: &atman_dsl::ast::FlowDecl) -> Option<Stri
         }
     }
     None
+}
+
+fn expr_to_value(expr: &Option<atman_dsl::ast::Expr>) -> Value {
+    use atman_dsl::ast::{Expr, Literal};
+    match expr {
+        Some(Expr::Literal(Literal::Int(n))) => Value::Int(*n),
+        Some(Expr::Literal(Literal::Float(n))) => Value::Float(*n),
+        Some(Expr::Literal(Literal::Bool(b))) => Value::Bool(*b),
+        Some(Expr::Literal(Literal::Str(s))) => Value::Str(s.clone()),
+        _ => Value::Unit,
+    }
 }
