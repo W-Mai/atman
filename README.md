@@ -80,31 +80,31 @@ flow agent_loop(iteration: int) -> string {
     when iteration >= 200 {
         return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
     }
-    reply = llm {
-        model: "smart"
-        context: session
-        system: "Planning tools: use plan.write/read/tick for the active high-level route through a multi-step task. A plan is a durable ordered checklist that atman injects back into every LLM call; create or revise one for work that spans several steps, files, tool calls, or turns, then call plan.tick when a plan step is truly complete. Use memory.todo.set/done/cancel/delete/list for concrete execution items inside the current plan step: small trackable units with where/why/how/expected_result, especially when you need a visible work queue or may pause and resume. Do not mirror the same item in both systems. If a plan step is enough, do not create a todo. If a todo becomes the whole strategy, replace it with a plan. Typical flow: set or read the plan, execute one plan step, create todos only for that step's sub-work, finish/cancel those todos, then tick the plan step."
-        cache: true
-        retry: 12
+    reply = llm.call(
+        model: "smart",
+        context: "session",
+        system: "Planning tools: use plan.write/read/tick for the active high-level route through a multi-step task. A plan is a durable ordered checklist that atman injects back into every LLM call; create or revise one for work that spans several steps, files, tool calls, or turns, then call plan.tick when a plan step is truly complete. Use memory.todo.set/done/cancel/delete/list for concrete execution items inside the current plan step: small trackable units with where/why/how/expected_result, especially when you need a visible work queue or may pause and resume. Do not mirror the same item in both systems. If a plan step is enough, do not create a todo. If a todo becomes the whole strategy, replace it with a plan. Typical flow: set or read the plan, execute one plan step, create todos only for that step's sub-work, finish/cancel those todos, then tick the plan step.",
+        cache: true,
+        retry: 12,
         tools: [
-            fs.read, fs.write, fs.edit, fs.list, fs.grep,
-            bash.spawn, bash.status, bash.output, bash.kill, bash.list,
-            term.spawn, term.input, term.capture, term.resize, term.kill, term.list,
-            web.fetch, web.search,
-            hunk.review, hunk.apply, hunk.plan_edit,
-            git.diff, git.show, git.log, git.status, git.add, git.commit, git.branch, git.push, test.run,
-            memory.confess, memory.fetch_confessions,
-            memory.todo.set, memory.todo.done, memory.todo.cancel, memory.todo.delete, memory.todo.list,
-            memory.goal.get, memory.goal.set, memory.goal.clear,
-            memory.recent_turns, memory.history.search, memory.history.read,
-            memory.spec.status, memory.spec.update, memory.spec.deviate,
-            plan.write, plan.read, plan.tick,
-            agent.spawn,
-            form.ask,
-            preview.push,
-            session.push, sleep
-        ]
-    }
+            "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
+            "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
+            "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list",
+            "web.fetch", "web.search",
+            "hunk.review", "hunk.apply", "hunk.plan_edit",
+            "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit", "git.branch", "git.push", "test.run",
+            "memory.confess", "memory.fetch_confessions",
+            "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
+            "memory.goal.get", "memory.goal.set", "memory.goal.clear",
+            "memory.recent_turns", "memory.history.search", "memory.history.read",
+            "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
+            "plan.write", "plan.read", "plan.tick",
+            "agent.spawn",
+            "form.ask",
+            "preview.push",
+            "session.push", "sleep"
+        ],
+    )
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         return text_concat(reply)
@@ -128,7 +128,7 @@ atman run examples/agent.at --flow agent user_prompt="read Cargo.toml and list t
 
 atman is a code interpreter for the `.at` language. It parses `.at` files, manages their runtime, and emits a typed event trace for every execution. The `.at` language is Turing-complete — it has variables, conditionals, recursion, fan-out, and subflows — so you can express any agent workflow as a deterministic program, not a prompt.
 
-The LLM is just one node type inside that program. `llm { ... }` is a stochastic node; everything around it (the tool dispatch, the approval gates, the retry loops, the subflow recursion, the context compaction) is deterministic orchestration written in an unambiguous, concrete, and inspectable language. You orchestrate the agent's entire workflow in `.at`; the LLM only executes what the flow assigns to it — the *witness* that observes, never the driver.
+The LLM is just one node type inside that program. `llm.call(...)` is a stochastic node; everything around it (the tool dispatch, the approval gates, the retry loops, the subflow recursion, the context compaction) is deterministic orchestration written in an unambiguous, concrete, and inspectable language. You orchestrate the agent's entire workflow in `.at`; the LLM only executes what the flow assigns to it — the *witness* that observes, never the driver.
 
 ## Why atman?
 
@@ -170,15 +170,14 @@ flow edit_and_verify(file: path, instruction: string) -> EditResult {
     }
 
     result = fix_until_test_passes {
-        edit_flow: llm {
-            model: "smart"
+        edit_flow: llm.call(
+            model: "smart",
             messages: [
                 system_msg(@"prompts/edit.md"),
                 user_msg("iter=" + to_json_string(iter) + "\nprevious failure:\n" + prev_fail + "\n\ninstruction: " + instruction),
-            ]
-            input: { file: file, original: original, instruction: instruction }
-            schema: { new_content: string, rationale: string }
-        }
+            ],
+            input: { file: file, original: original, instruction: instruction },
+        )
         test: test.run(framework: "cargo", timeout_ms: 300000)
         target: file
         max_iters: 5
@@ -206,7 +205,7 @@ atman run examples/edit_and_verify.at --flow edit_and_verify \
 
 | Node | Purpose |
 |---|---|
-| `llm { ... }` | Call an LLM with model, messages, tools, schema, retry, fallback |
+| `llm.call(model:, prompt:, tools:, ...)` | Call an LLM with model, prompt, messages, tools, context, cache, retry |
 | `fs.read(path)` / `fs.edit(...)` / `bash.spawn(cmd)` | Tool dispatch |
 | `subflow(name, args)` | Spawn a child flow with isolated scope |
 | `user_confirm(msg)` | Pause for human approval |

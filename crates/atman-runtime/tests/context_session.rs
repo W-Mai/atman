@@ -124,11 +124,11 @@ flow agent_loop(iteration: int) -> string {
     when iteration >= 5 {
         return "[agent: max iterations]"
     }
-    reply = llm {
-        model: "recording"
-        context: session
-        tools: [fs.read, session.push]
-    }
+    reply = llm.call(
+        model: "recording",
+        context: "session",
+        tools: ["fs.read", "session.push"],
+    )
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         return text_concat(reply)
@@ -263,10 +263,10 @@ async fn context_session_feeds_session_history_into_llm_call() {
 
 const AGENT_CONTEXT_NONE: &str = r#"
 flow one_shot(user_prompt: string) -> string {
-    reply = llm {
-        model: "recording"
-        prompt: user_prompt
-    }
+    reply = llm.call(
+        model: "recording",
+        prompt: user_prompt,
+    )
     return text_concat(reply)
 }
 "#;

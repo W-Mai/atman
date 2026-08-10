@@ -21,7 +21,7 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
     ));
 
     let src = r#"flow t() -> string {
-    return llm { model: "mock", prompt: "irrelevant", fallback: "ok" }
+    return llm.call(model: "mock", prompt: "irrelevant")
 }
 "#;
     let file = parse_file(src).unwrap();

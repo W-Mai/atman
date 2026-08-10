@@ -18,7 +18,7 @@ flow edit_and_verify(file: path, instruction: string) -> EditResult {
     }
 
     result = fix_until_test_passes {
-        edit_flow: llm {
+        edit_flow: llm.call(
             model: "smart"
             messages: [
                 system_msg(@"prompts/edit.md"),
@@ -26,7 +26,7 @@ flow edit_and_verify(file: path, instruction: string) -> EditResult {
             ]
             input: { file: file, original: original, instruction: instruction }
             schema: { new_content: string, rationale: string }
-        }
+        )
         test: test.run(framework: "cargo", timeout_ms: 300000)
         target: file
         max_iters: 5

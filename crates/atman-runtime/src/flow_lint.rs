@@ -328,7 +328,7 @@ flow b(unused: int) -> int {
     #[test]
     fn watch_target_counts_as_reference() {
         let src = r#"flow t() -> string {
-    x = llm { model: "m", prompt: "p" }
+    x = llm.call(model: "m", prompt: "p")
     watch x {
         on token(match: "err") { }
     }

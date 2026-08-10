@@ -644,7 +644,7 @@ impl Tool for MessageUser {
     }
     fn description(&self) -> Option<&str> {
         Some(
-            "Construct a user-role Message from a text string. Use with session.push to inject user instructions into the session history before an llm { context: session } call.",
+            "Construct a user-role Message from a text string. Use with session.push to inject user instructions into the session history before an llm.call(context: session) call.",
         )
     }
     fn input_schema(&self) -> serde_json::Value {

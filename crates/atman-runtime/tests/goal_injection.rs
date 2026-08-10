@@ -89,7 +89,7 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
-    return llm { model: "mock", prompt: "hi" }
+    return llm.call(model: "mock", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -124,11 +124,11 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
-    return llm {
+    return llm.call(
         model: "mock"
         prompt: "hi"
         system: "you are a helpful assistant"
-    }
+    )
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -162,7 +162,7 @@ async fn no_goal_leaves_system_untouched() {
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
-    return llm { model: "mock", prompt: "hi", system: "only-user" }
+    return llm.call(model: "mock", prompt: "hi", system: "only-user")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -192,7 +192,7 @@ async fn goal_survives_multiple_turns_in_same_session() {
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
-    return llm { model: "mock", prompt: "hi" }
+    return llm.call(model: "mock", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
