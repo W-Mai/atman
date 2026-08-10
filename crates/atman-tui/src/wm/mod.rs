@@ -548,7 +548,7 @@ impl WindowManager {
                 .unwrap_or_default();
             return (consumed, commands);
         }
-        if _app.mcp_add_form.is_some() {
+        if _app.mcp_add_form.is_some() || _app.modal_notification.is_some() {
             return (false, Vec::new());
         }
         match action {
