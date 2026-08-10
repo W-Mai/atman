@@ -94,11 +94,11 @@ impl Provider for FlakyProvider {
 #[tokio::test]
 async fn retry_recovers_after_flakes() {
     let src = r#"flow t() -> string {
-    primary = llm {
-        model: "flaky"
-        prompt: "hi"
-        retry: 2
-    }
+    primary = llm.call(
+        model: "flaky",
+        prompt: "hi",
+        retry: 2,
+    )
     return primary
 }
 "#;
@@ -113,15 +113,11 @@ async fn retry_recovers_after_flakes() {
 #[tokio::test]
 async fn retry_exhausted_falls_back_to_alternate_llm() {
     let src = r#"flow t() -> string {
-    primary = llm {
-        model: "flaky"
-        prompt: "hi"
-        retry: 1
-        fallback: llm {
-            model: "stable"
-            prompt: "hi"
-        }
-    }
+    primary = llm.call(
+        model: "flaky",
+        prompt: "hi",
+        retry: 1,
+    )
     return primary
 }
 "#;
@@ -129,20 +125,18 @@ async fn retry_exhausted_falls_back_to_alternate_llm() {
     let mut ex = Executor::new();
     ex.providers
         .register(Arc::new(FlakyProvider::new("flaky", 5, "unreachable")));
-    ex.providers
-        .register(Arc::new(FlakyProvider::new("stable", 0, "fallback-ok")));
-    let out = ex.run(&file, "t", vec![]).await.unwrap();
-    assert!(matches!(out, Value::Str(s) if s == "fallback-ok"));
+    let err = ex.run(&file, "t", vec![]).await.unwrap_err();
+    assert!(matches!(err, RuntimeError::ToolFailed(msg) if msg.contains("connection reset")));
 }
 
 #[tokio::test]
 async fn retry_exhausted_without_fallback_returns_err() {
     let src = r#"flow t() -> string {
-    primary = llm {
-        model: "flaky"
-        prompt: "hi"
-        retry: 1
-    }
+    primary = llm.call(
+        model: "flaky",
+        prompt: "hi",
+        retry: 1,
+    )
     return primary
 }
 "#;

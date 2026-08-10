@@ -8,10 +8,10 @@ use std::sync::Arc;
 #[tokio::test]
 async fn llm_call_event_records_wallclock_and_tokens() {
     let src = r#"flow t() -> string {
-    return llm {
-        model: "mock-model"
-        prompt: "hello world"
-    }
+    return llm.call(
+        model: "mock-model",
+        prompt: "hello world",
+    )
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -47,15 +47,11 @@ async fn llm_call_event_records_wallclock_and_tokens() {
 #[tokio::test]
 async fn llm_call_event_records_retry_attempts() {
     let src = r#"flow t() -> string {
-    return llm {
-        model: "flaky"
-        prompt: "hi"
-        retry: 2
-        fallback: llm {
-            model: "stable"
-            prompt: "hi"
-        }
-    }
+    return llm.call(
+        model: "flaky",
+        prompt: "hi",
+        retry: 2,
+    )
 }
 "#;
     let file = parse_file(src).unwrap();

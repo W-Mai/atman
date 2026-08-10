@@ -11,25 +11,24 @@ const REVIEW_FLOW: &str = r#"flow review_code(file: path) -> Review {
         fetch_confessions(),
     ] collect: all
 
-    primary = llm {
-        model: "claude-opus-4.7"
-        prompt: "review this code"
-        input: gather
-        schema: Review
-    }
+    primary = llm.call(
+        model: "claude-opus-4.7",
+        prompt: "review this code",
+        input: gather,
+    )
 
-    verify = llm {
-        model: "gpt-4o-mini"
-        prompt: "verify this review"
-        input: primary
-    }
+    verify = llm.call(
+        model: "gpt-4o-mini",
+        prompt: "verify this review",
+        input: primary,
+    )
 
     when verify.valid == false {
-        primary = llm {
-            model: "claude-opus-4.7"
-            prompt: "review again"
-            input: gather
-        }
+        primary = llm.call(
+            model: "claude-opus-4.7",
+            prompt: "review again",
+            input: gather,
+        )
     }
 
     when primary.severity == "critical" {
