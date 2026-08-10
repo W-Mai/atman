@@ -309,17 +309,27 @@ pub fn render_panel(
                 }
             }
         }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " [a]dd  [Enter] expand  [Tab] switch  [↑↓] navigate  [t] test  [r] remove  [d] toggle  [Esc] close",
-            Style::default().fg(t.subtle_fg.into()),
-        )));
     }
 
+    let help_text = " [a]dd  [Enter] expand  [Tab] switch  [↑↓] navigate  [t] test  [r] remove  [d] toggle  [Esc] close";
+    let content_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    let help_area = Rect {
+        y: content_area.bottom(),
+        height: 1,
+        ..area
+    };
     let visible: Vec<Line> = lines.into_iter().skip(*scroll as usize).collect();
-    let p = Paragraph::new(visible);
-    f.render_widget(p, area);
+    f.render_widget(Paragraph::new(visible), content_area);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            help_text,
+            Style::default().fg(t.subtle_fg.into()),
+        ))),
+        help_area,
+    );
 }
 
 /// Compute total visual line count for scroll clamping.
