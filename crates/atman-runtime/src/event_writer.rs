@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
@@ -123,6 +124,7 @@ impl Drop for EventWriter {
 }
 
 const MAX_BUFFERED: usize = 10_000;
+const RECOVERY_INTERVAL: Duration = Duration::from_secs(2);
 
 struct DegradedBuffer {
     events: VecDeque<EventEnvelope>,
@@ -179,6 +181,7 @@ async fn writer_loop(
         .await?;
     let indexer = project_index.zip(session_id);
     let mut degraded = DegradedBuffer::new(MAX_BUFFERED);
+    let mut recovery_tick = tokio::time::interval(RECOVERY_INTERVAL);
 
     loop {
         tokio::select! {
@@ -197,6 +200,14 @@ async fn writer_loop(
                     let _ = waiter.send(());
                 }
                 break;
+            }
+            _ = recovery_tick.tick() => {
+                retry_degraded_on_tick(
+                    &mut file,
+                    &mut degraded,
+                    indexer.as_ref(),
+                    redactor.as_deref(),
+                ).await;
             }
             maybe_event = rx.recv() => {
                 match maybe_event {
@@ -280,6 +291,22 @@ async fn handle_event(
             event.seq
         );
         degraded.degrade(event, e.to_string());
+    }
+}
+
+async fn retry_degraded_on_tick(
+    file: &mut tokio::fs::File,
+    degraded: &mut DegradedBuffer,
+    indexer: Option<&(Arc<AnchorIndex>, String)>,
+    redactor: Option<&Redactor>,
+) {
+    if !degraded.is_degraded() || degraded.events.is_empty() {
+        return;
+    }
+
+    retry_buffered(file, degraded, indexer, redactor).await;
+    if !degraded.is_degraded() {
+        crate::notify!(info, location = Status, "事件写入已恢复");
     }
 }
 
@@ -569,6 +596,35 @@ mod tests {
         );
         assert_eq!(degraded.dropped, 1);
         assert_eq!(degraded.error.as_deref(), Some("disk full"));
+    }
+
+    #[tokio::test]
+    async fn recovery_tick_retries_buffered_events() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("events.jsonl");
+        tokio::fs::write(&path, b"").await.unwrap();
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        let mut degraded = DegradedBuffer::new(MAX_BUFFERED);
+
+        handle_event(&mut file, flow_start(1), &mut degraded, None, None).await;
+
+        assert!(degraded.is_degraded());
+        assert_eq!(degraded.events.len(), 1);
+
+        drop(file);
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        retry_degraded_on_tick(&mut file, &mut degraded, None, None).await;
+
+        assert!(!degraded.is_degraded());
+        assert!(degraded.events.is_empty());
+        let contents = tokio::fs::read_to_string(path).await.unwrap();
+        let event: serde_json::Value = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(event["seq"], 1);
+        assert_eq!(event["type"], "flow_start");
     }
 
     #[tokio::test]
