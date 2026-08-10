@@ -14,12 +14,11 @@ flow review_code(file: path) -> Review {
         fetch_rule("code-review"),
     ] collect: all
 
-    primary = llm {
-        model: "smart"
-        prompt: @"prompts/code-review.md"
-        input: gather
-        schema: Review
-    }
+    primary = llm.call(
+        model: "smart",
+        prompt: @"prompts/code-review.md",
+        input: gather,
+    )
 
     return primary
 }
