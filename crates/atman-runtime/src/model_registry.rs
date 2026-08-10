@@ -614,8 +614,8 @@ pub fn is_first_run() -> bool {
             && e.provider.is_some()
             && e.context_budget.unwrap_or(0) > 0
     });
-    let env_configured = std::env::var("ANTHROPIC_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok();
+    let env_configured =
+        std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("OPENAI_API_KEY").is_ok();
     let auth_configured = AuthStore::load()
         .is_ok_and(|store| store.providers.iter().any(|provider| provider.enabled));
     let smart_resolves = {
