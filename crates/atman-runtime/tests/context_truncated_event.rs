@@ -9,11 +9,11 @@ async fn context_truncated_event_emitted_when_prompt_exceeds_budget() {
     let long_body = "x".repeat(20_000);
     let src = format!(
         r#"flow t() -> string {{
-    reply = llm {{
-        model: "mock"
-        prompt: "{long_body}"
-        context_budget: 100
-    }}
+    reply = llm.call(
+        model: "mock",
+        prompt: "{long_body}",
+        context_budget: 100,
+    )
     return reply
 }}
 "#
@@ -56,11 +56,11 @@ async fn context_truncated_event_emitted_when_prompt_exceeds_budget() {
 #[tokio::test]
 async fn context_truncated_event_not_emitted_when_prompt_under_budget() {
     let src = r#"flow t() -> string {
-    reply = llm {
-        model: "mock"
-        prompt: "short"
-        context_budget: 100
-    }
+    reply = llm.call(
+        model: "mock",
+        prompt: "short",
+        context_budget: 100,
+    )
     return reply
 }
 "#;

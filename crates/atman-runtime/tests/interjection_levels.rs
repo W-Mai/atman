@@ -85,7 +85,7 @@ fn joined_messages(calls: &[Vec<Message>]) -> String {
 #[tokio::test]
 async fn l2_course_correct_renders_as_user_correction_tag() {
     let src = r#"flow ask() -> string {
-    return llm { model: "rec", prompt: "hi" }
+    return llm.call(model: "rec", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -124,7 +124,7 @@ async fn l2_course_correct_renders_as_user_correction_tag() {
 #[tokio::test]
 async fn l3_redirect_switches_to_target_flow() {
     let src = r#"flow first() -> string {
-    return llm { model: "mock", prompt: "won't reach here" }
+    return llm.call(model: "mock", prompt: "won't reach here")
 }
 flow second() -> string {
     return "redirected"
@@ -158,12 +158,12 @@ flow second() -> string {
 
 #[tokio::test]
 async fn l3_redirect_chain_limit_returns_error() {
-    let src = r#"flow a() -> string { return llm { model: "mock", prompt: "x" } }
-flow b() -> string { return llm { model: "mock", prompt: "x" } }
-flow c() -> string { return llm { model: "mock", prompt: "x" } }
-flow d() -> string { return llm { model: "mock", prompt: "x" } }
-flow e() -> string { return llm { model: "mock", prompt: "x" } }
-flow f() -> string { return llm { model: "mock", prompt: "x" } }
+    let src = r#"flow a() -> string { return llm.call(model: "mock", prompt: "x") }
+flow b() -> string { return llm.call(model: "mock", prompt: "x") }
+flow c() -> string { return llm.call(model: "mock", prompt: "x") }
+flow d() -> string { return llm.call(model: "mock", prompt: "x") }
+flow e() -> string { return llm.call(model: "mock", prompt: "x") }
+flow f() -> string { return llm.call(model: "mock", prompt: "x") }
 flow g() -> string { return "reached" }
 "#;
     let file = parse_file(src).unwrap();
@@ -194,7 +194,7 @@ flow g() -> string { return "reached" }
 #[tokio::test]
 async fn l1_and_l2_both_appear_in_next_llm_request() {
     let src = r#"flow ask() -> string {
-    return llm { model: "rec", prompt: "hi" }
+    return llm.call(model: "rec", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();

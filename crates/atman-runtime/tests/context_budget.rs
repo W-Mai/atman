@@ -25,11 +25,11 @@ fn truncate_keeps_head_and_tail_dropping_middle() {
 #[tokio::test]
 async fn context_budget_kwarg_shrinks_prompt_before_provider() {
     let src = r#"flow t(text: string) -> string {
-    return llm {
-        model: "echo"
-        prompt: text
-        context_budget: 30
-    }
+    return llm.call(
+        model: "echo",
+        prompt: text,
+        context_budget: 30,
+    )
 }
 "#;
     let file = parse_file(src).unwrap();

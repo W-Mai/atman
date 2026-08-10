@@ -62,6 +62,11 @@ const BUILTIN_VARS: &[&str] = &[
 fn infer_node_kind(value: &Expr) -> Option<&'static str> {
     match value {
         Expr::Node(Node::Llm { .. }) => Some("llm"),
+        Expr::Node(Node::ToolCall { path, .. })
+            if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
+        {
+            Some("llm")
+        }
         Expr::Node(Node::ToolCall { path, .. }) => {
             let _ = path;
             Some("tool_call")

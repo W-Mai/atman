@@ -22,7 +22,7 @@ async fn l2_injection_mid_stream_triggers_restart_with_correction() {
 
     let src = r#"
 flow t(user: string) -> string {
-    reply = llm { model: "mock-slow", prompt: user }
+    reply = llm.call(model: "mock-slow", prompt: user)
     watch reply {
         on token(match: "___never_match_but_forces_streaming___") {
             abort("unused")

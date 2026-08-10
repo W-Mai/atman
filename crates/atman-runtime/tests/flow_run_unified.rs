@@ -138,10 +138,10 @@ async fn flow_interject_cancels_running_subagent_llm() {
     std::fs::create_dir_all(&commands_dir).unwrap();
     let flow_src = r#"flow describe() -> string { return "test" }
 flow test_flow(goal: string) -> string {
-    reply = llm {
-        model: "mock"
-        prompt: goal
-    }
+    reply = llm.call(
+        model: "mock",
+        prompt: goal,
+    )
     return text_concat(reply)
 }
 "#;
@@ -240,7 +240,7 @@ async fn l1_nudge_text_appears_in_entry_messages() {
     let flow_src = r#"flow describe() -> string { return "test" }
 flow test_flow(goal: string) -> string {
     session.push(message.user(goal))
-    reply = llm { model: "mock", context: session }
+    reply = llm.call(model: "mock", context: "session")
     return text_concat(reply)
 }
 "#;

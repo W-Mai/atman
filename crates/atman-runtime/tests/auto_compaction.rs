@@ -186,8 +186,8 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     ex.providers.register(provider.clone());
     let file = parse_file(
         r#"flow start() -> string {
-    first = llm { model: "llama-workflow-compact" context: session }
-    second = llm { model: "llama-workflow-compact" context: session }
+    first = llm.call(model: "llama-workflow-compact", context: "session")
+    second = llm.call(model: "llama-workflow-compact", context: "session")
     return text_concat(second)
 }"#,
     )

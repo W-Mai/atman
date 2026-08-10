@@ -33,10 +33,10 @@ fn spawn_test_setup(
     std::fs::write(
         &flow_path,
         r#"flow test_flow(goal: string) -> string {
-    reply = llm {
-        model: "mock"
-        prompt: goal
-    }
+    reply = llm.call(
+        model: "mock",
+        prompt: goal,
+    )
     return reply
 }
 "#,
@@ -75,6 +75,7 @@ fn spawn_test_setup(
     let registry = Arc::new(FlowRegistry::new());
     let tools = ToolRegistry::new();
     tools.register(Arc::new(AgentSpawn));
+    tools.register(Arc::new(atman_runtime::tools::llm_call::LlmCallTool));
     let mut providers = ProviderRegistry::new();
     if with_provider {
         providers.register(Arc::new(

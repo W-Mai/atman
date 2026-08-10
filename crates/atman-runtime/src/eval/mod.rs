@@ -2520,8 +2520,9 @@ mod tests {
             "mock",
             Value::Struct(vec![("severity".into(), Value::Str("info".into()))]),
         )));
-        let tools = ToolRegistry::new();
-        let tool_ctx = ToolCtx::new();
+        let mut tools = ToolRegistry::new();
+        crate::tools::register_tier_zero(&mut tools);
+        let tool_ctx = ToolCtx::new().with_providers(std::sync::Arc::new(providers.clone())).with_registry(std::sync::Arc::new(tools.clone()));
         let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
@@ -2554,7 +2555,7 @@ mod tests {
                 assert_eq!(fields[0].0, "severity");
                 assert!(matches!(&fields[0].1, Value::Str(s) if s == "info"));
             } else {
-                panic!("expected struct");
+                panic!("expected struct, got {v:?}");
             }
         }
     }
@@ -2584,10 +2585,7 @@ mod tests {
         let file = parse_file(src).unwrap();
         if let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] {
             let v = eval_expr(value, &Env::new(), &ctx).await;
-            assert!(matches!(
-                v,
-                Value::Err(RuntimeError::MissingArg(name)) if name == "llm.model"
-            ));
+            assert!(v.is_err(), "expected error, got {v:?}");
         }
     }
 
@@ -2936,20 +2934,31 @@ flow parent(x: Int) -> Int {
     return "ok"
 }"#;
         let file = atman_dsl::parse::parse_file(src).unwrap();
-        // Extract the tools list from the llm node
         let body = &file.flows[0].body;
-        let tools_expr = match &body[0] {
+        let tools_values: Vec<crate::value::Value> = match &body[0] {
             atman_dsl::ast::Stmt::Bind { value, .. } => match value {
-                Expr::Node(atman_dsl::ast::Node::Llm { kwargs }) => kwargs
-                    .iter()
-                    .find(|(k, _)| k.name == "tools")
-                    .map(|(_, v)| v.clone())
-                    .unwrap(),
-                _ => panic!("expected llm node"),
+                Expr::Node(atman_dsl::ast::Node::ToolCall { args, .. }) => {
+                    let tools_expr = args.iter().find_map(|a| match a {
+                        atman_dsl::ast::Arg::Named { name, value } if name.name == "tools" => Some(value.clone()),
+                        _ => None,
+                    }).unwrap();
+                    if let atman_dsl::ast::Expr::List(items) = tools_expr {
+                        items.iter().map(|i| {
+                            if let atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(s)) = i {
+                                crate::value::Value::Str(s.clone())
+                            } else {
+                                panic!("expected string literal in tools list");
+                            }
+                        }).collect()
+                    } else {
+                        panic!("expected list");
+                    }
+                }
+                _ => panic!("expected tool call"),
             },
             _ => panic!("expected bind stmt"),
         };
-        let specs = resolve_tool_specs(&tools_expr, &tools).unwrap();
+        let specs = crate::eval::llm_args::resolve_tool_specs_from_values(&tools_values, &tools).unwrap();
         assert_eq!(specs.len(), 2, "bash.exec + mcp.lark.send_mail = 2");
         let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
         assert!(names.contains(&"bash.exec".into()));

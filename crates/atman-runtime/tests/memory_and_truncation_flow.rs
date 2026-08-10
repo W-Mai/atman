@@ -50,11 +50,11 @@ async fn confess_three_and_fetch_returns_three_via_flow() {
 async fn long_prompt_triggers_context_truncated_event_and_flow_completes() {
     let src = format!(
         r#"flow t() -> string {{
-    reply = llm {{
-        model: "mock"
-        prompt: "{}"
-        context_budget: 100
-    }}
+    reply = llm.call(
+        model: "mock",
+        prompt: "{}",
+        context_budget: 100,
+    )
     return reply
 }}
 "#,

@@ -30,11 +30,11 @@ const EDIT_FLOW: &str = r#"flow edit_and_verify(file: path, instruction: string,
 
     original = fs.read(file)
 
-    edited = llm {
-        model: "claude-opus-4.7"
-        prompt: "edit"
-        input: { file: file, original: original, instruction: instruction }
-    }
+    edited = llm.call(
+        model: "claude-opus-4.7",
+        prompt: "edit",
+        input: { file: file, original: original, instruction: instruction },
+    )
 
     ok = user_confirm("apply?")
 
@@ -111,7 +111,7 @@ const FIX_LOOP_FLOW: &str = r#"flow demo(target: path, script: string) -> string
         capabilities { shell: true }
     }
     result = fix_until_test_passes {
-        edit_flow: llm { model: "mock", prompt: "fix" }
+        edit_flow: llm.call(model: "mock", prompt: "fix")
         test: bash.spawn(block: true, cmd: script)
         target: target
         max_iters: 5

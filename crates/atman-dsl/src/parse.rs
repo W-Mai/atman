@@ -526,7 +526,10 @@ fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
     }
 
     if input.peek(kw::llm) {
-        return Ok(Expr::Node(parse_llm(input)?));
+        if !input.fork().peek2(Token![.]) {
+            return Ok(Expr::Node(parse_llm(input)?));
+        }
+        return parse_llm_call(input);
     }
     if input.peek(kw::fanout) {
         return Ok(Expr::Node(parse_fanout(input)?));
@@ -817,6 +820,46 @@ fn parse_kwargs(input: ParseStream) -> Result<Kwargs> {
         }
     }
     Ok(kwargs)
+}
+
+fn parse_llm_call(input: ParseStream) -> Result<Expr> {
+    input.parse::<kw::llm>()?;
+    input.parse::<Token![.]>()?;
+    let method = to_ident(input.parse::<syn::Ident>()?);
+    if method.name != "call" {
+        return Err(input.error("expected `llm.call(...)`, only `.call` is supported on `llm`"));
+    }
+    let content;
+    parenthesized!(content in input);
+    let args = parse_llm_call_args(&content)?;
+    let llm_seg = Ident {
+        name: "llm".into(),
+        span: to_span(proc_macro2::Span::call_site()),
+    };
+    Ok(Expr::Node(Node::ToolCall {
+        path: vec![llm_seg, method],
+        args,
+    }))
+}
+
+// `llm.call(...)` arguments are named kwargs. Accept both comma-separated and
+// newline/whitespace-separated forms, mirroring `parse_kwargs` tolerance for
+// the legacy `llm { ... }` blocks.
+fn parse_llm_call_args(input: ParseStream) -> Result<Vec<Arg>> {
+    let mut args = Vec::new();
+    while !input.is_empty() {
+        if !(input.peek(syn::Ident) || peek_any_ident(input)) {
+            return Err(input.error("expected a named argument like `model: \"mock\"`"));
+        }
+        let name = to_ident(<syn::Ident as syn::ext::IdentExt>::parse_any(input)?);
+        input.parse::<Token![:]>()?;
+        let value = parse_expr(input)?;
+        args.push(Arg::Named { name, value });
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        }
+    }
+    Ok(args)
 }
 
 fn parse_llm(input: ParseStream) -> Result<Node> {

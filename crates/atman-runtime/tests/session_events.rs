@@ -12,10 +12,10 @@ async fn session_writes_events_to_jsonl_file() {
     let events_path = session.events_path().unwrap().to_path_buf();
 
     let src = r#"flow t() -> string {
-    return llm {
-        model: "mock"
-        prompt: "hi"
-    }
+    return llm.call(
+        model: "mock",
+        prompt: "hi",
+    )
 }
 "#;
     let file = parse_file(src).unwrap();

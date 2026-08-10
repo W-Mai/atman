@@ -8,10 +8,10 @@ use atman_runtime::{Executor, RuntimeError, Value};
 #[tokio::test]
 async fn watch_tokens_consumed_aborts_when_exceeded() {
     let src = r#"flow review() -> string {
-    primary = llm {
-        model: "mock-model"
-        prompt: "review please"
-    }
+    primary = llm.call(
+        model: "mock-model",
+        prompt: "review please",
+    )
     watch primary {
         on tokens_consumed(> 5) {
             abort("token budget exceeded")
@@ -40,10 +40,10 @@ async fn watch_tokens_consumed_aborts_when_exceeded() {
 #[tokio::test]
 async fn watch_elapsed_aborts_slow_stream() {
     let src = r#"flow review() -> string {
-    primary = llm {
-        model: "mock-model"
-        prompt: "review please"
-    }
+    primary = llm.call(
+        model: "mock-model",
+        prompt: "review please",
+    )
     watch primary {
         on elapsed(> 50 ms) {
             abort("too slow")
@@ -73,10 +73,10 @@ async fn watch_elapsed_aborts_slow_stream() {
 #[tokio::test]
 async fn watch_tokens_consumed_does_not_fire_when_under_budget() {
     let src = r#"flow review() -> string {
-    primary = llm {
-        model: "mock-model"
-        prompt: "review please"
-    }
+    primary = llm.call(
+        model: "mock-model",
+        prompt: "review please",
+    )
     watch primary {
         on tokens_consumed(> 10000) {
             abort("budget")

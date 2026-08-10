@@ -23,7 +23,7 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 #[tokio::test]
 async fn flow_cancel_before_start_returns_cancelled_error() {
     let src = r#"flow ask() -> string {
-    return llm { model: "mock", prompt: "hi" }
+    return llm.call(model: "mock", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -120,8 +120,8 @@ impl Provider for CancelAfterFirstProvider {
 #[tokio::test]
 async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
     let src = r#"flow chained() -> string {
-    a = llm { model: "prov", prompt: "first" }
-    b = llm { model: "prov", prompt: "second" }
+    a = llm.call(model: "prov", prompt: "first")
+    b = llm.call(model: "prov", prompt: "second")
     return b
 }
 "#;

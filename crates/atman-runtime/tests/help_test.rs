@@ -96,7 +96,7 @@ fn mcp_topic_contains_key_fields() {
 fn dsl_topic_contains_key_syntax() {
     let content = help::topic_content("dsl", &ctx_empty()).unwrap();
     assert!(content.contains("flow "));
-    assert!(content.contains("llm {"));
+    assert!(content.contains("llm.call("));
     assert!(content.contains("fanout"));
     assert!(content.contains("contract"));
 }

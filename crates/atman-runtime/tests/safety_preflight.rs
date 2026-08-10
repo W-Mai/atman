@@ -34,7 +34,7 @@ impl SafetyClassifier for StaticClassifier {
 fn agent_source() -> &'static str {
     r#"
 flow t(prompt: string) -> string {
-    return llm { model: "mock", prompt: prompt }
+    return llm.call(model: "mock", prompt: prompt)
 }
 "#
 }
@@ -249,7 +249,7 @@ async fn safety_auto_rewrite_retries_after_provider_content_filter_error() {
 
     let src = r#"
 flow t(prompt: string) -> string {
-    return llm { model: "rewrite-mock", prompt: prompt, retry: 1 }
+    return llm.call(model: "rewrite-mock", prompt: prompt, retry: 1)
 }
 "#;
     let cfg = SafetyConfig {

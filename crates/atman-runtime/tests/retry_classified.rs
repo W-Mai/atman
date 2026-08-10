@@ -143,12 +143,12 @@ fn retry_classified_only_retries_on_listed_kinds() {
         ],
     ));
     let src = r#"flow t() -> string {
-    return llm {
-        model: "m"
-        prompt: "hi"
-        retry: 3
-        retry_classified: [timeout, rate_limit]
-    }
+    return llm.call(
+        model: "m",
+        prompt: "hi",
+        retry: 3,
+        retry_classified: [timeout, rate_limit],
+    )
 }
 "#;
     let (value, calls) = run_with(provider, src);
@@ -171,12 +171,12 @@ fn retry_classified_gives_up_immediately_on_kind_not_in_list() {
         ],
     ));
     let src = r#"flow t() -> string {
-    return llm {
-        model: "m"
-        prompt: "hi"
-        retry: 3
-        retry_classified: [timeout, rate_limit]
-    }
+    return llm.call(
+        model: "m",
+        prompt: "hi",
+        retry: 3,
+        retry_classified: [timeout, rate_limit],
+    )
 }
 "#;
     let (value, calls) = run_with(provider, src);
@@ -199,11 +199,11 @@ fn retry_without_classified_retries_any_error() {
         ],
     ));
     let src = r#"flow t() -> string {
-    return llm {
-        model: "m"
-        prompt: "hi"
-        retry: 3
-    }
+    return llm.call(
+        model: "m",
+        prompt: "hi",
+        retry: 3,
+    )
 }
 "#;
     let (value, calls) = run_with(provider, src);
@@ -346,12 +346,12 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     build_long_history(&session, 30);
     let file = parse_file(
         r#"flow t() -> string {
-    return llm {
-        model: "llama-3b"
-        context: session
-        prompt: "continue"
-        retry: 10
-    }
+    return llm.call(
+        model: "llama-3b",
+        context: "session",
+        prompt: "continue",
+        retry: 10,
+    )
 }
 "#,
     )
@@ -380,12 +380,12 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
 fn retry_classified_unknown_kind_fails_parse_time() {
     let file = parse_file(
         r#"flow t() -> string {
-    return llm {
-        model: "m"
-        prompt: "hi"
-        retry: 1
-        retry_classified: [not_a_real_kind]
-    }
+    return llm.call(
+        model: "m",
+        prompt: "hi",
+        retry: 1,
+        retry_classified: [not_a_real_kind],
+    )
 }
 "#,
     )

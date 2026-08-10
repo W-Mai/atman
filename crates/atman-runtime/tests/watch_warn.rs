@@ -8,10 +8,10 @@ use atman_runtime::{Executor, Value};
 #[tokio::test]
 async fn watch_token_warn_emits_event_and_stream_completes() {
     let src = r#"flow review() -> string {
-    primary = llm {
-        model: "mock-model"
-        prompt: "review please"
-    }
+    primary = llm.call(
+        model: "mock-model",
+        prompt: "review please",
+    )
     watch primary {
         on token(match: "warn me") {
             warn("HIT WARN")
@@ -51,10 +51,10 @@ async fn watch_token_warn_emits_event_and_stream_completes() {
 #[tokio::test]
 async fn watch_warn_fires_once_per_pattern_even_on_repeats() {
     let src = r#"flow review() -> string {
-    primary = llm {
-        model: "mock-model"
-        prompt: "review"
-    }
+    primary = llm.call(
+        model: "mock-model",
+        prompt: "review",
+    )
     watch primary {
         on token(match: "warn me") {
             warn()

@@ -107,11 +107,11 @@ async fn cache_kwarg_flows_from_dsl_to_provider() {
         .await;
 
     let src = r#"flow t() -> string {
-    return llm {
-        model: "test"
-        prompt: "cache me"
-        cache: true
-    }
+    return llm.call(
+        model: "test",
+        prompt: "cache me",
+        cache: true,
+    )
 }
 "#;
     let file = parse_file(src).unwrap();

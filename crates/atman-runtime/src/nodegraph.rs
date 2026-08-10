@@ -114,6 +114,11 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
             };
             (NodeKind::Llm { model }, label, Vec::new())
         }
+        Node::ToolCall { path, .. }
+            if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
+        {
+            (NodeKind::Llm { model: None }, "llm.call".into(), Vec::new())
+        }
         Node::ToolCall { path, .. } => {
             let path_str = path
                 .iter()

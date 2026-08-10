@@ -7,10 +7,10 @@ use atman_runtime::{Executor, RuntimeError, Value};
 #[tokio::test]
 async fn watch_token_abort_stops_flow_when_forbidden_pattern_appears() {
     let src = r#"flow review() -> string {
-    primary = llm {
-        model: "mock-model"
-        prompt: "review please"
-    }
+    primary = llm.call(
+        model: "mock-model",
+        prompt: "review please",
+    )
     watch primary {
         on token(match: "as any" | "@ts-ignore") {
             abort("type-safety violation")
@@ -37,10 +37,10 @@ async fn watch_token_abort_stops_flow_when_forbidden_pattern_appears() {
 #[tokio::test]
 async fn watch_token_does_not_fire_on_clean_output() {
     let src = r#"flow review() -> string {
-    primary = llm {
-        model: "mock-model"
-        prompt: "review please"
-    }
+    primary = llm.call(
+        model: "mock-model",
+        prompt: "review please",
+    )
     watch primary {
         on token(match: "as any") {
             abort("type-safety")

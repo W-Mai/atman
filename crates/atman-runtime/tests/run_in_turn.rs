@@ -18,7 +18,7 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 #[tokio::test]
 async fn run_in_turn_appends_assistant_message_to_session() {
     let src = r#"flow ask() -> string {
-    return llm { model: "mock", prompt: "hi" }
+    return llm.call(model: "mock", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -56,7 +56,7 @@ async fn run_in_turn_appends_assistant_message_to_session() {
 #[tokio::test]
 async fn run_without_turn_does_not_touch_session() {
     let src = r#"flow ask() -> string {
-    return llm { model: "mock", prompt: "hi" }
+    return llm.call(model: "mock", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -72,7 +72,7 @@ async fn run_without_turn_does_not_touch_session() {
 #[tokio::test]
 async fn assistant_msg_event_carries_flow_run_id() {
     let src = r#"flow ask() -> string {
-    return llm { model: "mock", prompt: "hi" }
+    return llm.call(model: "mock", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();

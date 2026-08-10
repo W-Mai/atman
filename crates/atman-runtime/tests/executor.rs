@@ -77,11 +77,11 @@ async fn executor_fetch_rule_returns_content() {
 async fn executor_runs_review_flow_with_mock_provider() {
     let src = r#"flow review_code(file: path) -> Review {
     gather = fetch_confessions()
-    primary = llm {
-        model: "claude-opus-4.7"
-        prompt: "review please"
-        input: gather
-    }
+    primary = llm.call(
+        model: "claude-opus-4.7",
+        prompt: "review please",
+        input: gather,
+    )
     return primary
 }
 "#;

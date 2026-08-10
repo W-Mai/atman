@@ -135,11 +135,11 @@ flow agent_loop(messages: list, iteration: int) -> string {
     when iteration >= 5 {
         return "[agent: max iterations reached]"
     }
-    reply = llm {
-        model: "scripted"
-        messages: messages
-        tools: [fs.read]
-    }
+    reply = llm.call(
+        model: "scripted",
+        messages: messages,
+        tools: ["fs.read"],
+    )
     tool_uses = extract_tool_uses(reply)
     when is_empty(tool_uses) {
         return text_concat(reply)

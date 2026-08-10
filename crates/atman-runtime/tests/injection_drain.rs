@@ -84,7 +84,7 @@ impl Provider for RecordingProvider {
 #[tokio::test]
 async fn pending_injection_appears_in_next_llm_request_messages() {
     let src = r#"flow ask() -> string {
-    return llm { model: "prov", prompt: "hi" }
+    return llm.call(model: "prov", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -130,7 +130,7 @@ async fn pending_injection_appears_in_next_llm_request_messages() {
 #[tokio::test]
 async fn no_pending_injection_yields_bare_user_message() {
     let src = r#"flow ask() -> string {
-    return llm { model: "prov", prompt: "hi" }
+    return llm.call(model: "prov", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -160,8 +160,8 @@ async fn no_pending_injection_yields_bare_user_message() {
 #[tokio::test]
 async fn injection_drained_once_not_reused_by_next_node() {
     let src = r#"flow chained() -> string {
-    a = llm { model: "prov", prompt: "first" }
-    b = llm { model: "prov", prompt: "second" }
+    a = llm.call(model: "prov", prompt: "first")
+    b = llm.call(model: "prov", prompt: "second")
     return b
 }
 "#;
