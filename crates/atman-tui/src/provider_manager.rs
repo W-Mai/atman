@@ -1371,7 +1371,14 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
             .split(main);
-        render_provider_list(f, columns[0], self, t);
+        let left_col = columns[0];
+        let right_col = Rect {
+            x: columns[1].x + 1,
+            width: columns[1].width.saturating_sub(1),
+            ..columns[1]
+        };
+        render_provider_list(f, left_col, self, t);
+        render_model_detail(f, right_col, self, t);
         crate::wm::shell::render_column_divider(
             f,
             columns[0].right(),
@@ -1379,7 +1386,6 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
             columns[0].height,
             t,
         );
-        render_model_detail(f, columns[1], self, t);
         let help = match self.focus {
             ProviderFocus::ProviderList => {
                 "a:add  e:enable/disable  d:delete  r:refresh  t:test  Enter:edit/logout  Tab:models  Esc:close"
