@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::event::{Event, EventEnvelope};
@@ -174,11 +174,15 @@ async fn writer_loop(
     session_id: Option<String>,
     redactor: Option<Arc<Redactor>>,
 ) -> std::io::Result<()> {
+    // O_APPEND prevents seek-based overwrites required for idempotent retries.
+    #[allow(clippy::suspicious_open_options)]
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .read(true)
+        .write(true)
         .open(path)
         .await?;
+    let mut offset = file.seek(SeekFrom::End(0)).await?;
     let indexer = project_index.zip(session_id);
     let mut degraded = DegradedBuffer::new(MAX_BUFFERED);
     let mut recovery_tick = tokio::time::interval(RECOVERY_INTERVAL);
@@ -190,6 +194,7 @@ async fn writer_loop(
                 while let Ok(event) = rx.try_recv() {
                     handle_event(
                         &mut file,
+                        &mut offset,
                         event,
                         &mut degraded,
                         indexer.as_ref(),
@@ -204,6 +209,7 @@ async fn writer_loop(
             _ = recovery_tick.tick() => {
                 retry_degraded_on_tick(
                     &mut file,
+                    &mut offset,
                     &mut degraded,
                     indexer.as_ref(),
                     redactor.as_deref(),
@@ -214,6 +220,7 @@ async fn writer_loop(
                     Some(event) => {
                         handle_event(
                             &mut file,
+                            &mut offset,
                             event,
                             &mut degraded,
                             indexer.as_ref(),
@@ -229,6 +236,7 @@ async fn writer_loop(
                         while let Ok(event) = rx.try_recv() {
                             handle_event(
                                 &mut file,
+                                &mut offset,
                                 event,
                                 &mut degraded,
                                 indexer.as_ref(),
@@ -237,6 +245,7 @@ async fn writer_loop(
                         }
                         retry_buffered(
                             &mut file,
+                            &mut offset,
                             &mut degraded,
                             indexer.as_ref(),
                             redactor.as_deref(),
@@ -253,6 +262,7 @@ async fn writer_loop(
     }
     retry_buffered(
         &mut file,
+        &mut offset,
         &mut degraded,
         indexer.as_ref(),
         redactor.as_deref(),
@@ -275,6 +285,7 @@ async fn writer_loop(
 
 async fn handle_event(
     file: &mut tokio::fs::File,
+    offset: &mut u64,
     event: EventEnvelope,
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
@@ -284,7 +295,7 @@ async fn handle_event(
         degraded.buffer(event);
         return;
     }
-    if let Err(e) = write_event(file, &event, indexer, redactor).await {
+    if let Err(e) = write_event(file, offset, &event, indexer, redactor).await {
         crate::notify!(
             error,
             "event writer write failed (seq={}): {e}; buffering events in memory",
@@ -296,6 +307,7 @@ async fn handle_event(
 
 async fn retry_degraded_on_tick(
     file: &mut tokio::fs::File,
+    offset: &mut u64,
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
@@ -304,7 +316,7 @@ async fn retry_degraded_on_tick(
         return;
     }
 
-    retry_buffered(file, degraded, indexer, redactor).await;
+    retry_buffered(file, offset, degraded, indexer, redactor).await;
     if !degraded.is_degraded() {
         crate::notify!(info, location = Status, "事件写入已恢复");
     }
@@ -312,12 +324,13 @@ async fn retry_degraded_on_tick(
 
 async fn retry_buffered(
     file: &mut tokio::fs::File,
+    offset: &mut u64,
     degraded: &mut DegradedBuffer,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
 ) {
     while let Some(event) = degraded.events.pop_front() {
-        if let Err(e) = write_event(file, &event, indexer, redactor).await {
+        if let Err(e) = write_event(file, offset, &event, indexer, redactor).await {
             crate::notify!(
                 error,
                 "event writer retry failed (seq={}): {e}; {} event(s) remain buffered",
@@ -334,14 +347,28 @@ async fn retry_buffered(
 
 async fn write_event(
     file: &mut tokio::fs::File,
+    offset: &mut u64,
     envelope: &EventEnvelope,
     indexer: Option<&(Arc<AnchorIndex>, String)>,
     redactor: Option<&Redactor>,
 ) -> std::io::Result<()> {
     let line = serialize_event(envelope, redactor);
-    file.write_all(line.as_bytes()).await?;
-    file.write_all(b"\n").await?;
-    file.sync_data().await?;
+    let start = *offset;
+    file.seek(SeekFrom::Start(start)).await?;
+    if let Err(e) = file.write_all(line.as_bytes()).await {
+        *offset = start;
+        return Err(e);
+    }
+    if let Err(e) = file.write_all(b"\n").await {
+        *offset = start;
+        return Err(e);
+    }
+    let end = file.stream_position().await?;
+    if let Err(e) = file.sync_data().await {
+        *offset = start;
+        return Err(e);
+    }
+    *offset = end;
     if let Some((idx, sid)) = indexer
         && let Err(e) = insert_project_row(idx, sid, envelope, &line)
     {
@@ -604,20 +631,32 @@ mod tests {
         let path = dir.path().join("events.jsonl");
         tokio::fs::write(&path, b"").await.unwrap();
         let mut file = tokio::fs::File::open(&path).await.unwrap();
+        let mut offset = 0;
         let mut degraded = DegradedBuffer::new(MAX_BUFFERED);
 
-        handle_event(&mut file, flow_start(1), &mut degraded, None, None).await;
+        handle_event(
+            &mut file,
+            &mut offset,
+            flow_start(1),
+            &mut degraded,
+            None,
+            None,
+        )
+        .await;
 
         assert!(degraded.is_degraded());
         assert_eq!(degraded.events.len(), 1);
 
         drop(file);
+        #[allow(clippy::suspicious_open_options)]
         let mut file = tokio::fs::OpenOptions::new()
-            .append(true)
+            .read(true)
+            .write(true)
             .open(&path)
             .await
             .unwrap();
-        retry_degraded_on_tick(&mut file, &mut degraded, None, None).await;
+        let mut offset = 0;
+        retry_degraded_on_tick(&mut file, &mut offset, &mut degraded, None, None).await;
 
         assert!(!degraded.is_degraded());
         assert!(degraded.events.is_empty());
@@ -625,6 +664,34 @@ mod tests {
         let event: serde_json::Value = serde_json::from_str(contents.trim()).unwrap();
         assert_eq!(event["seq"], 1);
         assert_eq!(event["type"], "flow_start");
+    }
+
+    #[tokio::test]
+    async fn write_event_overwrites_partial_line() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .await
+            .unwrap();
+        let event = flow_start(1);
+        let line = serialize_event(&event, None);
+        file.write_all(&line.as_bytes()[..line.len() / 2])
+            .await
+            .unwrap();
+        let mut offset = 0;
+
+        write_event(&mut file, &mut offset, &event, None, None)
+            .await
+            .unwrap();
+
+        let contents = tokio::fs::read_to_string(path).await.unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        let _: serde_json::Value = serde_json::from_str(contents.trim()).unwrap();
     }
 
     #[tokio::test]
