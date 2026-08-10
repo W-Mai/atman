@@ -154,7 +154,9 @@ fn selectable_models() -> Vec<String> {
     let mut models: Vec<String> = atman_runtime::model_registry::all_model_entries()
         .into_iter()
         .filter_map(|(name, entry)| {
-            if entry.enabled != Some(false) && entry.context_budget.unwrap_or(0) > 0 {
+            if entry.enabled != Some(false)
+                && entry.api_key.as_deref().is_some_and(|k| !k.is_empty())
+            {
                 Some(name)
             } else {
                 None
@@ -515,7 +517,7 @@ mod tests {
             atman_runtime::model_registry::ModelEntry {
                 model: "example-model".into(),
                 enabled: Some(true),
-                context_budget: Some(1000),
+                api_key: Some("test-key".into()),
                 ..Default::default()
             },
         );
