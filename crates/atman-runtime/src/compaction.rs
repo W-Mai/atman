@@ -1,7 +1,8 @@
 use crate::message::{Message, MessagePart, MessageRole};
 
-pub const KEEP_RECENT_MESSAGES: usize = 20;
+pub const KEEP_RECENT_MESSAGES: usize = 10;
 pub const KEEP_RECENT_USER_TURNS: usize = 5;
+const KEEP_RECENT_TOKEN_FRACTION: f64 = 0.05;
 
 pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     let mut chars = 0usize;
@@ -84,8 +85,20 @@ pub fn find_compact_range(messages: &[Message], budget: u64) -> Option<CompactRa
         .iter()
         .rposition(is_compaction_summary)
         .unwrap_or(0);
+    let keep_recent_tokens = (budget as f64 * KEEP_RECENT_TOKEN_FRACTION).ceil() as u64;
+    let mut recent_tokens = 0u64;
+    let mut token_end = messages.len();
+    for (index, message) in messages.iter().enumerate().rev() {
+        recent_tokens = recent_tokens.saturating_add(estimate_tokens_for_message(message));
+        token_end = index;
+        if recent_tokens >= keep_recent_tokens {
+            break;
+        }
+    }
     let message_end = messages.len().saturating_sub(KEEP_RECENT_MESSAGES);
-    let end = message_end.min(find_kth_recent_user(messages, KEEP_RECENT_USER_TURNS));
+    let end = message_end
+        .min(token_end)
+        .min(find_kth_recent_user(messages, KEEP_RECENT_USER_TURNS));
     if end < start + 2 {
         return None;
     }
@@ -709,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn find_compact_range_preserves_recent_messages_without_anchor() {
+    fn find_compact_range_preserves_minimum_recent_messages_without_anchor() {
         let mut msgs = vec![system("head")];
         msgs.extend((0..25).map(|index| assistant(&format!("old {index}"))));
         msgs.extend(
@@ -718,6 +731,71 @@ mod tests {
         let range = find_compact_range(&msgs, 1).expect("range");
         assert_eq!(range.start, 0);
         assert_eq!(range.end, msgs.len() - KEEP_RECENT_MESSAGES);
+    }
+
+    #[test]
+    fn find_compact_range_expands_recent_window_for_large_tool_result() {
+        let mut msgs = vec![user(&"h".repeat(500_000))];
+        for index in 1..31 {
+            if matches!(index, 20 | 22 | 24 | 26 | 28 | 30) {
+                msgs.push(user(&"u".repeat(800)));
+            } else {
+                msgs.push(assistant(&"a".repeat(800)));
+            }
+        }
+        msgs.push(tool_result("call-large", &"t".repeat(5000), false));
+
+        let range = find_compact_range(&msgs, 120_000).expect("range");
+        assert!(range.end < msgs.len() - 20, "range was {range:?}");
+        assert!(
+            estimate_tokens_for_messages(&msgs[range.end..])
+                >= (120_000.0 * KEEP_RECENT_TOKEN_FRACTION).ceil() as u64
+        );
+    }
+
+    #[test]
+    fn find_compact_range_handles_four_to_twenty_one_message_histories() {
+        for len in 4..=21 {
+            let msgs = (0..len)
+                .map(|_| user(&"x".repeat(5000)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                find_compact_range(&msgs, 1).is_some(),
+                len >= KEEP_RECENT_MESSAGES + 2,
+                "len={len}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_compact_range_recent_users_limit_mixed_history() {
+        let msgs = vec![
+            system("head"),
+            assistant("a0"),
+            user("u0"),
+            tool_result("call-0", "r0", false),
+            assistant("a1"),
+            user("u1"),
+            assistant("a2"),
+            tool_result("call-1", "r1", false),
+            user("u2"),
+            assistant("a3"),
+            system("note"),
+            user("u3"),
+            tool_result("call-2", "r2", false),
+            assistant("a4"),
+            user("u4"),
+            assistant("a5"),
+            tool_result("call-3", "r3", false),
+            user("u5"),
+            assistant("a6"),
+            system("tail"),
+            assistant("a7"),
+        ];
+
+        let range = find_compact_range(&msgs, 1).expect("range");
+        assert_eq!(range.end, 5);
+        assert_eq!(msgs[range.end].role, MessageRole::User);
     }
 
     #[test]
@@ -780,7 +858,7 @@ mod tests {
         assert!(result.after_tokens < result.before_tokens);
         let msgs = handle.lock().unwrap();
         assert_eq!(result.compacted_start, 0);
-        assert_eq!(result.compacted_end, 12);
+        assert_eq!(result.compacted_end, 13);
         assert!(is_compaction_summary(&msgs[0]));
         assert_eq!(msgs.last().unwrap().text_concat(), "tail");
     }
@@ -1075,7 +1153,7 @@ mod tests {
         );
         let range = find_compact_range(&msgs, 10).expect("expected range");
         assert_eq!(range.start, 0, "should start from 0 without summary");
-        assert_eq!(range.end, 18, "the recent-message limit is retained");
+        assert_eq!(range.end, 28, "the recent-message limit is retained");
     }
 
     #[test]
