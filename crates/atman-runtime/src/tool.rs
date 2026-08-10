@@ -103,6 +103,7 @@ pub struct ToolCtx {
     pub task_registry: Option<crate::task_registry::TaskRegistry>,
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,
+    pub safety: Option<crate::safety::SafetyConfig>,
     pub current_model: Option<String>,
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
     pub on_memory_recent: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
@@ -251,6 +252,11 @@ impl ToolCtx {
 
     pub fn with_trust(mut self, trust: crate::trust::TrustConfig) -> Self {
         self.trust = Some(trust);
+        self
+    }
+
+    pub fn with_safety(mut self, safety: crate::safety::SafetyConfig) -> Self {
+        self.safety = Some(safety);
         self
     }
 

@@ -261,6 +261,11 @@ fn expr_to_node_kind_label(expr: &Expr) -> (crate::nodegraph::NodeKind, String) 
     use crate::nodegraph::NodeKind;
     match expr {
         Expr::Node(Node::Llm { .. }) => (NodeKind::Llm { model: None }, "llm".into()),
+        Expr::Node(Node::ToolCall { path, .. })
+            if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
+        {
+            (NodeKind::Llm { model: None }, "llm.call".into())
+        }
         Expr::Node(Node::ToolCall { path, .. }) => {
             let p = path
                 .iter()

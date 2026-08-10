@@ -337,6 +337,11 @@ async fn dispatch_tool_call<'a>(
         ctx_with_anchors
     };
     let ctx_with_anchors = ctx_with_anchors.with_current_node(ctx.current_node_id.clone());
+    let ctx_with_anchors = if let Some(s) = ctx.tool_ctx.safety.clone() {
+        ctx_with_anchors.with_safety(s)
+    } else {
+        ctx_with_anchors
+    };
     let ctx_with_anchors =
         ctx_with_anchors.with_providers(std::sync::Arc::new(ctx.providers.clone()));
     let mut ctx_with_anchors = if let Some(model) = &ctx.tool_ctx.current_model {
