@@ -18,7 +18,7 @@ impl Tool for SessionPush {
         Some(
             "Push a Message value into the current session's message history. \
              Use after dispatch_all to persist tool results so the next \
-             llm { context: session } call can see them. The message role \
+             llm.call(context: \"session\") call can see them. The message role \
              (user/assistant/tool/system) is preserved. Returns unit.",
         )
     }

@@ -168,7 +168,7 @@ fn cost_aggregates_llm_calls_from_session() {
     std::fs::write(
         &flow_path,
         r#"flow c(q: string) -> string {
-    return llm { model: "mock", prompt: q }
+    return llm.call(model: "mock", prompt: q)
 }
 "#,
     )

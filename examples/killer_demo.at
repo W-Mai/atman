@@ -10,13 +10,13 @@ flow demo(file: path) -> string {
 
     code = fs.read(file)
 
-    review = llm {
+    review = llm.call(
         model: "smart"
         messages: [
             system_msg("You are a terse senior code reviewer. Output 2-3 short bullet points on the most important issue only. No prose."),
             user_msg("Review this file:\n\n" + code),
         ]
-    }
+    )
 
     audit = preview.push(
         topic: "killer-demo",

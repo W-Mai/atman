@@ -244,6 +244,6 @@ fn render_mcp() -> String {
     out.push_str("```\n");
 
     out.push_str("\nIn a flow, include MCP tools with `\"mcp.*\"` in the `tools` list:\n\n");
-    out.push_str("```\nllm {\n    tools: [fs.read, \"mcp.*\"]\n}\n```\n");
+    out.push_str("```\nllm.call(\n    tools: [fs.read, \"mcp.*\"]\n)\n```\n");
     out
 }

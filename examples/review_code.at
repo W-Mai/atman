@@ -23,22 +23,22 @@ flow review_code(file: path) -> Review {
         retry: 2,
     )
 
-    verify = llm {
+    verify = llm.call(
         model: "cheap"
         messages: [system_msg(@"prompts/verify.md"), user_msg("Verify the review above.")]
         input: primary
         schema: { valid: bool, issues: [string] }
-    }
+    )
 
     when verify.valid == false {
-        primary = llm {
+        primary = llm.call(
             model: "smart"
             messages: [system_msg(@"prompts/code-review.md"), user_msg("Try again with more care.")]
             input: gather
             schema: Review
             cache: true
             retry: 2
-        }
+        )
     }
 
     when primary.severity == "critical" {
