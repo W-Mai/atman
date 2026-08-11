@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use atman_dsl::ast::{CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
+use atman_dsl::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchDecl, WatchEvent};
 
 use crate::env::Env;
 use crate::error::RuntimeError;
@@ -260,7 +260,6 @@ fn stmt_to_node_kind_label(stmt: &Stmt) -> (crate::nodegraph::NodeKind, String) 
 fn expr_to_node_kind_label(expr: &Expr) -> (crate::nodegraph::NodeKind, String) {
     use crate::nodegraph::NodeKind;
     match expr {
-        Expr::Node(Node::Llm { .. }) => (NodeKind::Llm { model: None }, "llm".into()),
         Expr::Node(Node::ToolCall { path, .. })
             if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
         {
@@ -372,7 +371,10 @@ async fn eval_bind_with_watches(
     ctx: &EvalCtx<'_>,
     watches: &[&WatchDecl],
 ) -> Result<Value, RuntimeError> {
-    let Expr::Node(Node::Llm { kwargs }) = expr else {
+    let Expr::Node(Node::ToolCall { path, args }) = expr else {
+        return Ok(eval_expr(expr, env, ctx).await);
+    };
+    if !(path.len() == 2 && path[0].name == "llm" && path[1].name == "call") {
         return Ok(eval_expr(expr, env, ctx).await);
     };
 
@@ -381,7 +383,10 @@ async fn eval_bind_with_watches(
     let mut input = Value::Unit;
     let mut cache_prompt = false;
     let mut context_budget: Option<u64> = None;
-    for (k, v) in kwargs {
+    for arg in args {
+        let Arg::Named { name: k, value: v } = arg else {
+            continue;
+        };
         if k.name == "schema" || k.name == "fallback" || k.name == "retry" {
             continue;
         }

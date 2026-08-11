@@ -100,20 +100,6 @@ fn extract_expr(expr: &Expr, prefix: &str, out: &mut Vec<StaticNode>) {
 
 fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
     let (kind, label, children) = match node {
-        Node::Llm { kwargs } => {
-            let model = kwargs
-                .iter()
-                .find(|(k, _)| k.name == "model")
-                .and_then(|(_, v)| match v {
-                    Expr::Literal(atman_dsl::ast::Literal::Str(s)) => Some(s.clone()),
-                    _ => None,
-                });
-            let label = match &model {
-                Some(m) => format!("llm({m})"),
-                None => "llm".to_string(),
-            };
-            (NodeKind::Llm { model }, label, Vec::new())
-        }
         Node::ToolCall { path, .. }
             if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
         {

@@ -61,7 +61,6 @@ const BUILTIN_VARS: &[&str] = &[
 
 fn infer_node_kind(value: &Expr) -> Option<&'static str> {
     match value {
-        Expr::Node(Node::Llm { .. }) => Some("llm"),
         Expr::Node(Node::ToolCall { path, .. })
             if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
         {
@@ -210,11 +209,6 @@ fn walk_node(
                     Arg::Positional(e) => walk_expr(e, scope, tools, errors),
                     Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
                 }
-            }
-        }
-        Node::Llm { kwargs } => {
-            for (_, v) in kwargs {
-                walk_expr(v, scope, tools, errors);
             }
         }
         Node::Fanout { items, .. } => {

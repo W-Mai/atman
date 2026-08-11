@@ -105,9 +105,6 @@ pub enum UnOp {
 
 #[derive(Debug, Clone)]
 pub enum Node {
-    Llm {
-        kwargs: Kwargs,
-    },
     ToolCall {
         path: Vec<Ident>,
         args: Vec<Arg>,

@@ -114,7 +114,7 @@ fn collect_ident_refs_node(node: &Node, refs: &mut HashSet<String>) {
                 }
             }
         }
-        Node::Llm { kwargs } | Node::FixUntilTestPasses { kwargs } => {
+        Node::FixUntilTestPasses { kwargs } => {
             for (_, v) in kwargs {
                 collect_ident_refs_expr(v, refs);
             }
@@ -218,7 +218,7 @@ fn child_exprs(node: &Node) -> Vec<&Expr> {
                 }
             }
         }
-        Node::Llm { kwargs } | Node::FixUntilTestPasses { kwargs } => {
+        Node::FixUntilTestPasses { kwargs } => {
             for (_, v) in kwargs {
                 out.push(v);
             }

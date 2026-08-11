@@ -307,15 +307,6 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
     let pad = "    ".repeat(indent + 1);
     let outer_pad = "    ".repeat(indent);
     match node {
-        Node::Llm { kwargs } => {
-            out.push_str("llm.call(\n");
-            for (name, value) in kwargs {
-                write!(out, "{pad}{}: ", name.name).unwrap();
-                write_expr(out, value, indent + 1);
-                out.push_str(",\n");
-            }
-            write!(out, "{outer_pad})").unwrap();
-        }
         Node::ToolCall { path, args } => {
             for (i, seg) in path.iter().enumerate() {
                 if i > 0 {
