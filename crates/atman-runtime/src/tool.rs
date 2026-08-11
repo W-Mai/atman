@@ -105,6 +105,7 @@ pub struct ToolCtx {
     pub trust: Option<crate::trust::TrustConfig>,
     pub safety: Option<crate::safety::SafetyConfig>,
     pub current_model: Option<String>,
+    pub watch_rules: Option<crate::streaming::WatchRules>,
     /// Called when memory.recent_turns is invoked, with the count of returned messages.
     pub on_memory_recent: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
     pub history_store: Option<std::sync::Arc<dyn crate::history_store::HistoryStore>>,
@@ -262,6 +263,11 @@ impl ToolCtx {
 
     pub fn with_current_model(mut self, model: impl Into<String>) -> Self {
         self.current_model = Some(model.into());
+        self
+    }
+
+    pub fn with_watch_rules(mut self, rules: crate::streaming::WatchRules) -> Self {
+        self.watch_rules = Some(rules);
         self
     }
 

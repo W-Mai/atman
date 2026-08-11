@@ -416,7 +416,8 @@ async fn eval_bind_with_watches(
         )
         .with_registry(registry)
         .with_current_node(ctx.current_node_id.clone())
-        .with_providers(std::sync::Arc::new(ctx.providers.clone()));
+        .with_providers(std::sync::Arc::new(ctx.providers.clone()))
+        .with_watch_rules(collect_watch_rules(watches));
     if let Some(sink) = ctx.events {
         tool_ctx = tool_ctx.with_events(sink.clone());
     }
@@ -439,7 +440,7 @@ async fn eval_bind_with_watches(
         tool_ctx = tool_ctx.with_stream_tx(tx);
     }
 
-    Ok(dispatch_llm(llm_args, &tool_ctx, Some(collect_watch_rules(watches))).await)
+    Ok(dispatch_llm(llm_args, &tool_ctx).await)
 }
 
 fn render_warn_msg(msg: &Option<Expr>, fallback: &str) -> String {

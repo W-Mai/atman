@@ -23,7 +23,7 @@ impl Tool for LlmCallTool {
                 ));
             };
             let llm_args = parse_llm_args_from_toolargs(&args, registry)?;
-            let v = dispatch_llm(llm_args, ctx, None).await;
+            let v = dispatch_llm(llm_args, ctx).await;
             match v {
                 Value::Err(e) => Err(e),
                 other => Ok(other),

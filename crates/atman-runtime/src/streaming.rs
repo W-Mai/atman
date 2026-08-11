@@ -388,7 +388,7 @@ fn merge_restart_error(
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct WatchRules {
+pub struct WatchRules {
     pub(crate) token_matches: Vec<(String, String)>,
     pub(crate) tokens_gt: Option<u64>,
     pub(crate) elapsed_ms_gt: Option<u64>,

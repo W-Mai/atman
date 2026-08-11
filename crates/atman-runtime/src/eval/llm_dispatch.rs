@@ -13,11 +13,7 @@ use super::{append_system_context, call_and_maybe_stream, input_with_cache_for_w
 
 /// Core LLM dispatch with all side effects.
 /// Used as the single implementation behind `llm.call` and higher-level LLM tools.
-pub async fn dispatch_llm(
-    mut args: LlmNodeArgs,
-    ctx: &ToolCtx,
-    watch_rules: Option<crate::streaming::WatchRules>,
-) -> Value {
+pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let Some(model) = args.model.clone() else {
         return Value::Err(RuntimeError::MissingArg("llm.model".into()));
     };
@@ -208,7 +204,7 @@ pub async fn dispatch_llm(
                 stall_timeout_secs,
             };
             let start = std::time::Instant::now();
-            let outcome = if let Some(rules) = watch_rules.clone() {
+            let outcome = if let Some(rules) = ctx.watch_rules.clone() {
                 let stream_tx = ctx
                     .stream_tx
                     .clone()
