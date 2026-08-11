@@ -14,7 +14,7 @@ use super::{
 /// Core LLM dispatch with all side effects. Pure function of `args` + `ctx`;
 /// used as the single implementation behind `llm.call` and higher-level LLM
 /// tools. Mirrors the `Node::Llm` eval block, adapted to `&ToolCtx`.
-pub async fn dispatch_llm(args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
+pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let Some(model) = args.model.clone() else {
         return Value::Err(RuntimeError::MissingArg("llm.model".into()));
     };
@@ -57,6 +57,22 @@ pub async fn dispatch_llm(args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             providers_reg.clone(),
         )
         .await;
+    }
+    if let Some(budget) = args.context_budget {
+        if let Some(p) = args.prompt.as_mut() {
+            let (truncated, stat) = super::truncate_prompt_to_budget_tracked(std::mem::take(p), budget);
+            *p = truncated;
+            if let (Some(sink), Some(stat)) = (ctx.events.as_ref(), stat) {
+                sink.emit(crate::event::Event::ContextTruncated {
+                    turn_id: ctx.turn_id.clone(),
+                    flow_run_id: ctx.flow_run_id.clone(),
+                    original_chars: stat.original_chars as u64,
+                    result_chars: stat.result_chars as u64,
+                    dropped_chars: stat.dropped_chars as u64,
+                    budget_tokens: stat.budget_tokens,
+                });
+            }
+        }
     }
     let mut compact_guard = if !matches!(context_mode, ContextMode::None)
         && !has_messages_override
