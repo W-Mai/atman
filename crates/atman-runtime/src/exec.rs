@@ -4,11 +4,9 @@ use atman_dsl::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchD
 
 use crate::env::Env;
 use crate::error::RuntimeError;
-use crate::eval::llm_args::parse_llm_args_from_toolargs;
-use crate::eval::llm_dispatch::dispatch_llm;
 use crate::eval::{EvalCtx, eval_expr};
 use crate::streaming::{WarnRule, WatchRules};
-use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
+use crate::tool::{BoxFut, Tool, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
 fn bind_pattern(
@@ -402,10 +400,6 @@ async fn eval_bind_with_watches(
 
     let registry = std::sync::Arc::new(ctx.tools.clone());
     let call_args = ToolArgs { positional, named };
-    let llm_args = match parse_llm_args_from_toolargs(&call_args, registry.as_ref()) {
-        Ok(args) => args,
-        Err(e) => return Ok(Value::Err(e)),
-    };
     let mut tool_ctx = ctx
         .tool_ctx
         .clone()
@@ -430,7 +424,7 @@ async fn eval_bind_with_watches(
             .with_flow_registry(std::sync::Arc::clone(&session.flow_registry))
             .with_compact_lock_handle(session.compact_lock_handle());
     }
-    if let Some(safety) = ctx.tool_ctx.safety.clone() {
+    if let Some(safety) = ctx.safety.cloned() {
         tool_ctx = tool_ctx.with_safety(safety);
     }
     if let Some(model) = &ctx.tool_ctx.current_model {
@@ -440,7 +434,13 @@ async fn eval_bind_with_watches(
         tool_ctx = tool_ctx.with_stream_tx(tx);
     }
 
-    Ok(dispatch_llm(llm_args, &tool_ctx).await)
+    let result = crate::tools::llm_call::LlmCallTool
+        .call(call_args, &tool_ctx)
+        .await;
+    Ok(match result {
+        Ok(v) => v,
+        Err(e) => Value::Err(e),
+    })
 }
 
 fn render_warn_msg(msg: &Option<Expr>, fallback: &str) -> String {
