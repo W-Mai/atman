@@ -17,6 +17,7 @@ pub struct LlmNodeArgs {
     pub context_mode: String,
     #[allow(dead_code)]
     pub fallback_expr: Option<Expr>,
+    pub fallback_value: Option<crate::value::Value>,
     pub tool_specs: Vec<crate::tool::ToolSpec>,
     pub stall_timeout_secs: u64,
 }
@@ -38,6 +39,7 @@ pub fn parse_llm_args_from_toolargs(
     let mut context_mode = String::from("none");
     let mut tool_specs: Vec<crate::tool::ToolSpec> = Vec::new();
     let mut stall_timeout_secs: u64 = 120;
+    let mut fallback_value: Option<crate::value::Value> = None;
     for (k, v) in &args.named {
         match k.as_str() {
             "retry_classified" => {
@@ -193,6 +195,9 @@ pub fn parse_llm_args_from_toolargs(
                     });
                 }
             },
+            "fallback" => {
+                fallback_value = Some(v.clone());
+            }
             _ => {}
         }
     }
@@ -209,6 +214,7 @@ pub fn parse_llm_args_from_toolargs(
         context_budget,
         context_mode,
         fallback_expr: None,
+        fallback_value,
         tool_specs,
         stall_timeout_secs,
     })

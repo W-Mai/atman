@@ -469,5 +469,8 @@ pub async fn dispatch_llm(args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .unwrap_or_else(|| "unknown error".into())
         )));
     }
+    if let Some(fb) = args.fallback_value.clone() {
+        return fb;
+    }
     Value::Err(last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into())))
 }
