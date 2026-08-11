@@ -586,6 +586,7 @@ pub(super) async fn call_and_maybe_stream(
     provider: &dyn crate::provider::Provider,
     req: crate::provider::LlmRequest,
     stream_ctx: StreamCallCtx<'_>,
+    watch_rules: Option<crate::streaming::WatchRules>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
     let stream_tx = stream_ctx
         .stream_tx
@@ -595,6 +596,9 @@ pub(super) async fn call_and_maybe_stream(
         .with_event_sink(stream_ctx.event_sink)
         .with_turn_id(stream_ctx.turn_id)
         .with_flow_run_id(stream_ctx.flow_run_id.cloned());
+    if let Some(rules) = watch_rules {
+        stream = stream.with_watch_rules(rules);
+    }
     if let Some(session) = stream_ctx.session {
         stream = stream.with_session(session);
     }
@@ -2537,6 +2541,7 @@ mod sanitize_tests {
                 stream_tx: Some(stream_tx),
                 ..Default::default()
             },
+            None,
         )
         .await;
         match result {
@@ -2565,6 +2570,7 @@ mod sanitize_tests {
                 stream_tx: Some(stream_tx),
                 ..Default::default()
             },
+            None,
         )
         .await;
         match result {
@@ -2590,6 +2596,7 @@ mod sanitize_tests {
                 stream_tx: Some(stream_tx),
                 ..Default::default()
             },
+            None,
         )
         .await;
         match result {
@@ -2616,6 +2623,7 @@ mod sanitize_tests {
                 stream_tx: Some(stream_tx),
                 ..Default::default()
             },
+            None,
         )
         .await;
         match result {
@@ -2641,6 +2649,7 @@ mod sanitize_tests {
                 stream_tx: Some(stream_tx),
                 ..Default::default()
             },
+            None,
         )
         .await;
         assert!(

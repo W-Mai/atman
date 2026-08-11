@@ -204,39 +204,20 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 stall_timeout_secs,
             };
             let start = std::time::Instant::now();
-            let outcome = if let Some(rules) = ctx.watch_rules.clone() {
-                let stream_tx = ctx
-                    .stream_tx
-                    .clone()
-                    .or_else(|| ctx.session_runtime.as_ref().map(|s| s.stream_tx()));
-                let mut stream = crate::streaming::LlmStream::new(provider.as_ref(), req)
-                    .with_stream_tx(stream_tx)
-                    .with_event_sink(ctx.events.as_ref())
-                    .with_turn_id(ctx.turn_id.clone())
-                    .with_flow_run_id(ctx.flow_run_id.clone())
-                    .with_watch_rules(rules);
-                if let Some(session) = ctx.session_runtime.as_deref() {
-                    stream = stream.with_session(session);
-                }
-                if let Some(entry) = ctx.agent_entry.as_ref() {
-                    stream = stream.with_entry(entry);
-                }
-                stream.run().await
-            } else {
-                call_and_maybe_stream(
-                    provider.as_ref(),
-                    req,
-                    StreamCallCtx {
-                        session: ctx.session_runtime.as_deref(),
-                        stream_tx: ctx.stream_tx.clone(),
-                        flow_run_id: ctx.flow_run_id.as_ref(),
-                        agent_entry: ctx.agent_entry.as_ref(),
-                        event_sink: ctx.events.as_ref(),
-                        turn_id: ctx.turn_id.clone(),
-                    },
-                )
-                .await
-            };
+            let outcome = call_and_maybe_stream(
+                provider.as_ref(),
+                req,
+                StreamCallCtx {
+                    session: ctx.session_runtime.as_deref(),
+                    stream_tx: ctx.stream_tx.clone(),
+                    flow_run_id: ctx.flow_run_id.as_ref(),
+                    agent_entry: ctx.agent_entry.as_ref(),
+                    event_sink: ctx.events.as_ref(),
+                    turn_id: ctx.turn_id.clone(),
+                },
+                ctx.watch_rules.clone(),
+            )
+            .await;
             let elapsed_ms = start.elapsed().as_millis() as u64;
             let usage = match &outcome {
                 Ok(am) => crate::provider::TokenUsage {
@@ -493,6 +474,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         }
         break;
     }
+    if let Some(fb) = args.fallback_value.clone() {
+        return fb;
+    }
     if let Some(session) = ctx.session_runtime.as_ref()
         && !saw_context_overflow
     {
@@ -506,9 +490,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "unknown error".into())
         )));
-    }
-    if let Some(fb) = args.fallback_value.clone() {
-        return fb;
     }
     Value::Err(last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into())))
 }
