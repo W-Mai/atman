@@ -63,7 +63,23 @@ llm.call(
     context_budget: 8000,              // truncate prompt to token budget
     stall_timeout: 120,                // LLM stall timeout in seconds
     tools: ["fs.read", "bash.spawn", "mcp.*"],  // tool allowlist, "mcp.*" = all MCP
+    fallback: "static value",          // value returned on failure
 )
+```
+
+Note: `fallback:` is pre-evaluated (the value is computed before the main LLM call runs). For lazy fallback with side effects (e.g. `fallback: llm.call(...)`), use `when result.is_err()` instead:
+
+```at
+result = llm.call(
+    model: "smart",
+    prompt: "hi",
+)
+if result.is_err() {
+    result = llm.call(
+        model: "backup",
+        prompt: "hi",
+    )
+}
 ```
 
 #### `fanout [items] collect: all|first` — Parallel fanout
