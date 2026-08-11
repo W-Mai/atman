@@ -11,7 +11,7 @@ impl Tool for LlmCallTool {
     }
 
     fn tier(&self) -> Tier {
-        Tier::Two
+        Tier::Zero
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
