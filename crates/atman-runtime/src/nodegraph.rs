@@ -100,10 +100,20 @@ fn extract_expr(expr: &Expr, prefix: &str, out: &mut Vec<StaticNode>) {
 
 fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
     let (kind, label, children) = match node {
-        Node::ToolCall { path, .. }
+        Node::ToolCall { path, args }
             if path.len() == 2 && path[0].name == "llm" && path[1].name == "call" =>
         {
-            (NodeKind::Llm { model: None }, "llm.call".into(), Vec::new())
+            let model = args.iter().find_map(|a| match a {
+                Arg::Named { name, value } if name.name == "model" => {
+                    if let Expr::Literal(atman_dsl::ast::Literal::Str(s)) = value {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            });
+            (NodeKind::Llm { model }, "llm.call".into(), Vec::new())
         }
         Node::ToolCall { path, .. } => {
             let path_str = path
@@ -231,7 +241,12 @@ mod tests {
         let g = extract_graph(&flow);
         assert_eq!(g.flow_name, "smoke");
         let kinds: Vec<_> = g.root.iter().map(|n| n.kind.clone()).collect();
-        assert!(matches!(kinds[0], NodeKind::Llm { .. }));
+        assert_eq!(
+            kinds[0],
+            NodeKind::Llm {
+                model: Some("glm".into())
+            }
+        );
         assert!(matches!(kinds.last(), Some(NodeKind::Return)));
     }
 
