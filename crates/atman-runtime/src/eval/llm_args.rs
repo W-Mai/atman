@@ -197,6 +197,12 @@ pub fn parse_llm_args_from_toolargs(
         }
     }
 
+    if matches!(input, Value::Unit) {
+        if let Ok(v) = args.positional(0) {
+            input = v.clone();
+        }
+    }
+
     Ok(LlmNodeArgs {
         model,
         prompt,
