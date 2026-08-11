@@ -1,6 +1,6 @@
+pub(crate) mod llm_args;
 mod llm_context;
 pub(crate) mod llm_dispatch;
-pub(crate) mod llm_args;
 
 use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
@@ -1432,7 +1432,9 @@ pub struct TruncationStat {
     pub budget_tokens: u64,
 }
 
-pub(super) fn sanitize_tool_pairs(messages: Vec<crate::message::Message>) -> Vec<crate::message::Message> {
+pub(super) fn sanitize_tool_pairs(
+    messages: Vec<crate::message::Message>,
+) -> Vec<crate::message::Message> {
     use crate::message::{Message, MessagePart, MessageRole};
     use std::collections::HashMap;
     let mut result_by_id: HashMap<String, Message> = HashMap::new();
@@ -1964,7 +1966,9 @@ mod tests {
         )));
         let mut tools = ToolRegistry::new();
         crate::tools::register_tier_zero(&mut tools);
-        let tool_ctx = ToolCtx::new().with_providers(std::sync::Arc::new(providers.clone())).with_registry(std::sync::Arc::new(tools.clone()));
+        let tool_ctx = ToolCtx::new()
+            .with_providers(std::sync::Arc::new(providers.clone()))
+            .with_registry(std::sync::Arc::new(tools.clone()));
         let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
             tools: &tools,
@@ -2237,7 +2241,11 @@ flow parent(x: Int) -> Int {
         let expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
             "nonexistent.*".into(),
         ))]);
-        let specs = crate::eval::llm_args::resolve_tool_specs_from_values(&[crate::value::Value::Str("nonexistent.*".into())], &tools).unwrap();
+        let specs = crate::eval::llm_args::resolve_tool_specs_from_values(
+            &[crate::value::Value::Str("nonexistent.*".into())],
+            &tools,
+        )
+        .unwrap();
         assert!(
             specs.is_empty(),
             "wildcard with no matches should return empty list"
@@ -2306,7 +2314,11 @@ flow parent(x: Int) -> Int {
         let expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
             "mcp.*".into(),
         ))]);
-        let specs = crate::eval::llm_args::resolve_tool_specs_from_values(&[crate::value::Value::Str("mcp.*".into())], &tools).unwrap();
+        let specs = crate::eval::llm_args::resolve_tool_specs_from_values(
+            &[crate::value::Value::Str("mcp.*".into())],
+            &tools,
+        )
+        .unwrap();
         assert_eq!(specs.len(), 3, "mcp.* should match 3 MCP tools");
         let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
         assert!(names.contains(&"mcp.lark.send_mail".into()));
@@ -2317,7 +2329,11 @@ flow parent(x: Int) -> Int {
         let expr2 = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
             "mcp.lark.*".into(),
         ))]);
-        let specs2 = crate::eval::llm_args::resolve_tool_specs_from_values(&[crate::value::Value::Str("mcp.lark.*".into())], &tools).unwrap();
+        let specs2 = crate::eval::llm_args::resolve_tool_specs_from_values(
+            &[crate::value::Value::Str("mcp.lark.*".into())],
+            &tools,
+        )
+        .unwrap();
         assert_eq!(specs2.len(), 2, "mcp.lark.* should match 2 lark tools");
     }
 
@@ -2380,18 +2396,29 @@ flow parent(x: Int) -> Int {
         let tools_values: Vec<crate::value::Value> = match &body[0] {
             atman_dsl::ast::Stmt::Bind { value, .. } => match value {
                 Expr::Node(atman_dsl::ast::Node::ToolCall { args, .. }) => {
-                    let tools_expr = args.iter().find_map(|a| match a {
-                        atman_dsl::ast::Arg::Named { name, value } if name.name == "tools" => Some(value.clone()),
-                        _ => None,
-                    }).unwrap();
-                    if let atman_dsl::ast::Expr::List(items) = tools_expr {
-                        items.iter().map(|i| {
-                            if let atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Str(s)) = i {
-                                crate::value::Value::Str(s.clone())
-                            } else {
-                                panic!("expected string literal in tools list");
+                    let tools_expr = args
+                        .iter()
+                        .find_map(|a| match a {
+                            atman_dsl::ast::Arg::Named { name, value } if name.name == "tools" => {
+                                Some(value.clone())
                             }
-                        }).collect()
+                            _ => None,
+                        })
+                        .unwrap();
+                    if let atman_dsl::ast::Expr::List(items) = tools_expr {
+                        items
+                            .iter()
+                            .map(|i| {
+                                if let atman_dsl::ast::Expr::Literal(
+                                    atman_dsl::ast::Literal::Str(s),
+                                ) = i
+                                {
+                                    crate::value::Value::Str(s.clone())
+                                } else {
+                                    panic!("expected string literal in tools list");
+                                }
+                            })
+                            .collect()
                     } else {
                         panic!("expected list");
                     }
@@ -2400,7 +2427,8 @@ flow parent(x: Int) -> Int {
             },
             _ => panic!("expected bind stmt"),
         };
-        let specs = crate::eval::llm_args::resolve_tool_specs_from_values(&tools_values, &tools).unwrap();
+        let specs =
+            crate::eval::llm_args::resolve_tool_specs_from_values(&tools_values, &tools).unwrap();
         assert_eq!(specs.len(), 2, "bash.exec + mcp.lark.send_mail = 2");
         let names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
         assert!(names.contains(&"bash.exec".into()));

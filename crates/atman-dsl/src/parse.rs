@@ -815,7 +815,6 @@ fn parse_kwargs(input: ParseStream) -> Result<Kwargs> {
     Ok(kwargs)
 }
 
-
 fn parse_subflow(input: ParseStream) -> Result<Node> {
     input.parse::<kw::subflow>()?;
     let content;

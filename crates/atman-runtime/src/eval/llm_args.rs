@@ -22,7 +22,6 @@ pub struct LlmNodeArgs {
     pub stall_timeout_secs: u64,
 }
 
-
 pub fn parse_llm_args_from_toolargs(
     args: &ToolArgs,
     tools: &crate::tool::ToolRegistry,

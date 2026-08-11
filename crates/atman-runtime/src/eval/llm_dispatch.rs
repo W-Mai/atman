@@ -5,16 +5,20 @@ use crate::tool::ToolCtx;
 use crate::value::Value;
 
 use super::ContextMode;
-use super::{append_system_context, call_and_maybe_stream, input_with_cache_for_window};
 use super::{
-    is_context_overflow_error, parse_context_mode, rebuild_session_llm_messages, render_injections,
-    sanitize_tool_pairs, session_system_context, StreamCallCtx,
+    StreamCallCtx, is_context_overflow_error, parse_context_mode, rebuild_session_llm_messages,
+    render_injections, sanitize_tool_pairs, session_system_context,
 };
+use super::{append_system_context, call_and_maybe_stream, input_with_cache_for_window};
 
 /// Core LLM dispatch with all side effects. Pure function of `args` + `ctx`;
 /// used as the single implementation behind `llm.call` and higher-level LLM
 /// tools. Mirrors the `Node::Llm` eval block, adapted to `&ToolCtx`.
-pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
+pub async fn dispatch_llm(
+    mut args: LlmNodeArgs,
+    ctx: &ToolCtx,
+    watch_rules: Option<crate::streaming::WatchRules>,
+) -> Value {
     let Some(model) = args.model.clone() else {
         return Value::Err(RuntimeError::MissingArg("llm.model".into()));
     };
@@ -60,7 +64,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     }
     if let Some(budget) = args.context_budget {
         if let Some(p) = args.prompt.as_mut() {
-            let (truncated, stat) = super::truncate_prompt_to_budget_tracked(std::mem::take(p), budget);
+            let (truncated, stat) =
+                super::truncate_prompt_to_budget_tracked(std::mem::take(p), budget);
             *p = truncated;
             if let (Some(sink), Some(stat)) = (ctx.events.as_ref(), stat) {
                 sink.emit(crate::event::Event::ContextTruncated {
@@ -82,7 +87,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     } else {
         None
     };
-    let turn_id = ctx.turn_id.clone().unwrap_or_else(crate::event::TurnId::now);
+    let turn_id = ctx
+        .turn_id
+        .clone()
+        .unwrap_or_else(crate::event::TurnId::now);
     let llm_context = match llm_context::build_llm_context(
         &args,
         context_mode,
@@ -100,10 +108,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let session_messages_len = llm_context.session_messages_len;
     if let Some(session) = ctx.session_runtime.as_ref()
         && let Some(l3_or_l2) = session.peek_pending_l2_or_higher(&turn_id)
-        && matches!(
-            l3_or_l2.level,
-            crate::injection::InjectionLevel::L3Redirect
-        )
+        && matches!(l3_or_l2.level, crate::injection::InjectionLevel::L3Redirect)
         && let Some(target) = &l3_or_l2.redirect_target
     {
         session.mark_injection_consumed(&l3_or_l2.id);
@@ -204,19 +209,35 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 stall_timeout_secs,
             };
             let start = std::time::Instant::now();
-            let outcome = call_and_maybe_stream(
-                provider.as_ref(),
-                req,
-                StreamCallCtx {
-                    session: ctx.session_runtime.as_deref(),
-                    stream_tx: ctx.stream_tx.clone(),
-                    flow_run_id: ctx.flow_run_id.as_ref(),
-                    agent_entry: ctx.agent_entry.as_ref(),
-                    event_sink: ctx.events.as_ref(),
-                    turn_id: ctx.turn_id.clone(),
-                },
-            )
-            .await;
+            let outcome = if let Some(rules) = watch_rules.clone() {
+                let mut stream = crate::streaming::LlmStream::new(provider.as_ref(), req)
+                    .with_stream_tx(ctx.stream_tx.clone())
+                    .with_event_sink(ctx.events.as_ref())
+                    .with_turn_id(ctx.turn_id.clone())
+                    .with_flow_run_id(ctx.flow_run_id.clone())
+                    .with_watch_rules(rules);
+                if let Some(session) = ctx.session_runtime.as_deref() {
+                    stream = stream.with_session(session);
+                }
+                if let Some(entry) = ctx.agent_entry.as_ref() {
+                    stream = stream.with_entry(entry);
+                }
+                stream.run().await
+            } else {
+                call_and_maybe_stream(
+                    provider.as_ref(),
+                    req,
+                    StreamCallCtx {
+                        session: ctx.session_runtime.as_deref(),
+                        stream_tx: ctx.stream_tx.clone(),
+                        flow_run_id: ctx.flow_run_id.as_ref(),
+                        agent_entry: ctx.agent_entry.as_ref(),
+                        event_sink: ctx.events.as_ref(),
+                        turn_id: ctx.turn_id.clone(),
+                    },
+                )
+                .await
+            };
             let elapsed_ms = start.elapsed().as_millis() as u64;
             let usage = match &outcome {
                 Ok(am) => crate::provider::TokenUsage {
@@ -313,7 +334,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 Err(e) => {
                     if matches!(
                         e,
-                        RuntimeError::Cancelled(_) | RuntimeError::L2Restart { .. }
+                        RuntimeError::Cancelled(_)
+                            | RuntimeError::L2Restart { .. }
+                            | RuntimeError::Aborted(_)
                     ) {
                         return Value::Err(e);
                     }

@@ -22,7 +22,7 @@ impl Tool for LlmCallTool {
                 ));
             };
             let llm_args = parse_llm_args_from_toolargs(&args, registry)?;
-            Ok(dispatch_llm(llm_args, ctx).await)
+            Ok(dispatch_llm(llm_args, ctx, None).await)
         })
     }
 }

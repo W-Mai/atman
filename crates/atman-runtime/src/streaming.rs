@@ -70,6 +70,7 @@ impl<'a> LlmStream<'a> {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_frame_tx(mut self, tx: Option<Sender<StreamFrame>>) -> Self {
         self.frame_tx = tx;
         self

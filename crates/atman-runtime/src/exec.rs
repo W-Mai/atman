@@ -4,10 +4,11 @@ use atman_dsl::ast::{Arg, CmpOp, Expr, FlowDecl, Node, Stmt, WatchAction, WatchD
 
 use crate::env::Env;
 use crate::error::RuntimeError;
+use crate::eval::llm_args::parse_llm_args_from_toolargs;
+use crate::eval::llm_dispatch::dispatch_llm;
 use crate::eval::{EvalCtx, eval_expr};
-use crate::provider::LlmRequest;
-use crate::streaming::{LlmStream, WarnRule, WatchRules};
-use crate::tool::{BoxFut, ToolCtx, ToolRegistry};
+use crate::streaming::{WarnRule, WatchRules};
+use crate::tool::{BoxFut, ToolArgs, ToolCtx, ToolRegistry};
 use crate::value::Value;
 
 fn bind_pattern(
@@ -378,123 +379,67 @@ async fn eval_bind_with_watches(
         return Ok(eval_expr(expr, env, ctx).await);
     };
 
-    let mut model: Option<String> = None;
-    let mut prompt: Option<String> = None;
-    let mut input = Value::Unit;
-    let mut cache_prompt = false;
-    let mut context_budget: Option<u64> = None;
+    let mut positional = Vec::new();
+    let mut named = Vec::new();
     for arg in args {
-        let Arg::Named { name: k, value: v } = arg else {
-            continue;
-        };
-        if k.name == "schema" || k.name == "fallback" || k.name == "retry" {
-            continue;
-        }
-        let val = eval_expr(v, env, ctx).await;
-        if val.is_err() {
-            return Ok(val);
-        }
-        match k.name.as_str() {
-            "model" => match val {
-                Value::Str(s) => model = Some(s),
-                other => {
-                    return Ok(Value::Err(RuntimeError::TypeMismatch {
-                        expected: "string".into(),
-                        actual: other.kind_name().into(),
-                    }));
+        match arg {
+            Arg::Positional(expr) => {
+                let value = eval_expr(expr, env, ctx).await;
+                if value.is_err() {
+                    return Ok(value);
                 }
-            },
-            "prompt" => match val {
-                Value::Str(s) => prompt = Some(s),
-                other => {
-                    return Ok(Value::Err(RuntimeError::TypeMismatch {
-                        expected: "string".into(),
-                        actual: other.kind_name().into(),
-                    }));
+                positional.push(value);
+            }
+            Arg::Named { name, value } => {
+                let value = eval_expr(value, env, ctx).await;
+                if value.is_err() {
+                    return Ok(value);
                 }
-            },
-            "input" => input = val,
-            "cache" => match val {
-                Value::Bool(b) => cache_prompt = b,
-                other => {
-                    return Ok(Value::Err(RuntimeError::TypeMismatch {
-                        expected: "bool".into(),
-                        actual: other.kind_name().into(),
-                    }));
-                }
-            },
-            "context_budget" => match val {
-                Value::Int(n) if n > 0 => context_budget = Some(n as u64),
-                other => {
-                    return Ok(Value::Err(RuntimeError::TypeMismatch {
-                        expected: "positive int".into(),
-                        actual: other.kind_name().into(),
-                    }));
-                }
-            },
-            _ => {}
+                named.push((name.name.clone(), value));
+            }
         }
     }
-    let Some(model) = model else {
-        return Ok(Value::Err(RuntimeError::MissingArg("llm.model".into())));
-    };
-    let Some(mut prompt) = prompt else {
-        return Ok(Value::Err(RuntimeError::MissingArg("llm.prompt".into())));
-    };
-    if let Some(budget) = context_budget {
-        let (truncated, stat) = crate::eval::truncate_prompt_to_budget_tracked(prompt, budget);
-        prompt = truncated;
-        if let (Some(sink), Some(stat)) = (ctx.events, stat) {
-            sink.emit(crate::event::Event::ContextTruncated {
-                turn_id: ctx.turn_id.clone(),
-                flow_run_id: ctx.flow_run_id.clone(),
-                original_chars: stat.original_chars as u64,
-                result_chars: stat.result_chars as u64,
-                dropped_chars: stat.dropped_chars as u64,
-                budget_tokens: stat.budget_tokens,
-            });
-        }
-    }
-    let Some(provider) = ctx.providers.resolve(&model) else {
-        return Ok(Value::Err(RuntimeError::ToolFailed(format!(
-            "no provider registered for model `{model}`"
-        ))));
-    };
 
-    let messages = vec![crate::provider::user_text_message(prompt.clone())];
-    let req = LlmRequest {
-        model: model.clone(),
-        messages,
-        system: None,
-        input: input.clone(),
-        schema: None,
-        cache_prompt,
-        tools: Vec::new(),
-        thinking_enabled: false,
-        stall_timeout_secs: 120,
+    let registry = std::sync::Arc::new(ctx.tools.clone());
+    let call_args = ToolArgs { positional, named };
+    let llm_args = match parse_llm_args_from_toolargs(&call_args, registry.as_ref()) {
+        Ok(args) => args,
+        Err(e) => return Ok(Value::Err(e)),
     };
-    let frame_tx = ctx
+    let mut tool_ctx = ctx
         .tool_ctx
-        .agent_entry
-        .as_ref()
-        .map(|e| e.frame_tx.clone());
-    let mut stream = LlmStream::new(provider.as_ref(), req)
-        .with_stream_tx(ctx.tool_ctx.stream_tx.clone())
-        .with_frame_tx(frame_tx)
-        .with_watch_rules(collect_watch_rules(watches))
-        .with_event_sink(ctx.events)
-        .with_turn_id(ctx.turn_id.clone())
-        .with_flow_run_id(ctx.flow_run_id.clone());
+        .clone()
+        .with_anchors(
+            ctx.turn_id.clone(),
+            ctx.flow_run_id.clone(),
+            ctx.events.map(|s| s.next_seq_peek()),
+        )
+        .with_registry(registry)
+        .with_current_node(ctx.current_node_id.clone())
+        .with_providers(std::sync::Arc::new(ctx.providers.clone()));
+    if let Some(sink) = ctx.events {
+        tool_ctx = tool_ctx.with_events(sink.clone());
+    }
     if let Some(session) = ctx.session_runtime.as_ref() {
-        stream = stream.with_session(session);
+        tool_ctx = tool_ctx
+            .with_session_messages(session.messages_full())
+            .with_session_messages_handle(session.messages_handle())
+            .with_session_runtime(session.clone())
+            .with_watch_hub(std::sync::Arc::clone(&session.watch_hub))
+            .with_flow_registry(std::sync::Arc::clone(&session.flow_registry))
+            .with_compact_lock_handle(session.compact_lock_handle());
     }
-    if let Some(entry) = ctx.tool_ctx.agent_entry.as_ref() {
-        stream = stream.with_entry(entry);
+    if let Some(safety) = ctx.tool_ctx.safety.clone() {
+        tool_ctx = tool_ctx.with_safety(safety);
     }
-    match stream.run().await {
-        Ok(am) => Ok(crate::provider::assistant_message_to_value(&am)),
-        Err(e) => Ok(Value::Err(e)),
+    if let Some(model) = &ctx.tool_ctx.current_model {
+        tool_ctx = tool_ctx.with_current_model(model.clone());
     }
+    if let Some(tx) = ctx.tool_ctx.stream_tx.clone() {
+        tool_ctx = tool_ctx.with_stream_tx(tx);
+    }
+
+    Ok(dispatch_llm(llm_args, &tool_ctx, Some(collect_watch_rules(watches))).await)
 }
 
 fn render_warn_msg(msg: &Option<Expr>, fallback: &str) -> String {
