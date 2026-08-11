@@ -209,8 +209,12 @@ pub async fn dispatch_llm(
             };
             let start = std::time::Instant::now();
             let outcome = if let Some(rules) = watch_rules.clone() {
+                let stream_tx = ctx
+                    .stream_tx
+                    .clone()
+                    .or_else(|| ctx.session_runtime.as_ref().map(|s| s.stream_tx()));
                 let mut stream = crate::streaming::LlmStream::new(provider.as_ref(), req)
-                    .with_stream_tx(ctx.stream_tx.clone())
+                    .with_stream_tx(stream_tx)
                     .with_event_sink(ctx.events.as_ref())
                     .with_turn_id(ctx.turn_id.clone())
                     .with_flow_run_id(ctx.flow_run_id.clone())
