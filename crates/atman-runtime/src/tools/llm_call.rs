@@ -2,6 +2,7 @@ use crate::error::RuntimeError;
 use crate::eval::llm_args::parse_llm_args_from_toolargs;
 use crate::eval::llm_dispatch::dispatch_llm;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::value::Value;
 
 pub struct LlmCallTool;
 
@@ -22,7 +23,11 @@ impl Tool for LlmCallTool {
                 ));
             };
             let llm_args = parse_llm_args_from_toolargs(&args, registry)?;
-            Ok(dispatch_llm(llm_args, ctx, None).await)
+            let v = dispatch_llm(llm_args, ctx, None).await;
+            match v {
+                Value::Err(e) => Err(e),
+                other => Ok(other),
+            }
         })
     }
 }
