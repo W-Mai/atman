@@ -11,9 +11,8 @@ use super::{
 };
 use super::{append_system_context, call_and_maybe_stream, input_with_cache_for_window};
 
-/// Core LLM dispatch with all side effects. Pure function of `args` + `ctx`;
-/// used as the single implementation behind `llm.call` and higher-level LLM
-/// tools. Mirrors the `Node::Llm` eval block, adapted to `&ToolCtx`.
+/// Core LLM dispatch with all side effects.
+/// Used as the single implementation behind `llm.call` and higher-level LLM tools.
 pub async fn dispatch_llm(
     mut args: LlmNodeArgs,
     ctx: &ToolCtx,

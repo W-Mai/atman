@@ -1,4 +1,3 @@
-use atman_dsl::ast::Expr;
 
 use crate::error::RuntimeError;
 use crate::tool::ToolArgs;
@@ -15,8 +14,6 @@ pub struct LlmNodeArgs {
     pub cache_prompt: bool,
     pub context_budget: Option<u64>,
     pub context_mode: String,
-    #[allow(dead_code)]
-    pub fallback_expr: Option<Expr>,
     pub fallback_value: Option<crate::value::Value>,
     pub tool_specs: Vec<crate::tool::ToolSpec>,
     pub stall_timeout_secs: u64,
@@ -212,7 +209,6 @@ pub fn parse_llm_args_from_toolargs(
         cache_prompt,
         context_budget,
         context_mode,
-        fallback_expr: None,
         fallback_value,
         tool_specs,
         stall_timeout_secs,
