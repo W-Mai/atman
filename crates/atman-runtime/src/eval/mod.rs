@@ -1,6 +1,7 @@
 pub(crate) mod llm_args;
 mod llm_context;
 pub(crate) mod llm_dispatch;
+pub(crate) mod llm_parse;
 
 use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 

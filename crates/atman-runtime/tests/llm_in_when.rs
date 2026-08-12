@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use atman_runtime::Executor;
 use atman_dsl::parse::parse_file;
+use atman_runtime::Executor;
+use atman_runtime::model_registry::{MODEL_CONFIG_LOCK, ModelConfig, ModelEntry, set_model_config};
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::value::Value;
-use atman_runtime::model_registry::{set_model_config, ModelConfig, ModelEntry, MODEL_CONFIG_LOCK};
+use std::sync::Arc;
 
 fn register_model() {
     let _lock = MODEL_CONFIG_LOCK.lock().unwrap();
@@ -28,7 +28,8 @@ fn run(src: &str, provider: MockProvider) -> Value {
     let mut ex = Executor::new();
     ex.providers.register(Arc::new(provider));
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(ex.run(&parsed, "test", vec![])).expect("flow failed")
+    rt.block_on(ex.run(&parsed, "test", vec![]))
+        .expect("flow failed")
 }
 
 #[test]

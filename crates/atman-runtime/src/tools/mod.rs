@@ -13,6 +13,9 @@ pub mod git_ops;
 pub mod help;
 pub mod hunk;
 pub mod llm_call;
+pub mod llm_classify;
+pub mod llm_extract;
+pub mod llm_generate_branches;
 pub mod memory;
 pub mod memory_stubs;
 pub mod plan;
@@ -85,6 +88,9 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(flow_list::FlowList));
     reg.register(Arc::new(flow_check::FlowCheck));
     reg.register(Arc::new(llm_call::LlmCallTool));
+    reg.register(Arc::new(llm_classify::LlmClassifyTool));
+    reg.register(Arc::new(llm_extract::LlmExtractTool));
+    reg.register(Arc::new(llm_generate_branches::LlmGenerateBranchesTool));
 }
 
 pub fn register_git_ops(reg: &mut ToolRegistry) {
