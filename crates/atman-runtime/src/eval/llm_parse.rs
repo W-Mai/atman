@@ -167,42 +167,48 @@ pub struct FieldDef {
 }
 
 /// Parse field definitions from a `Value::Struct` (the `fields` parameter).
-/// Each value should be a string in format "{type} — {description}" (separator is lenient).
+/// Parse field definitions from a `Value::Struct` (the `fields` parameter).
+/// Uses `--` annotation format: each field value is a `Value::Struct { type, desc }`.
 pub fn parse_field_definitions(fields: &[(String, Value)]) -> Result<Vec<FieldDef>, String> {
     let mut defs = Vec::new();
     for (name, val) in fields {
-        let desc_str = match val {
-            Value::Str(s) => s.as_str(),
+        match val {
+            Value::Struct(pairs)
+                if pairs.len() == 2
+                    && pairs.iter().any(|(k, _)| k == "type")
+                    && pairs.iter().any(|(k, _)| k == "desc") =>
+            {
+                let ty = pairs
+                    .iter()
+                    .find(|(k, _)| k == "type")
+                    .and_then(|(_, v)| match v {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let desc = pairs
+                    .iter()
+                    .find(|(k, _)| k == "desc")
+                    .and_then(|(_, v)| match v {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                defs.push(FieldDef {
+                    name: name.clone(),
+                    ty: ty.to_lowercase(),
+                    description: desc,
+                });
+            }
             _ => {
                 return Err(format!(
-                    "field `{name}`: expected string description, got {}",
+                    "field `{name}`: expected type annotation (e.g. `bool -- \"description\"`), got {}",
                     val.kind_name()
                 ));
             }
-        };
-        // Lenient separator: try em-dash, hyphen, colon
-        let (ty, description) = split_type_desc(desc_str);
-        defs.push(FieldDef {
-            name: name.clone(),
-            ty: ty.to_lowercase(),
-            description: description.to_string(),
-        });
-    }
-    Ok(defs)
-}
-
-fn split_type_desc(s: &str) -> (String, String) {
-    // Try em-dash (—), en-dash (–), hyphen (-), colon (:)
-    for sep in &[" — ", " - ", " – ", ": "] {
-        if let Some(pos) = s.find(sep) {
-            return (
-                s[..pos].trim().to_string(),
-                s[pos + sep.len()..].trim().to_string(),
-            );
         }
     }
-    // No separator found: treat entire string as description, infer no type
-    (String::new(), s.trim().to_string())
+    Ok(defs)
 }
 
 /// Coerce a Value to match a declared type.

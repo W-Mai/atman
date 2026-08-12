@@ -185,6 +185,7 @@ fn walk_expr(
             walk_expr(lhs, scope, tools, errors);
             walk_expr(rhs, scope, tools, errors);
         }
+        Expr::Annotated { expr, .. } => walk_expr(expr, scope, tools, errors),
     }
 }
 

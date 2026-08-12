@@ -156,8 +156,8 @@ flow test() -> string {
         model: "m",
         prompt: "Extract from text",
         fields: {
-            valid: "bool — is valid",
-            count: "int — how many",
+            valid: bool -- "is valid",
+            count: int -- "how many",
         },
     )
     when result.valid == true {
@@ -183,7 +183,7 @@ flow test() -> string {
         model: "m",
         prompt: "Extract",
         fields: {
-            status: "string — status",
+            status: string -- "status",
         },
     )
     return result.status
@@ -206,7 +206,7 @@ flow test() -> string {
         model: "m",
         prompt: "Extract",
         fields: {
-            valid: "bool — is valid",
+            valid: bool -- "is valid",
         },
     )
     when result.valid == true {
@@ -233,7 +233,7 @@ flow test() -> string {
         model: "m",
         prompt: "Extract",
         fields: {
-            name: "string — name",
+            name: string -- "name",
         },
     )
     return result.name
@@ -307,6 +307,58 @@ flow test() -> string {
     match run(src, provider) {
         Value::Str(s) => {
             assert!(s.contains("task1") && s.contains("task2") && !s.contains("task3"))
+        }
+        other => panic!("expected string, got {other:?}"),
+    }
+}
+
+#[test]
+fn extract_with_annotation_syntax() {
+    // New `--` annotation syntax for fields
+    let src = r#"
+flow test() -> string {
+    result = llm.extract(
+        model: "m",
+        prompt: "Extract from text",
+        fields: {
+            valid: bool -- "is valid",
+            count: int -- "how many",
+        },
+    )
+    when result.valid == true {
+        return "valid: " + to_json_string(result.count)
+    }
+    return "invalid"
+}
+"#;
+    let json = r#"{"valid": true, "count": 42}"#;
+    let provider = MockProvider::new("mock").with_model("m", Value::Str(json.into()));
+    match run(src, provider) {
+        Value::Str(s) => assert_eq!(s, "valid: 42"),
+        other => panic!("expected string, got {other:?}"),
+    }
+}
+
+#[test]
+fn extract_with_list_type_annotation() {
+    let src = r#"
+flow test() -> string {
+    result = llm.extract(
+        model: "m",
+        prompt: "Extract",
+        fields: {
+            issues: [string] -- "list of issues",
+        },
+    )
+    return to_json_string(result.issues)
+}
+"#;
+    let json = r#"{"issues": ["bug1", "bug2"]}"#;
+    let provider = MockProvider::new("mock").with_model("m", Value::Str(json.into()));
+    match run(src, provider) {
+        Value::Str(s) => {
+            assert!(s.contains("bug1"), "should contain bug1: {s}");
+            assert!(s.contains("bug2"), "should contain bug2: {s}");
         }
         other => panic!("expected string, got {other:?}"),
     }

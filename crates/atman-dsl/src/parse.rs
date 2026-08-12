@@ -417,6 +417,28 @@ fn parse_expr_bp(input: ParseStream, min_bp: u8) -> Result<Expr> {
             right: Box::new(rhs),
         };
     }
+    // Suffix annotation: only at top-level (min_bp == 0)
+    if min_bp == 0 {
+        lhs = parse_annotation_suffix(input, lhs)?;
+    }
+    Ok(lhs)
+}
+
+fn parse_annotation_suffix(input: ParseStream, lhs: Expr) -> Result<Expr> {
+    if input.peek(Token![-]) && input.peek2(Token![-]) {
+        let ahead = input.fork();
+        let _ = ahead.parse::<Token![-]>();
+        let _ = ahead.parse::<Token![-]>();
+        if ahead.peek(syn::LitStr) {
+            input.parse::<Token![-]>()?;
+            input.parse::<Token![-]>()?;
+            let s: LitStr = input.parse()?;
+            return Ok(Expr::Annotated {
+                expr: Box::new(lhs),
+                annotation: s.value(),
+            });
+        }
+    }
     Ok(lhs)
 }
 
@@ -444,6 +466,15 @@ fn peek_binop(input: ParseStream) -> Option<(BinOp, u8)> {
     } else if input.peek(Token![+]) {
         Some((BinOp::Add, 4))
     } else if input.peek(Token![-]) {
+        // Check for `--` annotation (two `-` followed by string literal)
+        if input.peek2(Token![-]) {
+            let ahead = input.fork();
+            let _ = ahead.parse::<Token![-]>();
+            let _ = ahead.parse::<Token![-]>();
+            if ahead.peek(syn::LitStr) {
+                return None; // annotation, not subtraction
+            }
+        }
         Some((BinOp::Sub, 4))
     } else if input.peek(Token![*]) {
         Some((BinOp::Mul, 5))

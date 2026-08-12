@@ -101,6 +101,7 @@ fn collect_ident_refs_expr(expr: &Expr, refs: &mut HashSet<String>) {
             collect_ident_refs_expr(lhs, refs);
             collect_ident_refs_expr(rhs, refs);
         }
+        Expr::Annotated { expr, .. } => collect_ident_refs_expr(expr, refs),
     }
 }
 
@@ -177,6 +178,7 @@ fn walk_expr_for_nodes(expr: &Expr, flow_name: &str, hits: &mut Vec<LintHit>) {
                 walk_expr_for_nodes(e, flow_name, hits);
             }
         }
+        Expr::Annotated { expr, .. } => walk_expr_for_nodes(expr, flow_name, hits),
     }
 }
 

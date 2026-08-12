@@ -78,6 +78,10 @@ pub enum Expr {
     Struct(Vec<(Ident, Expr)>),
     List(Vec<Expr>),
     Node(Node),
+    Annotated {
+        expr: Box<Expr>,
+        annotation: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

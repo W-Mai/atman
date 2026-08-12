@@ -226,6 +226,65 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
             "bare function call not supported; use namespaced tool call".into(),
         )),
         Expr::Pipe { lhs, rhs } => eval_pipe(lhs, rhs, env, ctx).await,
+        Expr::Annotated { expr, annotation } => eval_annotated(expr, annotation, env, ctx).await,
+    }
+}
+
+/// Check if an identifier name is a known type annotation.
+fn is_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool" | "int" | "float" | "string" | "path" | "bytes" | "duration"
+    )
+}
+
+/// Check if an Expr is a type list expression like `[string]` or `[int]`.
+fn is_type_list_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::List(items) if items.len() == 1 => {
+            matches!(&items[0], Expr::Ident(id) if is_type_name(&id.name))
+        }
+        _ => false,
+    }
+}
+
+/// Convert a type Expr to its string representation.
+fn type_expr_to_string(expr: &Expr) -> String {
+    match expr {
+        Expr::Ident(id) => id.name.clone(),
+        Expr::List(items) if items.len() == 1 => {
+            if let Expr::Ident(id) = &items[0] {
+                format!("list of {}", id.name)
+            } else {
+                "list".to_string()
+            }
+        }
+        _ => "unknown".to_string(),
+    }
+}
+
+async fn eval_annotated<'a>(
+    expr: &'a Expr,
+    annotation: &str,
+    env: &'a Env,
+    ctx: &'a EvalCtx<'a>,
+) -> Value {
+    match expr {
+        // Scalar type name → { type, desc }
+        Expr::Ident(id) if is_type_name(&id.name) => Value::Struct(vec![
+            ("type".into(), Value::Str(id.name.clone())),
+            ("desc".into(), Value::Str(annotation.to_string())),
+        ]),
+        // List type → { type: "list of X", desc }
+        Expr::List(_) if is_type_list_expr(expr) => {
+            let type_str = type_expr_to_string(expr);
+            Value::Struct(vec![
+                ("type".into(), Value::Str(type_str)),
+                ("desc".into(), Value::Str(annotation.to_string())),
+            ])
+        }
+        // Other expressions → evaluate, discard annotation
+        _ => eval_expr(expr, env, ctx).await,
     }
 }
 
@@ -258,6 +317,7 @@ pub(crate) fn expr_shape(e: &Expr) -> &'static str {
         Expr::Struct(_) => "struct literal",
         Expr::List(_) => "list literal",
         Expr::Node(_) => "flow node",
+        Expr::Annotated { expr, .. } => expr_shape(expr),
     }
 }
 

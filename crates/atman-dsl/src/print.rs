@@ -300,6 +300,12 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
             out.push(']');
         }
         Expr::Node(node) => write_node(out, node, indent),
+        Expr::Annotated { expr, annotation } => {
+            write_expr(out, expr, indent);
+            out.push_str(" -- \"");
+            out.push_str(&annotation.replace('\\', "\\\\").replace('"', "\\\""));
+            out.push('"');
+        }
     }
 }
 
