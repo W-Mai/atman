@@ -185,7 +185,22 @@ fn walk_expr(
             walk_expr(lhs, scope, tools, errors);
             walk_expr(rhs, scope, tools, errors);
         }
-        Expr::Annotated { expr, .. } => walk_expr(expr, scope, tools, errors),
+        Expr::Annotated { expr, .. } => {
+            // Type names and type list expressions in annotation position
+            // are not variable references
+            match expr.as_ref() {
+                Expr::Ident(id) if crate::eval::is_type_name(&id.name) => {}
+                Expr::List(inner) if inner.len() == 1 => {
+                    if let Expr::Ident(id) = &inner[0] {
+                        if crate::eval::is_type_name(&id.name) {
+                            return;
+                        }
+                    }
+                    walk_expr(expr, scope, tools, errors);
+                }
+                _ => walk_expr(expr, scope, tools, errors),
+            }
+        }
     }
 }
 

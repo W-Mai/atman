@@ -231,7 +231,7 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
 }
 
 /// Check if an identifier name is a known type annotation.
-fn is_type_name(name: &str) -> bool {
+pub(crate) fn is_type_name(name: &str) -> bool {
     matches!(
         name,
         "bool" | "int" | "float" | "string" | "path" | "bytes" | "duration"
