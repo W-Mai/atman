@@ -114,6 +114,7 @@ async fn anthropic_multimodal_request_includes_image_block() {
             },
         ],
         turn_id: atman_runtime::event::TurnId::now(),
+        origin: atman_runtime::message::MessageOrigin::User,
     };
     let v = provider
         .call(LlmRequest {

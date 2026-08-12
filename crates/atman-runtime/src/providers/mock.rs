@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
-use crate::message::{Message, MessagePart, MessageRole};
+use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
     TokenUsage, estimate_tokens,
@@ -162,6 +162,7 @@ fn value_to_assistant_message(v: &Value, turn_id: crate::event::TurnId) -> Assis
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Text { text: text.clone() }],
             turn_id,
+            origin: MessageOrigin::User,
         },
         stop_reason: StopReason::End,
         token_usage: TokenUsage {

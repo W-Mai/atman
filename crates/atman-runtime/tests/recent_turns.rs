@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::memory::goal::GoalStore;
-use atman_runtime::message::{Message, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessageRole};
 use atman_runtime::{Executor, Session, Value};
 
 #[tokio::test]
@@ -88,6 +88,7 @@ async fn recent_turns_caps_output_at_n() {
                 text: format!("msg{i}"),
             }],
             turn_id: atman_runtime::event::TurnId::now(),
+            origin: MessageOrigin::User,
         };
         session.append_message(m, None);
     }

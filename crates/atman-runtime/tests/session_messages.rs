@@ -1,5 +1,5 @@
 use atman_runtime::event::TurnId;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::session::Session;
 
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
@@ -7,6 +7,7 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
         role: MessageRole::User,
         parts: vec![MessagePart::Text { text: text.into() }],
         turn_id,
+        origin: MessageOrigin::User,
     }
 }
 
@@ -15,6 +16,7 @@ fn assistant_msg(turn_id: TurnId, text: &str) -> Message {
         role: MessageRole::Assistant,
         parts: vec![MessagePart::Text { text: text.into() }],
         turn_id,
+        origin: MessageOrigin::User,
     }
 }
 

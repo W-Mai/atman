@@ -246,6 +246,8 @@ pub fn spawn_mcp_boot(
                                                         text,
                                                     }],
                                                     turn_id: atman_runtime::TurnId::now(),
+                                                    origin:
+                                                        atman_runtime::message::MessageOrigin::User,
                                                 }
                                             })
                                             .collect();

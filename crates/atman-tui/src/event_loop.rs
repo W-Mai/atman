@@ -83,7 +83,10 @@ pub(crate) async fn run_frames(
         let past: Vec<String> = sess
             .messages_full()
             .iter()
-            .filter(|m| matches!(m.role, atman_runtime::message::MessageRole::User))
+            .filter(|m| {
+                matches!(m.role, atman_runtime::message::MessageRole::User)
+                    && matches!(m.origin, atman_runtime::message::MessageOrigin::User)
+            })
             .map(|m| m.text_concat())
             .filter(|s| !s.trim().is_empty())
             .collect();

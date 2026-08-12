@@ -1181,7 +1181,9 @@ async fn eval_message_node<'a>(
     env: &'a Env,
     ctx: &'a EvalCtx<'a>,
 ) -> Value {
-    use crate::message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
+    use crate::message::{
+        ImageData, ImageSource, Message, MessageOrigin, MessagePart, MessageRole,
+    };
 
     let role = match ast_role {
         atman_dsl::ast::MessageRole::User => MessageRole::User,
@@ -1284,6 +1286,7 @@ async fn eval_message_node<'a>(
                 is_error,
             }],
             turn_id,
+            origin: MessageOrigin::User,
         });
     }
 
@@ -1347,6 +1350,7 @@ async fn eval_message_node<'a>(
         role,
         parts,
         turn_id,
+        origin: MessageOrigin::User,
     })
 }
 
@@ -1439,7 +1443,7 @@ pub struct TruncationStat {
 pub(super) fn sanitize_tool_pairs(
     messages: Vec<crate::message::Message>,
 ) -> Vec<crate::message::Message> {
-    use crate::message::{Message, MessagePart, MessageRole};
+    use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use std::collections::HashMap;
     let mut result_by_id: HashMap<String, Message> = HashMap::new();
     for m in &messages {
@@ -1451,6 +1455,7 @@ pub(super) fn sanitize_tool_pairs(
                         role: MessageRole::Tool,
                         parts: vec![p.clone()],
                         turn_id: m.turn_id.clone(),
+                        origin: MessageOrigin::User,
                     });
             }
         }
@@ -1506,6 +1511,7 @@ pub(super) fn sanitize_tool_pairs(
                 role: MessageRole::Tool,
                 parts: filler_parts,
                 turn_id: m.turn_id.clone(),
+                origin: MessageOrigin::User,
             });
         }
     }
@@ -2242,7 +2248,7 @@ flow parent(x: Int) -> Int {
     #[test]
     fn resolve_tool_specs_wildcard_unknown_prefix_skips_silently() {
         let tools = crate::tool::ToolRegistry::new();
-        let expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+        let _expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
             "nonexistent.*".into(),
         ))]);
         let specs = crate::eval::llm_args::resolve_tool_specs_from_values(
@@ -2315,7 +2321,7 @@ flow parent(x: Int) -> Int {
         }));
 
         // "mcp.*" matches all 3 mcp.* tools, but not fs.read
-        let expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+        let _expr = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
             "mcp.*".into(),
         ))]);
         let specs = crate::eval::llm_args::resolve_tool_specs_from_values(
@@ -2330,7 +2336,7 @@ flow parent(x: Int) -> Int {
         assert!(names.contains(&"mcp.siyuan.search".into()));
 
         // "mcp.lark.*" matches only the 2 lark tools
-        let expr2 = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
+        let _expr2 = Expr::List(vec![Expr::Literal(atman_dsl::ast::Literal::Str(
             "mcp.lark.*".into(),
         ))]);
         let specs2 = crate::eval::llm_args::resolve_tool_specs_from_values(
@@ -2443,7 +2449,7 @@ flow parent(x: Int) -> Int {
 #[cfg(test)]
 mod sanitize_tests {
     use super::*;
-    use crate::message::{Message, MessagePart, MessageRole};
+    use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 
     #[test]
     fn sanitize_fills_missing_tool_results() {
@@ -2457,6 +2463,7 @@ mod sanitize_tests {
                     input: serde_json::json!({}),
                 }],
                 turn_id: turn.clone(),
+                origin: MessageOrigin::User,
             },
             Message {
                 role: MessageRole::User,
@@ -2464,6 +2471,7 @@ mod sanitize_tests {
                     text: "user interrupt".into(),
                 }],
                 turn_id: turn.clone(),
+                origin: MessageOrigin::User,
             },
         ];
         let out = sanitize_tool_pairs(msgs);
@@ -2490,6 +2498,7 @@ mod sanitize_tests {
                     input: serde_json::json!({}),
                 }],
                 turn_id: turn.clone(),
+                origin: MessageOrigin::User,
             },
             Message {
                 role: MessageRole::Tool,
@@ -2499,6 +2508,7 @@ mod sanitize_tests {
                     is_error: false,
                 }],
                 turn_id: turn.clone(),
+                origin: MessageOrigin::User,
             },
         ];
         let out = sanitize_tool_pairs(msgs);

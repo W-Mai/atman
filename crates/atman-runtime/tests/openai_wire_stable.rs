@@ -1,5 +1,5 @@
 use atman_runtime::event::TurnId;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::openai::OpenAiProvider;
 use atman_runtime::value::Value;
@@ -20,6 +20,7 @@ fn user(text: &str) -> Message {
             text: text.to_string(),
         }],
         turn_id: tid(),
+        origin: MessageOrigin::User,
     }
 }
 
@@ -32,6 +33,7 @@ fn tool_result(id: &str, content: &str) -> Message {
             is_error: false,
         }],
         turn_id: tid(),
+        origin: MessageOrigin::User,
     }
 }
 
@@ -49,6 +51,7 @@ fn assistant_with_tool_use(text: &str, id: &str, name: &str, input: serde_json::
             },
         ],
         turn_id: tid(),
+        origin: MessageOrigin::User,
     }
 }
 

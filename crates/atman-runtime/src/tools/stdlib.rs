@@ -766,6 +766,7 @@ impl Tool for MessageTool {
                 turn_id,
                 role: crate::message::MessageRole::Tool,
                 parts: vec![crate::message::MessagePart::Text { text }],
+                origin: crate::message::MessageOrigin::User,
             }))
         })
     }
@@ -1084,6 +1085,7 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now),
+            origin: crate::message::MessageOrigin::User,
         };
         emit_tool_result(ctx, &msg);
         out_slots[a.index] = Some(Value::Message(msg));
@@ -1113,6 +1115,7 @@ async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option
                 .turn_id
                 .clone()
                 .unwrap_or_else(crate::event::TurnId::now),
+            origin: crate::message::MessageOrigin::User,
         };
         emit_tool_result(ctx, &msg);
         out_slots[a.index] = Some(Value::Message(msg));
@@ -1290,6 +1293,7 @@ fn build_error_result(ctx: &ToolCtx, tool_use_id: &str, content: &str) -> crate:
             .turn_id
             .clone()
             .unwrap_or_else(crate::event::TurnId::now),
+        origin: crate::message::MessageOrigin::User,
     }
 }
 

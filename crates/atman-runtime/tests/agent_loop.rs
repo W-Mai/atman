@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use atman_dsl::parse::parse_file;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{Event, EventSink, NodeEvent, Observable, TurnId};
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::model_registry::{ModelConfig, ModelEntry};
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::tool::BoxFut;
@@ -53,6 +53,7 @@ impl ScriptedAgentProvider {
                 role: MessageRole::Assistant,
                 parts,
                 turn_id,
+                origin: MessageOrigin::User,
             },
             stop_reason: StopReason::End,
             token_usage: TokenUsage::default(),

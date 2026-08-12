@@ -1,5 +1,5 @@
 use atman_runtime::event::TurnId;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::anthropic::AnthropicProvider;
 use atman_runtime::value::Value;
@@ -18,6 +18,7 @@ fn request_with_tools() -> LlmRequest {
                 text: "list examples/".into(),
             }],
             turn_id: TurnId(Uuid::nil()),
+            origin: MessageOrigin::User,
         }],
         system: None,
         input: Value::Unit,

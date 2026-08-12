@@ -1,6 +1,6 @@
 use atman_runtime::compaction::{CompactRange, find_compact_summaries, replace_range_with_summary};
 use atman_runtime::event::TurnId;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 
 fn user(text: &str) -> Message {
     Message::user_text(TurnId::now(), text)
@@ -59,6 +59,7 @@ fn legacy_structured_summary_still_deserializes() {
             text: "summary body\n\n[atman:compact seq_start=1 seq_end=2 count=2]".into(),
         }],
         turn_id: TurnId::now(),
+        origin: MessageOrigin::User,
     };
     let json = serde_json::to_string(&msg).unwrap();
     let back: Message = serde_json::from_str(&json).unwrap();

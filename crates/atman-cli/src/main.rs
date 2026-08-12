@@ -2350,6 +2350,7 @@ async fn cmd_repl_once(
             &lifecycles,
             classifier.as_ref(),
             &text,
+            atman_runtime::message::MessageOrigin::User,
             &mut pending,
             kind,
             &mut input_rx,
@@ -2376,6 +2377,7 @@ async fn cmd_repl_once(
                             &lifecycles,
                             classifier.as_ref(),
                             &event_text,
+                            atman_runtime::message::MessageOrigin::Watcher,
                             &mut pending,
                             TurnKind::Bare,
                             &mut input_rx,
@@ -2805,6 +2807,7 @@ async fn run_turn_with_interjection(
         &std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>,
     >,
     raw_line: &str,
+    origin: atman_runtime::message::MessageOrigin,
     pending: &mut PendingUserMessage,
     kind: TurnKind,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -2815,7 +2818,7 @@ async fn run_turn_with_interjection(
     let mut attachments = std::mem::take(&mut pending.attachments);
     attachments.extend(inline_attachments);
     let turn_id = atman_runtime::event::TurnId::now();
-    let user_msg = build_user_message(&text, &attachments, turn_id.clone());
+    let user_msg = build_user_message(&text, &attachments, turn_id.clone(), origin);
     {
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);
@@ -3049,6 +3052,7 @@ fn build_user_message(
     text: &str,
     attachments: &[std::path::PathBuf],
     turn_id: atman_runtime::event::TurnId,
+    origin: atman_runtime::message::MessageOrigin,
 ) -> atman_runtime::message::Message {
     use atman_runtime::message::{ImageData, ImageSource, Message, MessagePart, MessageRole};
     let mut parts: Vec<MessagePart> = Vec::new();
@@ -3068,6 +3072,7 @@ fn build_user_message(
         role: MessageRole::User,
         parts,
         turn_id,
+        origin,
     }
 }
 
@@ -5846,6 +5851,7 @@ fn replay_messages_into(
                 role: atman_runtime::message::MessageRole::Tool,
                 parts: vec![atman_runtime::message::MessagePart::Text { text }],
                 turn_id,
+                origin: atman_runtime::message::MessageOrigin::User,
             },
         };
         session.append_message(msg, None);

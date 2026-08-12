@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
-use crate::message::{Message, MessagePart, MessageRole};
+use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use crate::tool::BoxFut;
 use crate::value::Value;
 
@@ -185,6 +185,7 @@ pub fn user_text_message(text: impl Into<String>) -> Message {
         role: MessageRole::User,
         parts: vec![MessagePart::Text { text: text.into() }],
         turn_id: crate::event::TurnId::now(),
+        origin: MessageOrigin::User,
     }
 }
 

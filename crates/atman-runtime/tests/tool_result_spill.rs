@@ -1,6 +1,6 @@
 use atman_runtime::Session;
 use atman_runtime::event::TurnId;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::tools::tool_output::MAX_TOOL_RESULT_CHARS;
 
 #[tokio::test]
@@ -18,6 +18,7 @@ async fn append_tool_result_truncates_and_spills_to_file() {
             is_error: false,
         }],
         turn_id: TurnId::now(),
+        origin: MessageOrigin::User,
     };
     session.append_message(msg, None);
     session.shutdown().await;
@@ -72,6 +73,7 @@ async fn small_tool_result_not_truncated() {
             is_error: false,
         }],
         turn_id: TurnId::now(),
+        origin: MessageOrigin::User,
     };
     session.append_message(msg, None);
     session.shutdown().await;
@@ -108,6 +110,7 @@ async fn spill_file_contains_full_output() {
             is_error: false,
         }],
         turn_id: TurnId::now(),
+        origin: MessageOrigin::User,
     };
     session.append_message(msg, None);
     session.shutdown().await;

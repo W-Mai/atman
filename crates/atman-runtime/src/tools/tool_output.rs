@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::message::{Message, MessagePart, MessageRole};
+use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
 
 pub const MAX_TOOL_RESULT_CHARS: usize = 25_000;
 
@@ -96,6 +96,7 @@ pub fn truncate_tool_results_in_message(
         role: msg.role,
         parts,
         turn_id: msg.turn_id.clone(),
+        origin: MessageOrigin::User,
     })
 }
 
@@ -114,7 +115,7 @@ pub fn spill_dir(session_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::event::TurnId;
-    use crate::message::{Message, MessagePart, MessageRole};
+    use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use tempfile::TempDir;
 
     fn tool_msg(content: &str) -> Message {
@@ -126,6 +127,7 @@ mod tests {
                 is_error: false,
             }],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         }
     }
 
@@ -219,6 +221,7 @@ mod tests {
                 text: "x".repeat(MAX_TOOL_RESULT_CHARS + 1000),
             }],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         };
         let result = maybe_truncate_tool_message(&msg, Some(dir.path()));
         assert_eq!(result.parts.len(), 1);

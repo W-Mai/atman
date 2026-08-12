@@ -4,7 +4,7 @@ use atman_runtime::event::TurnId;
 use atman_runtime::memory::MemoryId;
 use atman_runtime::memory::plan::{Plan, PlanStore};
 use atman_runtime::memory::todo::{Todo, TodoStatus};
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -40,6 +40,7 @@ fn is_plan_related_matches_plan_tool_use_and_result() {
             name: "plan.write".into(),
             input: serde_json::json!({"title":"x"}),
         }],
+        origin: MessageOrigin::User,
     };
     assert!(is_plan_related(&plan_use));
     let plan_result = Message {
@@ -50,6 +51,7 @@ fn is_plan_related_matches_plan_tool_use_and_result() {
             content: "# Plan: ship\n_id: p1_\n\n- [ ] a\n".into(),
             is_error: false,
         }],
+        origin: MessageOrigin::User,
     };
     assert!(is_plan_related(&plan_result));
     let ordinary = Message::user_text(TurnId::now(), "hello");
@@ -73,6 +75,7 @@ fn find_compact_range_skips_plan_messages() {
                 name: "plan.tick".into(),
                 input: serde_json::json!({}),
             }],
+            origin: MessageOrigin::User,
         },
     );
     for i in 0..5 {

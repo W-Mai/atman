@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable, TurnId};
-use crate::message::{ImageData, Message, MessagePart, MessageRole};
+use crate::message::{ImageData, Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
     TokenUsage, estimate_tokens,
@@ -444,6 +444,7 @@ impl Provider for CodexProvider {
                         role: MessageRole::Assistant,
                         parts,
                         turn_id,
+                        origin: MessageOrigin::User,
                     },
                     stop_reason,
                     token_usage: token_usage.unwrap_or_default(),

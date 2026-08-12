@@ -4,11 +4,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::TurnId;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    #[default]
+    User,
+    Watcher,
+    Interjection,
+}
+
+fn is_default_origin(origin: &MessageOrigin) -> bool {
+    matches!(origin, MessageOrigin::User)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Message {
     pub role: MessageRole,
     pub parts: Vec<MessagePart>,
     pub turn_id: TurnId,
+    #[serde(default, skip_serializing_if = "is_default_origin")]
+    pub origin: MessageOrigin,
 }
 
 impl<'de> Deserialize<'de> for Message {
@@ -21,6 +36,8 @@ impl<'de> Deserialize<'de> for Message {
             role: MessageRole,
             parts: Vec<MessagePart>,
             turn_id: TurnId,
+            #[serde(default)]
+            origin: MessageOrigin,
         }
 
         let raw = RawMessage::deserialize(deserializer)?;
@@ -28,11 +45,13 @@ impl<'de> Deserialize<'de> for Message {
             role,
             parts,
             turn_id,
+            origin,
         } = raw;
         Ok(Self {
             role,
             parts: normalize_legacy_compact_summary(role, parts),
             turn_id,
+            origin,
         })
     }
 }
@@ -98,6 +117,7 @@ impl Message {
             role: MessageRole::User,
             parts: vec![MessagePart::Text { text: text.into() }],
             turn_id,
+            origin: MessageOrigin::User,
         }
     }
 
@@ -106,6 +126,7 @@ impl Message {
             role: MessageRole::Assistant,
             parts: vec![MessagePart::Text { text: text.into() }],
             turn_id,
+            origin: MessageOrigin::User,
         }
     }
 
@@ -114,6 +135,7 @@ impl Message {
             role: MessageRole::System,
             parts: vec![MessagePart::Text { text: text.into() }],
             turn_id,
+            origin: MessageOrigin::User,
         }
     }
 
@@ -133,6 +155,7 @@ impl Message {
                 count,
             }],
             turn_id,
+            origin: MessageOrigin::User,
         }
     }
 
@@ -249,6 +272,7 @@ mod tests {
                 text: "handoff\n\n[atman:compact seq_start=2 seq_end=7 count=6]".into(),
             }],
             turn_id,
+            origin: MessageOrigin::User,
         };
         let s = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&s).unwrap();
@@ -276,6 +300,7 @@ mod tests {
                 MessagePart::Text { text: "b".into() },
             ],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         };
         assert_eq!(msg.text_concat(), "a b");
     }
@@ -290,6 +315,7 @@ mod tests {
                 is_error: false,
             }],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert!(!s.contains("is_error"), "should skip when false: {s}");
@@ -302,6 +328,7 @@ mod tests {
                 is_error: true,
             }],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         };
         let s = serde_json::to_string(&err_msg).unwrap();
         assert!(s.contains("\"is_error\":true"), "{s}");
@@ -313,5 +340,38 @@ mod tests {
         assert_eq!(MessageRole::Assistant.as_str(), "assistant");
         assert_eq!(MessageRole::System.as_str(), "system");
         assert_eq!(MessageRole::Tool.as_str(), "tool");
+    }
+
+    #[test]
+    fn default_origin_is_user() {
+        assert_eq!(MessageOrigin::default(), MessageOrigin::User);
+    }
+
+    #[test]
+    fn user_origin_skipped_in_json() {
+        let msg = Message::user_text(TurnId::now(), "hi");
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !s.contains("origin"),
+            "default origin should not be serialized: {s}"
+        );
+    }
+
+    #[test]
+    fn watcher_origin_serialized() {
+        let mut msg = Message::user_text(TurnId::now(), "watcher event");
+        msg.origin = MessageOrigin::Watcher;
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(s.contains("\"origin\":\"watcher\""), "{s}");
+        let back: Message = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.origin, MessageOrigin::Watcher);
+    }
+
+    #[test]
+    fn old_json_without_origin_defaults_to_user() {
+        let json = r#"{"role":"user","parts":[{"type":"text","text":"legacy"}],"turn_id":"019f0000-0000-7000-0000-000000000001"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.origin, MessageOrigin::User);
+        assert_eq!(msg.text_concat(), "legacy");
     }
 }

@@ -663,7 +663,7 @@ mod tests {
     use super::*;
     use crate::event::Observable;
     use crate::injection::{Injection, InjectionLevel};
-    use crate::message::{Message, MessagePart, MessageRole};
+    use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use crate::provider::{StopReason, TokenUsage, estimate_tokens, user_text_message};
     use crate::tool::BoxFut;
     use crate::value::Value;
@@ -700,6 +700,7 @@ mod tests {
                     role: MessageRole::Assistant,
                     parts: vec![MessagePart::Text { text: text.clone() }],
                     turn_id: crate::event::TurnId::now(),
+                    origin: MessageOrigin::User,
                 },
                 stop_reason: StopReason::End,
                 token_usage: TokenUsage {

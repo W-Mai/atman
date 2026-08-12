@@ -365,7 +365,7 @@ impl From<SessionOpenError> for RuntimeError {
 mod tests {
     use super::*;
     use crate::index::{AnchorIndex, ProjectEventInsert};
-    use crate::message::{Message, MessagePart, MessageRole};
+    use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use tempfile::TempDir;
 
     fn user_msg(text: &str) -> Message {
@@ -375,6 +375,7 @@ mod tests {
                 text: text.to_string(),
             }],
             turn_id: crate::event::TurnId::now(),
+            origin: MessageOrigin::User,
         }
     }
 
@@ -385,6 +386,7 @@ mod tests {
                 text: text.to_string(),
             }],
             turn_id: crate::event::TurnId::now(),
+            origin: MessageOrigin::User,
         }
     }
 

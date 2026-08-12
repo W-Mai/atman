@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use atman_dsl::parse::parse_file;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{NodeEvent, Observable, TurnId};
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
@@ -59,6 +59,7 @@ impl Provider for RecordingProvider {
                     role: MessageRole::Assistant,
                     parts,
                     turn_id,
+                    origin: MessageOrigin::User,
                 },
                 stop_reason: StopReason::End,
                 token_usage: TokenUsage::default(),
@@ -94,6 +95,7 @@ impl Provider for RecordingProvider {
                 role: MessageRole::Assistant,
                 parts,
                 turn_id,
+                origin: MessageOrigin::User,
             },
             stop_reason: StopReason::End,
             token_usage: TokenUsage::default(),

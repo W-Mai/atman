@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use atman_dsl::parse::parse_file;
 use atman_runtime::event::{Observable, TurnId};
 use atman_runtime::injection::InjectionLevel;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{
     AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage, wrap_call_as_streaming,
 };
@@ -17,6 +17,7 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
         role: MessageRole::User,
         parts: vec![MessagePart::Text { text: text.into() }],
         turn_id,
+        origin: MessageOrigin::User,
     }
 }
 
@@ -44,6 +45,7 @@ impl Provider for RecordingProvider {
                     role: MessageRole::Assistant,
                     parts: vec![MessagePart::Text { text: "ok".into() }],
                     turn_id,
+                    origin: MessageOrigin::User,
                 },
                 stop_reason: StopReason::End,
                 token_usage: TokenUsage::default(),
@@ -68,6 +70,7 @@ impl Provider for RecordingProvider {
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Text { text: "ok".into() }],
                 turn_id,
+                origin: MessageOrigin::User,
             }))
         }))
     }

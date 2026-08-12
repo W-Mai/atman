@@ -151,7 +151,7 @@ async fn safety_deny_mode_blocks_and_never_calls_provider() {
 #[tokio::test]
 async fn safety_auto_rewrite_retries_after_provider_content_filter_error() {
     use atman_runtime::event::{NodeEvent, Observable};
-    use atman_runtime::message::{Message, MessageRole};
+    use atman_runtime::message::{Message, MessageOrigin, MessageRole};
     use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -193,6 +193,7 @@ async fn safety_auto_rewrite_retries_after_provider_content_filter_error() {
                                 text: "safe answer".into(),
                             }],
                             turn_id: turn,
+                            origin: MessageOrigin::User,
                         },
                         stop_reason: StopReason::End,
                         token_usage: TokenUsage::default(),
@@ -230,6 +231,7 @@ async fn safety_auto_rewrite_retries_after_provider_content_filter_error() {
                                     text: "safe answer".into(),
                                 }],
                                 turn_id: turn,
+                                origin: MessageOrigin::User,
                             },
                             stop_reason: StopReason::End,
                             token_usage: TokenUsage::default(),

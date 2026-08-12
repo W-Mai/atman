@@ -145,6 +145,7 @@ async fn openai_multimodal_request_uses_image_url_parts() {
             },
         ],
         turn_id: atman_runtime::event::TurnId::now(),
+        origin: atman_runtime::message::MessageOrigin::User,
     };
     let v = provider
         .call(LlmRequest {

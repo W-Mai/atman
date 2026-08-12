@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::RuntimeError;
 use crate::event::{NodeEvent, Observable};
-use crate::message::{ImageData, Message, MessagePart, MessageRole};
+use crate::message::{ImageData, Message, MessageOrigin, MessagePart, MessageRole};
 use crate::provider::{
     AssistantMessage, CallTiming, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason,
     TokenUsage, estimate_tokens,
@@ -462,6 +462,7 @@ impl Provider for AnthropicProvider {
                         role: MessageRole::Assistant,
                         parts,
                         turn_id,
+                        origin: MessageOrigin::User,
                     },
                     stop_reason,
                     token_usage: TokenUsage {
@@ -535,6 +536,7 @@ fn response_to_assistant(
             role: MessageRole::Assistant,
             parts,
             turn_id,
+            origin: MessageOrigin::User,
         },
         stop_reason,
         token_usage: usage,

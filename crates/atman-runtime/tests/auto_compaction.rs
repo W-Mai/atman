@@ -1,6 +1,6 @@
 use atman_runtime::Session;
 use atman_runtime::event::TurnId;
-use atman_runtime::message::Message;
+use atman_runtime::message::{Message, MessageOrigin};
 
 static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -136,6 +136,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
                         text: normal_idx.map_or_else(|| "summary".into(), |i| format!("reply {i}")),
                     }],
                     turn_id,
+                    origin: MessageOrigin::User,
                 },
                 stop_reason: StopReason::End,
                 token_usage: TokenUsage {

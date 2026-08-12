@@ -5,7 +5,7 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::Executor;
 use atman_runtime::error::RuntimeError;
 use atman_runtime::event::{NodeEvent, Observable};
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{
     AssistantMessage, DEFAULT_STREAM_BUFFER, LlmRequest, Provider, StopReason, TokenUsage,
 };
@@ -38,6 +38,7 @@ impl FlakyProvider {
                     text: self.good.clone(),
                 }],
                 turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
             },
             stop_reason: StopReason::End,
             token_usage: TokenUsage::default(),

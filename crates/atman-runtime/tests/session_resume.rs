@@ -1,4 +1,4 @@
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::session::{Session, SessionOpenError};
 
 fn user_msg(text: &str) -> Message {
@@ -6,6 +6,7 @@ fn user_msg(text: &str) -> Message {
         role: MessageRole::User,
         parts: vec![MessagePart::Text { text: text.into() }],
         turn_id: atman_runtime::event::TurnId::now(),
+        origin: MessageOrigin::User,
     }
 }
 
@@ -14,6 +15,7 @@ fn assistant_msg(text: &str) -> Message {
         role: MessageRole::Assistant,
         parts: vec![MessagePart::Text { text: text.into() }],
         turn_id: atman_runtime::event::TurnId::now(),
+        origin: MessageOrigin::User,
     }
 }
 

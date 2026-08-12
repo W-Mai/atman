@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::memory::goal::GoalStore;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, Session, Value};
@@ -43,6 +43,7 @@ impl atman_runtime::provider::Provider for CapturedProvider {
                     role: MessageRole::Assistant,
                     parts: vec![MessagePart::Text { text: "ok".into() }],
                     turn_id,
+                    origin: MessageOrigin::User,
                 },
             ))
         })
@@ -65,6 +66,7 @@ impl atman_runtime::provider::Provider for CapturedProvider {
                         role: MessageRole::Assistant,
                         parts: vec![MessagePart::Text { text }],
                         turn_id,
+                        origin: MessageOrigin::User,
                     },
                 ))
             })

@@ -650,6 +650,7 @@ pub fn compact_messages_on_handle(
 mod tests {
     use super::*;
     use crate::event::TurnId;
+    use crate::message::MessageOrigin;
 
     fn user(text: &str) -> Message {
         Message::user_text(TurnId::now(), text)
@@ -965,6 +966,7 @@ mod tests {
                 },
             ],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         }
     }
 
@@ -977,6 +979,7 @@ mod tests {
                 is_error,
             }],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         }
     }
 
@@ -993,6 +996,7 @@ mod tests {
                 },
             ],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         }
     }
 
@@ -1163,7 +1167,7 @@ mod tests {
 
     #[test]
     fn filter_orphan_tool_messages_removes_orphan_results() {
-        use crate::message::{Message, MessagePart, MessageRole};
+        use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
         let turn = TurnId::now();
         let msgs = vec![
             Message {
@@ -1174,6 +1178,7 @@ mod tests {
                     is_error: false,
                 }],
                 turn_id: turn.clone(),
+                origin: MessageOrigin::User,
             },
             Message {
                 role: MessageRole::Assistant,
@@ -1183,6 +1188,7 @@ mod tests {
                     input: serde_json::json!({}),
                 }],
                 turn_id: turn.clone(),
+                origin: MessageOrigin::User,
             },
             Message {
                 role: MessageRole::Tool,
@@ -1192,6 +1198,7 @@ mod tests {
                     is_error: false,
                 }],
                 turn_id: turn,
+                origin: MessageOrigin::User,
             },
         ];
         let mut filtered = msgs;

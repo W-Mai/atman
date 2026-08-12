@@ -162,7 +162,7 @@ mod tests {
     use super::*;
     use crate::event::TurnId;
     use crate::event::{Event, EventEnvelope};
-    use crate::message::{MessagePart, MessageRole};
+    use crate::message::{MessageOrigin, MessagePart, MessageRole};
 
     fn user(text: &str) -> Message {
         Message {
@@ -171,6 +171,7 @@ mod tests {
                 text: text.to_string(),
             }],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         }
     }
 
@@ -181,6 +182,7 @@ mod tests {
                 text: text.to_string(),
             }],
             turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
         }
     }
 

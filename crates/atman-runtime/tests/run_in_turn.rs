@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::event::TurnId;
-use atman_runtime::message::{Message, MessagePart, MessageRole};
+use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
 use atman_runtime::{Executor, Value};
@@ -12,6 +12,7 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
         role: MessageRole::User,
         parts: vec![MessagePart::Text { text: text.into() }],
         turn_id,
+        origin: MessageOrigin::User,
     }
 }
 

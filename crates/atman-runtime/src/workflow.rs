@@ -1010,7 +1010,7 @@ fn rebuild_workflow_tree_restores_root_and_subflow() {
 #[test]
 fn rebuild_messages_for_run_filters_by_run_id() {
     use crate::event::{Event, FlowRunId, TurnId};
-    use crate::message::{Message, MessagePart, MessageRole};
+    use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     let root = FlowRunId::now();
     let child = FlowRunId::now();
     let tid = TurnId::now();
@@ -1021,6 +1021,7 @@ fn rebuild_messages_for_run_filters_by_run_id() {
             role,
             parts: vec![MessagePart::Text { text }],
             turn_id: tid.clone(),
+            origin: MessageOrigin::User,
         },
     };
     let events = vec![
