@@ -26,7 +26,6 @@ pub(crate) struct LlmStream<'a> {
 }
 
 /// Streaming-enabled LlmStream. Created by `LlmStream::with_stream_tx()`.
-/// Only this type can call `with_entry`, `with_session`, `with_watch_rules`.
 pub(crate) struct StreamingLlmStream<'a> {
     base: LlmStream<'a>,
     stream_tx: Sender<StreamFrame>,
@@ -68,8 +67,6 @@ impl<'a> LlmStream<'a> {
         self
     }
 
-    /// Type-level transition: LlmStream → StreamingLlmStream.
-    /// Only after this call can `with_entry`/`with_session`/`with_watch_rules` be used.
     pub(crate) fn with_stream_tx(self, tx: Sender<StreamFrame>) -> StreamingLlmStream<'a> {
         StreamingLlmStream {
             base: self,
@@ -82,7 +79,6 @@ impl<'a> LlmStream<'a> {
         }
     }
 
-    /// Non-streaming path: direct provider.call() with no StreamFrame emission.
     pub(crate) async fn run(&mut self) -> Result<AssistantMessage, RuntimeError> {
         self.provider
             .call(self.rebuild_req())
@@ -167,7 +163,6 @@ impl<'a> StreamingLlmStream<'a> {
         self
     }
 
-    // Passthrough setters for convenience (allow chaining after with_stream_tx)
     #[allow(dead_code)]
     pub(crate) fn with_event_sink(mut self, sink: Option<&'a EventSink>) -> Self {
         self.base.event_sink = sink;

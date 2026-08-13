@@ -308,6 +308,9 @@ pub(crate) async fn run_frames(
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
                             app.wm.sync_modals();
+                            if app.wm.modals.provider_manager.open {
+                                app.wm.modals.provider_manager.handle_mouse(&me, handle.control_tx.as_ref());
+                            }
                             let (consumed, commands) = app.wm.dispatch_mouse(
                                 &me,
                                 &mut app.app,

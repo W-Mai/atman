@@ -447,8 +447,12 @@ impl ModalManager {
                 center_rect(canvas, w, h)
             }
             ModalKind::ProviderManager => {
-                let w = canvas.width.saturating_sub(4).clamp(60, 90);
-                let h = canvas.height.saturating_sub(2).clamp(10, 24);
+                let w = canvas.width.saturating_sub(4).clamp(50, 70);
+                let h = if self.provider_manager.in_form {
+                    canvas.height.saturating_sub(2).clamp(20, 30)
+                } else {
+                    canvas.height.saturating_sub(2).clamp(10, 24)
+                };
                 center_rect(canvas, w, h)
             }
             ModalKind::AliasManager => {

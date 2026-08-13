@@ -77,6 +77,7 @@ pub struct ProviderManager {
     pub open_alias_model: Option<String>,
     pub refresh_just_triggered: bool,
     pub test_just_triggered: bool,
+    pub test_btn_rect: Option<Rect>,
     pub add_just_completed: bool,
     pub last_added_name: Option<String>,
     show_add: bool,
@@ -107,6 +108,26 @@ impl ProviderManager {
             self.close();
         } else {
             self.open();
+        }
+    }
+
+    pub fn handle_mouse(&mut self, me: &crossterm::event::MouseEvent, control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>) {
+        if !self.in_form {
+            return;
+        }
+        let Some(rect) = self.test_btn_rect else { return };
+        let col = me.column;
+        let row = me.row;
+        let hit = col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height;
+        use crossterm::event::MouseEventKind;
+        match me.kind {
+            MouseEventKind::Moved if hit => {
+                self.form_field = 7;
+            }
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) if hit => {
+                self.test_form(control_tx);
+            }
+            _ => {}
         }
     }
 
@@ -573,6 +594,30 @@ impl ProviderManager {
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
         if self.in_form {
+            if self.form_field == 7 {
+                match action {
+                    KeyAction::Escape => {
+                        if self.editing_provider.is_some() {
+                            self.show_add = false;
+                            self.in_form = false;
+                            self.editing_provider = None;
+                        } else {
+                            self.in_form = false;
+                        }
+                    }
+                    KeyAction::Submit => {
+                        self.test_form(control_tx);
+                    }
+                    KeyAction::Tab => {
+                        self.form_field = 0;
+                    }
+                    KeyAction::BackTab => {
+                        self.form_field = 6;
+                    }
+                    _ => {}
+                }
+                return None;
+            }
             let editor = match self.form_field {
                 0 => &mut self.name_editor,
                 1 => &mut self.provider_type_editor,
@@ -592,18 +637,15 @@ impl ProviderManager {
                         self.in_form = false;
                     }
                 }
-                KeyAction::Char('t') => {
-                    self.test_form(control_tx);
-                }
                 KeyAction::Submit => {
                     return self.commit_form(control_tx);
                 }
                 KeyAction::Tab => {
-                    self.form_field = (self.form_field + 1) % 7;
+                    self.form_field = (self.form_field + 1) % 8;
                 }
                 KeyAction::BackTab => {
                     self.form_field = if self.form_field == 0 {
-                        6
+                        7
                     } else {
                         self.form_field - 1
                     };
@@ -998,7 +1040,7 @@ fn render_model_detail(
 fn render_add_dialog(
     f: &mut ratatui::Frame,
     area: Rect,
-    mgr: &ProviderManager,
+    mgr: &mut ProviderManager,
     theme: &crate::theme::Theme,
 ) {
     crate::wm::shell::render_section_header(f, area, Line::from("Add Provider"), theme);
@@ -1033,7 +1075,7 @@ fn render_add_dialog(
             } else {
                 Style::default().fg(theme.tinted_fg.into())
             };
-            let display_val = if *label == "API Key" && !val.is_empty() {
+            let display_val = if *label == "API Key" && !val.is_empty() && !active {
                 "•".repeat(val.len().min(20))
             } else {
                 (*val).to_string()
@@ -1128,20 +1170,53 @@ fn render_add_dialog(
             }
             y = y.saturating_add(1);
         }
+        y = y.saturating_add(1);
         if y < inner.bottom() {
+            let test_active = mgr.form_field == 7;
+            let test_style = if test_active {
+                Style::default()
+                    .fg(theme.modal_bg.into())
+                    .bg(theme.accent.into())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.tinted_fg.into())
+                    .bg(theme.border.into())
+            };
+            let hint = if test_active { "  ← Enter to test" } else { "" };
+            let test_btn = Rect {
+                x: inner.x + 1,
+                y,
+                width: 6,
+                height: 1,
+            };
+            mgr.test_btn_rect = Some(test_btn);
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "Tab/Shift+Tab cycle · t:test · Enter:save · Esc:cancel",
-                    Style::default().fg(theme.subtle_fg.into()),
-                ))),
+                Paragraph::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(" Test ", test_style),
+                    Span::raw(hint),
+                ])),
                 Rect {
                     x: inner.x,
-                    y: inner.bottom().saturating_sub(1),
+                    y,
                     width: inner.width,
                     height: 1,
                 },
             );
         }
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Tab/Shift+Tab cycle · Enter:save/test · Esc:cancel",
+                Style::default().fg(theme.subtle_fg.into()),
+            ))),
+            Rect {
+                x: inner.x,
+                y: inner.bottom().saturating_sub(1),
+                width: inner.width,
+                height: 1,
+            },
+        );
     } else if mgr.name_focused {
         lines.push(Line::from("Name:"));
         lines.push(Line::from(Span::styled(

@@ -6961,16 +6961,11 @@ async fn test_provider_endpoint(
 ) -> (String, bool) {
     let client = reqwest::Client::new();
     let url = if provider_type == "anthropic" {
-        format!("{}/v1/messages", base_url.trim_end_matches('/'))
+        format!("{}/v1/models", base_url.trim_end_matches('/'))
     } else {
-        format!("{}/chat/completions", base_url.trim_end_matches('/'))
+        format!("{}/models", base_url.trim_end_matches('/'))
     };
-    let body = serde_json::json!({
-        "model": name,
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "hi"}]
-    });
-    let mut req = client.post(&url).json(&body);
+    let mut req = client.get(&url);
     if provider_type == "anthropic" {
         req = req
             .header("x-api-key", api_key)
