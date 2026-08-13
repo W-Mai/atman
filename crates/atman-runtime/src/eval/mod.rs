@@ -237,16 +237,390 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
     }
 }
 
+fn arg_positional<'a>(
+    args: &'a [Arg],
+    index: usize,
+    fn_name: &str,
+) -> Result<&'a Expr, RuntimeError> {
+    let mut pos = 0;
+    for arg in args {
+        match arg {
+            Arg::Positional(e) => {
+                if pos == index {
+                    return Ok(e);
+                }
+                pos += 1;
+            }
+            Arg::Named { .. } => {}
+        }
+    }
+    Err(RuntimeError::MissingArg(format!(
+        "{fn_name}: missing positional arg {index}"
+    )))
+}
+
+async fn eval_list_map<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    let list_expr = match arg_positional(args, 0, "list.map") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+    let lambda_expr = match arg_positional(args, 1, "list.map") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+
+    let items_val = eval_expr(list_expr, env, ctx).await;
+    let lambda_val = eval_expr(lambda_expr, env, ctx).await;
+
+    let items = match items_val {
+        Value::List(items) => items,
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "list".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    let (params, body, captured_env) = match lambda_val {
+        Value::Lambda {
+            params,
+            body,
+            captured_env,
+        } => (params, body, captured_env),
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "lambda".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    if params.len() != 1 {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "list.map: lambda must have 1 parameter, got {}",
+            params.len()
+        )));
+    }
+
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let mut call_env = captured_env.child();
+        call_env.bind(params[0].name.clone(), item);
+        out.push(eval_expr(&body, &call_env, ctx).await);
+    }
+    Value::List(out)
+}
+
+async fn eval_list_filter<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    let list_expr = match arg_positional(args, 0, "list.filter") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+    let lambda_expr = match arg_positional(args, 1, "list.filter") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+
+    let items_val = eval_expr(list_expr, env, ctx).await;
+    let lambda_val = eval_expr(lambda_expr, env, ctx).await;
+
+    let items = match items_val {
+        Value::List(items) => items,
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "list".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    let (params, body, captured_env) = match lambda_val {
+        Value::Lambda {
+            params,
+            body,
+            captured_env,
+        } => (params, body, captured_env),
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "lambda".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    if params.len() != 1 {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "list.filter: lambda must have 1 parameter, got {}",
+            params.len()
+        )));
+    }
+
+    let mut out = Vec::new();
+    for item in items {
+        let mut call_env = captured_env.child();
+        call_env.bind(params[0].name.clone(), item.clone());
+        let keep = eval_expr(&body, &call_env, ctx).await;
+        if let Value::Bool(true) = keep {
+            out.push(item);
+        }
+    }
+    Value::List(out)
+}
+
+async fn eval_list_reduce<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    let list_expr = match arg_positional(args, 0, "list.reduce") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+    let lambda_expr = match arg_positional(args, 1, "list.reduce") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+    let init_expr = match arg_positional(args, 2, "list.reduce") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+
+    let items = match eval_expr(list_expr, env, ctx).await {
+        Value::List(items) => items,
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "list".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    let (params, body, captured_env) = match eval_expr(lambda_expr, env, ctx).await {
+        Value::Lambda {
+            params,
+            body,
+            captured_env,
+        } => (params, body, captured_env),
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "lambda".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    if params.len() != 2 {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "list.reduce: lambda must have 2 parameters (acc, x), got {}",
+            params.len()
+        )));
+    }
+
+    let mut acc = eval_expr(init_expr, env, ctx).await;
+    if let Value::Err(_) = &acc {
+        return acc;
+    }
+    for item in items {
+        let mut call_env = captured_env.child();
+        call_env.bind(params[0].name.clone(), acc.clone());
+        call_env.bind(params[1].name.clone(), item);
+        acc = eval_expr(&body, &call_env, ctx).await;
+        if let Value::Err(_) = &acc {
+            return acc;
+        }
+    }
+    acc
+}
+
+async fn eval_list_find<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    let list_expr = match arg_positional(args, 0, "list.find") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+    let lambda_expr = match arg_positional(args, 1, "list.find") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+
+    let items = match eval_expr(list_expr, env, ctx).await {
+        Value::List(items) => items,
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "list".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    let (params, body, captured_env) = match eval_expr(lambda_expr, env, ctx).await {
+        Value::Lambda {
+            params,
+            body,
+            captured_env,
+        } => (params, body, captured_env),
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "lambda".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    if params.len() != 1 {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "list.find: lambda must have 1 parameter, got {}",
+            params.len()
+        )));
+    }
+
+    for item in items {
+        let mut call_env = captured_env.child();
+        call_env.bind(params[0].name.clone(), item.clone());
+        let found = eval_expr(&body, &call_env, ctx).await;
+        if let Value::Bool(true) = found {
+            return item;
+        }
+    }
+    Value::Unit
+}
+
+async fn eval_list_any<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    let list_expr = match arg_positional(args, 0, "list.any") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+    let lambda_expr = match arg_positional(args, 1, "list.any") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+
+    let items = match eval_expr(list_expr, env, ctx).await {
+        Value::List(items) => items,
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "list".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    let (params, body, captured_env) = match eval_expr(lambda_expr, env, ctx).await {
+        Value::Lambda {
+            params,
+            body,
+            captured_env,
+        } => (params, body, captured_env),
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "lambda".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    if params.len() != 1 {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "list.any: lambda must have 1 parameter, got {}",
+            params.len()
+        )));
+    }
+
+    for item in items {
+        let mut call_env = captured_env.child();
+        call_env.bind(params[0].name.clone(), item);
+        let found = eval_expr(&body, &call_env, ctx).await;
+        if let Value::Bool(true) = found {
+            return Value::Bool(true);
+        }
+    }
+    Value::Bool(false)
+}
+
+async fn eval_list_all<'a>(args: &'a [Arg], env: &'a Env, ctx: &'a EvalCtx<'a>) -> Value {
+    let list_expr = match arg_positional(args, 0, "list.all") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+    let lambda_expr = match arg_positional(args, 1, "list.all") {
+        Ok(e) => e,
+        Err(e) => return Value::Err(e),
+    };
+
+    let items = match eval_expr(list_expr, env, ctx).await {
+        Value::List(items) => items,
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "list".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    let (params, body, captured_env) = match eval_expr(lambda_expr, env, ctx).await {
+        Value::Lambda {
+            params,
+            body,
+            captured_env,
+        } => (params, body, captured_env),
+        other => {
+            return Value::Err(RuntimeError::TypeMismatch {
+                expected: "lambda".into(),
+                actual: other.kind_name().into(),
+            });
+        }
+    };
+    if params.len() != 1 {
+        return Value::Err(RuntimeError::ToolFailed(format!(
+            "list.all: lambda must have 1 parameter, got {}",
+            params.len()
+        )));
+    }
+
+    for item in items {
+        let mut call_env = captured_env.child();
+        call_env.bind(params[0].name.clone(), item);
+        let ok = eval_expr(&body, &call_env, ctx).await;
+        if !matches!(ok, Value::Bool(true)) {
+            return Value::Bool(false);
+        }
+    }
+    Value::Bool(true)
+}
+
 pub async fn eval_dynamic_fanout<'a>(
-    _source: &'a Expr,
-    _lambda: &'a Expr,
-    _collect: &'a atman_dsl::ast::FanoutCollect,
-    _env: &'a Env,
-    _ctx: &'a EvalCtx<'a>,
+    source: &'a Expr,
+    lambda: &'a Expr,
+    collect: &'a atman_dsl::ast::FanoutCollect,
+    env: &'a Env,
+    ctx: &'a EvalCtx<'a>,
 ) -> Value {
-    Value::Err(RuntimeError::ToolFailed(
-        "DynamicFanout not yet implemented".into(),
-    ))
+    let list_val = eval_expr(source, env, ctx).await;
+    let Value::List(items) = list_val else {
+        return Value::Err(RuntimeError::TypeMismatch {
+            expected: "list".into(),
+            actual: list_val.kind_name().into(),
+        });
+    };
+
+    let lambda_val = eval_expr(lambda, env, ctx).await;
+    let Value::Lambda {
+        params,
+        body,
+        captured_env,
+    } = lambda_val
+    else {
+        return Value::Err(RuntimeError::TypeMismatch {
+            expected: "lambda".into(),
+            actual: lambda_val.kind_name().into(),
+        });
+    };
+
+    let mut results = Vec::new();
+    for item in items {
+        let mut call_env = captured_env.child();
+        if let Some(param) = params.first() {
+            call_env.bind(param.name.clone(), item);
+        }
+        let result = eval_expr(&body, &call_env, ctx).await;
+        if let Value::Err(e) = &result {
+            return Value::Err(e.clone());
+        }
+        if matches!(collect, atman_dsl::ast::FanoutCollect::First) {
+            return result;
+        }
+        results.push(result);
+    }
+
+    match collect {
+        atman_dsl::ast::FanoutCollect::All => Value::List(results),
+        atman_dsl::ast::FanoutCollect::First => results.into_iter().next().unwrap_or(Value::Unit),
+    }
 }
 
 /// Check if an identifier name is a known type annotation.
@@ -861,7 +1235,23 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
         return Value::Err(RuntimeError::Cancelled("flow cancelled by user".into()));
     }
     match node {
-        Node::ToolCall { path, args } => dispatch_tool_call(path, args, Vec::new(), env, ctx).await,
+        Node::ToolCall { path, args } => {
+            let path_str = path
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            match path_str.as_str() {
+                "list.map" => return eval_list_map(args, env, ctx).await,
+                "list.filter" => return eval_list_filter(args, env, ctx).await,
+                "list.reduce" => return eval_list_reduce(args, env, ctx).await,
+                "list.find" => return eval_list_find(args, env, ctx).await,
+                "list.any" => return eval_list_any(args, env, ctx).await,
+                "list.all" => return eval_list_all(args, env, ctx).await,
+                _ => {}
+            }
+            dispatch_tool_call(path, args, Vec::new(), env, ctx).await
+        }
         Node::DynamicFanout {
             source,
             lambda,

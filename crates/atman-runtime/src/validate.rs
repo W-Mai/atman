@@ -224,7 +224,9 @@ fn walk_node(
                 .map(|i| i.name.as_str())
                 .collect::<Vec<_>>()
                 .join(".");
-            if !tools.has(&name) {
+            // list.* combinators are intercepted at eval time, not registered as tools
+            let is_combinator = name.starts_with("list.");
+            if !is_combinator && !tools.has(&name) {
                 errors.push(ValidationError::UndefinedTool(name));
             }
             for arg in args {
