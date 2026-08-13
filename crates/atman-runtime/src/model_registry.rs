@@ -31,11 +31,20 @@ pub fn config_provider_types() -> Vec<&'static str> {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ProviderEntry {
+    pub name: String,
+    pub kind: String,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
+    pub base_url: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ModelEntry {
     pub model: String,
     pub provider: Option<String>,
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
     pub context_budget: Option<u64>,
     pub compact_threshold_ratio: Option<f64>,
     pub thinking: Option<bool>,
@@ -51,12 +60,16 @@ pub struct AliasEntry {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct ModelConfig {
+pub struct ProviderConfig {
+    pub providers: HashMap<String, ProviderEntry>,
     pub models: HashMap<String, ModelEntry>,
     pub aliases: HashMap<String, AliasEntry>,
 }
 
-static MODEL_CONFIG: RwLock<Option<ModelConfig>> = RwLock::new(None);
+/// Backwards-compatible alias — ProviderConfig is the canonical name.
+pub type ModelConfig = ProviderConfig;
+
+static MODEL_CONFIG: RwLock<Option<ProviderConfig>> = RwLock::new(None);
 
 /// Serializes tests that mutate the global model registry.
 ///
@@ -77,7 +90,7 @@ pub fn discovered_models() -> Vec<String> {
 
 /// Set the base model configuration (from config.toml).
 /// Preserves previously registered discovered models.
-pub fn set_model_config(mut cfg: ModelConfig) {
+pub fn set_provider_config(mut cfg: ProviderConfig) {
     let mut guard = MODEL_CONFIG.write().unwrap();
     if let Some(old) = guard.take() {
         // Preserve discovered models from old config.
@@ -93,12 +106,27 @@ pub fn set_model_config(mut cfg: ModelConfig) {
     *guard = Some(cfg);
 }
 
+/// Backwards-compatible alias for [set_provider_config].
+pub fn set_model_config(cfg: ModelConfig) {
+    set_provider_config(cfg);
+}
+
 /// Register additional model entries without clobbering existing ones.
 pub fn register_model_entries(entries: Vec<(String, ModelEntry)>) {
     let mut guard = MODEL_CONFIG.write().unwrap();
     let mut cfg = guard.take().unwrap_or_default();
     for (name, entry) in entries {
         cfg.models.entry(name).or_insert(entry);
+    }
+    *guard = Some(cfg);
+}
+
+/// Register additional provider entries without clobbering existing ones.
+pub fn register_provider_entries(entries: Vec<(String, ProviderEntry)>) {
+    let mut guard = MODEL_CONFIG.write().unwrap();
+    let mut cfg = guard.take().unwrap_or_default();
+    for (name, entry) in entries {
+        cfg.providers.entry(name).or_insert(entry);
     }
     *guard = Some(cfg);
 }
@@ -208,6 +236,17 @@ pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
     Vec::new()
 }
 
+pub fn all_provider_entries() -> Vec<(String, ProviderEntry)> {
+    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
+        return cfg
+            .providers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+    }
+    Vec::new()
+}
+
 pub fn all_aliases() -> Vec<(String, String)> {
     if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
         return cfg
@@ -249,6 +288,9 @@ impl ModelInfo {
     }
 
     pub fn compaction_trigger_threshold(&self) -> u64 {
+        if self.context_budget == 0 {
+            return u64::MAX;
+        }
         let budget = self.context_budget;
 
         let configured_output = self.max_output_tokens.unwrap_or(32_000) as u64;
@@ -277,6 +319,10 @@ impl ModelInfo {
         self.thinking_enabled
     }
 }
+
+// ── Known models table (supplements API discovery) ──
+
+pub use crate::known_models::{KNOWN_MODELS, lookup_known_model};
 
 // ── Alias CRUD (writes config.toml) ──
 
@@ -318,20 +364,58 @@ fn reload_from_text(text: &str) {
         }
     }
 
+    // Update providers from config.toml.
+    cfg.providers.clear();
+    if let Some(providers) = raw.get("providers").and_then(|p| p.as_table()) {
+        for (key, entry) in providers {
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| key.clone());
+            let kind = entry
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            let api_key = entry
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let api_key_env = entry
+                .get("api_key_env")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let base_url = entry
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let max_tokens = entry
+                .get("max_tokens")
+                .and_then(|v| v.as_integer())
+                .map(|n| n as u32);
+            let enabled = entry.get("enabled").and_then(|v| v.as_bool());
+            cfg.providers.insert(
+                key.clone(),
+                ProviderEntry {
+                    name,
+                    kind,
+                    api_key,
+                    api_key_env,
+                    base_url,
+                    max_tokens,
+                    enabled,
+                },
+            );
+        }
+    }
+
     // Update config-defined models — only update existing keys or add
     // new ones; never remove entries that aren't in config.toml.
     if let Some(models) = raw.get("models").and_then(|m| m.as_table()) {
         for (name, entry) in models {
             let provider = entry
                 .get("provider")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let api_key = entry
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let base_url = entry
-                .get("base_url")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             let context_budget = entry
@@ -352,8 +436,6 @@ fn reload_from_text(text: &str) {
                 ModelEntry {
                     model: model.unwrap_or_default(),
                     provider,
-                    api_key,
-                    base_url,
                     context_budget,
                     compact_threshold_ratio: None,
                     thinking,
@@ -366,6 +448,108 @@ fn reload_from_text(text: &str) {
     }
 
     *guard = Some(cfg);
+}
+
+/// Unified config parser — parses `[providers.X]`, `[models.X]`, and `[alias.X]`
+/// sections from a TOML string into a [ProviderConfig].
+///
+/// Replaces the per-crate `parse_model_config` functions in CLI and daemon.
+pub fn parse_config(text: &str) -> Option<ProviderConfig> {
+    #[derive(serde::Deserialize, Default)]
+    struct RawProvider {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        api_key_env: Option<String>,
+        #[serde(default)]
+        base_url: Option<String>,
+        #[serde(default)]
+        max_tokens: Option<u32>,
+        #[serde(default)]
+        enabled: Option<bool>,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct RawModel {
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        context_budget: Option<u64>,
+        #[serde(default)]
+        compact_threshold_ratio: Option<f64>,
+        #[serde(default)]
+        thinking: Option<bool>,
+        #[serde(default)]
+        max_tokens: Option<u32>,
+        #[serde(default)]
+        enabled: Option<bool>,
+        #[serde(default)]
+        discovered: bool,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct RawAlias {
+        model: String,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct RawFile {
+        #[serde(default)]
+        providers: std::collections::HashMap<String, RawProvider>,
+        #[serde(default)]
+        models: std::collections::HashMap<String, RawModel>,
+        #[serde(default)]
+        alias: std::collections::HashMap<String, RawAlias>,
+    }
+
+    let raw: RawFile = toml::from_str(text).ok()?;
+    let mut cfg = ProviderConfig::default();
+
+    for (key, p) in raw.providers {
+        cfg.providers.insert(
+            key.clone(),
+            ProviderEntry {
+                name: p.name.unwrap_or(key),
+                kind: p.kind.unwrap_or_default(),
+                api_key: p.api_key,
+                api_key_env: p.api_key_env,
+                base_url: p.base_url,
+                max_tokens: p.max_tokens,
+                enabled: p.enabled,
+            },
+        );
+    }
+
+    for (name, m) in raw.models {
+        cfg.models.insert(
+            name,
+            ModelEntry {
+                model: m.model.unwrap_or_default(),
+                provider: m.provider,
+                context_budget: m.context_budget,
+                compact_threshold_ratio: m.compact_threshold_ratio,
+                thinking: m.thinking,
+                max_tokens: m.max_tokens,
+                enabled: m.enabled,
+                discovered: m.discovered,
+            },
+        );
+    }
+
+    for (name, a) in raw.alias {
+        cfg.aliases.insert(name, AliasEntry { model: a.model });
+    }
+
+    if cfg.providers.is_empty() && cfg.models.is_empty() && cfg.aliases.is_empty() {
+        return None;
+    }
+    Some(cfg)
 }
 
 pub fn add_alias_to_config(alias: &str, model: &str) -> anyhow::Result<()> {
@@ -608,11 +792,13 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
 ];
 
 pub fn is_first_run() -> bool {
+    let providers = all_provider_entries();
     let models = all_model_entries();
-    let config_configured = models.iter().any(|(_, e)| {
+    let config_configured = providers.iter().any(|(_, e)| {
         e.api_key.as_deref().is_some_and(|k| !k.is_empty())
-            && e.provider.is_some()
-            && e.context_budget.unwrap_or(0) > 0
+            || e.api_key_env
+                .as_deref()
+                .is_some_and(|env| std::env::var(env).is_ok_and(|v| !v.trim().is_empty()))
     });
     let env_configured =
         std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("OPENAI_API_KEY").is_ok();

@@ -37,6 +37,7 @@ rusqlite.workspace = true
 regex.workspace = true
 ignore.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 blake3.workspace = true
 git2.workspace = true
 portable-pty.workspace = true

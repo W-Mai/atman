@@ -24,6 +24,7 @@ pub mod hunk;
 pub mod index;
 pub mod injection;
 pub mod injection_classifier;
+pub mod known_models;
 pub mod lifecycle;
 pub mod mcp;
 pub mod mcp_config;
