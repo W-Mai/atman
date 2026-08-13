@@ -3741,7 +3741,7 @@ fn apply_session_config(session: &atman_runtime::Session) {
     if let Some(mode) = env_mode.or(cfg_mode) {
         session.set_fs_access_mode(mode);
     }
-    if let Some(mc) = parse_model_config(&text) {
+    if let Some(mc) = atman_runtime::model_registry::parse_config(&text) {
         atman_runtime::model_registry::set_model_config(mc);
     }
 }
@@ -3769,65 +3769,9 @@ pub fn load_model_config_from_disk() {
     } else {
         text
     };
-    if let Some(mc) = parse_model_config(&text) {
+    if let Some(mc) = atman_runtime::model_registry::parse_config(&text) {
         atman_runtime::model_registry::set_model_config(mc);
     }
-}
-
-pub fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::ModelConfig> {
-    use atman_runtime::model_registry::{AliasEntry, ModelConfig, ModelEntry};
-    #[derive(serde::Deserialize, Default)]
-    struct RawModel {
-        #[serde(default)]
-        model: Option<String>,
-        #[serde(default)]
-        provider: Option<String>,
-        #[serde(default)]
-        context_budget: Option<u64>,
-        #[serde(default)]
-        compact_threshold_ratio: Option<f64>,
-        #[serde(default)]
-        thinking: Option<bool>,
-        #[serde(default)]
-        max_tokens: Option<u32>,
-        #[serde(default)]
-        enabled: Option<bool>,
-    }
-    #[derive(serde::Deserialize, Default)]
-    struct RawAlias {
-        model: String,
-    }
-    #[derive(serde::Deserialize, Default)]
-    struct RawFile {
-        #[serde(default)]
-        models: std::collections::HashMap<String, RawModel>,
-        #[serde(default)]
-        alias: std::collections::HashMap<String, RawAlias>,
-    }
-    let raw: RawFile = toml::from_str(text).ok()?;
-    let mut cfg = ModelConfig::default();
-    for (name, m) in raw.models {
-        cfg.models.insert(
-            name,
-            ModelEntry {
-                model: m.model.unwrap_or_default(),
-                provider: m.provider,
-                context_budget: m.context_budget,
-                compact_threshold_ratio: m.compact_threshold_ratio,
-                thinking: m.thinking,
-                max_tokens: m.max_tokens,
-                enabled: m.enabled,
-                discovered: false,
-            },
-        );
-    }
-    for (name, a) in raw.alias {
-        cfg.aliases.insert(name, AliasEntry { model: a.model });
-    }
-    if cfg.models.is_empty() && cfg.aliases.is_empty() {
-        return None;
-    }
-    Some(cfg)
 }
 
 // ── Alias CRUD helpers ──
@@ -3852,7 +3796,7 @@ fn write_config_toml(text: &str) -> Result<()> {
 }
 
 fn reload_model_config(text: &str) {
-    if let Some(mc) = parse_model_config(text) {
+    if let Some(mc) = atman_runtime::model_registry::parse_config(text) {
         atman_runtime::model_registry::set_model_config(mc);
     }
 }
@@ -5496,7 +5440,7 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
 
     let cfg_text = std::fs::read_to_string(config_dir().unwrap_or_default().join("config.toml"))
         .unwrap_or_default();
-    if let Some(mc) = parse_model_config(&cfg_text) {
+    if let Some(mc) = atman_runtime::model_registry::parse_config(&cfg_text) {
         println!("models:");
         for (name, entry) in &mc.models {
             let budget = entry
