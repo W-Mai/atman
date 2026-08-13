@@ -1964,12 +1964,6 @@ pub(super) fn sanitize_tool_pairs(
         }
         out.push(m.clone());
         if !uses.is_empty() {
-            let next_has_all = match out.len().checked_sub(1) {
-                Some(_) => false,
-                None => false,
-            };
-            let _ = next_has_all;
-            let mut filler_parts: Vec<MessagePart> = Vec::new();
             for u in &uses {
                 if let Some(rm) = result_by_id.get(u) {
                     if let Some(MessagePart::ToolResult {
@@ -1978,26 +1972,30 @@ pub(super) fn sanitize_tool_pairs(
                         is_error,
                     }) = rm.parts.first()
                     {
-                        filler_parts.push(MessagePart::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            content: content.clone(),
-                            is_error: *is_error,
+                        out.push(Message {
+                            role: MessageRole::Tool,
+                            parts: vec![MessagePart::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                content: content.clone(),
+                                is_error: *is_error,
+                            }],
+                            turn_id: m.turn_id.clone(),
+                            origin: MessageOrigin::User,
                         });
                     }
                 } else {
-                    filler_parts.push(MessagePart::ToolResult {
-                        tool_use_id: u.clone(),
-                        content: "[tool execution interrupted — no result captured]".into(),
-                        is_error: true,
+                    out.push(Message {
+                        role: MessageRole::Tool,
+                        parts: vec![MessagePart::ToolResult {
+                            tool_use_id: u.clone(),
+                            content: "[tool execution interrupted — no result captured]".into(),
+                            is_error: true,
+                        }],
+                        turn_id: m.turn_id.clone(),
+                        origin: MessageOrigin::User,
                     });
                 }
             }
-            out.push(Message {
-                role: MessageRole::Tool,
-                parts: filler_parts,
-                turn_id: m.turn_id.clone(),
-                origin: MessageOrigin::User,
-            });
         }
     }
     out
