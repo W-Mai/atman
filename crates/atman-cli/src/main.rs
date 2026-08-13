@@ -1856,10 +1856,9 @@ async fn cmd_repl_once(
                         name,
                         provider_type,
                         api_key,
+                        api_key_env,
                         base_url,
-                        context_budget: _,
                         max_tokens,
-                        thinking: _,
                         enabled,
                     } => {
                         if atman_runtime::model_registry::upsert_provider_config(
@@ -1870,7 +1869,11 @@ async fn cmd_repl_once(
                             } else {
                                 Some(&api_key)
                             },
-                            None,
+                            if api_key_env.is_empty() {
+                                None
+                            } else {
+                                Some(&api_key_env)
+                            },
                             if base_url.is_empty() {
                                 None
                             } else {
@@ -1890,10 +1893,9 @@ async fn cmd_repl_once(
                         name,
                         provider_type,
                         api_key,
+                        api_key_env,
                         base_url,
-                        context_budget: _,
                         max_tokens,
-                        thinking: _,
                         enabled,
                     } => {
                         if atman_runtime::model_registry::upsert_provider_config(
@@ -1904,7 +1906,11 @@ async fn cmd_repl_once(
                             } else {
                                 Some(&api_key)
                             },
-                            None,
+                            if api_key_env.is_empty() {
+                                None
+                            } else {
+                                Some(&api_key_env)
+                            },
                             if base_url.is_empty() {
                                 None
                             } else {

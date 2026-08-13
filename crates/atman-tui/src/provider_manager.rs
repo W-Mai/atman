@@ -88,9 +88,8 @@ pub struct ProviderManager {
     api_key_editor: InputEditor,
     base_url_editor: InputEditor,
     provider_type_editor: InputEditor,
-    context_budget_editor: InputEditor,
+    api_key_env_editor: InputEditor,
     max_tokens_editor: InputEditor,
-    thinking_editor: InputEditor,
     enabled_editor: InputEditor,
     in_form: bool,
     form_field: usize,
@@ -240,6 +239,11 @@ impl ProviderManager {
             key_ed.insert_str(k);
         }
         self.api_key_editor = key_ed;
+        let mut env_ed = InputEditor::default();
+        if let Some(e) = &entry.api_key_env {
+            env_ed.insert_str(e);
+        }
+        self.api_key_env_editor = env_ed;
         let mut url_ed = InputEditor::default();
         if let Some(u) = &entry.base_url {
             url_ed.insert_str(u);
@@ -398,10 +402,9 @@ impl ProviderManager {
                                 name: p.name.clone(),
                                 provider_type: entry.kind.clone(),
                                 api_key: entry.api_key.unwrap_or_default(),
+                                api_key_env: entry.api_key_env.unwrap_or_default(),
                                 base_url: entry.base_url.unwrap_or_default(),
-                                context_budget: None,
                                 max_tokens: entry.max_tokens,
-                                thinking: false,
                                 enabled: !current_enabled,
                             });
                         }
@@ -504,11 +507,8 @@ impl ProviderManager {
         let mut pt_ed = InputEditor::default();
         pt_ed.insert_str(atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE);
         self.provider_type_editor = pt_ed;
-        self.context_budget_editor = InputEditor::default();
+        self.api_key_env_editor = InputEditor::default();
         self.max_tokens_editor = InputEditor::default();
-        let mut th_ed = InputEditor::default();
-        th_ed.insert_str("false");
-        self.thinking_editor = th_ed;
         let mut en_ed = InputEditor::default();
         en_ed.insert_str("true");
         self.enabled_editor = en_ed;
@@ -528,22 +528,8 @@ impl ProviderManager {
         let mut url_ed = InputEditor::default();
         url_ed.insert_str(preset.base_url);
         self.base_url_editor = url_ed;
-        if let Some(model) = preset.models.first() {
-            let mut ctx_ed = InputEditor::default();
-            ctx_ed.insert_str(&model.context_budget.to_string());
-            self.context_budget_editor = ctx_ed;
-            let mut th_ed = InputEditor::default();
-            th_ed.insert_str(
-                if model.description.to_ascii_lowercase().contains("thinking") {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
-            self.thinking_editor = th_ed;
-        }
         if !preset.needs_api_key {
-            self.form_field = 4;
+            self.form_field = 2;
         }
     }
 
@@ -584,10 +570,9 @@ impl ProviderManager {
                 0 => &mut self.name_editor,
                 1 => &mut self.provider_type_editor,
                 2 => &mut self.api_key_editor,
-                3 => &mut self.base_url_editor,
-                4 => &mut self.context_budget_editor,
+                3 => &mut self.api_key_env_editor,
+                4 => &mut self.base_url_editor,
                 5 => &mut self.max_tokens_editor,
-                6 => &mut self.thinking_editor,
                 _ => &mut self.enabled_editor,
             };
             match action {
@@ -607,11 +592,11 @@ impl ProviderManager {
                     self.commit_form(control_tx);
                 }
                 KeyAction::Tab => {
-                    self.form_field = (self.form_field + 1) % 8;
+                    self.form_field = (self.form_field + 1) % 7;
                 }
                 KeyAction::BackTab => {
                     self.form_field = if self.form_field == 0 {
-                        7
+                        6
                     } else {
                         self.form_field - 1
                     };
@@ -651,23 +636,21 @@ impl ProviderManager {
                     self.enabled_editor = ed;
                 }
                 KeyAction::CursorLeft if self.form_field == 6 => {
-                    let current = self.thinking_editor.buf().trim();
+                    let current = self.enabled_editor.buf().trim();
                     let new = if current == "true" { "false" } else { "true" };
                     let mut ed = InputEditor::default();
                     ed.insert_str(new);
-                    self.thinking_editor = ed;
+                    self.enabled_editor = ed;
                 }
                 KeyAction::CursorRight if self.form_field == 6 => {
-                    let current = self.thinking_editor.buf().trim();
+                    let current = self.enabled_editor.buf().trim();
                     let new = if current == "true" { "false" } else { "true" };
                     let mut ed = InputEditor::default();
                     ed.insert_str(new);
-                    self.thinking_editor = ed;
+                    self.enabled_editor = ed;
                 }
                 KeyAction::Backspace if self.form_field == 6 => {}
                 KeyAction::Char(_) if self.form_field == 6 => {}
-                KeyAction::Backspace if self.form_field == 7 => {}
-                KeyAction::Char(_) if self.form_field == 7 => {}
                 KeyAction::Backspace => {
                     editor.backspace();
                 }
@@ -771,14 +754,10 @@ impl ProviderManager {
     ) {
         let name = self.name_editor.buf().trim().to_string();
         let api_key = self.api_key_editor.buf().trim().to_string();
+        let api_key_env = self.api_key_env_editor.buf().trim().to_string();
         let base_url = self.base_url_editor.buf().trim().to_string();
         let provider_type = self.provider_type_editor.buf().trim().to_string();
-        let context_budget: Option<u64> = self.context_budget_editor.buf().trim().parse().ok();
         let max_tokens: Option<u32> = self.max_tokens_editor.buf().trim().parse().ok();
-        let thinking = matches!(
-            self.thinking_editor.buf().trim().to_lowercase().as_str(),
-            "true" | "1" | "yes" | "on"
-        );
         let enabled = matches!(
             self.enabled_editor.buf().trim().to_lowercase().as_str(),
             "true" | "1" | "yes" | "on"
@@ -797,10 +776,9 @@ impl ProviderManager {
                     name: name.clone(),
                     provider_type,
                     api_key,
+                    api_key_env,
                     base_url,
-                    context_budget,
                     max_tokens,
-                    thinking,
                     enabled,
                 });
             } else {
@@ -808,10 +786,9 @@ impl ProviderManager {
                     name: name.clone(),
                     provider_type,
                     api_key,
+                    api_key_env,
                     base_url,
-                    context_budget,
                     max_tokens,
-                    thinking,
                     enabled,
                 });
             }
@@ -1050,14 +1027,13 @@ fn render_add_dialog(
     let mut lines = vec![];
     let mut cursor_pos: Option<(u16, u16)> = None;
     if mgr.in_form {
-        let fields: [(&str, &str); 8] = [
+        let fields: [(&str, &str); 7] = [
             ("Name", mgr.name_editor.buf()),
             ("Type", mgr.provider_type_editor.buf()),
             ("API Key", mgr.api_key_editor.buf()),
+            ("API Key Env", mgr.api_key_env_editor.buf()),
             ("Base URL", mgr.base_url_editor.buf()),
-            ("Context Budget", mgr.context_budget_editor.buf()),
             ("Max Output", mgr.max_tokens_editor.buf()),
-            ("Thinking", mgr.thinking_editor.buf()),
             ("Enabled", mgr.enabled_editor.buf()),
         ];
         let mut y = inner.y;
@@ -1399,10 +1375,9 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
             0 => &mut self.name_editor,
             1 => &mut self.provider_type_editor,
             2 => &mut self.api_key_editor,
-            3 => &mut self.base_url_editor,
-            4 => &mut self.context_budget_editor,
+            3 => &mut self.api_key_env_editor,
+            4 => &mut self.base_url_editor,
             5 => &mut self.max_tokens_editor,
-            6 => &mut self.thinking_editor,
             _ => &mut self.enabled_editor,
         };
         editor.insert_str(text);
