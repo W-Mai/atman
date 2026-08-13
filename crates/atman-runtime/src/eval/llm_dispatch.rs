@@ -33,6 +33,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let retry_kinds = args.retry_kinds.clone();
     let cache_prompt = args.cache_prompt;
     let context_mode = parse_context_mode(&args.context_mode);
+    let stream_tx = if matches!(context_mode, ContextMode::None) {
+        None
+    } else {
+        ctx.stream_tx.clone()
+    };
     let tool_specs = args.tool_specs.clone();
     let stall_timeout_secs = args.stall_timeout_secs;
     if args.messages_override.is_some() && args.prompt.is_some() {
@@ -228,11 +233,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 req,
                 StreamCallCtx {
                     session: ctx.session_runtime.as_deref(),
-                    stream_tx: if matches!(context_mode, ContextMode::None) {
-                        None
-                    } else {
-                        ctx.stream_tx.clone()
-                    },
+                    stream_tx: stream_tx.clone(),
                     flow_run_id: ctx.flow_run_id.as_ref(),
                     agent_entry: ctx.agent_entry.as_ref(),
                     event_sink: ctx.events.as_ref(),
@@ -288,7 +289,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 });
             }
             let input_with_cache = input_with_cache_for_window(&usage);
-            if let Some(tx) = ctx.stream_tx.as_ref() {
+            if let Some(tx) = stream_tx.as_ref() {
                 let _ = tx.send(crate::stream::StreamFrame::LlmCallStats {
                     model: model.clone(),
                     input_tokens: usage.input,
@@ -353,7 +354,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     {
                         compact_after_overflow_used = true;
                         saw_context_overflow = true;
-                        if let Some(tx) = ctx.stream_tx.as_ref() {
+                        if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::Note(
                                 "context overflow — compacting and retrying".into(),
                             ));
@@ -407,7 +408,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 action: "rewritten".to_string(),
                             });
                         }
-                        if let Some(tx) = ctx.stream_tx.as_ref() {
+                        if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::Note(
                                 "safety auto-rewrite triggered".into(),
                             ));
@@ -418,7 +419,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     if matches!(e, RuntimeError::ThinkingSignatureMissing) {
                         signature_retries += 1;
                         if signature_retries < 3 {
-                            if let Some(tx) = ctx.stream_tx.as_ref() {
+                            if let Some(tx) = stream_tx.as_ref() {
                                 let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
                             }
                             crate::notify!(
@@ -430,7 +431,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             continue 'llm_attempts;
                         }
                         thinking_enabled = false;
-                        if let Some(tx) = ctx.stream_tx.as_ref() {
+                        if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
                         }
                         crate::notify!(
@@ -438,7 +439,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             location = Inline,
                             "thinking signature missing after 3 retries; disabling thinking…"
                         );
-                        if let Some(tx) = ctx.stream_tx.as_ref() {
+                        if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::Note(
                                 "thinking disabled after 3 signature failures".into(),
                             ));
@@ -450,7 +451,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         && matches!(e.kind(), crate::error::ErrorKind::InvalidRequest)
                     {
                         thinking_enabled = false;
-                        if let Some(tx) = ctx.stream_tx.as_ref() {
+                        if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::LlmRetry);
                         }
                         crate::notify!(
@@ -458,7 +459,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             location = Inline,
                             "thinking mode disabled due to API error; retrying…"
                         );
-                        if let Some(tx) = ctx.stream_tx.as_ref() {
+                        if let Some(tx) = stream_tx.as_ref() {
                             let _ = tx.send(crate::stream::StreamFrame::Note(
                                 "thinking disabled due to API error".into(),
                             ));
@@ -484,7 +485,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                                 | crate::error::ErrorKind::Transient
                         ) {
                             let delay_ms = 1000u64 << attempt;
-                            if let Some(tx) = ctx.stream_tx.as_ref() {
+                            if let Some(tx) = stream_tx.as_ref() {
                                 let _ = tx.send(crate::stream::StreamFrame::Note(format!(
                                     "retrying in {}s…",
                                     delay_ms / 1000
@@ -509,7 +510,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     {
         crate::compaction::start_auto_compact(session.clone(), model.clone(), providers_reg).await;
     }
-    if let Some(tx) = ctx.stream_tx.as_ref() {
+    if let Some(tx) = stream_tx.as_ref() {
         let _ = tx.send(crate::stream::StreamFrame::Note(format!(
             "LLM call failed: {}",
             last_err
