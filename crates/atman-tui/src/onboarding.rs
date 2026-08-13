@@ -41,6 +41,7 @@ impl Default for OnboardingState {
 pub enum OnboardingEvent {
     None,
     OpenProviderManager,
+    OpenModelManager,
     Completed,
     Skipped,
 }
@@ -61,7 +62,7 @@ impl OnboardingState {
     }
 
     pub fn try_advance_to_model_select(&mut self) {
-        if self.pending_model_select && !selectable_models().is_empty() {
+        if self.pending_model_select {
             self.pending_model_select = false;
             self.pending_provider_name = None;
             self.step = OnboardingStep::ModelSelect;
@@ -114,6 +115,7 @@ impl OnboardingState {
                 self.pending_provider_name = None;
                 OnboardingEvent::None
             }
+            KeyAction::Char('a') => OnboardingEvent::OpenModelManager,
             KeyAction::HistoryUp | KeyAction::Char('k') if len > 0 => {
                 self.selected_model = self.selected_model.checked_sub(1).unwrap_or(len - 1);
                 OnboardingEvent::None
@@ -130,12 +132,8 @@ impl OnboardingState {
                 }
             },
             KeyAction::Submit => {
-                if self.pending_provider_name.is_some() {
-                    OnboardingEvent::None
-                } else {
-                    self.error = Some("Add a provider first".to_string());
-                    OnboardingEvent::None
-                }
+                self.error = Some("No models available. Press 'a' to add a model.".to_string());
+                OnboardingEvent::None
             }
             _ => OnboardingEvent::None,
         }
@@ -245,6 +243,8 @@ impl crate::wm::modal::ModalOverlay for OnboardingState {
                 OnboardingStep::ModelSelect => Line::from(vec![
                     key_span("↑↓/j/k"),
                     help_span(" navigate  "),
+                    key_span("a"),
+                    help_span(" add model  "),
                     key_span("Enter"),
                     help_span(" finish  "),
                     key_span("Esc"),

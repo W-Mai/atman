@@ -91,7 +91,7 @@ pub struct ProviderManager {
     api_key_env_editor: InputEditor,
     max_tokens_editor: InputEditor,
     enabled_editor: InputEditor,
-    in_form: bool,
+    pub in_form: bool,
     form_field: usize,
     editing_provider: Option<String>,
     /// Confirmation dialog state.

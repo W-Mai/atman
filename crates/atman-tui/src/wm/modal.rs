@@ -160,14 +160,33 @@ impl ModalManager {
         _tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         let kinds = self.open_kinds();
-        let Some(kind) = kinds.last() else {
-            return;
-        };
-        match kind {
-            ModalKind::ProviderManager => self.provider_manager.handle_paste(text),
-            ModalKind::AliasManager => self.alias_manager.handle_paste(text),
-            ModalKind::Form => self.form_modal.handle_paste(text),
-            _ => {}
+        for kind in kinds.iter().rev() {
+            let handled = match kind {
+                ModalKind::ProviderManager => {
+                    if self.provider_manager.in_form {
+                        self.provider_manager.handle_paste(text);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                ModalKind::ModelManager => {
+                    self.model_manager.handle_paste(text);
+                    true
+                }
+                ModalKind::AliasManager => {
+                    self.alias_manager.handle_paste(text);
+                    true
+                }
+                ModalKind::Form => {
+                    self.form_modal.handle_paste(text);
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                break;
+            }
         }
     }
 
@@ -245,6 +264,9 @@ impl ModalManager {
                         crate::onboarding::OnboardingEvent::None => {}
                         crate::onboarding::OnboardingEvent::OpenProviderManager => {
                             self.provider_manager.open_add();
+                        }
+                        crate::onboarding::OnboardingEvent::OpenModelManager => {
+                            self.model_manager.open();
                         }
                         crate::onboarding::OnboardingEvent::Completed => {
                             self.onboarding_open = false;
