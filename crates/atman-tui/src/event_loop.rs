@@ -298,9 +298,13 @@ pub(crate) async fn run_frames(
                             }
                         }
                         Some(Ok(CtEvent::Paste(s))) => {
-                            editor.ingest_paste(&s);
-                            interrupt_prompt = None;
-                            app.app.refresh_popup(editor.buf());
+                            if app.wm.modals.any_open() {
+                                app.wm.modals.dispatch_paste(&s, &mut app.app, handle.control_tx.as_ref());
+                            } else {
+                                editor.ingest_paste(&s);
+                                interrupt_prompt = None;
+                                app.app.refresh_popup(editor.buf());
+                            }
                         }
                         Some(Ok(CtEvent::Mouse(me))) => {
                             app.wm.sync_modals();

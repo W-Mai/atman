@@ -1391,6 +1391,23 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         None
     }
 
+    fn handle_paste(&mut self, text: &str) {
+        if !self.in_form {
+            return;
+        }
+        let editor = match self.form_field {
+            0 => &mut self.name_editor,
+            1 => &mut self.provider_type_editor,
+            2 => &mut self.api_key_editor,
+            3 => &mut self.base_url_editor,
+            4 => &mut self.context_budget_editor,
+            5 => &mut self.max_tokens_editor,
+            6 => &mut self.thinking_editor,
+            _ => &mut self.enabled_editor,
+        };
+        editor.insert_str(text);
+    }
+
     fn title(&self) -> Line<'static> {
         Line::from("Provider Manager")
     }

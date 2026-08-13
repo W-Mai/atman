@@ -141,11 +141,30 @@ pub trait ModalOverlay {
     fn title(&self) -> ratatui::text::Line<'static>;
     fn icon(&self) -> &str;
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color;
+    fn handle_paste(&mut self, _text: &str) {}
 }
 
 // ── ModalManager dispatch methods ──
 
 impl ModalManager {
+    pub fn dispatch_paste(
+        &mut self,
+        text: &str,
+        _app: &mut crate::app::AppState,
+        _tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
+        let kinds = self.open_kinds();
+        let Some(kind) = kinds.last() else {
+            return;
+        };
+        match kind {
+            ModalKind::ProviderManager => self.provider_manager.handle_paste(text),
+            ModalKind::AliasManager => self.alias_manager.handle_paste(text),
+            ModalKind::Form => self.form_modal.handle_paste(text),
+            _ => {}
+        }
+    }
+
     /// Render the topmost modal's content inside the shell-provided area.
     pub fn render_top(
         &mut self,

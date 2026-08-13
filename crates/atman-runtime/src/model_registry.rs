@@ -320,11 +320,185 @@ impl ModelInfo {
     }
 }
 
-// ── Known models table (supplements API discovery) ──
+// Known models table (supplements API discovery)
 
 pub use crate::known_models::{KNOWN_MODELS, lookup_known_model};
 
-// ── Alias CRUD (writes config.toml) ──
+// Config migration (v1 to v2)
+
+/// Detect old format: any [models.X] with api_key or base_url, or no config_version.
+pub fn needs_migration(text: &str) -> bool {
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    if doc.get("config_version").is_some() {
+        return false;
+    }
+    if let Some(models) = doc.get("models").and_then(|m| m.as_table()) {
+        for (_, entry) in models {
+            if entry.get("api_key").is_some() || entry.get("base_url").is_some() {
+                return true;
+            }
+            // provider field is a type string (openai/openai-compat/anthropic/codex)
+            if let Some(p) = entry.get("provider").and_then(|v| v.as_str()) {
+                if matches!(p, "openai" | "openai-compat" | "anthropic" | "codex") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Migrate v1 config to v2 format. Returns migrated text or None on failure.
+///
+/// - Groups models by (provider_type, api_key, base_url) into [providers.X]
+/// - Removes api_key/base_url from [models.X]
+/// - Updates provider field to reference provider name
+/// - Adds config_version = 2
+pub fn migrate_config(text: &str) -> Option<String> {
+    let mut doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+
+    // Collect models that need migration, grouped by (type, key, url)
+    let models = doc.get("models")?.as_table()?;
+    let mut groups: std::collections::BTreeMap<(String, String, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+
+    for (name, entry) in models.iter() {
+        let api_key = entry
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let base_url = entry
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let ptype = entry
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("openai-compat")
+            .to_string();
+
+        if !api_key.is_empty()
+            || !base_url.is_empty()
+            || matches!(
+                ptype.as_str(),
+                "openai" | "openai-compat" | "anthropic" | "codex"
+            )
+        {
+            groups
+                .entry((ptype, api_key, base_url))
+                .or_default()
+                .push(name.to_string());
+        }
+    }
+
+    if groups.is_empty() {
+        return None;
+    }
+
+    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for ((ptype, api_key, base_url), model_names) in &groups {
+        let provider_name = pick_provider_name(ptype, base_url, &mut used_names);
+        used_names.insert(provider_name.clone());
+
+        // Create [providers.{name}] section
+        let mut table = toml_edit::Table::new();
+        table.insert("kind", toml_edit::value(ptype.clone()));
+        if !api_key.is_empty() {
+            table.insert("api_key", toml_edit::value(api_key.clone()));
+        }
+        if !base_url.is_empty() {
+            table.insert("base_url", toml_edit::value(base_url.clone()));
+        }
+        table.insert("enabled", toml_edit::value(true));
+
+        // Ensure [providers] table exists
+        if doc.get("providers").is_none() {
+            doc.insert("providers", toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        if let Some(providers) = doc.get_mut("providers").and_then(|p| p.as_table_mut()) {
+            providers.insert(&provider_name, toml_edit::Item::Table(table));
+        }
+
+        // Update each model's provider field and remove api_key/base_url
+        for model_name in model_names {
+            if let Some(model) = doc
+                .get_mut("models")
+                .and_then(|m| m.as_table_mut())
+                .and_then(|t| t.get_mut(model_name.as_str()))
+                .and_then(|e| e.as_table_mut())
+            {
+                model.insert("provider", toml_edit::value(&provider_name));
+                model.remove("api_key");
+                model.remove("base_url");
+            }
+        }
+    }
+
+    // Add config_version = 2 at the top level
+    doc.insert("config_version", toml_edit::value(2i64));
+
+    Some(doc.to_string())
+}
+
+fn pick_provider_name(
+    ptype: &str,
+    base_url: &str,
+    used: &mut std::collections::HashSet<String>,
+) -> String {
+    // Try to match base_url against PROVIDER_PRESETS
+    for preset in PROVIDER_PRESETS {
+        if !base_url.is_empty() && preset.base_url == base_url {
+            let name = preset.name.to_lowercase();
+            if !used.contains(&name) {
+                return name;
+            }
+        }
+    }
+    // Fall back to provider type, with suffix for duplicates
+    let base = ptype.to_string();
+    if !used.contains(&base) {
+        return base;
+    }
+    for i in 2.. {
+        let candidate = format!("{base}-{i}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// Run migration if needed. Returns true if migration was performed.
+pub fn run_migration_if_needed() -> bool {
+    let Ok(text) = read_config_toml().ok_or(()) else {
+        return false;
+    };
+    if !needs_migration(&text) {
+        return false;
+    }
+    let Some(migrated) = migrate_config(&text) else {
+        return false;
+    };
+    // Backup original
+    if let Ok(dir) = crate::storage::config_dir() {
+        let _ = std::fs::write(dir.join("config.toml.bak"), &text);
+    }
+    if write_config_toml(&migrated).is_err() {
+        return false;
+    }
+    crate::notify!(
+        info,
+        "config.toml migrated to v2 format (backup at config.toml.bak)"
+    );
+    true
+}
+
+// Alias CRUD (writes config.toml)
 
 fn read_config_toml() -> Option<String> {
     let path = crate::storage::config_dir().ok()?.join("config.toml");
@@ -598,11 +772,65 @@ fn upsert_alias_comment_preserving(text: &str, alias: &str, model: &str) -> Stri
     lines.join("\n")
 }
 
+pub fn upsert_provider_config(
+    name: &str,
+    kind: &str,
+    api_key: Option<&str>,
+    api_key_env: Option<&str>,
+    base_url: Option<&str>,
+    max_tokens: Option<u32>,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    let text = read_config_toml().unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = if text.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        text.parse()
+            .map_err(|e| anyhow::anyhow!("parse config.toml: {e}"))?
+    };
+
+    if doc.get("providers").is_none() {
+        doc.insert("providers", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let providers = doc
+        .get_mut("providers")
+        .and_then(|p| p.as_table_mut())
+        .ok_or_else(|| anyhow::anyhow!("providers is not a table"))?;
+
+    let mut entry = toml_edit::Table::new();
+    entry.insert("kind", toml_edit::value(kind));
+    if let Some(key) = api_key {
+        if !key.is_empty() {
+            entry.insert("api_key", toml_edit::value(key));
+        }
+    }
+    if let Some(env) = api_key_env {
+        if !env.is_empty() {
+            entry.insert("api_key_env", toml_edit::value(env));
+        }
+    }
+    if let Some(url) = base_url {
+        if !url.is_empty() {
+            entry.insert("base_url", toml_edit::value(url));
+        }
+    }
+    if let Some(mt) = max_tokens {
+        entry.insert("max_tokens", toml_edit::value(mt as i64));
+    }
+    entry.insert("enabled", toml_edit::value(enabled));
+    providers.insert(name, toml_edit::Item::Table(entry));
+
+    let new_text = doc.to_string();
+    write_config_toml(&new_text)?;
+    reload_from_text(&new_text);
+    Ok(())
+}
+
 pub fn upsert_model_config(
     name: &str,
     provider: &str,
-    api_key: Option<&str>,
-    base_url: Option<&str>,
+    _api_key: Option<&str>,
+    _base_url: Option<&str>,
     context_budget: u64,
     thinking: bool,
 ) -> anyhow::Result<()> {
@@ -623,12 +851,6 @@ pub fn upsert_model_config(
             "provider".to_string(),
             toml::Value::String(provider.to_string()),
         );
-        if let Some(key) = api_key {
-            entry.insert("api_key".to_string(), toml::Value::String(key.to_string()));
-        }
-        if let Some(url) = base_url {
-            entry.insert("base_url".to_string(), toml::Value::String(url.to_string()));
-        }
         entry.insert(
             "context_budget".to_string(),
             toml::Value::Integer(context_budget as i64),
@@ -679,7 +901,7 @@ pub fn update_alias_in_config(
     Ok(())
 }
 
-// ── Provider presets + first-run detection ──
+// Provider presets + first-run detection
 
 pub struct ProviderPreset {
     pub name: &'static str,

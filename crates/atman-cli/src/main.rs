@@ -3744,6 +3744,22 @@ pub fn load_model_config_from_disk() {
     let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
         return;
     };
+    // Migrate v1 → v2 if needed
+    let text = if atman_runtime::model_registry::needs_migration(&text) {
+        if let Some(migrated) = atman_runtime::model_registry::migrate_config(&text) {
+            let _ = std::fs::write(cfg.join("config.toml.bak"), &text);
+            let _ = std::fs::write(cfg.join("config.toml"), &migrated);
+            atman_runtime::notify!(
+                info,
+                "config.toml migrated to v2 format (backup at config.toml.bak)"
+            );
+            migrated
+        } else {
+            text
+        }
+    } else {
+        text
+    };
     if let Some(mc) = parse_model_config(&text) {
         atman_runtime::model_registry::set_model_config(mc);
     }
