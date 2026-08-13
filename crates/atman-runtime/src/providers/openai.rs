@@ -79,6 +79,11 @@ impl OpenAiProvider {
             } else {
                 None
             },
+            thinking: if req.thinking_enabled {
+                Some(ThinkingConfig { kind: "enabled" })
+            } else {
+                Some(ThinkingConfig { kind: "disabled" })
+            },
         }
     }
 
@@ -620,6 +625,14 @@ struct ChatCompletionsRequest {
     tools: Vec<WireToolSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+#[derive(Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
