@@ -1043,22 +1043,26 @@ pub(super) async fn call_and_maybe_stream(
     stream_ctx: StreamCallCtx<'_>,
     watch_rules: Option<crate::streaming::WatchRules>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let stream_tx = stream_ctx.stream_tx;
-    let mut stream = LlmStream::new(provider, req)
-        .with_stream_tx(stream_tx)
+    let mut base = LlmStream::new(provider, req)
         .with_event_sink(stream_ctx.event_sink)
         .with_turn_id(stream_ctx.turn_id)
         .with_flow_run_id(stream_ctx.flow_run_id.cloned());
-    if let Some(rules) = watch_rules {
-        stream = stream.with_watch_rules(rules);
-    }
-    if let Some(session) = stream_ctx.session {
-        stream = stream.with_session(session);
-    }
-    if let Some(entry) = stream_ctx.agent_entry {
-        stream = stream.with_entry(entry);
-    }
-    let result = stream.run().await;
+
+    let result = if let Some(tx) = stream_ctx.stream_tx {
+        let mut stream = base.with_stream_tx(tx);
+        if let Some(rules) = watch_rules {
+            stream = stream.with_watch_rules(rules);
+        }
+        if let Some(session) = stream_ctx.session {
+            stream = stream.with_session(session);
+        }
+        if let Some(entry) = stream_ctx.agent_entry {
+            stream = stream.with_entry(entry);
+        }
+        stream.run().await
+    } else {
+        base.run().await
+    };
     if let (Some(sess), Err(RuntimeError::AttachmentError { reason })) =
         (stream_ctx.session, &result)
     {
