@@ -306,6 +306,17 @@ fn write_expr(out: &mut String, expr: &Expr, indent: usize) {
             out.push_str(&annotation.replace('\\', "\\\\").replace('"', "\\\""));
             out.push('"');
         }
+        Expr::Lambda { params, body } => {
+            out.push('|');
+            for (i, p) in params.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&p.name);
+            }
+            out.push_str("| ");
+            write_expr(out, body, indent);
+        }
     }
 }
 
@@ -347,6 +358,22 @@ fn write_node(out: &mut String, node: &Node, indent: usize) {
                 FanoutCollect::First => "first",
             };
             write!(out, "{outer_pad}] collect: {mode}").unwrap();
+        }
+        Node::DynamicFanout {
+            source,
+            lambda,
+            collect,
+        } => {
+            out.push_str("fanout ");
+            write_expr(out, source, indent);
+            out.push_str(" { ");
+            write_expr(out, lambda, indent);
+            let mode = match collect {
+                FanoutCollect::All => "all",
+                FanoutCollect::First => "first",
+            };
+            out.push_str(" } collect: ");
+            out.push_str(mode);
         }
         Node::UserConfirm { msg } => {
             out.push_str("user_confirm(");

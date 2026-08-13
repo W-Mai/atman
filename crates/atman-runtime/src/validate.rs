@@ -185,6 +185,13 @@ fn walk_expr(
             walk_expr(lhs, scope, tools, errors);
             walk_expr(rhs, scope, tools, errors);
         }
+        Expr::Lambda { params, body } => {
+            let mut child_scope = scope.clone();
+            for p in params {
+                child_scope.insert(p.name.clone());
+            }
+            walk_expr(body, &child_scope, tools, errors);
+        }
         Expr::Annotated { expr, .. } => {
             // Type names and type list expressions in annotation position
             // are not variable references
@@ -226,6 +233,10 @@ fn walk_node(
                     Arg::Named { value, .. } => walk_expr(value, scope, tools, errors),
                 }
             }
+        }
+        Node::DynamicFanout { source, lambda, .. } => {
+            walk_expr(source, scope, tools, errors);
+            walk_expr(lambda, scope, tools, errors);
         }
         Node::Fanout { items, .. } => {
             for item in items {

@@ -198,6 +198,7 @@ fn value_preview(v: &Value) -> Option<String> {
                 .join(", ")
         ),
         Value::EditProposal(_) => "<edit proposal>".into(),
+        Value::Lambda { .. } => "<lambda>".into(),
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {

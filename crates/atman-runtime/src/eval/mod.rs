@@ -5,6 +5,8 @@ pub(crate) mod llm_parse;
 
 use atman_dsl::ast::{Arg, BinOp, Expr, Literal, Node, UnOp};
 
+use std::sync::Arc;
+
 use crate::env::Env;
 use crate::error::RuntimeError;
 use crate::streaming::LlmStream;
@@ -227,7 +229,24 @@ async fn eval_expr_inner<'a>(expr: &'a Expr, env: &'a Env, ctx: &'a EvalCtx<'a>)
         )),
         Expr::Pipe { lhs, rhs } => eval_pipe(lhs, rhs, env, ctx).await,
         Expr::Annotated { expr, annotation } => eval_annotated(expr, annotation, env, ctx).await,
+        Expr::Lambda { params, body } => Value::Lambda {
+            params: params.clone(),
+            body: Arc::new((**body).clone()),
+            captured_env: env.clone(),
+        },
     }
+}
+
+pub async fn eval_dynamic_fanout<'a>(
+    _source: &'a Expr,
+    _lambda: &'a Expr,
+    _collect: &'a atman_dsl::ast::FanoutCollect,
+    _env: &'a Env,
+    _ctx: &'a EvalCtx<'a>,
+) -> Value {
+    Value::Err(RuntimeError::ToolFailed(
+        "DynamicFanout not yet implemented".into(),
+    ))
 }
 
 /// Check if an identifier name is a known type annotation.
@@ -318,6 +337,7 @@ pub(crate) fn expr_shape(e: &Expr) -> &'static str {
         Expr::List(_) => "list literal",
         Expr::Node(_) => "flow node",
         Expr::Annotated { expr, .. } => expr_shape(expr),
+        Expr::Lambda { .. } => "lambda",
     }
 }
 
@@ -822,6 +842,7 @@ fn preview_tool_value(v: &Value) -> String {
         Value::Err(e) => format!("err({e})"),
         Value::Path(p) => format!("{p:?}"),
         Value::EditProposal(_) => "<edit_proposal>".into(),
+        Value::Lambda { .. } => "<lambda>".into(),
     };
     truncate(&raw, 2000)
 }
@@ -841,6 +862,13 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
     }
     match node {
         Node::ToolCall { path, args } => dispatch_tool_call(path, args, Vec::new(), env, ctx).await,
+        Node::DynamicFanout {
+            source,
+            lambda,
+            collect,
+        } => {
+            return eval_dynamic_fanout(source, lambda, collect, env, ctx).await;
+        }
         Node::Fanout { items, collect } => match collect {
             atman_dsl::ast::FanoutCollect::All => {
                 let parent_id = ctx.current_node_id.clone();
