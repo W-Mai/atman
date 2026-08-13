@@ -1043,9 +1043,7 @@ pub(super) async fn call_and_maybe_stream(
     stream_ctx: StreamCallCtx<'_>,
     watch_rules: Option<crate::streaming::WatchRules>,
 ) -> Result<crate::provider::AssistantMessage, RuntimeError> {
-    let stream_tx = stream_ctx
-        .stream_tx
-        .or_else(|| stream_ctx.session.map(|s| s.stream_tx()));
+    let stream_tx = stream_ctx.stream_tx;
     let mut stream = LlmStream::new(provider, req)
         .with_stream_tx(stream_tx)
         .with_event_sink(stream_ctx.event_sink)

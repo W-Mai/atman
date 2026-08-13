@@ -211,11 +211,89 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
 
     fn handle_key(
         &mut self,
-        _action: &KeyAction,
+        action: &KeyAction,
         _app: &mut crate::app::AppState,
-        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
-        Some(ModalAction::Consumed)
+        match self.mode {
+            CompactReviewMode::Viewing => match action {
+                KeyAction::Submit => {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(crate::TuiControl::CompactReviewAccept {
+                            review_id: self.pending.review_id.clone(),
+                            edited: None,
+                        });
+                    }
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::Char('e') => {
+                    self.mode = CompactReviewMode::Editing;
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::Escape | KeyAction::Char('r') => {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(crate::TuiControl::CompactReviewReject {
+                            review_id: self.pending.review_id.clone(),
+                        });
+                    }
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::PageUp => {
+                    self.scroll = self.scroll.saturating_sub(1);
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::PageDown => {
+                    self.scroll = self.scroll.saturating_add(1);
+                    Some(ModalAction::Consumed)
+                }
+                _ => Some(ModalAction::Consumed),
+            },
+            CompactReviewMode::Editing => match action {
+                KeyAction::Submit => {
+                    let edited = self.edited_summary();
+                    if let Some(tx) = tx {
+                        let _ = tx.send(crate::TuiControl::CompactReviewAccept {
+                            review_id: self.pending.review_id.clone(),
+                            edited: Some(edited),
+                        });
+                    }
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::Escape => {
+                    self.mode = CompactReviewMode::Viewing;
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::Backspace => {
+                    self.editor.backspace();
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::DeleteWordBackward => {
+                    self.editor.delete_word_backward();
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::CursorLeft => {
+                    self.editor.move_left();
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::CursorRight => {
+                    self.editor.move_right();
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::CursorHome => {
+                    self.editor.move_home();
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::CursorEnd => {
+                    self.editor.move_end();
+                    Some(ModalAction::Consumed)
+                }
+                KeyAction::Char(c) => {
+                    self.editor.insert_char(*c);
+                    Some(ModalAction::Consumed)
+                }
+                _ => Some(ModalAction::Consumed),
+            },
+        }
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {

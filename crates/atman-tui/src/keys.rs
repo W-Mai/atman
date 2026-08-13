@@ -77,6 +77,8 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Home, _, _, _) => KeyAction::CursorHome,
         (End, _, _, _) => KeyAction::CursorEnd,
         (Char('\u{1b}'), _, _, _) => KeyAction::Escape,
+        (Char('\u{7f}'), _, _, _) => KeyAction::Backspace,
+        (Char('\u{8}'), _, _, _) => KeyAction::Backspace,
         (Char(c), false, _, _) => KeyAction::Char(c),
         _ => KeyAction::Ignore,
     }

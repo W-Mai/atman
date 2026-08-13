@@ -228,7 +228,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 req,
                 StreamCallCtx {
                     session: ctx.session_runtime.as_deref(),
-                    stream_tx: ctx.stream_tx.clone(),
+                    stream_tx: if matches!(context_mode, ContextMode::None) {
+                        None
+                    } else {
+                        ctx.stream_tx.clone()
+                    },
                     flow_run_id: ctx.flow_run_id.as_ref(),
                     agent_entry: ctx.agent_entry.as_ref(),
                     event_sink: ctx.events.as_ref(),
