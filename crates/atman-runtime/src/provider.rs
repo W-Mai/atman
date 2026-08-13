@@ -226,23 +226,16 @@ impl ProviderRegistry {
         if let Some(entry) = crate::model_registry::model_entry(model)
             && let Some(ref provider_name) = entry.provider
         {
-            if let Some(p) = self.providers.get(provider_name) {
+            let config_key = format!("config:{provider_name}");
+            if let Some(p) = self
+                .providers
+                .get(&config_key)
+                .or_else(|| self.providers.get(provider_name))
+            {
                 return Some(p.clone());
             }
         }
-        if let Some(entry) = crate::model_registry::model_entry(model) {
-            let provider_name = format!("config:{}", entry.model);
-            if let Some(p) = self.providers.get(&provider_name) {
-                return Some(p.clone());
-            }
-            let provider_name = format!("config:{model}");
-            if let Some(p) = self.providers.get(&provider_name) {
-                return Some(p.clone());
-            }
-        }
-        self.default
-            .as_ref()
-            .and_then(|n| self.providers.get(n).cloned())
+        None
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Provider>> {
@@ -274,13 +267,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_falls_back_to_default_for_unknown() {
+    fn resolve_returns_none_for_unknown() {
         let reg = fixture_registry();
-        let p = reg
-            .resolve("some-unknown-model")
-            .expect("should fall back to default");
-        // "codex" was registered first, so it's the default.
-        assert_eq!(p.name(), "codex");
+        assert!(reg.resolve("some-unknown-model").is_none());
     }
 
     #[test]

@@ -259,8 +259,6 @@ flow test_flow(goal: string) -> string {
         atman_runtime::model_registry::ModelEntry {
             model: "mock".to_string(),
             provider: Some("mock".to_string()),
-            api_key: None,
-            base_url: None,
             context_budget: Some(100000),
             compact_threshold_ratio: None,
             thinking: Some(false),

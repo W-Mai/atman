@@ -13,10 +13,6 @@ fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::Model
         #[serde(default)]
         provider: Option<String>,
         #[serde(default)]
-        api_key: Option<String>,
-        #[serde(default)]
-        base_url: Option<String>,
-        #[serde(default)]
         context_budget: Option<u64>,
         #[serde(default)]
         compact_threshold_ratio: Option<f64>,
@@ -44,8 +40,6 @@ fn parse_model_config(text: &str) -> Option<atman_runtime::model_registry::Model
             ModelEntry {
                 model: m.model.unwrap_or_default(),
                 provider: m.provider,
-                api_key: m.api_key,
-                base_url: m.base_url,
                 context_budget: m.context_budget,
                 compact_threshold_ratio: m.compact_threshold_ratio,
                 thinking: m.thinking,

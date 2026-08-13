@@ -151,16 +151,34 @@ impl OnboardingState {
 }
 
 fn selectable_models() -> Vec<String> {
+    let providers = atman_runtime::model_registry::all_provider_entries();
     let mut models: Vec<String> = atman_runtime::model_registry::all_model_entries()
         .into_iter()
         .filter_map(|(name, entry)| {
-            if entry.enabled != Some(false)
-                && entry.api_key.as_deref().is_some_and(|k| !k.is_empty())
-            {
-                Some(name)
-            } else {
-                None
+            if entry.enabled == Some(false) {
+                return None;
             }
+            let provider_name = entry.provider.as_ref()?;
+            let provider = providers
+                .iter()
+                .find(|(n, _)| n == provider_name)
+                .map(|(_, e)| e)?;
+            let has_key = provider
+                .api_key_env
+                .as_deref()
+                .and_then(|env| std::env::var(env).ok().filter(|v| !v.trim().is_empty()))
+                .or_else(|| provider.api_key.clone().filter(|k| !k.is_empty()))
+                .or_else(|| match provider.kind.as_str() {
+                    "openai" | "openai-compat" => std::env::var("OPENAI_API_KEY")
+                        .ok()
+                        .filter(|v| !v.is_empty()),
+                    "anthropic" => std::env::var("ANTHROPIC_API_KEY")
+                        .ok()
+                        .filter(|v| !v.is_empty()),
+                    _ => None,
+                })
+                .is_some();
+            if has_key { Some(name) } else { None }
         })
         .collect();
     models.sort();
@@ -516,12 +534,21 @@ mod tests {
     #[test]
     fn try_advance_to_model_select() {
         let mut cfg = atman_runtime::model_registry::ModelConfig::default();
+        cfg.providers.insert(
+            "test-provider".into(),
+            atman_runtime::model_registry::ProviderEntry {
+                name: "test-provider".into(),
+                kind: "openai".into(),
+                api_key: Some("test-key".into()),
+                ..Default::default()
+            },
+        );
         cfg.models.insert(
             "example-model".into(),
             atman_runtime::model_registry::ModelEntry {
                 model: "example-model".into(),
                 enabled: Some(true),
-                api_key: Some("test-key".into()),
+                provider: Some("test-provider".into()),
                 ..Default::default()
             },
         );

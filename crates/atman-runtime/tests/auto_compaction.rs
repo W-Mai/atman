@@ -175,6 +175,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
             )]
             .into_iter()
             .collect(),
+            providers: std::collections::HashMap::new(),
             aliases: std::collections::HashMap::new(),
         };
         atman_runtime::model_registry::set_model_config(cfg);
@@ -224,6 +225,7 @@ async fn compact_messages_returns_none_below_budget() {
         )]
         .into_iter()
         .collect(),
+        providers: std::collections::HashMap::new(),
         aliases: std::collections::HashMap::new(),
     };
     atman_runtime::model_registry::set_model_config(cfg);

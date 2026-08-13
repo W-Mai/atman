@@ -160,28 +160,25 @@ impl ProviderManager {
                 });
             }
         }
-        for (name, entry) in atman_runtime::model_registry::all_model_entries() {
-            if entry.api_key.is_some() {
-                let kind = entry.provider.as_deref().unwrap_or("unknown");
-                let detail = entry
-                    .base_url
-                    .as_deref()
-                    .unwrap_or("")
-                    .replace("https://", "")
-                    .replace("http://", "");
-                let status = if entry.enabled == Some(false) {
-                    ProviderStatus::Disabled
-                } else {
-                    ProviderStatus::Active
-                };
-                self.providers.push(ProviderEntry {
-                    source: ProviderSource::Config,
-                    name,
-                    kind: kind.into(),
-                    status,
-                    detail,
-                });
-            }
+        for (name, entry) in atman_runtime::model_registry::all_provider_entries() {
+            let detail = entry
+                .base_url
+                .as_deref()
+                .unwrap_or("")
+                .replace("https://", "")
+                .replace("http://", "");
+            let status = if entry.enabled == Some(false) {
+                ProviderStatus::Disabled
+            } else {
+                ProviderStatus::Active
+            };
+            self.providers.push(ProviderEntry {
+                source: ProviderSource::Config,
+                name,
+                kind: entry.kind.clone(),
+                status,
+                detail,
+            });
         }
         self.groups = atman_runtime::model_registry::all_provider_groups();
     }
@@ -227,11 +224,10 @@ impl ProviderManager {
     }
 
     fn open_edit(&mut self, name: &str) {
-        let entry = atman_runtime::model_registry::model_entry(name);
-        if entry.is_none() || entry.as_ref().and_then(|e| e.api_key.as_ref()).is_none() {
+        let providers = atman_runtime::model_registry::all_provider_entries();
+        let Some(entry) = providers.iter().find(|(n, _)| n == name).map(|(_, e)| e) else {
             return;
-        }
-        let entry = entry.unwrap();
+        };
         self.show_add = true;
         self.editing_provider = Some(name.to_string());
         self.in_form = true;
@@ -250,29 +246,13 @@ impl ProviderManager {
         }
         self.base_url_editor = url_ed;
         let mut pt_ed = InputEditor::default();
-        if let Some(p) = &entry.provider {
-            pt_ed.insert_str(p);
-        } else {
-            pt_ed.insert_str("openai-compat");
-        }
+        pt_ed.insert_str(&entry.kind);
         self.provider_type_editor = pt_ed;
-        let mut ctx_ed = InputEditor::default();
-        if let Some(c) = entry.context_budget {
-            ctx_ed.insert_str(&c.to_string());
-        }
-        self.context_budget_editor = ctx_ed;
         let mut mt_ed = InputEditor::default();
         if let Some(m) = entry.max_tokens {
             mt_ed.insert_str(&m.to_string());
         }
         self.max_tokens_editor = mt_ed;
-        let mut th_ed = InputEditor::default();
-        th_ed.insert_str(if entry.thinking.unwrap_or(false) {
-            "true"
-        } else {
-            "false"
-        });
-        self.thinking_editor = th_ed;
         let mut en_ed = InputEditor::default();
         en_ed.insert_str(if entry.enabled.unwrap_or(true) {
             "true"
@@ -406,20 +386,22 @@ impl ProviderManager {
                     }
                 }
                 ProviderSource::Config => {
-                    if let Some(entry) = atman_runtime::model_registry::model_entry(&p.name) {
+                    let providers = atman_runtime::model_registry::all_provider_entries();
+                    if let Some(entry) = providers
+                        .iter()
+                        .find(|(n, _)| *n == p.name)
+                        .map(|(_, e)| e.clone())
+                    {
                         let current_enabled = entry.enabled.unwrap_or(true);
                         if let Some(tx) = control_tx {
                             let _ = tx.send(crate::TuiControl::UpdateConfigProvider {
                                 name: p.name.clone(),
-                                provider_type: entry.provider.unwrap_or_else(|| {
-                                    atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE
-                                        .into()
-                                }),
+                                provider_type: entry.kind.clone(),
                                 api_key: entry.api_key.unwrap_or_default(),
                                 base_url: entry.base_url.unwrap_or_default(),
-                                context_budget: entry.context_budget,
+                                context_budget: None,
                                 max_tokens: entry.max_tokens,
-                                thinking: entry.thinking.unwrap_or(false),
+                                thinking: false,
                                 enabled: !current_enabled,
                             });
                         }
@@ -494,17 +476,16 @@ impl ProviderManager {
         let p = self.providers.get(self.selected).cloned();
         if let Some(p) = p {
             if matches!(p.source, ProviderSource::Config) {
-                if let Some(entry) = atman_runtime::model_registry::model_entry(&p.name) {
-                    if let (Some(api_key), Some(base_url)) = (entry.api_key, entry.base_url) {
-                        let provider_type = entry.provider.unwrap_or_else(|| {
-                            atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE.into()
-                        });
+                let providers = atman_runtime::model_registry::all_provider_entries();
+                if let Some(entry) = providers.iter().find(|(n, _)| *n == p.name).map(|(_, e)| e) {
+                    if let (Some(api_key), Some(base_url)) = (&entry.api_key, &entry.base_url) {
+                        let provider_type = entry.kind.clone();
                         if let Some(tx) = control_tx {
                             let _ = tx.send(crate::TuiControl::TestProvider {
                                 name: p.name,
                                 provider_type,
-                                api_key,
-                                base_url,
+                                api_key: api_key.clone(),
+                                base_url: base_url.clone(),
                             });
                             self.test_just_triggered = true;
                         }

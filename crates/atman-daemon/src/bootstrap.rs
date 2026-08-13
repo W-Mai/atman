@@ -385,6 +385,7 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         );
         atman_runtime::model_registry::set_model_config(ModelConfig {
             models,
+            providers: std::collections::HashMap::new(),
             aliases: std::collections::HashMap::new(),
         });
     }
@@ -559,20 +560,8 @@ async fn build_fetch_rule(
 }
 
 async fn register_providers_from_env(executor: &mut Executor) {
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        let mut p = AnthropicProvider::new("anthropic", key);
-        if let Ok(url) = std::env::var("ANTHROPIC_BASE_URL") {
-            p = p.with_base_url(url);
-        }
-        executor.providers.register(Arc::new(p));
-    }
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        let mut p = OpenAiProvider::new("openai", key);
-        if let Ok(url) = std::env::var("OPENAI_BASE_URL") {
-            p = p.with_base_url(url);
-        }
-        executor.providers.register(Arc::new(p));
-    }
+    // Env-var providers are now handled by register_providers_from_config
+    // via kind-based env fallback (OPENAI_API_KEY / ANTHROPIC_API_KEY).
     register_providers_from_config(executor);
     register_providers_from_auth_store(executor).await;
 }
@@ -617,22 +606,50 @@ async fn register_providers_from_auth_store(executor: &mut Executor) {
 }
 
 fn register_providers_from_config(executor: &mut Executor) {
-    for (name, entry) in atman_runtime::model_registry::all_model_entries() {
+    for (name, entry) in atman_runtime::model_registry::all_provider_entries() {
         if entry.enabled == Some(false) {
             continue;
         }
-        let Some(provider_type) = &entry.provider else {
-            continue;
-        };
-        let key = entry.api_key.as_deref().unwrap_or("");
-        if key.is_empty() {
+        // Resolve API key: api_key_env -> api_key -> kind-based env fallback
+        let key = entry
+            .api_key_env
+            .as_deref()
+            .and_then(|env| std::env::var(env).ok().filter(|v| !v.trim().is_empty()))
+            .or_else(|| entry.api_key.clone().filter(|k| !k.is_empty()))
+            .or_else(|| match entry.kind.as_str() {
+                "openai" | "openai-compat" => std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+                "anthropic" => std::env::var("ANTHROPIC_API_KEY")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let needs_key = matches!(
+            entry.kind.as_str(),
+            "openai" | "openai-compat" | "anthropic"
+        );
+        if needs_key && key.is_empty() {
             continue;
         }
+
+        // Resolve base_url: config -> kind-based env override
+        let base_url = entry
+            .base_url
+            .clone()
+            .or_else(|| match entry.kind.as_str() {
+                "openai" | "openai-compat" => std::env::var("OPENAI_BASE_URL").ok(),
+                "anthropic" => std::env::var("ANTHROPIC_BASE_URL").ok(),
+                _ => None,
+            });
+
         let provider_name = format!("config:{name}");
-        match provider_type.as_str() {
+        match entry.kind.as_str() {
             "anthropic" => {
-                let mut p = AnthropicProvider::new(&provider_name, key);
-                if let Some(url) = &entry.base_url {
+                let mut p = AnthropicProvider::new(&provider_name, &key);
+                if let Some(url) = &base_url {
                     p = p.with_base_url(url);
                 }
                 if let Some(mt) = entry.max_tokens {
@@ -641,8 +658,8 @@ fn register_providers_from_config(executor: &mut Executor) {
                 executor.providers.register(Arc::new(p));
             }
             "openai" | "openai-compat" => {
-                let mut p = OpenAiProvider::new(&provider_name, key);
-                if let Some(url) = &entry.base_url {
+                let mut p = OpenAiProvider::new(&provider_name, &key);
+                if let Some(url) = &base_url {
                     p = p.with_base_url(url);
                 }
                 if let Some(mt) = entry.max_tokens {

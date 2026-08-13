@@ -51,6 +51,9 @@ fn spawn_test_setup(
             models: atman_runtime::model_registry::all_model_entries()
                 .into_iter()
                 .collect(),
+            providers: atman_runtime::model_registry::all_provider_entries()
+                .into_iter()
+                .collect(),
             aliases: atman_runtime::model_registry::all_aliases()
                 .into_iter()
                 .map(|(name, model)| (name, AliasEntry { model }))
