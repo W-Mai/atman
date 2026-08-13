@@ -102,6 +102,12 @@ fn collect_ident_refs_expr(expr: &Expr, refs: &mut HashSet<String>) {
             collect_ident_refs_expr(rhs, refs);
         }
         Expr::Annotated { expr, .. } => collect_ident_refs_expr(expr, refs),
+        Expr::Lambda { params, body } => {
+            for p in params {
+                refs.insert(p.name.clone());
+            }
+            collect_ident_refs_expr(body, refs);
+        }
     }
 }
 
@@ -119,6 +125,10 @@ fn collect_ident_refs_node(node: &Node, refs: &mut HashSet<String>) {
             for (_, v) in kwargs {
                 collect_ident_refs_expr(v, refs);
             }
+        }
+        Node::DynamicFanout { source, lambda, .. } => {
+            collect_ident_refs_expr(source, refs);
+            collect_ident_refs_expr(lambda, refs);
         }
         Node::Fanout { items, .. } => {
             for it in items {
@@ -179,6 +189,7 @@ fn walk_expr_for_nodes(expr: &Expr, flow_name: &str, hits: &mut Vec<LintHit>) {
             }
         }
         Expr::Annotated { expr, .. } => walk_expr_for_nodes(expr, flow_name, hits),
+        Expr::Lambda { body, .. } => walk_expr_for_nodes(body, flow_name, hits),
     }
 }
 
@@ -224,6 +235,10 @@ fn child_exprs(node: &Node) -> Vec<&Expr> {
             for (_, v) in kwargs {
                 out.push(v);
             }
+        }
+        Node::DynamicFanout { source, lambda, .. } => {
+            out.push(source);
+            out.push(lambda);
         }
         Node::Fanout { items, .. } => {
             for i in items {

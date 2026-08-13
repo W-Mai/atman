@@ -82,6 +82,10 @@ pub enum Expr {
         expr: Box<Expr>,
         annotation: String,
     },
+    Lambda {
+        params: Vec<Ident>,
+        body: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +119,11 @@ pub enum Node {
     },
     Fanout {
         items: Vec<Expr>,
+        collect: FanoutCollect,
+    },
+    DynamicFanout {
+        source: Box<Expr>,
+        lambda: Box<Expr>,
         collect: FanoutCollect,
     },
     UserConfirm {

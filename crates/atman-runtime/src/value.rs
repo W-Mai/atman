@@ -1,8 +1,11 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::env::Env;
 use crate::error::RuntimeError;
 use crate::hunk::EditProposal;
 use crate::message::Message;
+use atman_dsl::ast::{Expr, Ident};
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -17,6 +20,11 @@ pub enum Value {
     Message(Message),
     EditProposal(Box<EditProposal>),
     Err(RuntimeError),
+    Lambda {
+        params: Vec<Ident>,
+        body: Arc<Expr>,
+        captured_env: Env,
+    },
 }
 
 impl Value {
@@ -37,6 +45,7 @@ impl Value {
             Value::Message(_) => "message",
             Value::EditProposal(_) => "edit_proposal",
             Value::Err(_) => "err",
+            Value::Lambda { .. } => "lambda",
         }
     }
 
@@ -71,6 +80,7 @@ impl Value {
             Value::Message(msg) => serde_json::to_value(msg).unwrap_or(serde_json::Value::Null),
             Value::EditProposal(p) => serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
             Value::Err(e) => serde_json::json!({ "error": e.to_string() }),
+            Value::Lambda { .. } => serde_json::Value::Null,
         }
     }
 

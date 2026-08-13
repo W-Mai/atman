@@ -533,6 +533,26 @@ fn consume_binop(input: ParseStream, op: BinOp) -> Result<()> {
 }
 
 fn parse_expr_primary(input: ParseStream) -> Result<Expr> {
+    // Lambda: |x| expr or |x, y| expr (not || which is logical or)
+    if input.peek(Token![|]) && !input.peek(Token![||]) {
+        input.parse::<Token![|]>()?;
+        let mut params = Vec::new();
+        while !input.peek(Token![|]) {
+            params.push(to_ident(input.parse::<syn::Ident>()?));
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        input.parse::<Token![|]>()?;
+        if params.is_empty() {
+            return Err(input.error("lambda must have at least one parameter"));
+        }
+        let body = parse_expr(input)?;
+        return Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
+        });
+    }
     if input.peek(Token![!]) && !input.peek(Token![!=]) {
         input.parse::<Token![!]>()?;
         let operand = parse_expr_primary(input)?;
@@ -885,6 +905,50 @@ fn parse_fix_until_test_passes(input: ParseStream) -> Result<Node> {
 
 fn parse_fanout(input: ParseStream) -> Result<Node> {
     input.parse::<kw::fanout>()?;
+
+    // Dynamic fanout: fanout <expr> { |param| body } collect: mode
+    // Static fanout: fanout [expr, ...] collect: mode
+    // Disambiguate by checking if collect follows after the bracket list.
+    let is_static_fanout = if input.peek(token::Bracket) {
+        let ahead = input.fork();
+        let _ = parse_expr(&ahead);
+        ahead.peek(kw::collect)
+    } else {
+        false
+    };
+
+    if !is_static_fanout {
+        let source = parse_expr(input)?;
+        let body_content;
+        braced!(body_content in input);
+        // Parse |param|
+        body_content.parse::<Token![|]>()?;
+        let param = to_ident(body_content.parse::<syn::Ident>()?);
+        body_content.parse::<Token![|]>()?;
+        let body = parse_expr(&body_content)?;
+        let lambda = Expr::Lambda {
+            params: vec![param],
+            body: Box::new(body),
+        };
+        input.parse::<kw::collect>()?;
+        input.parse::<Token![:]>()?;
+        let collect = if input.peek(kw::all) {
+            input.parse::<kw::all>()?;
+            FanoutCollect::All
+        } else if input.peek(kw::first) {
+            input.parse::<kw::first>()?;
+            FanoutCollect::First
+        } else {
+            return Err(input.error("expected `all` or `first` after `collect:`"));
+        };
+        return Ok(Node::DynamicFanout {
+            source: Box::new(source),
+            lambda: Box::new(lambda),
+            collect,
+        });
+    }
+
+    // Static fanout: fanout [expr, ...] collect: mode
     let content;
     bracketed!(content in input);
     let mut items = Vec::new();

@@ -124,6 +124,22 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
             let label = format!("⟶ {path_str}");
             (NodeKind::ToolCall { path: path_str }, label, Vec::new())
         }
+        Node::DynamicFanout {
+            source,
+            lambda,
+            collect,
+        } => {
+            let mut branch_children = Vec::new();
+            extract_expr(source, &format!("{prefix}.source"), &mut branch_children);
+            extract_expr(lambda, &format!("{prefix}.lambda"), &mut branch_children);
+            (
+                NodeKind::Fanout {
+                    collect: (*collect).into(),
+                },
+                "fanout (dynamic)".into(),
+                branch_children,
+            )
+        }
         Node::Fanout { items, collect } => {
             let mut branch_children = Vec::new();
             for (i, item) in items.iter().enumerate() {
