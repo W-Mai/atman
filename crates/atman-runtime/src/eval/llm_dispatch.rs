@@ -18,6 +18,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         return Value::Err(RuntimeError::MissingArg("llm.model".into()));
     };
     let mut system = args.system.clone();
+    // Substitute {pwd} placeholder with session working directory
+    if let Some(s) = system.as_mut()
+        && let Some(session) = ctx.session_runtime.as_ref()
+    {
+        if let Some(meta) = session.meta() {
+            if let Some(cwd) = meta.start_path.as_deref().or(meta.project_root.as_deref()) {
+                *s = s.replace("{pwd}", &cwd.display().to_string());
+            }
+        }
+    }
     let input = args.input.clone();
     let retry_count = args.retry_count;
     let retry_kinds = args.retry_kinds.clone();

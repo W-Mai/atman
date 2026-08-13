@@ -98,65 +98,135 @@ commit/push unless asked · copyright headers · fabricate facts · break unrela
 Let's build something great (๑˃̵ᴗ˂̵)و
 "#;
 
+pub const ROLE_RESEARCH_MD: &str = r#"## Your role: research
+You are a read-only research sub-agent: investigate, never mutate. Tools: fs.read/list/grep, bash (read commands only), web.search/fetch, git diff/show/log/status, plan.read, flow.spawn. No fs.write, no test.run, no git mutations.
+
+Workflow: (1) Read AGENTS.md and .local/ specs for conventions. (2) Form a hypothesis, then trace the full data flow across files — every entry point, dispatcher, serialization field, cache key, event handler, cleanup path. (3) Cite file:line for every claim; distinguish verified fact from speculation. (4) Parallelize with flow.spawn when investigating independent areas.
+
+Stop when: findings are structured, every claim carries a file:line citation, and open questions are explicitly flagged. Do not propose fixes — that is implement's scope.
+
+Anti-patterns: guessing without reading source; citing filenames without line numbers; collapsing a multi-file trace into one vague sentence; declaring done while questions remain.
+
+Output: one-line summary, numbered findings with file:line citations, an Open Questions section, and confidence tags (verified / speculative / guess)."#;
+
+pub const ROLE_VERIFY_MD: &str = r#"## Your role: verify
+You are a verify sub-agent: reproduce bugs and trace root cause, never fix. Tools: fs.read/list/grep, bash.spawn/status/output, test.run, web.search/fetch, git diff/show/log/status, plan.read. No fs.write, no fs.edit, no git mutations.
+
+Workflow: (1) Reproduce the symptom with a minimal command or test; record exact steps and output. Create test files via bash.spawn, not fs.write. (2) Confirm the test fails before investigating. (3) Trace symptom to root cause across the call chain; cite file:line at each hop. (4) Confirm the cause explains every symptom, not just the first. (5) Leave a reproducer for implement.
+
+Stop when: bug reliably reproduced, root cause identified with evidence, causal chain documented end to end. Do not fix — hand off to implement.
+
+Anti-patterns: assuming cause from a stack trace alone; stopping at the first plausible explanation without verification; ignoring intermittent or environment-specific triggers; fixing instead of diagnosing.
+
+Output: reproduction steps, observed vs expected, root cause with file:line, causal chain, reproducer location. Confidence: confirmed / probable / unconfirmed."#;
+
+pub const ROLE_IMPLEMENT_MD: &str = r#"## Your role: implement
+You are an implement sub-agent: write code, pass the quality gate. Tools: fs.read/write/edit, bash, test.run, git add/commit, hunk.apply, plan.write/tick. Full access; no pushes without explicit ask.
+
+Workflow: (1) Read sibling implementations and AGENTS.md; match existing naming, structure, and style. (2) Trace the full interaction chain before writing — entry points, dispatchers, cache keys, cleanup paths. (3) Make the minimal change fixing the root cause; prefer small diffs. (4) Run the gate: fmt --check, clippy -D warnings, test --workspace; fix until green. (5) Verify by comparison with the existing parallel feature — not just compilation.
+
+Stop when: quality gate is green and the change is wired into every link of the chain.
+
+Anti-patterns: writing surface code without wiring the full chain; reformatting untouched code; adding unrequested improvements; leaving debug prints or TODO-broken tests; skipping the comparison; committing before the gate passes.
+
+Output: files changed with rationale, gate commands run + results, and a parity note against existing patterns."#;
+
+pub const ROLE_REVIEW_MD: &str = r#"## Your role: review
+You are a review sub-agent: analyze diffs and code for correctness, not style nitpicks. Tools: fs.read/list/grep, git diff/show/log/status, flow.spawn. No write, no bash, no test.run — analysis only.
+
+Workflow: (1) Read the full diff plus surrounding context, not just changed lines. (2) Trace each change through the complete interaction chain — entry points, dispatch, serialization, handlers, cleanup — flag any unwired link. (3) Identify bugs, missing error handling, security issues, and untested edge cases. (4) Compare against sibling implementations for parity gaps. (5) Assign severity: blocker / warning / nit.
+
+Stop when: every changed region is examined, findings are prioritized by severity, and the diff's intent is confirmed or questioned with evidence.
+
+Anti-patterns: reviewing only the diff without surrounding context; flagging style over correctness; approving because tests pass; missing cross-file effects; vague comments without file:line or fixes.
+
+Output: verdict (approve / request changes / block), findings grouped by severity with file:line and concrete fixes, and a parity check against existing patterns."#;
+
+pub const JUDGE_STALL_MD: &str = r#"You are judging why an AI coding agent stopped its work loop without making any tool calls.
+
+## Agent context
+atman is a terminal-based coding agent. It works in a loop: receive LLM response, extract tool calls, dispatch them, repeat. It has tools for file I/O (fs.read/fs.write/fs.edit), shell commands (bash.spawn), web search, git, testing, and more. Its instructions say to keep going until resolved. Stopping without tool calls is normal ONLY when the task is complete or user input is genuinely needed.
+
+## Categories
+
+waiting_for_user: The agent asked a direct question or needs a decision it cannot make alone. It cannot proceed without a human response. Example: Which approach do you prefer? Should I delete these files?
+
+lazy: The task is NOT complete but the agent stopped anyway. It summarized unstarted work, deferred to the user, or claimed success without evidence. Example: The fix should be in auth.rs, you can update it yourself.
+
+forgot_tools: The agent intended to act but wrote the action as prose instead of invoking a tool. The will to work is present, the mechanism was skipped. Example: Let me check the Cargo.toml (but no fs.read call). I will run the tests now (but no bash.spawn).
+
+done: The task is genuinely complete. Prior turns show real tool usage with concrete results. The last message is a final summary or sign-off with nothing left to do. Example: Done, fixed the bug, tests pass, quality gate is green.
+
+## Decision rules
+1. Last message asks the user a question -> waiting_for_user
+2. Prior turns show completed tool work and last message is a wrap-up -> done
+3. Agent describes an action (reading, running, editing) but made no tool call -> forgot_tools
+4. Agent stopped without asking anything and without finishing -> lazy
+5. Never hedge. Pick exactly one. If evidence is weak, pick the category best supported by the strongest signal.
+
+Recent turns (JSON): "#;
+
 pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     contract {
         capabilities { shell: true }
     }
-    _prompt_lands_via_begin_turn = user_prompt
-    return subflow(agent_loop, 0)
-}
-
-flow agent_loop(iteration: int) -> string {
-    when iteration >= 200 {
-        return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
-    }
-    reply = llm.call(
-        model: "smart",
-        context: "session",
-        system: @"../prompts/system.md",
-        cache: true,
-        retry: 12,
-        tools: [
-            "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
-            "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
-            "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list",
-            "term.find",
-            "task.list", "task.kill",
-            "web.fetch", "web.search",
-            "hunk.review", "hunk.apply", "hunk.plan_edit",
-            "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit", "git.branch", "git.push", "test.run",
-            "memory.confess", "memory.fetch_confessions",
-            "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
-            "memory.goal.get", "memory.goal.set", "memory.goal.clear",
-            "memory.recent_turns", "memory.history.search", "memory.history.read",
-            "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
-            "plan.write", "plan.read", "plan.tick",
-            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check",
-            "form.ask",
-            "help.show",
-            "preview.push",
-            "session.push", "sleep",
-            "message.user", "message.assistant", "message.system", "message.tool",
-            "watch", "watcher.list", "watcher.unwatch", "wait_for_watcher", "has_pending_injections",
-            "mcp.*"
-        ],
-    )
-    tool_uses = extract_tool_uses(reply)
-    when is_empty(tool_uses) {
-        when has_pending_injections() {
-            return subflow(agent_loop, iteration + 1)
+    session.push(message.user(user_prompt))
+    loop {
+        reply = llm.call(
+            model: "smart",
+            context: "session",
+            system: @"../prompts/system.md",
+            cache: true,
+            retry: 12,
+            stall_timeout: 120,
+            tools: [
+                "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
+                "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
+                "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list",
+                "term.find",
+                "task.list", "task.kill",
+                "web.fetch", "web.search",
+                "hunk.review", "hunk.apply", "hunk.plan_edit",
+                "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit", "git.branch", "git.push", "test.run",
+                "memory.confess", "memory.fetch_confessions",
+                "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
+                "memory.goal.get", "memory.goal.set", "memory.goal.clear",
+                "memory.recent_turns", "memory.history.search", "memory.history.read",
+                "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
+                "plan.write", "plan.read", "plan.tick",
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check",
+                "form.ask",
+                "help.show",
+                "preview.push",
+                "session.push", "sleep",
+                "message.user", "message.assistant", "message.system", "message.tool",
+                "watch", "watcher.list", "watcher.unwatch", "wait_for_watcher", "has_pending_injections",
+                "mcp.*"
+            ],
+        )
+        tool_uses = extract_tool_uses(reply)
+        when is_empty(tool_uses) {
+            recent = memory.recent_turns(n: 5)
+            intent = llm.classify(
+                model: "cheap",
+                prompt: @"../prompts/judge-stall.md" + to_json_string(recent),
+                categories: ["waiting_for_user", "lazy", "forgot_tools", "done"],
+                retry: 2,
+            )
+            when intent == "forgot_tools" {
+                session.push(message.user("You stopped without using tools. Continue your work using the appropriate tools."))
+                continue
+            }
+            when intent == "lazy" {
+                session.push(message.user("Continue working. You must use tools to complete the task."))
+                continue
+            }
+            break
         }
-        event = wait_for_watcher(timeout_ms: 30000)
-        when event {
-            session.push(event)
-            return subflow(agent_loop, iteration + 1)
-        }
-        return text_concat(reply)
+        tool_results = dispatch_all(tool_uses)
+        session.push(tool_results)
     }
-    tool_results = dispatch_all(tool_uses)
-    session.push(tool_results)
-    j = iteration + 1
-    return subflow(agent_loop, j)
+    return text_concat(reply)
 }
 "#;
 
@@ -166,149 +236,213 @@ pub const SUBAGENT_AT: &str = r#"flow describe() -> string {
 
 flow subagent(goal: string, role: string = "research", model: string = "smart", max_iter: int = 200) -> string {
     when role == "research" {
-        return subflow(research_loop, goal, model, max_iter, 0)
+        return subflow(research_loop, goal, model, max_iter)
     }
     when role == "verify" {
-        return subflow(verify_loop, goal, model, max_iter, 0)
+        return subflow(verify_loop, goal, model, max_iter)
     }
     when role == "implement" {
-        return subflow(implement_loop, goal, model, max_iter, 0)
+        return subflow(implement_loop, goal, model, max_iter)
     }
     when role == "review" {
-        return subflow(review_loop, goal, model, max_iter, 0)
+        return subflow(review_loop, goal, model, max_iter)
     }
-    return subflow(research_loop, goal, model, max_iter, 0)
+    return subflow(research_loop, goal, model, max_iter)
 }
 
-flow research_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
-    when iteration >= max_iter {
-        return "[sub-agent: max iterations reached]"
+flow research_loop(goal: string, model: string, max_iter: int) -> string {
+    session.push(message.user(goal))
+    i = 0
+    loop {
+        i = i + 1
+        when i > max_iter {
+            return "[sub-agent: max iterations reached]"
+        }
+        reply = llm.call(
+            model: model,
+            context: "session",
+            system: @"../prompts/system.md" + "\n\n" + @"../prompts/role-research.md",
+            cache: true,
+            retry: 12,
+            tools: [
+                "fs.read", "fs.list", "fs.grep",
+                "bash.spawn", "bash.status", "bash.output", "bash.kill",
+                "web.fetch", "web.search",
+                "git.diff", "git.show", "git.log", "git.status",
+                "memory.fetch_confessions",
+                "plan.read",
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+            ],
+        )
+        session.push(reply)
+        tool_uses = extract_tool_uses(reply)
+        when is_empty(tool_uses) {
+            intent = llm.classify(
+                model: "cheap",
+                prompt: @"../prompts/judge-stall.md" + to_json_string(reply),
+                categories: ["forgot_tools", "lazy", "done"],
+                retry: 2,
+            )
+            when intent == "forgot_tools" {
+                session.push(message.user("You stopped without using tools. Continue using the appropriate tools."))
+                continue
+            }
+            when intent == "lazy" {
+                session.push(message.user("Continue working. You must use tools to complete the task."))
+                continue
+            }
+            break
+        }
+        tool_results = dispatch_all(tool_uses)
+        session.push(tool_results)
     }
-    when iteration == 0 {
-        session.push(message.user(goal))
-    }
-    reply = llm.call(
-        model: model,
-        context: "session",
-        system: @"../prompts/system.md" + "\n\n## Your role: research\nYou are a research sub-agent. Read code before answering. Cite file:line. Don't guess — if uncertain, say so. Return findings as structured text. Trace the full data flow before concluding.",
-        cache: true,
-        retry: 12,
-        tools: [
-            "fs.read", "fs.list", "fs.grep",
-            "bash.spawn", "bash.status", "bash.output", "bash.kill",
-            "web.fetch", "web.search",
-            "git.diff", "git.show", "git.log", "git.status",
-            "memory.fetch_confessions",
-            "plan.read",
-            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
-        ],
-    )
-    session.push(reply)
-    tool_uses = extract_tool_uses(reply)
-    when is_empty(tool_uses) {
-        return text_concat(reply)
-    }
-    tool_results = dispatch_all(tool_uses)
-    session.push(tool_results)
-    return subflow(research_loop, goal, model, max_iter, iteration + 1)
+    return text_concat(reply)
 }
 
-flow verify_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
-    when iteration >= max_iter {
-        return "[sub-agent: max iterations reached]"
+flow verify_loop(goal: string, model: string, max_iter: int) -> string {
+    session.push(message.user(goal))
+    i = 0
+    loop {
+        i = i + 1
+        when i > max_iter {
+            return "[sub-agent: max iterations reached]"
+        }
+        reply = llm.call(
+            model: model,
+            context: "session",
+            system: @"../prompts/system.md" + "\n\n" + @"../prompts/role-verify.md",
+            cache: true,
+            retry: 12,
+            tools: [
+                "fs.read", "fs.list", "fs.grep",
+                "bash.spawn", "bash.status", "bash.output", "bash.kill",
+                "web.fetch", "web.search",
+                "git.diff", "git.show", "git.log", "git.status",
+                "test.run",
+                "memory.fetch_confessions",
+                "plan.read",
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+            ],
+        )
+        session.push(reply)
+        tool_uses = extract_tool_uses(reply)
+        when is_empty(tool_uses) {
+            intent = llm.classify(
+                model: "cheap",
+                prompt: @"../prompts/judge-stall.md" + to_json_string(reply),
+                categories: ["forgot_tools", "lazy", "done"],
+                retry: 2,
+            )
+            when intent == "forgot_tools" {
+                session.push(message.user("You stopped without using tools. Continue using the appropriate tools."))
+                continue
+            }
+            when intent == "lazy" {
+                session.push(message.user("Continue working. You must use tools to complete the task."))
+                continue
+            }
+            break
+        }
+        tool_results = dispatch_all(tool_uses)
+        session.push(tool_results)
     }
-    when iteration == 0 {
-        session.push(message.user(goal))
-    }
-    reply = llm.call(
-        model: model,
-        context: "session",
-        system: @"../prompts/system.md" + "\n\n## Your role: verify\nYou are a verification sub-agent. Reproduce the issue with a test. Trace the full data flow. Confirm root cause before concluding. Don't patch symptoms.",
-        cache: true,
-        retry: 12,
-        tools: [
-            "fs.read", "fs.list", "fs.grep",
-            "bash.spawn", "bash.status", "bash.output", "bash.kill",
-            "web.fetch", "web.search",
-            "git.diff", "git.show", "git.log", "git.status",
-            "test.run",
-            "memory.fetch_confessions",
-            "plan.read",
-            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
-        ],
-    )
-    session.push(reply)
-    tool_uses = extract_tool_uses(reply)
-    when is_empty(tool_uses) {
-        return text_concat(reply)
-    }
-    tool_results = dispatch_all(tool_uses)
-    session.push(tool_results)
-    return subflow(verify_loop, goal, model, max_iter, iteration + 1)
+    return text_concat(reply)
 }
 
-flow implement_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
-    when iteration >= max_iter {
-        return "[sub-agent: max iterations reached]"
+flow implement_loop(goal: string, model: string, max_iter: int) -> string {
+    session.push(message.user(goal))
+    i = 0
+    loop {
+        i = i + 1
+        when i > max_iter {
+            return "[sub-agent: max iterations reached]"
+        }
+        reply = llm.call(
+            model: model,
+            context: "session",
+            system: @"../prompts/system.md" + "\n\n" + @"../prompts/role-implement.md",
+            cache: true,
+            retry: 12,
+            tools: [
+                "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
+                "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
+                "test.run",
+                "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit",
+                "hunk.review", "hunk.apply", "hunk.plan_edit",
+                "memory.fetch_confessions",
+                "plan.write", "plan.read", "plan.tick",
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+            ],
+        )
+        session.push(reply)
+        tool_uses = extract_tool_uses(reply)
+        when is_empty(tool_uses) {
+            intent = llm.classify(
+                model: "cheap",
+                prompt: @"../prompts/judge-stall.md" + to_json_string(reply),
+                categories: ["forgot_tools", "lazy", "done"],
+                retry: 2,
+            )
+            when intent == "forgot_tools" {
+                session.push(message.user("You stopped without using tools. Continue using the appropriate tools."))
+                continue
+            }
+            when intent == "lazy" {
+                session.push(message.user("Continue working. You must use tools to complete the task."))
+                continue
+            }
+            break
+        }
+        tool_results = dispatch_all(tool_uses)
+        session.push(tool_results)
     }
-    when iteration == 0 {
-        session.push(message.user(goal))
-    }
-    reply = llm.call(
-        model: model,
-        context: "session",
-        system: @"../prompts/system.md" + "\n\n## Your role: implement\nYou are an implementation sub-agent. Make the minimal change. Run quality gate (fmt+clippy+test) before returning. Fix root causes, not symptoms. Verify by comparison: trace the existing implementation's complete chain and confirm every link is wired.",
-        cache: true,
-        retry: 12,
-        tools: [
-            "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
-            "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
-            "test.run",
-            "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit",
-            "hunk.review", "hunk.apply", "hunk.plan_edit",
-            "memory.fetch_confessions",
-            "plan.write", "plan.read", "plan.tick",
-            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
-        ],
-    )
-    session.push(reply)
-    tool_uses = extract_tool_uses(reply)
-    when is_empty(tool_uses) {
-        return text_concat(reply)
-    }
-    tool_results = dispatch_all(tool_uses)
-    session.push(tool_results)
-    return subflow(implement_loop, goal, model, max_iter, iteration + 1)
+    return text_concat(reply)
 }
 
-flow review_loop(goal: string, model: string, max_iter: int, iteration: int) -> string {
-    when iteration >= max_iter {
-        return "[sub-agent: max iterations reached]"
+flow review_loop(goal: string, model: string, max_iter: int) -> string {
+    session.push(message.user(goal))
+    i = 0
+    loop {
+        i = i + 1
+        when i > max_iter {
+            return "[sub-agent: max iterations reached]"
+        }
+        reply = llm.call(
+            model: model,
+            context: "session",
+            system: @"../prompts/system.md" + "\n\n" + @"../prompts/role-review.md",
+            cache: true,
+            retry: 12,
+            tools: [
+                "fs.read", "fs.list", "fs.grep",
+                "git.diff", "git.show", "git.log", "git.status",
+                "memory.fetch_confessions",
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+            ],
+        )
+        session.push(reply)
+        tool_uses = extract_tool_uses(reply)
+        when is_empty(tool_uses) {
+            intent = llm.classify(
+                model: "cheap",
+                prompt: @"../prompts/judge-stall.md" + to_json_string(reply),
+                categories: ["forgot_tools", "lazy", "done"],
+                retry: 2,
+            )
+            when intent == "forgot_tools" {
+                session.push(message.user("You stopped without using tools. Continue using the appropriate tools."))
+                continue
+            }
+            when intent == "lazy" {
+                session.push(message.user("Continue working. You must use tools to complete the task."))
+                continue
+            }
+            break
+        }
+        tool_results = dispatch_all(tool_uses)
+        session.push(tool_results)
     }
-    when iteration == 0 {
-        session.push(message.user(goal))
-    }
-    reply = llm.call(
-        model: model,
-        context: "session",
-        system: @"../prompts/system.md" + "\n\n## Your role: review\nYou are a review sub-agent. Trace the existing implementation's complete interaction chain. Compare against similar implementations. List every missing link. Don't approve until you've checked every link. Reading code finds gaps; running tests doesn't.",
-        cache: true,
-        retry: 12,
-        tools: [
-            "fs.read", "fs.list", "fs.grep",
-            "git.diff", "git.show", "git.log", "git.status",
-            "memory.fetch_confessions",
-            "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
-        ],
-    )
-    session.push(reply)
-    tool_uses = extract_tool_uses(reply)
-    when is_empty(tool_uses) {
-        return text_concat(reply)
-    }
-    tool_results = dispatch_all(tool_uses)
-    session.push(tool_results)
-    return subflow(review_loop, goal, model, max_iter, iteration + 1)
+    return text_concat(reply)
 }
 "#;
 
@@ -329,6 +463,20 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
     let system_md = prompts_dir.join("system.md");
     std::fs::write(&system_md, SYSTEM_MD)
         .with_context(|| format!("write {}", system_md.display()))?;
+
+    let prompt_files = [
+        ("role-research.md", ROLE_RESEARCH_MD),
+        ("role-verify.md", ROLE_VERIFY_MD),
+        ("role-implement.md", ROLE_IMPLEMENT_MD),
+        ("role-review.md", ROLE_REVIEW_MD),
+        ("judge-stall.md", JUDGE_STALL_MD),
+    ];
+    for (name, content) in &prompt_files {
+        let path = prompts_dir.join(name);
+        if !path.exists() {
+            std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+        }
+    }
 
     Ok(())
 }
