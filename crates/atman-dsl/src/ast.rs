@@ -231,6 +231,9 @@ pub enum Stmt {
     Return { value: Expr },
     Expr(Expr),
     Watch(WatchDecl),
+    Loop { body: Vec<Stmt> },
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone)]

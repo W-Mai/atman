@@ -65,6 +65,9 @@ fn collect_ident_refs_stmts(stmts: &[Stmt], refs: &mut HashSet<String>) {
             Stmt::Watch(w) => {
                 refs.insert(w.target.name.clone());
             }
+            Stmt::Loop { body } => collect_ident_refs_stmts(body, refs),
+            Stmt::Break => {}
+            Stmt::Continue => {}
         }
     }
 }
@@ -150,6 +153,11 @@ fn walk_stmts_for_nodes(stmts: &[Stmt], flow_name: &str, hits: &mut Vec<LintHit>
                 walk_stmts_for_nodes(body, flow_name, hits);
             }
             Stmt::Watch(_) => {}
+            Stmt::Loop { body } => {
+                walk_stmts_for_nodes(body, flow_name, hits);
+            }
+            Stmt::Break => {}
+            Stmt::Continue => {}
         }
     }
 }

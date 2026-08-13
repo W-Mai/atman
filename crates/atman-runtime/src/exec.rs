@@ -58,6 +58,8 @@ pub enum StmtOutcome {
     Continue,
     Return(Value),
     Err(RuntimeError),
+    LoopBreak,
+    LoopContinue,
 }
 
 pub fn exec_stmts<'a>(
@@ -220,6 +222,8 @@ fn emit_flow_node_end(
     };
     let status = match outcome {
         StmtOutcome::Err(_) => crate::event::FlowNodeStatus::Err,
+        StmtOutcome::LoopBreak => crate::event::FlowNodeStatus::Ok,
+        StmtOutcome::LoopContinue => crate::event::FlowNodeStatus::Ok,
         _ => crate::event::FlowNodeStatus::Ok,
     };
     let preview_owned = output_preview.map(String::from);
@@ -254,6 +258,9 @@ fn stmt_to_node_kind_label(stmt: &Stmt) -> (crate::nodegraph::NodeKind, String) 
             "when …".into(),
         ),
         Stmt::Watch(_) => (NodeKind::Return, "watch".into()),
+        Stmt::Loop { .. } => (NodeKind::Return, "loop".into()),
+        Stmt::Break => (NodeKind::Return, "break".into()),
+        Stmt::Continue => (NodeKind::Return, "continue".into()),
     }
 }
 
@@ -361,6 +368,20 @@ fn exec_stmt<'a>(
                 (StmtOutcome::Continue, preview)
             }
             Stmt::Watch(_) => (StmtOutcome::Continue, None),
+            Stmt::Loop { body } => {
+                loop {
+                    let outcome = exec_stmts(body, env, ctx).await;
+                    match outcome {
+                        StmtOutcome::Continue => continue,
+                        StmtOutcome::LoopContinue => continue,
+                        StmtOutcome::LoopBreak => break,
+                        other => return (other, Some("loop interrupted".into())),
+                    }
+                }
+                (StmtOutcome::Continue, Some("loop end".into()))
+            }
+            Stmt::Break => (StmtOutcome::LoopBreak, Some("break".into())),
+            Stmt::Continue => (StmtOutcome::LoopContinue, Some("continue".into())),
         }
     })
 }
@@ -620,10 +641,13 @@ pub async fn exec_flow_with_siblings(
             }
         }
     }
-    match exec_stmts(&flow.body, &mut env, &ctx).await {
+    let raw_outcome = exec_stmts(&flow.body, &mut env, &ctx).await;
+    match raw_outcome {
         StmtOutcome::Return(v) => Ok(v),
         StmtOutcome::Err(e) => Err(e),
         StmtOutcome::Continue => Ok(Value::Unit),
+        StmtOutcome::LoopBreak => Err(RuntimeError::ToolFailed("break outside loop".into())),
+        StmtOutcome::LoopContinue => Err(RuntimeError::ToolFailed("continue outside loop".into())),
     }
 }
 

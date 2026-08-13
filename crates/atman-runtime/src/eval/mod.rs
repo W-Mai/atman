@@ -1475,6 +1475,12 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 crate::exec::StmtOutcome::Continue => {
                     (Value::Unit, crate::event::FlowStatus::Ok, true)
                 }
+                crate::exec::StmtOutcome::LoopBreak => {
+                    (Value::Unit, crate::event::FlowStatus::Ok, true)
+                }
+                crate::exec::StmtOutcome::LoopContinue => {
+                    (Value::Unit, crate::event::FlowStatus::Ok, true)
+                }
             };
             let cancelled = matches!(status, crate::event::FlowStatus::Cancelled);
             if let Some(sink) = ctx.events {

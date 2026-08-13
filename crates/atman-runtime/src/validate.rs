@@ -134,6 +134,11 @@ fn walk_stmts(
                     }
                 }
             }
+            Stmt::Loop { body } => {
+                walk_stmts(body, scope, kinds, tools, errors);
+            }
+            Stmt::Break => {}
+            Stmt::Continue => {}
         }
     }
 }

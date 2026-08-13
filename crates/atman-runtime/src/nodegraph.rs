@@ -84,6 +84,20 @@ fn extract_stmt(stmt: &Stmt, prefix: &str, out: &mut Vec<StaticNode>) {
             });
         }
         Stmt::Watch(_) => {}
+        Stmt::Loop { body } => {
+            let mut inner = Vec::new();
+            for (i, s) in body.iter().enumerate() {
+                extract_stmt(s, &format!("{prefix}.{i}"), &mut inner);
+            }
+            out.push(StaticNode {
+                node_id: prefix.to_string(),
+                kind: NodeKind::Return,
+                label: "loop".into(),
+                children: inner,
+            });
+        }
+        Stmt::Break => {}
+        Stmt::Continue => {}
     }
 }
 

@@ -306,21 +306,48 @@ fn parse_stmt(input: ParseStream) -> Result<Stmt> {
         let body = parse_stmts(&content)?;
         return Ok(Stmt::When { cond, body });
     }
-    if input.peek(syn::Ident) && input.peek2(Token![=]) {
-        let name = to_ident(input.parse::<syn::Ident>()?);
-        input.parse::<Token![=]>()?;
-        let value = parse_expr(input)?;
-        return Ok(Stmt::Bind {
-            name: Pattern::Ident(name),
-            value,
-        });
-    }
     if input.peek(token::Brace) && looks_like_destructure(input) {
         let pattern = parse_struct_pattern(input)?;
         input.parse::<Token![=]>()?;
         let value = parse_expr(input)?;
         return Ok(Stmt::Bind {
             name: pattern,
+            value,
+        });
+    }
+    // Check for loop/break/continue keywords
+    if input.peek(syn::Ident)
+        || input.peek(Token![loop])
+        || input.peek(Token![break])
+        || input.peek(Token![continue])
+    {
+        let ahead = input.fork();
+        let ident: syn::Ident = <syn::Ident as syn::ext::IdentExt>::parse_any(&ahead)?;
+        match ident.to_string().as_str() {
+            "loop" => {
+                <syn::Ident as syn::ext::IdentExt>::parse_any(input)?;
+                let content;
+                braced!(content in input);
+                let body = parse_stmts(&content)?;
+                return Ok(Stmt::Loop { body });
+            }
+            "break" => {
+                <syn::Ident as syn::ext::IdentExt>::parse_any(input)?;
+                return Ok(Stmt::Break);
+            }
+            "continue" => {
+                <syn::Ident as syn::ext::IdentExt>::parse_any(input)?;
+                return Ok(Stmt::Continue);
+            }
+            _ => {}
+        }
+    }
+    if input.peek(syn::Ident) && input.peek2(Token![=]) {
+        let name = to_ident(input.parse::<syn::Ident>()?);
+        input.parse::<Token![=]>()?;
+        let value = parse_expr(input)?;
+        return Ok(Stmt::Bind {
+            name: Pattern::Ident(name),
             value,
         });
     }

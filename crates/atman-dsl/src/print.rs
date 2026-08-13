@@ -151,6 +151,18 @@ fn write_stmt(out: &mut String, stmt: &Stmt, indent: usize) {
             out.push('\n');
         }
         Stmt::Watch(w) => write_watch(out, w, indent),
+        Stmt::Loop { body } => {
+            out.push_str("loop {\n");
+            write_stmts(out, body, indent + 1);
+            let pad = "    ".repeat(indent);
+            out.push_str(&format!("{pad}}}\n"));
+        }
+        Stmt::Break => {
+            out.push_str("break\n");
+        }
+        Stmt::Continue => {
+            out.push_str("continue\n");
+        }
     }
 }
 
