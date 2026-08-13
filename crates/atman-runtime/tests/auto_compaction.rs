@@ -168,6 +168,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
                 "llama-workflow-compact".into(),
                 ModelEntry {
                     model: "llama-workflow-compact".into(),
+                    provider: Some("workflow-compact".into()),
                     context_budget: Some(200_000),
                     compact_threshold_ratio: Some(0.8),
                     ..Default::default()

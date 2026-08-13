@@ -115,6 +115,7 @@ fn register_scripted_model() {
             "scripted".into(),
             ModelEntry {
                 model: "scripted".into(),
+                provider: Some("scripted-agent".into()),
                 context_budget: Some(8_192),
                 ..Default::default()
             },

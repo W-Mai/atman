@@ -459,6 +459,55 @@ impl Provider for OpenAiProvider {
             cancel,
         }
     }
+
+    fn discover_models(
+        &self,
+    ) -> crate::tool::BoxFut<'static, Vec<crate::provider::DiscoveredModel>> {
+        let base_url = self.base_url.clone();
+        let api_key = self.api_key.clone();
+        Box::pin(async move {
+            #[derive(serde::Deserialize)]
+            struct ModelsResponse {
+                #[serde(default)]
+                data: Vec<ModelEntry>,
+            }
+            #[derive(serde::Deserialize)]
+            struct ModelEntry {
+                id: String,
+            }
+
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
+            let resp = match client
+                .get(format!("{base_url}/models"))
+                .bearer_auth(&api_key)
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => r,
+                _ => return vec![],
+            };
+            let body: ModelsResponse = match resp.json().await {
+                Ok(b) => b,
+                Err(_) => return vec![],
+            };
+            body.data
+                .into_iter()
+                .filter(|m| !m.id.starts_with("ft:"))
+                .map(|m| {
+                    let (budget, thinking) =
+                        crate::model_registry::lookup_known_model(&m.id).unwrap_or((32_768, false));
+                    crate::provider::DiscoveredModel {
+                        slug: m.id,
+                        context_budget: Some(budget),
+                        thinking,
+                    }
+                })
+                .collect()
+        })
+    }
 }
 
 #[derive(Default)]

@@ -1857,34 +1857,33 @@ async fn cmd_repl_once(
                         provider_type,
                         api_key,
                         base_url,
-                        context_budget,
+                        context_budget: _,
                         max_tokens,
-                        thinking,
+                        thinking: _,
                         enabled,
                     } => {
-                        let dir = config_dir().ok();
-                        if let Some(dir) = dir {
-                            let path = dir.join("config.toml");
-                            if let Ok(updated) = upsert_model_config(
-                                &path,
-                                &name,
-                                &provider_type,
-                                &api_key,
-                                &base_url,
-                                context_budget,
-                                max_tokens,
-                                thinking,
-                                Some(enabled),
-                            ) {
-                                let _ = write_config_toml(&updated);
-                                let text = std::fs::read_to_string(&path).unwrap_or_default();
-                                if let Some(mc) = parse_model_config(&text) {
-                                    atman_runtime::model_registry::set_model_config(mc);
-                                }
-                                let _ = cmd_tx_for_models
-                                    .send(atman_tui::TuiCommand::ProviderModelsUpdated);
-                                atman_runtime::notify!(success, "Provider \"{name}\" added");
-                            }
+                        if atman_runtime::model_registry::upsert_provider_config(
+                            &name,
+                            &provider_type,
+                            if api_key.is_empty() {
+                                None
+                            } else {
+                                Some(&api_key)
+                            },
+                            None,
+                            if base_url.is_empty() {
+                                None
+                            } else {
+                                Some(&base_url)
+                            },
+                            max_tokens,
+                            enabled,
+                        )
+                        .is_ok()
+                        {
+                            let _ = cmd_tx_for_models
+                                .send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                            atman_runtime::notify!(success, "Provider \"{name}\" added");
                         }
                     }
                     atman_tui::TuiControl::UpdateConfigProvider {
@@ -1892,34 +1891,33 @@ async fn cmd_repl_once(
                         provider_type,
                         api_key,
                         base_url,
-                        context_budget,
+                        context_budget: _,
                         max_tokens,
-                        thinking,
+                        thinking: _,
                         enabled,
                     } => {
-                        let dir = config_dir().ok();
-                        if let Some(dir) = dir {
-                            let path = dir.join("config.toml");
-                            if let Ok(updated) = upsert_model_config(
-                                &path,
-                                &name,
-                                &provider_type,
-                                &api_key,
-                                &base_url,
-                                context_budget,
-                                max_tokens,
-                                thinking,
-                                Some(enabled),
-                            ) {
-                                let _ = write_config_toml(&updated);
-                                let text = std::fs::read_to_string(&path).unwrap_or_default();
-                                if let Some(mc) = parse_model_config(&text) {
-                                    atman_runtime::model_registry::set_model_config(mc);
-                                }
-                                let _ = cmd_tx_for_models
-                                    .send(atman_tui::TuiCommand::ProviderModelsUpdated);
-                                atman_runtime::notify!(success, "Provider \"{name}\" updated");
-                            }
+                        if atman_runtime::model_registry::upsert_provider_config(
+                            &name,
+                            &provider_type,
+                            if api_key.is_empty() {
+                                None
+                            } else {
+                                Some(&api_key)
+                            },
+                            None,
+                            if base_url.is_empty() {
+                                None
+                            } else {
+                                Some(&base_url)
+                            },
+                            max_tokens,
+                            enabled,
+                        )
+                        .is_ok()
+                        {
+                            let _ = cmd_tx_for_models
+                                .send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                            atman_runtime::notify!(success, "Provider \"{name}\" updated");
                         }
                     }
                     atman_tui::TuiControl::OpenAliasManager { .. } => {
@@ -6894,44 +6892,6 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn upsert_model_config(
-    path: &std::path::Path,
-    name: &str,
-    provider_type: &str,
-    api_key: &str,
-    base_url: &str,
-    context_budget: Option<u64>,
-    max_tokens: Option<u32>,
-    thinking: bool,
-    enabled: Option<bool>,
-) -> Result<String, String> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    let mut doc: toml::Value =
-        toml::from_str(&text).map_err(|e| format!("parse config.toml: {e}"))?;
-    let models = doc
-        .as_table_mut()
-        .ok_or("config.toml is not a table")?
-        .entry("models")
-        .or_insert_with(|| toml::Value::Table(Default::default()));
-    let models_table = models.as_table_mut().ok_or("models is not a table")?;
-    let mut entry = toml::Table::new();
-    entry.insert("provider".into(), toml::Value::String(provider_type.into()));
-    entry.insert("api_key".into(), toml::Value::String(api_key.into()));
-    entry.insert("base_url".into(), toml::Value::String(base_url.into()));
-    if let Some(cb) = context_budget {
-        entry.insert("context_budget".into(), toml::Value::Integer(cb as i64));
-    }
-    if let Some(mt) = max_tokens {
-        entry.insert("max_tokens".into(), toml::Value::Integer(mt as i64));
-    }
-    entry.insert("thinking".into(), toml::Value::Boolean(thinking));
-    if let Some(en) = enabled {
-        entry.insert("enabled".into(), toml::Value::Boolean(en));
-    }
-    models_table.insert(name.into(), toml::Value::Table(entry));
-    toml::to_string_pretty(&doc).map_err(|e| format!("serialize config.toml: {e}"))
-}
-
 async fn test_provider_endpoint(
     name: &str,
     provider_type: &str,
