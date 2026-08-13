@@ -539,6 +539,10 @@ pub fn run_migration_if_needed() -> bool {
 
 // Alias CRUD (writes config.toml)
 
+pub fn read_config_toml_pub() -> Option<String> {
+    read_config_toml()
+}
+
 fn read_config_toml() -> Option<String> {
     let path = crate::storage::config_dir().ok()?.join("config.toml");
     std::fs::read_to_string(&path).ok()

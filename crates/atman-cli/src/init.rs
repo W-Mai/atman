@@ -113,7 +113,7 @@ context_budget = 128000
 model = "claude-opus-4.7"
 
 [alias.cheap]
-model = "gpt-4o-mini"
+model = "smart"
 
 [suggest]
 # model = "cheap"
