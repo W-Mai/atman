@@ -55,8 +55,8 @@ fn examples_review_code_at_parses() {
 #[tokio::test]
 async fn end_to_end_review_flow_produces_structured_output() {
     let file = parse_file(REVIEW_FLOW).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
 
     let rule = FetchRule::new();
     rule.insert("code-review", "review carefully, look for as-any")
@@ -107,8 +107,8 @@ async fn end_to_end_review_flow_produces_structured_output() {
 #[tokio::test]
 async fn retry_branch_fires_when_verify_reports_invalid() {
     let file = parse_file(REVIEW_FLOW).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     ex.tools.register(Arc::new(FetchRule::new()));
 
     let bad = Value::Struct(vec![("severity".into(), Value::Str("info".into()))]);

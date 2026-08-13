@@ -70,7 +70,7 @@ async fn http_mcp_server_completes_full_tool_registry_roundtrip() {
     let server = MockServer::start().await;
     mount_mcp_stub(&server).await;
 
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     let cfg = McpServerConfig::http(
         "cloud",
         format!("{}/rpc", server.uri()),
@@ -78,7 +78,7 @@ async fn http_mcp_server_completes_full_tool_registry_roundtrip() {
         Tier::Three,
         5000,
     );
-    let statuses = register_from_configs(&mut reg, &[cfg]).await;
+    let statuses = register_from_configs(&reg, &[cfg]).await;
     assert_eq!(statuses.len(), 1);
     let status = statuses[0]
         .as_ref()
@@ -147,7 +147,7 @@ async fn http_mcp_sends_bearer_token_when_configured() {
         .mount(&server)
         .await;
 
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     let cfg = McpServerConfig::http(
         "auth-cloud",
         format!("{}/rpc", server.uri()),
@@ -155,7 +155,7 @@ async fn http_mcp_sends_bearer_token_when_configured() {
         Tier::Three,
         5000,
     );
-    let statuses = register_from_configs(&mut reg, &[cfg]).await;
+    let statuses = register_from_configs(&reg, &[cfg]).await;
     let msg = statuses[0].as_ref().err().map(|e| e.error.to_string());
     assert!(
         statuses[0].is_ok(),
@@ -172,7 +172,7 @@ async fn http_mcp_returns_error_when_server_returns_5xx_after_retries() {
         .mount(&server)
         .await;
 
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     let cfg = McpServerConfig::http(
         "flaky",
         format!("{}/rpc", server.uri()),
@@ -180,7 +180,7 @@ async fn http_mcp_returns_error_when_server_returns_5xx_after_retries() {
         Tier::Three,
         10_000,
     );
-    let statuses = register_from_configs(&mut reg, &[cfg]).await;
+    let statuses = register_from_configs(&reg, &[cfg]).await;
     assert_eq!(statuses.len(), 1);
     let err = match &statuses[0] {
         Err(e) => e,
@@ -192,7 +192,7 @@ async fn http_mcp_returns_error_when_server_returns_5xx_after_retries() {
 
 #[tokio::test]
 async fn http_mcp_config_without_url_reports_protocol_error() {
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     let cfg = McpServerConfig {
         name: "no-url".into(),
         transport: TransportKind::Http,
@@ -206,7 +206,7 @@ async fn http_mcp_config_without_url_reports_protocol_error() {
         timeout_ms: 500,
         disabled: false,
     };
-    let statuses = register_from_configs(&mut reg, &[cfg]).await;
+    let statuses = register_from_configs(&reg, &[cfg]).await;
     let err = match &statuses[0] {
         Err(e) => e,
         Ok(_) => panic!("expected boot error"),

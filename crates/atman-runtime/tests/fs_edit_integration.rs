@@ -15,8 +15,8 @@ async fn fs_edit_end_to_end_read_then_edit_flow() {
     .await
     .unwrap();
 
-    let mut registry = atman_runtime::tool::ToolRegistry::new();
-    register_tier_zero(&mut registry);
+    let registry = atman_runtime::tool::ToolRegistry::new();
+    register_tier_zero(&registry);
 
     let tracker = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let ctx = ToolCtx::new().with_read_files(tracker.clone());
@@ -87,8 +87,8 @@ async fn fs_edit_ambiguous_match_returns_actionable_error_through_registry() {
         .await
         .unwrap();
 
-    let mut registry = atman_runtime::tool::ToolRegistry::new();
-    register_tier_zero(&mut registry);
+    let registry = atman_runtime::tool::ToolRegistry::new();
+    register_tier_zero(&registry);
 
     let tracker = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let ctx = ToolCtx::new().with_read_files(tracker);

@@ -17,11 +17,11 @@ async fn confess_three_and_fetch_returns_three_via_flow() {
     let goal = Arc::new(atman_runtime::memory::GoalStore::at(dir.path()));
     let spec = Arc::new(SpecStore::new(dir.path().to_path_buf()));
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let plan = std::sync::Arc::new(atman_runtime::memory::PlanStore::at(dir.path()));
-    tools::register_memory(&mut ex.tools, todo, confession.clone(), goal, plan);
-    tools::register_spec_memory(&mut ex.tools, spec);
+    tools::register_memory(&ex.tools, todo, confession.clone(), goal, plan);
+    tools::register_spec_memory(&ex.tools, spec);
 
     let src = r#"flow t() -> Int {
     memory.confess(trigger: "a", rule_violated: "r", what_i_did: "w", why: "y", mitigation: "m")
@@ -62,8 +62,8 @@ async fn long_prompt_triggers_context_truncated_event_and_flow_completes() {
     );
 
     let sink = EventSink::new();
-    let mut ex = Executor::with_events(sink.clone());
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::with_events(sink.clone());
+    tools::register_tier_zero(&ex.tools);
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_fallback(Value::Str("summary".into())),
     ));

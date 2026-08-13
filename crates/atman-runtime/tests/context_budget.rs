@@ -33,7 +33,7 @@ async fn context_budget_kwarg_shrinks_prompt_before_provider() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("echo").with_fallback(Value::Str("ok".into())),
     ));

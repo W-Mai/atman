@@ -145,13 +145,13 @@ mod tests {
     }
 
     fn build_executor_with_todos(dir: &Path) -> Executor {
-        let mut ex = Executor::new();
-        crate::tools::register_tier_zero(&mut ex.tools);
+        let ex = Executor::new();
+        crate::tools::register_tier_zero(&ex.tools);
         let todo = std::sync::Arc::new(crate::memory::TodoStore::at(dir));
         let confession = std::sync::Arc::new(crate::memory::ConfessionStore::at(dir));
         let goal = std::sync::Arc::new(crate::memory::GoalStore::at(dir));
         let plan = std::sync::Arc::new(crate::memory::PlanStore::at(dir));
-        crate::tools::register_memory(&mut ex.tools, todo, confession, goal, plan);
+        crate::tools::register_memory(&ex.tools, todo, confession, goal, plan);
         ex
     }
 

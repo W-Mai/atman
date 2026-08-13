@@ -100,7 +100,7 @@ async fn l2_course_correct_renders_as_user_correction_tag() {
         .unwrap();
 
     let calls: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(RecordingProvider {
         name: "rec".into(),
         calls: calls.clone(),
@@ -141,7 +141,7 @@ flow second() -> string {
         .enqueue_injection_with_level("second", InjectionLevel::L3Redirect, Some("second".into()))
         .unwrap();
 
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("nope".into())),
     ));
@@ -179,7 +179,7 @@ flow g() -> string { return "reached" }
             .unwrap();
     }
 
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("x".into())),
     ));
@@ -210,7 +210,7 @@ async fn l1_and_l2_both_appear_in_next_llm_request() {
         .unwrap();
 
     let calls: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(RecordingProvider {
         name: "rec".into(),
         calls: calls.clone(),

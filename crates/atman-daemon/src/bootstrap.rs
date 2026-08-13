@@ -326,14 +326,14 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     let mut executor = Executor::with_events(events);
 
     let fetch_rule = build_fetch_rule(&opts.project_root, opts.home_dir.as_deref()).await;
-    tools::register_tier_zero_with_rules(&mut executor.tools, fetch_rule);
-    tools::register_git_ops(&mut executor.tools);
-    tools::register_watch(&mut executor.tools);
+    tools::register_tier_zero_with_rules(&executor.tools, fetch_rule);
+    tools::register_git_ops(&executor.tools);
+    tools::register_watch(&executor.tools);
     let task_registry = atman_runtime::TaskRegistry::new();
     let bg_registry =
-        tools::register_bash_bg_with_task_registry(&mut executor.tools, task_registry.clone());
+        tools::register_bash_bg_with_task_registry(&executor.tools, task_registry.clone());
     let term_registry =
-        tools::register_terminal_with_task_registry(&mut executor.tools, task_registry.clone());
+        tools::register_terminal_with_task_registry(&executor.tools, task_registry.clone());
     executor.tools.register(std::sync::Arc::new(
         atman_runtime::tools::task_ops::TaskList,
     ));
@@ -351,12 +351,12 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         .with_task_registry(task_registry)
         .with_trust(trust_config);
     tools::register_preview(
-        &mut executor.tools,
+        &executor.tools,
         load_preview_config(opts.config_dir.as_deref()),
     );
     let web_config = load_web_config(opts.config_dir.as_deref());
-    tools::register_web(&mut executor.tools, web_config.fetch);
-    tools::register_web_search(&mut executor.tools, &web_config.search);
+    tools::register_web(&executor.tools, web_config.fetch);
+    tools::register_web_search(&executor.tools, &web_config.search);
     register_providers_from_env(&mut executor).await;
     if sandbox_enabled {
         if let Some(sandbox) = build_sandbox(
@@ -534,13 +534,13 @@ pub fn attach_memory_stores_with_redactor(
     let confession_store = Arc::new(confession_store);
     let spec_store = Arc::new(spec_store);
     tools::register_memory(
-        &mut executor.tools,
+        &executor.tools,
         todo_store,
         confession_store,
         goal_store,
         plan_store,
     );
-    tools::register_spec_memory(&mut executor.tools, spec_store);
+    tools::register_spec_memory(&executor.tools, spec_store);
 }
 
 async fn build_fetch_rule(

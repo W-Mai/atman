@@ -12,8 +12,8 @@ async fn executor_runs_flow_and_emits_start_end() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
 
     let out = ex
         .run(&file, "t", vec![("n".into(), Value::Int(4))])
@@ -37,8 +37,8 @@ async fn executor_reports_err_status_on_failure() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let err = ex.run(&file, "t", vec![]).await.unwrap_err();
     assert!(matches!(
         err,
@@ -61,8 +61,8 @@ async fn executor_fetch_rule_returns_content() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
 
     let rule = FetchRule::new();
     rule.insert("comment-discipline", "only write why-comments")
@@ -86,8 +86,8 @@ async fn executor_runs_review_flow_with_mock_provider() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     ex.providers
         .register(Arc::new(MockProvider::new("mock").with_model(
             "claude-opus-4.7",

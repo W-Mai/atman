@@ -1347,7 +1347,7 @@ impl McpServerConfig {
 }
 
 pub async fn register_from_configs(
-    reg: &mut crate::tool::ToolRegistry,
+    reg: &crate::tool::ToolRegistry,
     configs: &[McpServerConfig],
 ) -> Vec<Result<McpClientStatus, McpBootError>> {
     let mut out = Vec::with_capacity(configs.len());

@@ -8,8 +8,8 @@ async fn destructure_binds_each_field_into_scope() {
     return body
 }
 "#;
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(src).unwrap();
     let val = ex.run(&file, "t", vec![]).await.expect("flow ok");
     match val {
@@ -25,8 +25,8 @@ async fn destructure_supports_rename_into_new_name() {
     return err
 }
 "#;
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(src).unwrap();
     let val = ex.run(&file, "t", vec![]).await.expect("flow ok");
     match val {
@@ -42,8 +42,8 @@ async fn destructure_nested_pattern_binds_inner_leaf() {
     return inner_a
 }
 "#;
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(src).unwrap();
     let val = ex.run(&file, "t", vec![]).await.expect("flow ok");
     match val {
@@ -59,8 +59,8 @@ async fn destructure_nested_pattern_missing_inner_field_errors() {
     return missing
 }
 "#;
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(src).unwrap();
     let err = ex.run(&file, "t", vec![]).await.expect_err("should error");
     let msg = format!("{err}");
@@ -77,8 +77,8 @@ async fn destructure_nested_pattern_non_struct_inner_errors() {
     return a
 }
 "#;
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(src).unwrap();
     let err = ex.run(&file, "t", vec![]).await.expect_err("should error");
     let msg = format!("{err}");
@@ -95,8 +95,8 @@ async fn destructure_missing_field_reports_missing_arg() {
     return nope
 }
 "#;
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(src).unwrap();
     let err = ex.run(&file, "t", vec![]).await.expect_err("should error");
     let msg = format!("{err}");

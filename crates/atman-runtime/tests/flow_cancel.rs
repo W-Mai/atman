@@ -28,7 +28,7 @@ async fn flow_cancel_before_start_returns_cancelled_error() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut executor = Executor::new();
+    let executor = Executor::new();
     executor.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("would-run".into())),
     ));
@@ -135,7 +135,7 @@ async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
     session.begin_turn(user_msg(turn_id.clone(), "go"));
 
     let calls = Arc::new(Mutex::new(0usize));
-    let mut executor = Executor::new();
+    let executor = Executor::new();
     executor
         .providers
         .register(Arc::new(CancelAfterFirstProvider {

@@ -8,8 +8,8 @@ use tokio::sync::broadcast;
 async fn term_spawn_emits_terminal_chunk_to_stream() {
     let (stream_tx, mut rx) = broadcast::channel::<StreamFrame>(256);
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let term_reg = tools::register_terminal(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let term_reg = tools::register_terminal(&ex.tools);
     let dir = std::env::temp_dir().join(format!("atman_term_e2e_{}", uuid::Uuid::now_v7()));
     ex.tool_ctx = ex
         .tool_ctx

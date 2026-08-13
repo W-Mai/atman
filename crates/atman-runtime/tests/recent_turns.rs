@@ -9,13 +9,13 @@ use atman_runtime::{Executor, Session, Value};
 async fn recent_turns_returns_empty_before_any_message() {
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));
     let plan = Arc::new(atman_runtime::memory::PlanStore::at(session.dir()));
-    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
+    atman_runtime::tools::register_memory(&ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
     result = memory.recent_turns(n: 5)
@@ -47,13 +47,13 @@ async fn recent_turns_picks_up_appended_messages() {
         session.append_message(m, None);
     }
 
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));
     let plan = Arc::new(atman_runtime::memory::PlanStore::at(session.dir()));
-    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
+    atman_runtime::tools::register_memory(&ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
     result = memory.recent_turns(n: 5)
@@ -93,13 +93,13 @@ async fn recent_turns_caps_output_at_n() {
         session.append_message(m, None);
     }
 
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));
     let plan = Arc::new(atman_runtime::memory::PlanStore::at(session.dir()));
-    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal, plan);
+    atman_runtime::tools::register_memory(&ex.tools, todo, conf, goal, plan);
 
     let src = r#"flow t() -> int {
     result = memory.recent_turns(n: 3)

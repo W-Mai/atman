@@ -191,8 +191,8 @@ pub fn user_text_message(text: impl Into<String>) -> Message {
 
 #[derive(Default, Clone)]
 pub struct ProviderRegistry {
-    providers: HashMap<String, Arc<dyn Provider>>,
-    default: Option<String>,
+    providers: std::sync::Arc<std::sync::RwLock<HashMap<String, Arc<dyn Provider>>>>,
+    default: std::sync::Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl ProviderRegistry {
@@ -200,26 +200,29 @@ impl ProviderRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, provider: Arc<dyn Provider>) {
+    pub fn register(&self, provider: Arc<dyn Provider>) {
         let name = provider.name().to_string();
-        if self.default.is_none() {
-            self.default = Some(name.clone());
+        let mut defaults = self.default.write().unwrap();
+        if defaults.is_none() {
+            *defaults = Some(name.clone());
         }
-        self.providers.insert(name, provider);
+        drop(defaults);
+        self.providers.write().unwrap().insert(name, provider);
     }
 
-    pub fn set_default(&mut self, name: &str) {
-        if self.providers.contains_key(name) {
-            self.default = Some(name.to_string());
+    pub fn set_default(&self, name: &str) {
+        if self.providers.read().unwrap().contains_key(name) {
+            *self.default.write().unwrap() = Some(name.to_string());
         }
     }
 
     pub fn resolve(&self, model: &str) -> Option<Arc<dyn Provider>> {
-        if let Some(p) = self.providers.get(model) {
+        let providers = self.providers.read().unwrap();
+        if let Some(p) = providers.get(model) {
             return Some(p.clone());
         }
         if let Some((prefix, _)) = model.split_once('/')
-            && let Some(p) = self.providers.get(prefix)
+            && let Some(p) = providers.get(prefix)
         {
             return Some(p.clone());
         }
@@ -227,10 +230,9 @@ impl ProviderRegistry {
             && let Some(ref provider_name) = entry.provider
         {
             let config_key = format!("config:{provider_name}");
-            if let Some(p) = self
-                .providers
+            if let Some(p) = providers
                 .get(&config_key)
-                .or_else(|| self.providers.get(provider_name))
+                .or_else(|| providers.get(provider_name))
             {
                 return Some(p.clone());
             }
@@ -239,7 +241,7 @@ impl ProviderRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Provider>> {
-        self.providers.get(name).cloned()
+        self.providers.read().unwrap().get(name).cloned()
     }
 }
 
@@ -250,7 +252,7 @@ mod tests {
 
     /// Helper: build a registry with a "codex" provider and an "openai" default.
     fn fixture_registry() -> ProviderRegistry {
-        let mut reg = ProviderRegistry::new();
+        let reg = ProviderRegistry::new();
         let codex = Arc::new(MockProvider::new("codex"));
         reg.register(codex);
         let openai = Arc::new(MockProvider::new("openai"));

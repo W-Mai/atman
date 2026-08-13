@@ -184,8 +184,8 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     let session = std::sync::Arc::new(Session::open_ephemeral());
     build_long_history(&session, 20);
 
-    let mut ex = Executor::with_events(session.sink().clone());
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
     let file = parse_file(
         r#"flow start() -> string {
@@ -275,7 +275,7 @@ async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     build_long_history(&session, 60);
     session.record_llm_call("mock-summary", 0, 0, 0, 0, None, None);
-    let mut providers = ProviderRegistry::new();
+    let providers = ProviderRegistry::new();
     providers.register(Arc::new(MockProvider::new("mock-summary").with_fallback(
         Value::Str("We investigated compaction and shipped the anchor-based fs.read tool.".into()),
     )));
@@ -324,7 +324,7 @@ async fn setup_review_env() -> (
     let session = Arc::new(Session::open(tmp.path()).unwrap());
     build_long_history(&session, 60);
     session.record_llm_call("mock-summary", 0, 0, 0, 0, None, None);
-    let mut providers = ProviderRegistry::new();
+    let providers = ProviderRegistry::new();
     providers
         .register(Arc::new(MockProvider::new("mock-summary").with_fallback(
             Value::Str("original LLM summary about compaction".into()),

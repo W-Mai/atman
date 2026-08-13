@@ -18,7 +18,7 @@ async fn hunk_review_emits_pending_and_resolved_events_to_shared_sink() {
     std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
 
     let mut ex = Executor::with_events(sink.clone());
-    tools::register_tier_zero(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
     ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
         state: daemon_state.clone(),
         sink: sink.clone(),

@@ -25,7 +25,7 @@ fn register_model() {
 fn run(src: &str, provider: MockProvider) -> Value {
     register_model();
     let parsed = parse_file(src).expect("parse");
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(provider));
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(ex.run(&parsed, "test", vec![]))

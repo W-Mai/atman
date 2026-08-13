@@ -13,7 +13,7 @@ async fn l2_injection_mid_stream_triggers_restart_with_correction() {
     let session = std::sync::Arc::new(Session::open(root.path()).unwrap());
     let sink = session.sink().clone();
 
-    let mut ex = Executor::with_events(sink.clone());
+    let ex = Executor::with_events(sink.clone());
     ex.providers.register(Arc::new(
         MockProvider::new("mock")
             .with_chunk_delay(Duration::from_millis(200))

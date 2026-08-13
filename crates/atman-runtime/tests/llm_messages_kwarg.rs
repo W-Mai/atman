@@ -14,7 +14,7 @@ async fn llm_accepts_messages_kwarg_from_message_nodes() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("got it".into())),
     ));
@@ -33,7 +33,7 @@ async fn llm_system_kwarg_flows_through_to_provider() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("k".into())),
     ));
@@ -52,7 +52,7 @@ async fn llm_rejects_both_prompt_and_messages_together() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("x".into())),
     ));
@@ -67,7 +67,7 @@ async fn llm_requires_prompt_or_messages() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("x".into())),
     ));

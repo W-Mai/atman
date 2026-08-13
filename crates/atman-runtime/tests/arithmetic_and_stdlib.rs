@@ -3,8 +3,8 @@ use atman_runtime::{Executor, Value, tools};
 
 async fn run(src: &str) -> Value {
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     ex.run(&file, "start", vec![]).await.unwrap()
 }
 
@@ -84,8 +84,8 @@ flow start() -> int {
 "#,
     )
     .unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let err = ex.run(&file, "start", vec![]).await.unwrap_err();
     assert!(format!("{err}").contains("div by zero"));
 }

@@ -16,8 +16,8 @@ async fn pipe_prepends_lhs_as_first_positional_arg() {
         f.display()
     );
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(&src).unwrap();
     let val = ex.run(&file, "t", vec![]).await.expect("flow ok");
     match val {
@@ -33,8 +33,8 @@ async fn pipe_chains_left_to_right() {
     return result
 }
 "#;
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(src).unwrap();
     let val = ex.run(&file, "t", vec![]).await.expect("flow ok");
     match val {
@@ -50,8 +50,8 @@ async fn pipe_with_extra_args_appends_after_lhs() {
     return out
 }
 "#;
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let file = parse_file(src).unwrap();
     let val = ex.run(&file, "t", vec![]).await.expect("flow ok");
     let list = match val {

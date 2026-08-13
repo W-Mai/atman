@@ -20,7 +20,7 @@ async fn watch_token_abort_stops_flow_when_forbidden_pattern_appears() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers
         .register(Arc::new(MockProvider::new("mock").with_model(
             "mock-model",
@@ -50,7 +50,7 @@ async fn watch_token_does_not_fire_on_clean_output() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers
         .register(Arc::new(MockProvider::new("mock").with_model(
             "mock-model",

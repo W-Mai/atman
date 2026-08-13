@@ -20,7 +20,7 @@ async fn context_truncated_event_emitted_when_prompt_exceeds_budget() {
     );
 
     let sink = EventSink::new();
-    let mut ex = Executor::with_events(sink.clone());
+    let ex = Executor::with_events(sink.clone());
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_fallback(Value::Str("ok".into())),
     ));
@@ -65,7 +65,7 @@ async fn context_truncated_event_not_emitted_when_prompt_under_budget() {
 }
 "#;
     let sink = EventSink::new();
-    let mut ex = Executor::with_events(sink.clone());
+    let ex = Executor::with_events(sink.clone());
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_fallback(Value::Str("ok".into())),
     ));

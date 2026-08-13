@@ -40,7 +40,7 @@ flow explore_module(question: string, dir: string) -> Finding {
 "#;
 
     let file = parse_file(FLOW).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
 
     let finding = Value::Struct(vec![
         ("module".into(), Value::Str("src".into())),

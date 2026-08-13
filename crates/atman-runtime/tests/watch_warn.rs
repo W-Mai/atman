@@ -22,7 +22,7 @@ async fn watch_token_warn_emits_event_and_stream_completes() {
 "#;
     let file = parse_file(src).unwrap();
     let sink = EventSink::new();
-    let mut ex = Executor::with_events(sink.clone());
+    let ex = Executor::with_events(sink.clone());
     ex.providers
         .register(Arc::new(MockProvider::new("mock").with_model(
             "mock-model",
@@ -65,7 +65,7 @@ async fn watch_warn_fires_once_per_pattern_even_on_repeats() {
 "#;
     let file = parse_file(src).unwrap();
     let sink = EventSink::new();
-    let mut ex = Executor::with_events(sink.clone());
+    let ex = Executor::with_events(sink.clone());
     ex.providers.register(Arc::new(
         MockProvider::new("mock")
             .with_model("mock-model", Value::Str("warn me warn me warn me".into())),

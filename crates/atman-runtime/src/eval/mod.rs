@@ -2454,13 +2454,13 @@ mod tests {
             });
         }
 
-        let mut providers = crate::provider::ProviderRegistry::new();
+        let providers = crate::provider::ProviderRegistry::new();
         providers.register(Arc::new(MockProvider::new("mock").with_model(
             "mock",
             Value::Struct(vec![("severity".into(), Value::Str("info".into()))]),
         )));
-        let mut tools = ToolRegistry::new();
-        crate::tools::register_tier_zero(&mut tools);
+        let tools = ToolRegistry::new();
+        crate::tools::register_tier_zero(&tools);
         let tool_ctx = ToolCtx::new()
             .with_providers(std::sync::Arc::new(providers.clone()))
             .with_registry(std::sync::Arc::new(tools.clone()));

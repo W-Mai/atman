@@ -12,8 +12,8 @@ async fn llm_chunks_flow_from_provider_to_session_stream() {
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let mut rx = session.stream_subscribe();
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     ex.providers.register(Arc::new(
         MockProvider::new("mock")
             .with_fallback(Value::Str("hi from mock".into()))
@@ -59,8 +59,8 @@ async fn tool_use_frames_wrap_dispatch() {
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let mut rx = session.stream_subscribe();
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
 
     let src = r#"flow t() -> int {
     n = len([1, 2, 3])
@@ -97,8 +97,8 @@ async fn zero_subscribers_makes_stream_send_a_noop() {
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
 
     let src = r#"flow t() -> int {
     return len([1, 2, 3])

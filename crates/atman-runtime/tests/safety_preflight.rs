@@ -40,7 +40,7 @@ flow t(prompt: string) -> string {
 }
 
 async fn run(safety: SafetyConfig, sink: EventSink) -> Result<Value, RuntimeError> {
-    let mut ex = Executor::with_events(sink).with_safety(safety);
+    let ex = Executor::with_events(sink).with_safety(safety);
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_fallback(Value::Str("ok".into())),
     ));
@@ -264,7 +264,7 @@ flow t(prompt: string) -> string {
     let provider = Arc::new(RewriteProvider {
         calls: AtomicUsize::new(0),
     });
-    let mut ex = Executor::with_events(sink.clone()).with_safety(cfg);
+    let ex = Executor::with_events(sink.clone()).with_safety(cfg);
     ex.providers.register(provider.clone());
     let file = parse_file(src).unwrap();
     let out = ex

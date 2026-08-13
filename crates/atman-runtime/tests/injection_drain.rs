@@ -100,7 +100,7 @@ async fn pending_injection_appears_in_next_llm_request_messages() {
         .unwrap();
 
     let calls: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut executor = Executor::new();
+    let executor = Executor::new();
     executor.providers.register(Arc::new(RecordingProvider {
         name: "prov".into(),
         calls: calls.clone(),
@@ -143,7 +143,7 @@ async fn no_pending_injection_yields_bare_user_message() {
     session.begin_turn(user_msg(turn_id.clone(), "start"));
 
     let calls: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut executor = Executor::new();
+    let executor = Executor::new();
     executor.providers.register(Arc::new(RecordingProvider {
         name: "prov".into(),
         calls: calls.clone(),
@@ -176,7 +176,7 @@ async fn injection_drained_once_not_reused_by_next_node() {
     session.enqueue_injection("one-shot nudge").unwrap();
 
     let calls: Arc<Mutex<Vec<Vec<Message>>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut executor = Executor::new();
+    let executor = Executor::new();
     executor.providers.register(Arc::new(RecordingProvider {
         name: "prov".into(),
         calls: calls.clone(),

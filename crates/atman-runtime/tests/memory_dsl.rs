@@ -23,9 +23,9 @@ async fn memory_confess_persists_via_dsl_call() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     tools::register_memory(
-        &mut ex.tools,
+        &ex.tools,
         Arc::new(TodoStore::at(dir.path())),
         store.clone(),
         Arc::new(atman_runtime::memory::GoalStore::at(dir.path())),
@@ -56,9 +56,9 @@ async fn memory_todo_set_and_done_via_dsl() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     tools::register_memory(
-        &mut ex.tools,
+        &ex.tools,
         todo_store.clone(),
         confession_store,
         Arc::new(atman_runtime::memory::GoalStore::at(dir.path())),
@@ -102,9 +102,9 @@ async fn memory_fetch_confessions_returns_registered_entries() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     tools::register_memory(
-        &mut ex.tools,
+        &ex.tools,
         Arc::new(TodoStore::at(dir.path())),
         store,
         Arc::new(atman_runtime::memory::GoalStore::at(dir.path())),

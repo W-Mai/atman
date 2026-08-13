@@ -15,7 +15,7 @@ async fn llm_call_event_records_wallclock_and_tokens() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock-model", Value::Str("response text".into())),
     ));
@@ -55,7 +55,7 @@ async fn llm_call_event_records_retry_attempts() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("flaky").with_fallback(Value::Str("unreachable".into())),
     ));

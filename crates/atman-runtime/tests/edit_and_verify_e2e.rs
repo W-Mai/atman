@@ -64,8 +64,8 @@ async fn edit_and_verify_reverts_file_when_check_fails() {
 
     let file = parse_file(EDIT_FLOW).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
     );
@@ -134,8 +134,8 @@ async fn fix_until_test_passes_iterates_until_bash_check_passes() {
 
     let file = parse_file(FIX_LOOP_FLOW).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
     );
@@ -177,8 +177,8 @@ async fn fix_until_test_passes_returns_gave_up_after_max_iters() {
 
     let file = parse_file(FIX_LOOP_FLOW).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
     );
@@ -217,8 +217,8 @@ async fn edit_and_verify_keeps_edit_when_check_passes() {
 
     let file = parse_file(EDIT_FLOW).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
     );

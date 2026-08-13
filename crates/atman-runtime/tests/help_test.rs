@@ -4,8 +4,8 @@ use atman_runtime::tool::{ToolCtx, ToolRegistry};
 use atman_runtime::tools;
 
 fn ctx_with_tools() -> ToolCtx {
-    let mut reg = ToolRegistry::new();
-    tools::register_tier_zero(&mut reg);
+    let reg = ToolRegistry::new();
+    tools::register_tier_zero(&reg);
     ToolCtx {
         registry: Some(std::sync::Arc::new(reg)),
         ..Default::default()

@@ -22,8 +22,8 @@ const SIMPLE_FLOW: &str = r#"flow t(n: Int) -> Int {
 async fn root_flow_run_registered_in_flow_registry() {
     let file = parse_file(SIMPLE_FLOW).unwrap();
     let session = Arc::new(Session::open_ephemeral());
-    let mut ex = Executor::with_events(session.sink().clone());
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&ex.tools);
 
     let out = ex
         .run_in_turn(
@@ -51,8 +51,8 @@ async fn root_flow_run_registered_in_flow_registry() {
 async fn current_root_cleared_and_reset_across_turns() {
     let file = parse_file(SIMPLE_FLOW).unwrap();
     let session = Arc::new(Session::open_ephemeral());
-    let mut ex = Executor::with_events(session.sink().clone());
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&ex.tools);
 
     // Turn 1
     ex.run_in_turn(
@@ -85,8 +85,8 @@ async fn current_root_cleared_and_reset_across_turns() {
 async fn no_session_no_root_registration() {
     // Ephemeral runs without a session should not register root.
     let file = parse_file(SIMPLE_FLOW).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
 
     let out = ex
         .run(&file, "t", vec![("n".into(), Value::Int(4))])
@@ -155,12 +155,12 @@ flow test_flow(goal: string) -> string {
     }
 
     let registry = Arc::new(FlowRegistry::new());
-    let mut providers = atman_runtime::provider::ProviderRegistry::new();
+    let providers = atman_runtime::provider::ProviderRegistry::new();
     providers.register(Arc::new(
         MockProvider::new("mock").with_fallback(atman_runtime::Value::Str("ok".into())),
     ));
-    let mut tools = ToolRegistry::new();
-    atman_runtime::tools::register_tier_zero(&mut tools);
+    let tools = ToolRegistry::new();
+    atman_runtime::tools::register_tier_zero(&tools);
 
     let ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
@@ -267,14 +267,14 @@ flow test_flow(goal: string) -> string {
             discovered: false,
         },
     )]);
-    let mut providers = atman_runtime::provider::ProviderRegistry::new();
+    let providers = atman_runtime::provider::ProviderRegistry::new();
     providers.register(Arc::new(
         MockProvider::new("mock")
             .with_fallback(Value::Str("done".into()))
             .with_chunk_delay(std::time::Duration::from_millis(50)),
     ));
-    let mut tools = ToolRegistry::new();
-    atman_runtime::tools::register_tier_zero(&mut tools);
+    let tools = ToolRegistry::new();
+    atman_runtime::tools::register_tier_zero(&tools);
 
     let (stream_tx, _) = tokio::sync::broadcast::channel::<atman_runtime::stream::StreamFrame>(256);
     let ctx = ToolCtx::new()

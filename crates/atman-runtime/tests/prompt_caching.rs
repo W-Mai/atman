@@ -115,7 +115,7 @@ async fn cache_kwarg_flows_from_dsl_to_provider() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         AnthropicProvider::new("anthropic", "test-key").with_base_url(server.uri()),
     ));

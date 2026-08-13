@@ -125,7 +125,7 @@ fn build_long_history(session: &Session, msg_count: usize) {
 
 fn run_with(provider: Arc<ScriptedProvider>, src: &str) -> (Result<Value, RuntimeError>, usize) {
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     let counter = provider.clone();
     ex.providers.register(provider);
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -356,7 +356,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
 "#,
     )
     .unwrap();
-    let mut ex = Executor::with_events(session.sink().clone());
+    let ex = Executor::with_events(session.sink().clone());
     ex.providers.register(provider.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let turn_id = atman_runtime::event::TurnId::now();
@@ -390,7 +390,7 @@ fn retry_classified_unknown_kind_fails_parse_time() {
 "#,
     )
     .unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("m").with_model("m", Value::Str("unused".into())),
     ));

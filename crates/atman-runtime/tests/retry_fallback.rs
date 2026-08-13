@@ -104,7 +104,7 @@ async fn retry_recovers_after_flakes() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers
         .register(Arc::new(FlakyProvider::new("flaky", 2, "ok")));
     let out = ex.run(&file, "t", vec![]).await.unwrap();
@@ -123,7 +123,7 @@ async fn retry_exhausted_falls_back_to_alternate_llm() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers
         .register(Arc::new(FlakyProvider::new("flaky", 5, "unreachable")));
     let err = ex.run(&file, "t", vec![]).await.unwrap_err();
@@ -142,7 +142,7 @@ async fn retry_exhausted_without_fallback_returns_err() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers
         .register(Arc::new(FlakyProvider::new("flaky", 5, "x")));
     let err = ex.run(&file, "t", vec![]).await.unwrap_err();

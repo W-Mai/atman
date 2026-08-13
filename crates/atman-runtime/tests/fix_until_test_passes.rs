@@ -22,8 +22,8 @@ async fn passes_immediately_on_first_iter_when_test_exits_zero() {
     );
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
     );
@@ -48,8 +48,8 @@ async fn gives_up_after_max_iters_when_test_never_passes() {
     );
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
     );
@@ -81,8 +81,8 @@ async fn recovers_after_two_failures_then_passes() {
     );
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
     );
@@ -108,8 +108,8 @@ async fn on_giveup_runs_when_max_iters_exhausted() {
     );
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
     );
@@ -135,8 +135,8 @@ async fn iter_and_iters_variables_available_in_edit_and_giveup_scopes() {
     );
     let file = parse_file(&src).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
     ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
         std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
     );

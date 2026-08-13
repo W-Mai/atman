@@ -15,9 +15,9 @@ async fn term_spawn_in_flow_emits_terminal_chunk_to_stream() {
 "#;
     let file = parse_file(src).unwrap();
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    let bg = tools::register_bash_bg(&mut ex.tools);
-    let term_reg = tools::register_terminal(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
+    let bg = tools::register_bash_bg(&ex.tools);
+    let term_reg = tools::register_terminal(&ex.tools);
     let dir = std::env::temp_dir().join(format!("atman_term_tui_test_{}", uuid::Uuid::now_v7()));
     ex.tool_ctx = ex
         .tool_ctx

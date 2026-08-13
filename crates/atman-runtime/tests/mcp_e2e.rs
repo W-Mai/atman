@@ -47,7 +47,7 @@ for line in sys.stdin:
 async fn mcp_server_discovers_tools_and_calls_them_via_registry() {
     let dir = tempfile::tempdir().unwrap();
     let script = write_script(dir.path(), "mock_mcp.py", MOCK_SERVER);
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     let cfg = McpServerConfig::stdio(
         "demo",
         "python3",
@@ -55,7 +55,7 @@ async fn mcp_server_discovers_tools_and_calls_them_via_registry() {
         Tier::Three,
         5000,
     );
-    let statuses = register_from_configs(&mut reg, &[cfg]).await;
+    let statuses = register_from_configs(&reg, &[cfg]).await;
     assert_eq!(statuses.len(), 1);
     let Ok(status) = &statuses[0] else {
         panic!("expected boot ok, got: {statuses:?}");
@@ -91,7 +91,7 @@ async fn mcp_server_discovers_tools_and_calls_them_via_registry() {
 
 #[tokio::test]
 async fn mcp_boot_error_when_command_missing_returns_err_but_does_not_panic() {
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     let cfg = McpServerConfig::stdio(
         "missing",
         "/no/such/binary/at/all",
@@ -99,7 +99,7 @@ async fn mcp_boot_error_when_command_missing_returns_err_but_does_not_panic() {
         Tier::Three,
         500,
     );
-    let statuses = register_from_configs(&mut reg, &[cfg]).await;
+    let statuses = register_from_configs(&reg, &[cfg]).await;
     assert_eq!(statuses.len(), 1);
     assert!(
         statuses[0].is_err(),
@@ -116,9 +116,9 @@ async fn mcp_boot_error_when_command_missing_returns_err_but_does_not_panic() {
 async fn mcp_qualified_tool_name_is_mcp_dot_server_dot_tool() {
     let dir = tempfile::tempdir().unwrap();
     let script = write_script(dir.path(), "mock_mcp2.py", MOCK_SERVER);
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     register_from_configs(
-        &mut reg,
+        &reg,
         &[McpServerConfig::stdio(
             "srv-a",
             "python3",
@@ -137,9 +137,9 @@ async fn mcp_two_servers_register_under_distinct_namespaces() {
     let dir = tempfile::tempdir().unwrap();
     let s1 = write_script(dir.path(), "mock_a.py", MOCK_SERVER);
     let s2 = write_script(dir.path(), "mock_b.py", MOCK_SERVER);
-    let mut reg = ToolRegistry::new();
+    let reg = ToolRegistry::new();
     let statuses = register_from_configs(
-        &mut reg,
+        &reg,
         &[
             McpServerConfig::stdio(
                 "a",

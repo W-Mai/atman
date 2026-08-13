@@ -9,9 +9,9 @@ async fn spec_workflow_from_status_through_update_to_deviate() {
     let dir = tempfile::tempdir().unwrap();
     let spec_store = Arc::new(SpecStore::new(dir.path().to_path_buf()));
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    tools::register_spec_memory(&mut ex.tools, spec_store.clone());
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
+    tools::register_spec_memory(&ex.tools, spec_store.clone());
 
     let src = r#"
 flow init(feature: string) -> string {
@@ -107,9 +107,9 @@ flow full_status(feature: string) -> int {
 async fn spec_workflow_phase_gate_rejects_skip_from_flow() {
     let dir = tempfile::tempdir().unwrap();
     let spec_store = Arc::new(SpecStore::new(dir.path().to_path_buf()));
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
-    tools::register_spec_memory(&mut ex.tools, spec_store);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
+    tools::register_spec_memory(&ex.tools, spec_store);
 
     let src = r#"flow skip() -> string {
     r = memory.spec.update(feature: "x", phase: "implementation", content: "premature")

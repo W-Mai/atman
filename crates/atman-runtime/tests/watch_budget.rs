@@ -21,7 +21,7 @@ async fn watch_tokens_consumed_aborts_when_exceeded() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers
         .register(Arc::new(MockProvider::new("mock").with_model(
             "mock-model",
@@ -53,7 +53,7 @@ async fn watch_elapsed_aborts_slow_stream() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock")
             .with_model(
@@ -86,7 +86,7 @@ async fn watch_tokens_consumed_does_not_fire_when_under_budget() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock-model", Value::Str("short reply".into())),
     ));

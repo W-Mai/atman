@@ -23,8 +23,8 @@ pub struct Executor {
 
 impl Executor {
     pub fn new() -> Self {
-        let mut tools = ToolRegistry::new();
-        crate::tools::register_tier_zero(&mut tools);
+        let tools = ToolRegistry::new();
+        crate::tools::register_tier_zero(&tools);
         Self {
             tools,
             providers: ProviderRegistry::new(),
@@ -36,8 +36,8 @@ impl Executor {
     }
 
     pub fn with_events(events: EventSink) -> Self {
-        let mut tools = ToolRegistry::new();
-        crate::tools::register_tier_zero(&mut tools);
+        let tools = ToolRegistry::new();
+        crate::tools::register_tier_zero(&tools);
         Self {
             tools,
             providers: ProviderRegistry::new(),

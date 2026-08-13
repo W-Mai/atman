@@ -4,8 +4,8 @@ use atman_runtime::value::Value;
 
 fn run(src: &str) -> Value {
     let parsed = parse_file(src).expect("parse");
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(ex.run(&parsed, "test", vec![]))
         .expect("flow failed")
@@ -13,8 +13,8 @@ fn run(src: &str) -> Value {
 
 fn run_result(src: &str) -> Result<Value, atman_runtime::error::RuntimeError> {
     let parsed = parse_file(src).expect("parse");
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(ex.run(&parsed, "test", vec![]))
 }

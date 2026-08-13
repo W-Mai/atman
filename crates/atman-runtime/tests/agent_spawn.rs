@@ -79,7 +79,7 @@ fn spawn_test_setup(
     let tools = ToolRegistry::new();
     tools.register(Arc::new(AgentSpawn));
     tools.register(Arc::new(atman_runtime::tools::llm_call::LlmCallTool));
-    let mut providers = ProviderRegistry::new();
+    let providers = ProviderRegistry::new();
     if with_provider {
         providers.register(Arc::new(
             MockProvider::new("mock").with_fallback(Value::Str("ok — sub-agent completed".into())),

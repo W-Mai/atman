@@ -29,11 +29,11 @@ pub mod test;
 pub mod tool_output;
 pub mod web;
 
-pub fn register_tier_zero(reg: &mut ToolRegistry) {
+pub fn register_tier_zero(reg: &ToolRegistry) {
     register_tier_zero_with_rules(reg, memory_stubs::FetchRule::new());
 }
 
-pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_stubs::FetchRule) {
+pub fn register_tier_zero_with_rules(reg: &ToolRegistry, fetch_rule: memory_stubs::FetchRule) {
     reg.register(Arc::new(fs::FsRead));
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(fs::FsWrite));
@@ -87,14 +87,14 @@ pub fn register_tier_zero_with_rules(reg: &mut ToolRegistry, fetch_rule: memory_
     reg.register(Arc::new(llm_generate_branches::LlmGenerateBranchesTool));
 }
 
-pub fn register_git_ops(reg: &mut ToolRegistry) {
+pub fn register_git_ops(reg: &ToolRegistry) {
     reg.register(Arc::new(git_ops::GitAdd));
     reg.register(Arc::new(git_ops::GitCommit));
     reg.register(Arc::new(git_ops::GitBranch));
     reg.register(Arc::new(git_ops::GitPush));
 }
 
-pub fn register_watch(reg: &mut ToolRegistry) {
+pub fn register_watch(reg: &ToolRegistry) {
     reg.register(Arc::new(crate::watch::Watch));
     reg.register(Arc::new(crate::watch::WatcherList));
     reg.register(Arc::new(crate::watch::WatcherUnwatch));
@@ -102,7 +102,7 @@ pub fn register_watch(reg: &mut ToolRegistry) {
     reg.register(Arc::new(crate::watch::HasPendingInjections));
 }
 
-pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {
+pub fn register_bash_bg(reg: &ToolRegistry) -> Arc<bash_bg::BgRegistry> {
     let registry = Arc::new(bash_bg::BgRegistry::new());
     reg.register(Arc::new(bash_bg::BashSpawn));
     reg.register(Arc::new(bash_bg::BashStatus));
@@ -113,7 +113,7 @@ pub fn register_bash_bg(reg: &mut ToolRegistry) -> Arc<bash_bg::BgRegistry> {
 }
 
 pub fn register_bash_bg_with_task_registry(
-    reg: &mut ToolRegistry,
+    reg: &ToolRegistry,
     task_registry: crate::task_registry::TaskRegistry,
 ) -> Arc<bash_bg::BgRegistry> {
     let registry = Arc::new(bash_bg::BgRegistry::new().with_task_registry(task_registry));
@@ -125,17 +125,17 @@ pub fn register_bash_bg_with_task_registry(
     registry
 }
 
-pub fn register_web(reg: &mut ToolRegistry, config: web::WebConfig) {
+pub fn register_web(reg: &ToolRegistry, config: web::WebConfig) {
     reg.register(Arc::new(web::WebFetch::new(config)));
 }
 
-pub fn register_web_search(reg: &mut ToolRegistry, config: &web::SearchConfig) {
+pub fn register_web_search(reg: &ToolRegistry, config: &web::SearchConfig) {
     if let Some(provider) = web::build_search_provider(config) {
         reg.register(Arc::new(web::WebSearch::new(provider)));
     }
 }
 
-pub fn register_terminal(reg: &mut ToolRegistry) -> Arc<term::TermRegistry> {
+pub fn register_terminal(reg: &ToolRegistry) -> Arc<term::TermRegistry> {
     let registry = Arc::new(term::TermRegistry::new());
     reg.register(Arc::new(term::TermSpawn));
     reg.register(Arc::new(term::TermInput));
@@ -148,7 +148,7 @@ pub fn register_terminal(reg: &mut ToolRegistry) -> Arc<term::TermRegistry> {
 }
 
 pub fn register_terminal_with_task_registry(
-    reg: &mut ToolRegistry,
+    reg: &ToolRegistry,
     task_registry: crate::task_registry::TaskRegistry,
 ) -> Arc<term::TermRegistry> {
     let registry = Arc::new(term::TermRegistry::new().with_task_registry(task_registry));
@@ -162,12 +162,12 @@ pub fn register_terminal_with_task_registry(
     registry
 }
 
-pub fn register_preview(reg: &mut ToolRegistry, config: preview::PreviewConfig) {
+pub fn register_preview(reg: &ToolRegistry, config: preview::PreviewConfig) {
     reg.register(Arc::new(preview::PreviewPush::new(config)));
 }
 
 pub fn register_memory(
-    reg: &mut ToolRegistry,
+    reg: &ToolRegistry,
     todo_store: Arc<crate::memory::todo::TodoStore>,
     confession_store: Arc<crate::memory::confession::ConfessionStore>,
     goal_store: Arc<crate::memory::goal::GoalStore>,
@@ -212,10 +212,7 @@ pub fn register_memory(
     reg.register(Arc::new(plan::PlanTick { store: plan_store }));
 }
 
-pub fn register_spec_memory(
-    reg: &mut ToolRegistry,
-    spec_store: Arc<crate::memory::spec::SpecStore>,
-) {
+pub fn register_spec_memory(reg: &ToolRegistry, spec_store: Arc<crate::memory::spec::SpecStore>) {
     reg.register(Arc::new(memory::MemorySpecStatus {
         store: spec_store.clone(),
     }));

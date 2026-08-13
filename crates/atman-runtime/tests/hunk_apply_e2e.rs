@@ -29,8 +29,8 @@ async fn hunk_all_writes_full_proposed() {
     std::fs::write(&path, "a\nb\nc\n").unwrap();
 
     let file = parse_file(base_flow()).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let out = ex
         .run(
             &file,
@@ -57,8 +57,8 @@ async fn hunk_none_leaves_file_original() {
     std::fs::write(&path, "a\nb\nc\n").unwrap();
 
     let file = parse_file(base_flow()).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     ex.run(
         &file,
         "apply_none",
@@ -83,8 +83,8 @@ async fn hunk_list_selection_applies_only_id_1() {
     proposed = proposed.replace("l15\n", "L15\n");
 
     let file = parse_file(base_flow()).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     ex.run(
         &file,
         "apply_first_only",

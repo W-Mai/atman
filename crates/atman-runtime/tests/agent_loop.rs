@@ -170,8 +170,8 @@ async fn agent_flow_dispatches_tool_use_and_returns_final_text() {
     ]));
 
     let sink = EventSink::new();
-    let mut ex = Executor::with_events(sink.clone());
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::with_events(sink.clone());
+    tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
     let file = parse_file(agent_source()).unwrap();
     let result = ex
@@ -236,8 +236,8 @@ async fn agent_flow_hits_max_iterations_when_llm_keeps_calling_tools() {
             .collect(),
     ));
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
     let file = parse_file(agent_source()).unwrap();
     let result = ex

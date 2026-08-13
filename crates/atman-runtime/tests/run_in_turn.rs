@@ -23,7 +23,7 @@ async fn run_in_turn_appends_assistant_message_to_session() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut executor = Executor::new();
+    let executor = Executor::new();
     executor.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("hello world".into())),
     ));
@@ -61,7 +61,7 @@ async fn run_without_turn_does_not_touch_session() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut executor = Executor::new();
+    let executor = Executor::new();
     executor.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("no session".into())),
     ));
@@ -77,7 +77,7 @@ async fn assistant_msg_event_carries_flow_run_id() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut executor = Executor::new();
+    let executor = Executor::new();
     executor.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("ok".into())),
     ));

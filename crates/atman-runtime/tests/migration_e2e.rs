@@ -28,8 +28,8 @@ async fn fetch_rule_returns_migrated_project_agents_md_content() {
     fetch_rule.set_migrated(scanned).await;
     assert_eq!(fetch_rule.migrated_count().await, 1);
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero_with_rules(&mut ex.tools, fetch_rule);
+    let ex = Executor::new();
+    tools::register_tier_zero_with_rules(&ex.tools, fetch_rule);
 
     let file =
         parse_file(r#"flow ask() -> string { return fetch_rule("project-rules") }"#).unwrap();
@@ -61,8 +61,8 @@ async fn fetch_rule_prefers_project_rule_over_global_when_names_collide() {
 
     let fetch_rule = FetchRule::new();
     fetch_rule.set_migrated(rules).await;
-    let mut ex = Executor::new();
-    tools::register_tier_zero_with_rules(&mut ex.tools, fetch_rule);
+    let ex = Executor::new();
+    tools::register_tier_zero_with_rules(&ex.tools, fetch_rule);
 
     let file = parse_file(r#"flow ask() -> string { return fetch_rule("code-review") }"#).unwrap();
     let out = ex.run(&file, "ask", vec![]).await.unwrap();
@@ -93,9 +93,9 @@ async fn fetch_rule_at_tool_syntax_selects_specific_source() {
     let fetch_rule = FetchRule::new();
     fetch_rule.set_migrated(rules).await;
 
-    let mut ex = Executor::new();
+    let ex = Executor::new();
     tools::register_tier_zero_with_rules(
-        &mut ex.tools,
+        &ex.tools,
         Arc::try_unwrap(Arc::new(fetch_rule)).ok().unwrap(),
     );
 
@@ -108,8 +108,8 @@ async fn fetch_rule_at_tool_syntax_selects_specific_source() {
 #[tokio::test]
 async fn fetch_rule_returns_empty_string_when_migrated_rule_missing() {
     let fetch_rule = FetchRule::new();
-    let mut ex = Executor::new();
-    tools::register_tier_zero_with_rules(&mut ex.tools, fetch_rule);
+    let ex = Executor::new();
+    tools::register_tier_zero_with_rules(&ex.tools, fetch_rule);
     let file =
         parse_file(r#"flow ask() -> string { return fetch_rule("does-not-exist") }"#).unwrap();
     let out = ex.run(&file, "ask", vec![]).await.unwrap();

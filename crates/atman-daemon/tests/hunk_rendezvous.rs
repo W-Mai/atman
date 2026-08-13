@@ -15,7 +15,7 @@ async fn hunk_review_reuses_daemon_rendezvous_when_resolver_present() {
     std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
 
     let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    tools::register_tier_zero(&ex.tools);
     ex.tool_ctx.prompt_resolver = Some(Arc::new(DaemonPromptResolver {
         state: daemon_state.clone(),
         sink: atman_runtime::event::EventSink::new(),
@@ -77,8 +77,8 @@ async fn hunk_review_falls_back_to_auto_when_no_resolver() {
     let file_path = tmp.path().join("in.txt");
     std::fs::write(&file_path, "a\nb\nc\n").unwrap();
 
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
 
     let src = format!(
         r#"flow t() -> string {{

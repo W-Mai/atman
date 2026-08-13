@@ -282,8 +282,8 @@ mod tests {
     use atman_dsl::parse::parse_file;
 
     fn registry_with_fs() -> ToolRegistry {
-        let mut reg = ToolRegistry::new();
-        tools::register_tier_zero(&mut reg);
+        let reg = ToolRegistry::new();
+        tools::register_tier_zero(&reg);
         reg
     }
 

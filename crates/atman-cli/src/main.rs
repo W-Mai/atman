@@ -1889,6 +1889,59 @@ async fn cmd_repl_once(
                                     &name, &base_url,
                                 );
                             }
+                            // Register provider instance in ProviderRegistry at runtime
+                            let provider_key = format!("config:{name}");
+                            let resolved_key = if !api_key.is_empty() {
+                                api_key.clone()
+                            } else if !api_key_env.is_empty() {
+                                std::env::var(&api_key_env).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            let resolved_url = if !base_url.is_empty() {
+                                base_url.clone()
+                            } else {
+                                match provider_type.as_str() {
+                                    "openai" | "openai-compat" => {
+                                        std::env::var("OPENAI_BASE_URL").unwrap_or_default()
+                                    }
+                                    "anthropic" => {
+                                        std::env::var("ANTHROPIC_BASE_URL").unwrap_or_default()
+                                    }
+                                    _ => String::new(),
+                                }
+                            };
+                            match provider_type.as_str() {
+                                "anthropic" => {
+                                    let mut p =
+                                        atman_runtime::providers::anthropic::AnthropicProvider::new(
+                                            &provider_key,
+                                            &resolved_key,
+                                        );
+                                    if !resolved_url.is_empty() {
+                                        p = p.with_base_url(&resolved_url);
+                                    }
+                                    if let Some(mt) = max_tokens {
+                                        p = p.with_max_tokens(mt);
+                                    }
+                                    executor_for_ctrl.providers.register(std::sync::Arc::new(p));
+                                }
+                                "openai" | "openai-compat" => {
+                                    let mut p =
+                                        atman_runtime::providers::openai::OpenAiProvider::new(
+                                            &provider_key,
+                                            &resolved_key,
+                                        );
+                                    if !resolved_url.is_empty() {
+                                        p = p.with_base_url(&resolved_url);
+                                    }
+                                    if let Some(mt) = max_tokens {
+                                        p = p.with_max_tokens(mt);
+                                    }
+                                    executor_for_ctrl.providers.register(std::sync::Arc::new(p));
+                                }
+                                _ => {}
+                            }
                             let _ = cmd_tx_for_models
                                 .send(atman_tui::TuiCommand::ProviderModelsUpdated);
                             atman_runtime::notify!(success, "Provider \"{name}\" added");
@@ -2018,9 +2071,9 @@ async fn cmd_repl_once(
                                 });
                                 return;
                             };
-                            let mut probe = atman_runtime::ToolRegistry::new();
+                            let probe = atman_runtime::ToolRegistry::new();
                             let results =
-                                atman_runtime::mcp::register_from_configs(&mut probe, &[cfg]).await;
+                                atman_runtime::mcp::register_from_configs(&probe, &[cfg]).await;
                             let (msg, ok) = match &results[0] {
                                 Ok(s) => (format!("{} tools discovered", s.tool_count), true),
                                 Err(e) => (e.error.to_string(), false),
@@ -5507,9 +5560,9 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
     if mcp_configs.is_empty() {
         println!("  (none configured — add [[mcp]] blocks to config.toml)");
     } else {
-        let mut probe_registry = atman_runtime::ToolRegistry::new();
+        let probe_registry = atman_runtime::ToolRegistry::new();
         let statuses =
-            atman_runtime::mcp::register_from_configs(&mut probe_registry, &mcp_configs).await;
+            atman_runtime::mcp::register_from_configs(&probe_registry, &mcp_configs).await;
         for (cfg, status) in mcp_configs.iter().zip(statuses.iter()) {
             let source = match cfg.transport {
                 atman_runtime::mcp::TransportKind::Stdio => {
@@ -5962,8 +6015,8 @@ async fn cmd_flow_test(path: &Path, bless: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut ex = atman_runtime::Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = atman_runtime::Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(std::sync::Arc::new(
         atman_runtime::providers::mock::MockProvider::new("mock")
             .with_fallback(atman_runtime::Value::Str("[mock reply]".into())),
@@ -6526,9 +6579,9 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
             };
             print!("Connecting to {}... ", name);
             std::io::stdout().flush()?;
-            let mut probe_registry = atman_runtime::ToolRegistry::new();
+            let probe_registry = atman_runtime::ToolRegistry::new();
             let statuses = atman_runtime::mcp::register_from_configs(
-                &mut probe_registry,
+                &probe_registry,
                 std::slice::from_ref(cfg),
             )
             .await;

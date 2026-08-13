@@ -86,8 +86,8 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
         .unwrap();
 
     let provider = mock_that_echoes_system();
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
@@ -121,8 +121,8 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
     GoalStore::at(session.dir()).set("stay minimal").unwrap();
 
     let provider = mock_that_echoes_system();
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
@@ -159,8 +159,8 @@ async fn no_goal_leaves_system_untouched() {
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     let provider = mock_that_echoes_system();
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
@@ -189,8 +189,8 @@ async fn goal_survives_multiple_turns_in_same_session() {
     GoalStore::at(session.dir()).set("persistent goal").unwrap();
 
     let provider = mock_that_echoes_system();
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
@@ -219,13 +219,13 @@ async fn dsl_goal_set_persists_to_disk() {
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
-    let mut ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    atman_runtime::tools::register_tier_zero(&ex.tools);
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));
     let plan = Arc::new(atman_runtime::memory::PlanStore::at(session.dir()));
-    atman_runtime::tools::register_memory(&mut ex.tools, todo, conf, goal.clone(), plan);
+    atman_runtime::tools::register_memory(&ex.tools, todo, conf, goal.clone(), plan);
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_fallback(Value::Str("ok".into())),
     ));

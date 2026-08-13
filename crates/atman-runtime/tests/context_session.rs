@@ -167,8 +167,8 @@ async fn context_session_feeds_session_history_into_llm_call() {
     ]));
 
     let session = std::sync::Arc::new(Session::open_ephemeral());
-    let mut ex = Executor::with_events(session.sink().clone());
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let file = parse_file(AGENT_CONTEXT_SESSION).unwrap();
@@ -280,8 +280,8 @@ async fn context_none_default_does_not_read_session_history() {
     }]]));
 
     let session = std::sync::Arc::new(Session::open_ephemeral());
-    let mut ex = Executor::with_events(session.sink().clone());
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let file = parse_file(AGENT_CONTEXT_NONE).unwrap();

@@ -8,15 +8,15 @@ use atman_runtime::{Executor, tools, validate};
 use tempfile::TempDir;
 
 fn build_executor_with_memory(dir: &TempDir) -> Executor {
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&mut ex.tools);
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
     let todo = Arc::new(TodoStore::at(dir.path()));
     let confession = Arc::new(ConfessionStore::at(dir.path()));
     let goal = Arc::new(atman_runtime::memory::GoalStore::at(dir.path()));
     let spec = Arc::new(SpecStore::new(dir.path().to_path_buf()));
     let plan = Arc::new(atman_runtime::memory::PlanStore::at(dir.path()));
-    tools::register_memory(&mut ex.tools, todo, confession, goal, plan);
-    tools::register_spec_memory(&mut ex.tools, spec);
+    tools::register_memory(&ex.tools, todo, confession, goal, plan);
+    tools::register_spec_memory(&ex.tools, spec);
     ex
 }
 

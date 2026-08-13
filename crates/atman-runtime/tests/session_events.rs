@@ -19,7 +19,7 @@ async fn session_writes_events_to_jsonl_file() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let mut ex = Executor::with_events(session.sink().clone());
+    let ex = Executor::with_events(session.sink().clone());
     ex.providers.register(Arc::new(
         MockProvider::new("mock").with_model("mock", Value::Str("ok".into())),
     ));
