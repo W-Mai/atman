@@ -298,7 +298,9 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                     node_id: ctx.current_node_id.clone(),
                 });
             }
-            if let Some(session) = ctx.session_runtime.as_ref() {
+            if let Some(session) = ctx.session_runtime.as_ref()
+                && !matches!(context_mode, ContextMode::None)
+            {
                 session.record_llm_call(
                     &model,
                     input_with_cache,
@@ -311,8 +313,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             }
             match outcome {
                 Ok(am) => {
-                    if let Some(session) = ctx.session_runtime.as_ref() {
-                        if !matches!(context_mode, ContextMode::None) && !has_messages_override {
+                    if let Some(session) = ctx.session_runtime.as_ref()
+                        && !matches!(context_mode, ContextMode::None)
+                    {
+                        if !has_messages_override {
                             drop(compact_guard.take());
                         }
                         let _append_compact_guard = session.acquire_compact_lock().await;

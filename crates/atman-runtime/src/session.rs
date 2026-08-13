@@ -1555,57 +1555,59 @@ impl AppendMessageCommand {
         let flow_run_id_str = self.flow_run_id.as_ref().map(|r| r.0.to_string());
         let msg =
             crate::tools::tool_output::maybe_truncate_tool_message(&self.msg, Some(&session.dir));
-        let event = match msg.role {
-            MessageRole::User => Event::UserMsg {
-                turn_id: msg.turn_id.clone(),
-                flow_run_id: self.flow_run_id.clone(),
-                message: msg.clone(),
-            },
-            MessageRole::Assistant => {
-                let _ = session
-                    .watch
-                    .stream_tx
-                    .send(crate::stream::StreamFrame::AssistantMsg {
-                        flow_run_id: flow_run_id_str.clone(),
-                        message: msg.clone(),
-                    });
-                for source in extract_mermaid_blocks(&msg) {
-                    let _ =
-                        session
-                            .watch
-                            .stream_tx
-                            .send(crate::stream::StreamFrame::MermaidDiagram {
-                                source: source.clone(),
-                            });
-                    session
-                        .sink
-                        .emit(crate::event::Event::MermaidDiagram { source });
-                }
-                Event::AssistantMsg {
+        let is_internal = msg.origin == crate::message::MessageOrigin::Internal;
+        let event =
+            match msg.role {
+                MessageRole::User => Event::UserMsg {
                     turn_id: msg.turn_id.clone(),
                     flow_run_id: self.flow_run_id.clone(),
                     message: msg.clone(),
-                }
-            }
-            MessageRole::Tool => {
-                let _ = session
-                    .watch
-                    .stream_tx
-                    .send(crate::stream::StreamFrame::ToolResultMsg {
-                        flow_run_id: flow_run_id_str.clone(),
+                },
+                MessageRole::Assistant => {
+                    if !is_internal {
+                        let _ = session.watch.stream_tx.send(
+                            crate::stream::StreamFrame::AssistantMsg {
+                                flow_run_id: flow_run_id_str.clone(),
+                                message: msg.clone(),
+                            },
+                        );
+                        for source in extract_mermaid_blocks(&msg) {
+                            let _ = session.watch.stream_tx.send(
+                                crate::stream::StreamFrame::MermaidDiagram {
+                                    source: source.clone(),
+                                },
+                            );
+                            session
+                                .sink
+                                .emit(crate::event::Event::MermaidDiagram { source });
+                        }
+                    }
+                    Event::AssistantMsg {
+                        turn_id: msg.turn_id.clone(),
+                        flow_run_id: self.flow_run_id.clone(),
                         message: msg.clone(),
-                    });
-                Event::ToolResultMsg {
-                    turn_id: msg.turn_id.clone(),
-                    flow_run_id: self.flow_run_id.clone(),
-                    message: msg.clone(),
+                    }
                 }
-            }
-            MessageRole::System => Event::SystemMsg {
-                turn_id: msg.turn_id.clone(),
-                message: msg.clone(),
-            },
-        };
+                MessageRole::Tool => {
+                    if !is_internal {
+                        let _ = session.watch.stream_tx.send(
+                            crate::stream::StreamFrame::ToolResultMsg {
+                                flow_run_id: flow_run_id_str.clone(),
+                                message: msg.clone(),
+                            },
+                        );
+                    }
+                    Event::ToolResultMsg {
+                        turn_id: msg.turn_id.clone(),
+                        flow_run_id: self.flow_run_id.clone(),
+                        message: msg.clone(),
+                    }
+                }
+                MessageRole::System => Event::SystemMsg {
+                    turn_id: msg.turn_id.clone(),
+                    message: msg.clone(),
+                },
+            };
         let seq = session.sink.emit_returning_seq(event);
         if matches!(msg.role, MessageRole::User) {
             let images: Vec<(usize, String)> = msg

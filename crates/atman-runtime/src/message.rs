@@ -11,6 +11,7 @@ pub enum MessageOrigin {
     User,
     Watcher,
     Interjection,
+    Internal,
 }
 
 fn is_default_origin(origin: &MessageOrigin) -> bool {
