@@ -123,10 +123,9 @@ pub struct ModalEntry {
 /// key event). `Some` means the key was consumed; `None` means it fell through.
 #[derive(Debug, Clone)]
 pub enum ModalAction {
-    /// Key consumed, no side effect beyond whatever the modal already did.
     Consumed,
-    /// The palette closed on Submit, carrying the picked entry to dispatch.
     Dispatched(crate::palette::PaletteEntryId),
+    OpenModelManager(String),
 }
 
 pub trait ModalOverlay {
@@ -298,7 +297,10 @@ impl ModalManager {
             }
             ModalKind::ProviderManager => {
                 if self.provider_manager.open {
-                    self.provider_manager.handle_key(action, tx);
+                    let pm_action = self.provider_manager.handle_key(action, tx);
+                    if let Some(ModalAction::OpenModelManager(name)) = pm_action {
+                        self.model_manager.open_with_provider(&name);
+                    }
                     if let Some(model) = self.provider_manager.open_alias_model.take() {
                         self.alias_manager.open_form_with_model(&model);
                     }

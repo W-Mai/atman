@@ -323,6 +323,45 @@ impl ModelInfo {
 // Known models table (supplements API discovery)
 
 pub use crate::known_models::{KNOWN_MODELS, lookup_known_model};
+/// Register preset models for a provider whose base_url matches a PROVIDER_PRESETS entry.
+/// Models are marked `discovered = true` so they survive `set_model_config` reloads
+/// but are never written to config.toml. User-defined models in config.toml take priority.
+pub fn register_preset_models_for(provider_name: &str, base_url: &str) {
+    for preset in PROVIDER_PRESETS {
+        if preset.base_url == base_url && !preset.models.is_empty() {
+            let entries: Vec<(String, ModelEntry)> = preset
+                .models
+                .iter()
+                .map(|m| {
+                    let name = m.id.to_string();
+                    let entry = ModelEntry {
+                        model: m.id.to_string(),
+                        provider: Some(provider_name.to_string()),
+                        context_budget: Some(m.context_budget),
+                        thinking: Some(m.thinking),
+                        enabled: None,
+                        discovered: true,
+                        ..Default::default()
+                    };
+                    (name, entry)
+                })
+                .collect();
+            register_model_entries(entries);
+            return;
+        }
+    }
+}
+
+/// Register preset models for all config providers that match a PROVIDER_PRESETS entry.
+/// Called at bootstrap after `register_providers_from_config`.
+pub fn register_all_preset_models() {
+    let providers = all_provider_entries();
+    for (name, entry) in &providers {
+        if let Some(base_url) = &entry.base_url {
+            register_preset_models_for(name, base_url);
+        }
+    }
+}
 
 // Config migration (v1 to v2)
 

@@ -560,9 +560,8 @@ async fn build_fetch_rule(
 }
 
 async fn register_providers_from_env(executor: &mut Executor) {
-    // Env-var providers are now handled by register_providers_from_config
-    // via kind-based env fallback (OPENAI_API_KEY / ANTHROPIC_API_KEY).
     register_providers_from_config(executor);
+    atman_runtime::model_registry::register_all_preset_models();
     register_providers_from_auth_store(executor).await;
 }
 

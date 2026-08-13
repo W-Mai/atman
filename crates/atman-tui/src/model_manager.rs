@@ -41,6 +41,14 @@ impl ModelManager {
         self.refresh();
     }
 
+    pub fn open_with_provider(&mut self, provider: &str) {
+        self.open = true;
+        self.refresh();
+        self.open_form();
+        self.provider_editor = InputEditor::default();
+        self.provider_editor.insert_str(provider);
+    }
+
     pub fn close(&mut self) {
         self.open = false;
         self.show_form = false;

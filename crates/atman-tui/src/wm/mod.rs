@@ -543,7 +543,8 @@ impl WindowManager {
                     crate::wm::ModalAction::Dispatched(id) => {
                         Some(self.apply_palette_action(id, _app, _control_tx))
                     }
-                    crate::wm::ModalAction::Consumed => None,
+                    crate::wm::ModalAction::Consumed
+                    | crate::wm::ModalAction::OpenModelManager(_) => None,
                 })
                 .unwrap_or_default();
             return (consumed, commands);

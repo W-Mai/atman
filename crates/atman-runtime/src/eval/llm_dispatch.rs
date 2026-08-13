@@ -55,6 +55,15 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             "no provider registered for model `{model}`"
         )));
     };
+    let api_model = crate::model_registry::model_entry(&model)
+        .and_then(|e| {
+            if e.model.is_empty() {
+                None
+            } else {
+                Some(e.model)
+            }
+        })
+        .unwrap_or_else(|| model.clone());
     let has_messages_override = args.messages_override.is_some();
     if !matches!(context_mode, ContextMode::None)
         && !has_messages_override
@@ -203,7 +212,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         for attempt in 0..=retry_count {
             let sanitized_messages = sanitize_tool_pairs(final_messages.clone());
             let req = crate::provider::LlmRequest {
-                model: model.clone(),
+                model: api_model.clone(),
                 messages: sanitized_messages,
                 system: system.clone(),
                 input: input.clone(),

@@ -1884,6 +1884,11 @@ async fn cmd_repl_once(
                         )
                         .is_ok()
                         {
+                            if !base_url.is_empty() {
+                                atman_runtime::model_registry::register_preset_models_for(
+                                    &name, &base_url,
+                                );
+                            }
                             let _ = cmd_tx_for_models
                                 .send(atman_tui::TuiCommand::ProviderModelsUpdated);
                             atman_runtime::notify!(success, "Provider \"{name}\" added");

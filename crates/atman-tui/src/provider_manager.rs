@@ -270,7 +270,7 @@ impl ProviderManager {
         &mut self,
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    ) -> Option<ModalAction> {
         // Confirmation dialog gets first priority.
         if self.show_confirm {
             match action {
@@ -282,11 +282,12 @@ impl ProviderManager {
                 }
                 _ => {}
             }
-            return;
+            return None;
         }
         if self.show_add {
-            self.handle_add_key(action, control_tx);
-            return;
+            return self
+                .handle_add_key(action, control_tx)
+                .or(Some(ModalAction::Consumed));
         }
         self.refresh_list();
         match self.focus {
@@ -309,6 +310,11 @@ impl ProviderManager {
                     }
                 }
                 KeyAction::Char('a') => self.open_add(),
+                KeyAction::Char('m') => {
+                    if let Some(p) = self.providers.get(self.selected) {
+                        return Some(ModalAction::OpenModelManager(p.name.clone()));
+                    }
+                }
                 KeyAction::Char('e') => {
                     let p = self.providers.get(self.selected).cloned();
                     if let Some(p) = p {
@@ -344,7 +350,7 @@ impl ProviderManager {
                     Some(g) => g,
                     None => {
                         self.focus = ProviderFocus::ProviderList;
-                        return;
+                        return None;
                     }
                 };
                 match action {
@@ -369,6 +375,7 @@ impl ProviderManager {
                 }
             }
         }
+        None
     }
 
     fn toggle_enabled(
@@ -564,7 +571,7 @@ impl ProviderManager {
         &mut self,
         action: &KeyAction,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    ) -> Option<ModalAction> {
         if self.in_form {
             let editor = match self.form_field {
                 0 => &mut self.name_editor,
@@ -589,7 +596,7 @@ impl ProviderManager {
                     self.test_form(control_tx);
                 }
                 KeyAction::Submit => {
-                    self.commit_form(control_tx);
+                    return self.commit_form(control_tx);
                 }
                 KeyAction::Tab => {
                     self.form_field = (self.form_field + 1) % 7;
@@ -701,9 +708,7 @@ impl ProviderManager {
                     self.show_add = false;
                 }
                 KeyAction::Submit => {
-                    let Some(option) = self.add_options.get(self.kind_selected).cloned() else {
-                        return;
-                    };
+                    let option = self.add_options.get(self.kind_selected).cloned()?;
                     match option.kind {
                         AddProviderKind::Preset(idx) => {
                             let preset = &atman_runtime::model_registry::PROVIDER_PRESETS[idx];
@@ -746,12 +751,13 @@ impl ProviderManager {
                 _ => {}
             }
         }
+        None
     }
 
     fn commit_form(
         &mut self,
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
-    ) {
+    ) -> Option<ModalAction> {
         let name = self.name_editor.buf().trim().to_string();
         let api_key = self.api_key_editor.buf().trim().to_string();
         let api_key_env = self.api_key_env_editor.buf().trim().to_string();
@@ -763,13 +769,16 @@ impl ProviderManager {
             "true" | "1" | "yes" | "on"
         );
         if name.is_empty() || base_url.is_empty() {
-            return;
+            return None;
         }
         let provider_type = if provider_type.is_empty() {
             atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE.into()
         } else {
             provider_type
         };
+        let is_preset = atman_runtime::model_registry::PROVIDER_PRESETS
+            .iter()
+            .any(|p| p.base_url == base_url);
         if let Some(tx) = control_tx {
             if self.editing_provider.is_some() {
                 let _ = tx.send(crate::TuiControl::UpdateConfigProvider {
@@ -796,8 +805,13 @@ impl ProviderManager {
         self.show_add = false;
         self.in_form = false;
         self.editing_provider = None;
-        self.last_added_name = Some(name);
+        self.last_added_name = Some(name.clone());
         self.add_just_completed = true;
+        if !is_preset {
+            Some(ModalAction::OpenModelManager(name))
+        } else {
+            None
+        }
     }
 
     fn commit_add(
@@ -946,57 +960,27 @@ fn render_model_detail(
             ]));
         }
 
-        // For config providers, show model entry details
-        if matches!(p.source, ProviderSource::Config) {
-            if let Some(entry) = atman_runtime::model_registry::model_entry(&p.name) {
+        // Show models for this provider (works for all sources)
+        for g in &mgr.groups {
+            if g.provider_name == p.name {
                 lines.push(Line::from(""));
-                if let Some(ctx) = entry.context_budget {
-                    lines.push(Line::from(vec![
-                        Span::styled(" Context: ", label_style),
-                        Span::styled(atman_runtime::humanize::format_count(ctx), val_style),
-                    ]));
-                }
-                if let Some(mt) = entry.max_tokens {
-                    lines.push(Line::from(vec![
-                        Span::styled(" Max out: ", label_style),
-                        Span::styled(format!("{}K", mt / 1000), val_style),
-                    ]));
-                }
-                if let Some(thinking) = entry.thinking {
-                    lines.push(Line::from(vec![
-                        Span::styled(" Think:  ", label_style),
-                        Span::styled(if thinking { "yes" } else { "no" }, val_style),
-                    ]));
-                }
-            }
-        }
-
-        // For OAuth providers, show cached models
-        if matches!(p.source, ProviderSource::AuthStore { .. }) {
-            for g in &mgr.groups {
-                if g.provider_name == p.name {
-                    lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(" {} models:", g.models.len()),
+                    label_style,
+                )));
+                for m in &g.models {
+                    let thinking = if m.thinking { " \u{1F9E0}" } else { "" };
                     lines.push(Line::from(Span::styled(
-                        format!(" {} cached models:", g.models.len()),
-                        label_style,
+                        format!(
+                            "  {}  {}{}",
+                            m.slug,
+                            atman_runtime::humanize::format_count(m.context_budget),
+                            thinking
+                        ),
+                        val_style,
                     )));
-                    for m in &g.models {
-                        let thinking = if m.thinking { " 🧠" } else { "" };
-                        lines.push(Line::from(Span::styled(
-                            format!(
-                                "  {}  {}  {}{}",
-                                m.slug,
-                                atman_runtime::humanize::format_count(m.context_budget),
-                                m.max_output_tokens
-                                    .map(|n| format!("{}K out", n / 1000))
-                                    .unwrap_or_else(|| "—".into()),
-                                thinking
-                            ),
-                            val_style,
-                        )));
-                    }
-                    break;
                 }
+                break;
             }
         }
     }
@@ -1359,8 +1343,7 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         _app: &mut crate::app::AppState,
         tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
-        self.handle_key(action, tx);
-        Some(ModalAction::Consumed)
+        self.handle_key(action, tx).or(Some(ModalAction::Consumed))
     }
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
