@@ -12,6 +12,7 @@ pub enum ModalKind {
     ProviderManager,
     AliasManager,
     ModelPicker,
+    ModelManager,
     Onboarding,
     Palette,
     ThemePicker,
@@ -25,6 +26,7 @@ pub struct ModalManager {
     pub provider_manager: crate::provider_manager::ProviderManager,
     pub alias_manager: crate::alias_manager::AliasManager,
     pub model_picker: crate::model_picker::ModelPicker,
+    pub model_manager: crate::model_manager::ModelManager,
     pub session_switcher: crate::session_switcher::SessionSwitcher,
     pub history_search: crate::history_search_modal::HistorySearchModal,
     pub onboarding: crate::onboarding::OnboardingState,
@@ -41,6 +43,7 @@ impl ModalManager {
             || self.provider_manager.open
             || self.alias_manager.open
             || self.model_picker.open
+            || self.model_manager.open
             || self.session_switcher.open
             || self.history_search.open
             || self.onboarding_open
@@ -71,6 +74,9 @@ impl ModalManager {
         }
         if self.model_picker.open {
             kinds.push(ModalKind::ModelPicker);
+        }
+        if self.model_manager.open {
+            kinds.push(ModalKind::ModelManager);
         }
         if self.onboarding_open {
             kinds.push(ModalKind::Onboarding);
@@ -187,6 +193,7 @@ impl ModalManager {
             ModalKind::ProviderManager => self.provider_manager.render_content(f, area, app, t),
             ModalKind::AliasManager => self.alias_manager.render_content(f, area, app, t),
             ModalKind::ModelPicker => self.model_picker.render_content(f, area, app, t),
+            ModalKind::ModelManager => self.model_manager.render_content(f, area, app, t),
             ModalKind::Onboarding => self.onboarding.render_content(f, area, app, t),
             ModalKind::ThemePicker => self.render_theme_picker_content(f, area, app, t),
             ModalKind::TrustModePicker => self.render_trust_mode_picker_content(f, area, app, t),
@@ -223,6 +230,14 @@ impl ModalManager {
                     }
                 }
                 (true, None)
+            }
+            ModalKind::ModelManager => {
+                if self.model_manager.open {
+                    self.model_manager.handle_key(action);
+                    (true, None)
+                } else {
+                    (false, None)
+                }
             }
             ModalKind::Onboarding => {
                 if self.onboarding_open {
@@ -428,6 +443,11 @@ impl ModalManager {
                 let h = canvas.height.saturating_sub(2).clamp(10, 22);
                 center_rect(canvas, w, h)
             }
+            ModalKind::ModelManager => {
+                let w = canvas.width.saturating_sub(4).clamp(50, 80);
+                let h = canvas.height.saturating_sub(2).clamp(10, 24);
+                center_rect(canvas, w, h)
+            }
             ModalKind::Onboarding => {
                 if canvas.width < 60 || canvas.height < 20 {
                     canvas
@@ -553,6 +573,10 @@ impl ModalManager {
                 "Switch Model",
                 Style::default().fg(t.tinted_fg.into()),
             )),
+            ModalKind::ModelManager => Line::from(Span::styled(
+                "Model Manager",
+                Style::default().fg(t.tinted_fg.into()),
+            )),
             ModalKind::Onboarding => Line::from(Span::styled(
                 "Welcome to atman",
                 Style::default().fg(t.tinted_fg.into()),
@@ -578,8 +602,9 @@ impl ModalManager {
             ModalKind::HistorySearch => "⌕",
             ModalKind::ProviderManager => "⚙",
             ModalKind::AliasManager => "@",
-            ModalKind::ModelPicker => "◆",
-            ModalKind::Onboarding => "✦",
+            ModalKind::ModelPicker => "\u{25C6}",
+            ModalKind::ModelManager => "\u{25C6}",
+            ModalKind::Onboarding => "\u{2726}",
             ModalKind::ThemePicker => "◐",
             ModalKind::TrustModePicker => "⚡",
         }

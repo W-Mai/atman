@@ -20,6 +20,7 @@ pub mod highlight;
 pub mod history;
 pub mod history_search_modal;
 pub mod mcp_manager;
+pub mod model_manager;
 pub mod model_picker;
 pub mod onboarding;
 pub mod window;
