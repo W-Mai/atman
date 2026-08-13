@@ -83,7 +83,7 @@ pub use task_registry::{
     TaskEvent, TaskFilter, TaskId, TaskKind, TaskRegistry, TaskSnapshot, TaskStatus,
 };
 pub use tool::{CancelBehavior, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
-pub use tool_naming::ToolNaming;
+pub use tool_naming::{ToolNaming, from_wire, to_wire};
 pub use validate::{ValidationError, validate};
 pub use value::Value;
 pub use workflow::{NodeStatus, Parallelism, WorkflowGraph, WorkflowNode, WorkflowNodeKind};

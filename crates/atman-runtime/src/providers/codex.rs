@@ -87,7 +87,7 @@ fn build_input_items(req: &LlmRequest) -> Vec<InputItem> {
             for p in &m.parts {
                 if let MessagePart::ToolUse { id, name, .. } = p {
                     // Codex Responses API requires "_" in function names.
-                    tool_names.insert(id.clone(), name.replace('.', "_"));
+                    tool_names.insert(id.clone(), crate::tool_naming::to_wire(name));
                 }
             }
         }
@@ -213,7 +213,7 @@ fn split_assistant_parts(parts: &[MessagePart]) -> (Option<String>, Vec<Assistan
             MessagePart::ToolUse { id, name, input } => tools.push(AssistantSplit {
                 id: id.clone(),
                 // Codex Responses API requires "_" in function names.
-                name: name.replace('.', "_"),
+                name: crate::tool_naming::to_wire(name),
                 arguments: serde_json::to_string(input).unwrap_or_default(),
             }),
             _ => {}
@@ -230,7 +230,7 @@ fn build_tools(tools: &[crate::tool::ToolSpec]) -> Vec<ResponsesTool> {
             r#type: "function".into(),
             // Codex Responses API rejects "." in function names (e.g. "fs.read").
             // Replace with "_" for outbound, revert on inbound.
-            name: t.name.replace('.', "_"),
+            name: crate::tool_naming::to_wire(&t.name),
             description: t.description.clone(),
             parameters: t.input_schema.clone(),
         })
@@ -256,6 +256,7 @@ impl Provider for CodexProvider {
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let request = self.build_request(&req);
         let turn_id = turn_id_from_req(&req);
+        let streaming_tools = req.tools.clone();
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
@@ -341,7 +342,7 @@ impl Provider for CodexProvider {
                                 let slot = &mut partial_tool_calls[idx];
                                 slot.id = item["call_id"].as_str().unwrap_or("").to_string();
                                 // Convert "_" back to "." for atman tool names.
-                                slot.name = item["name"].as_str().unwrap_or("").replace('_', ".");
+                                slot.name = item["name"].as_str().unwrap_or("").to_string();
                             }
                         }
 
@@ -414,7 +415,7 @@ impl Provider for CodexProvider {
                     };
                     parts.push(MessagePart::ToolUse {
                         id: tc.id,
-                        name: tc.name,
+                        name: crate::tool_naming::from_wire(&tc.name, &streaming_tools),
                         input,
                     });
                 }

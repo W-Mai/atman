@@ -60,7 +60,7 @@ impl OpenAiProvider {
             .map(|t| WireToolSpec {
                 kind: "function",
                 function: WireToolFunction {
-                    name: t.name.clone(),
+                    name: crate::tool_naming::to_wire(&t.name),
                     description: t.description.clone(),
                     parameters: t.input_schema.clone(),
                 },
@@ -210,7 +210,7 @@ fn split_assistant_parts(parts: &[MessagePart]) -> (Vec<String>, Vec<WireToolCal
                 id: id.clone(),
                 kind: "function",
                 function: WireFunctionCall {
-                    name: name.clone(),
+                    name: crate::tool_naming::to_wire(name),
                     arguments: input.to_string(),
                 },
             }),
@@ -242,13 +242,14 @@ impl Provider for OpenAiProvider {
                     "openai http {status}: {body_text}"
                 )));
             };
-            Ok(response_to_assistant(body, turn_id))
+            Ok(response_to_assistant(body, turn_id, &req.tools))
         })
     }
 
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage> {
         let request = self.build_request(&req, true);
         let turn_id = next_turn_id_from_req(&req);
+        let streaming_tools = req.tools.clone();
         let (tx, events) = broadcast::channel(DEFAULT_STREAM_BUFFER);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
@@ -402,7 +403,7 @@ impl Provider for OpenAiProvider {
                     };
                     parts.push(MessagePart::ToolUse {
                         id: tc.id,
-                        name: tc.name,
+                        name: crate::tool_naming::from_wire(&tc.name, &streaming_tools),
                         input,
                     });
                 }
@@ -520,6 +521,7 @@ struct PartialToolCall {
 fn response_to_assistant(
     body: ChatCompletionsResponse,
     turn_id: crate::event::TurnId,
+    tools: &[crate::tool::ToolSpec],
 ) -> AssistantMessage {
     let mut parts: Vec<MessagePart> = Vec::new();
     let mut stop_reason = StopReason::End;
@@ -538,7 +540,7 @@ fn response_to_assistant(
                     };
                     parts.push(MessagePart::ToolUse {
                         id: tc.id,
-                        name: tc.function.name,
+                        name: crate::tool_naming::from_wire(&tc.function.name, tools),
                         input,
                     });
                 }

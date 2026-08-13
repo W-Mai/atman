@@ -1,5 +1,23 @@
 use std::collections::HashMap;
 
+/// Convert a flow-internal tool name (e.g. "fs.read") to a provider-safe
+/// wire name that matches the OpenAI function name pattern `^[a-zA-Z0-9_-]+$`.
+/// All providers use the same mapping: `.` → `_`.
+pub fn to_wire(flow_name: &str) -> String {
+    flow_name.replace('.', "_")
+}
+
+/// Reverse of [to_wire]: given a wire name from the provider, find the
+/// original flow name by matching against the tool list.
+pub fn from_wire(wire_name: &str, tools: &[crate::tool::ToolSpec]) -> String {
+    for t in tools {
+        if to_wire(&t.name) == wire_name {
+            return t.name.clone();
+        }
+    }
+    wire_name.to_string()
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ToolNaming {
     per_provider: HashMap<String, HashMap<String, String>>,

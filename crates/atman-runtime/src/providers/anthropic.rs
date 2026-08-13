@@ -59,7 +59,7 @@ impl AnthropicProvider {
             .tools
             .iter()
             .map(|t| WireTool {
-                name: name_to_provider(&t.name),
+                name: crate::tool_naming::to_wire(&t.name),
                 description: t.description.clone(),
                 input_schema: t.input_schema.clone(),
             })
@@ -105,18 +105,7 @@ impl AnthropicProvider {
     }
 }
 
-fn name_to_provider(flow_name: &str) -> String {
-    flow_name.replace('.', "_")
-}
-
-fn name_from_provider(native: &str, tools: &[crate::tool::ToolSpec]) -> String {
-    for t in tools {
-        if name_to_provider(&t.name) == native {
-            return t.name.clone();
-        }
-    }
-    native.to_string()
-}
+// Tool name mapping is now shared via crate::tool_naming::to_wire / from_wire
 
 fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
     let role = match m.role {
@@ -164,7 +153,7 @@ fn build_wire_message(m: &Message, apply_cache_control: bool) -> WireMessage {
             }
             MessagePart::ToolUse { id, name, input } => ContentPart::ToolUse {
                 id: id.clone(),
-                name: name_to_provider(name),
+                name: crate::tool_naming::to_wire(name),
                 input: input.clone(),
             },
             MessagePart::Thinking {
@@ -453,7 +442,7 @@ impl Provider for AnthropicProvider {
                     };
                     parts.push(MessagePart::ToolUse {
                         id: pu.id,
-                        name: name_from_provider(&pu.name, &tools),
+                        name: crate::tool_naming::from_wire(&pu.name, &tools),
                         input,
                     });
                 }
@@ -510,7 +499,7 @@ fn response_to_assistant(
             }),
             ContentBlock::ToolUse { id, name, input } => parts.push(MessagePart::ToolUse {
                 id,
-                name: name_from_provider(&name, tools),
+                name: crate::tool_naming::from_wire(&name, tools),
                 input,
             }),
             ContentBlock::Other => {}
