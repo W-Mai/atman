@@ -1443,6 +1443,4 @@ mod tests {
             "To: a@x.com, b@x.com\nSubject: Deploy status\n---\nSee attached"
         );
     }
-
-
 }
