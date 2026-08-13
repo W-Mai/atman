@@ -1979,6 +1979,59 @@ async fn cmd_repl_once(
                         )
                         .is_ok()
                         {
+                            // Re-register provider instance in ProviderRegistry
+                            let provider_key = format!("config:{name}");
+                            let resolved_key = if !api_key.is_empty() {
+                                api_key.clone()
+                            } else if !api_key_env.is_empty() {
+                                std::env::var(&api_key_env).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            let resolved_url = if !base_url.is_empty() {
+                                base_url.clone()
+                            } else {
+                                match provider_type.as_str() {
+                                    "openai" | "openai-compat" => {
+                                        std::env::var("OPENAI_BASE_URL").unwrap_or_default()
+                                    }
+                                    "anthropic" => {
+                                        std::env::var("ANTHROPIC_BASE_URL").unwrap_or_default()
+                                    }
+                                    _ => String::new(),
+                                }
+                            };
+                            match provider_type.as_str() {
+                                "anthropic" => {
+                                    let mut p =
+                                        atman_runtime::providers::anthropic::AnthropicProvider::new(
+                                            &provider_key,
+                                            &resolved_key,
+                                        );
+                                    if !resolved_url.is_empty() {
+                                        p = p.with_base_url(&resolved_url);
+                                    }
+                                    if let Some(mt) = max_tokens {
+                                        p = p.with_max_tokens(mt);
+                                    }
+                                    executor_for_ctrl.providers.register(std::sync::Arc::new(p));
+                                }
+                                "openai" | "openai-compat" => {
+                                    let mut p =
+                                        atman_runtime::providers::openai::OpenAiProvider::new(
+                                            &provider_key,
+                                            &resolved_key,
+                                        );
+                                    if !resolved_url.is_empty() {
+                                        p = p.with_base_url(&resolved_url);
+                                    }
+                                    if let Some(mt) = max_tokens {
+                                        p = p.with_max_tokens(mt);
+                                    }
+                                    executor_for_ctrl.providers.register(std::sync::Arc::new(p));
+                                }
+                                _ => {}
+                            }
                             let _ = cmd_tx_for_models
                                 .send(atman_tui::TuiCommand::ProviderModelsUpdated);
                             atman_runtime::notify!(success, "Provider \"{name}\" updated");
