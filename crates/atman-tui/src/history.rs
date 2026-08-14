@@ -95,7 +95,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut sub_agent_indices: HashMap<String, usize> = HashMap::new();
     let mut sub_agent_messages: HashMap<String, Vec<Message>> = HashMap::new();
     let ensure_panel = |out: &mut Vec<OutputItem>, current: &mut Option<usize>| -> usize {
-        if let Some(i) = *current {
+        if let Some(i) = *current
+            && let Some(OutputItem::WorkflowPanel { ended_at: None, .. }) = out.get(i)
+        {
             return i;
         }
         let turn_index = out
@@ -152,14 +154,16 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     continue;
                 }
                 if matches!(msg.role, MessageRole::User)
-                    && flow_run_id
-                        .as_ref()
-                        .is_none_or(|rid| find_spawned_root(rid).is_none())
-                    && let Some(i) = current_workflow_idx.take()
-                    && let Some(OutputItem::WorkflowPanel { ended_at, .. }) = out.get_mut(i)
-                    && ended_at.is_none()
+                    && flow_run_id.is_none()
+                    && let Some(i) = current_workflow_idx
+                    && let Some(OutputItem::WorkflowPanel { ended_at: None, .. }) = out.get(i)
                 {
-                    *ended_at = Some(Instant::now());
+                    // user_msg with flow_run_id=None can be either:
+                    // (a) genuine user message starting a new turn, or
+                    // (b) session.push(message.user(...)) inside a flow.
+                    // We can't distinguish them here, so don't touch the panel.
+                    // Panel closing is handled by FlowStart (new root flow) and
+                    // FlowDone (flow completion) instead.
                 }
                 if matches!(msg.role, MessageRole::Assistant | MessageRole::Tool)
                     && flow_run_id.is_some()
@@ -282,6 +286,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             } => {
                 if spawned_set.contains(run_id.as_str()) {
                     continue;
+                }
+                if parent_run_id.is_none() {
+                    current_workflow_idx = None;
                 }
                 let panel_idx = ensure_panel(&mut out, &mut current_workflow_idx);
                 apply_workflow(
@@ -1089,6 +1096,120 @@ mod tests {
         assert_eq!(panel.0.root.len(), 1);
         assert_eq!(panel.0.root[0].label, "look_into");
         assert!(panel.1.is_some(), "FlowDone should close panel");
+    }
+
+    #[test]
+    fn flatten_transcript_session_push_user_msg_does_not_break_workflow() {
+        // Reproduces: session.push(message.user(...)) inside agent flow
+        // produces user_msg with flow_run_id=None between flow events.
+        // This should NOT close the workflow panel or create a new empty one.
+        use atman_runtime::nodegraph::{FlowGraph as StaticFlowGraph, NodeKind};
+        let run_id = "agent-run-001";
+        let entries = vec![
+            // Genuine user message (start of turn)
+            TranscriptEntry::Message {
+                message: Message::user_text(
+                    atman_runtime::event::TurnId::now(),
+                    "hello".to_string(),
+                ),
+                flow_run_id: None,
+            },
+            // Agent flow starts
+            TranscriptEntry::FlowStart {
+                run_id: run_id.into(),
+                flow_name: "agent".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowGraph {
+                run_id: run_id.into(),
+                flow_name: "agent".into(),
+                graph: StaticFlowGraph {
+                    flow_name: "agent".into(),
+                    root: Vec::new(),
+                },
+                ts: None,
+            },
+            // Flow node 0: session.push
+            TranscriptEntry::FlowNodeStart {
+                run_id: run_id.into(),
+                node_id: "0".into(),
+                kind: NodeKind::ToolCall {
+                    path: "session.push".into(),
+                },
+                label: "session.push".into(),
+                parent_node_id: None,
+                ts: None,
+            },
+            // THIS is the problematic event: user_msg from session.push(message.user(...))
+            TranscriptEntry::Message {
+                message: Message::user_text(
+                    atman_runtime::event::TurnId::now(),
+                    "hello".to_string(),
+                ),
+                flow_run_id: None, // None! — same as genuine user message
+            },
+            // Flow node 0 ends
+            TranscriptEntry::FlowNodeEnd {
+                run_id: run_id.into(),
+                node_id: "0".into(),
+                status: FlowNodeStatus::Ok,
+                output_preview: None,
+                ts: None,
+            },
+            // Flow node 1: loop
+            TranscriptEntry::FlowNodeStart {
+                run_id: run_id.into(),
+                node_id: "1".into(),
+                kind: NodeKind::Return,
+                label: "loop".into(),
+                parent_node_id: None,
+                ts: None,
+            },
+            TranscriptEntry::FlowNodeEnd {
+                run_id: run_id.into(),
+                node_id: "1".into(),
+                status: FlowNodeStatus::Ok,
+                output_preview: None,
+                ts: None,
+            },
+            // Flow ends
+            TranscriptEntry::FlowDone {
+                run_id: run_id.into(),
+                ok: true,
+                cancelled: false,
+                ts: None,
+            },
+        ];
+        let out = flatten_transcript(&entries);
+        let panels: Vec<_> = out
+            .iter()
+            .filter_map(|it| match it {
+                OutputItem::WorkflowPanel { graph, .. } => Some(graph.clone()),
+                _ => None,
+            })
+            .collect();
+        // Should have exactly 1 panel (not 2 or 3)
+        assert_eq!(
+            panels.len(),
+            1,
+            "should have 1 workflow panel, got {}",
+            panels.len()
+        );
+        // Root should have 1 node (the agent flow)
+        assert_eq!(panels[0].root.len(), 1, "root should have 1 flow node");
+        // The flow node should have 2 children (session.push + loop)
+        let children = &panels[0].root[0].children;
+        assert_eq!(
+            children.len(),
+            2,
+            "flow node should have 2 children, got {}",
+            children.len()
+        );
+        assert_eq!(children[0].label, "session.push");
+        assert_eq!(children[1].label, "loop");
     }
 
     #[test]
