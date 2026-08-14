@@ -47,14 +47,15 @@ impl ModelManager {
     }
 
     pub fn refresh(&mut self) {
-        let config_providers: std::collections::HashSet<String> =
+        let enabled_providers: std::collections::HashSet<String> =
             atman_runtime::model_registry::all_provider_entries()
                 .into_iter()
+                .filter(|(_, e)| e.enabled.unwrap_or(true))
                 .map(|(n, _)| n)
                 .collect();
         self.groups = atman_runtime::model_registry::all_provider_groups()
             .into_iter()
-            .filter(|g| config_providers.contains(&g.provider_name))
+            .filter(|g| enabled_providers.contains(&g.provider_name))
             .collect();
         self.model_idx = vec![0; self.groups.len()];
         if self.provider_idx >= self.groups.len() {
