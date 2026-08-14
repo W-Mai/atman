@@ -1011,6 +1011,12 @@ fn render_model_detail(
         )));
     }
 
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Press m to manage models",
+        Style::default().fg(theme.subtle_fg.into()),
+    )));
+
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -1376,7 +1382,7 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         );
         let help = match self.focus {
             ProviderFocus::ProviderList => {
-                "a:add  e:enable/disable  d:delete  r:refresh  t:test  Enter:edit/logout  Tab:models  Esc:close"
+                "a:add  e:enable/disable  d:delete  r:refresh  t:test  m:manage models  Enter:edit/logout  Tab:details  Esc:close"
             }
             ProviderFocus::ModelList => "Tab:providers  a:alias  Esc:back",
         };
