@@ -236,6 +236,15 @@ pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
     Vec::new()
 }
 
+pub fn is_provider_enabled(name: &str) -> bool {
+    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
+        if let Some(entry) = cfg.providers.get(name) {
+            return entry.enabled.unwrap_or(true);
+        }
+    }
+    true
+}
+
 pub fn all_provider_entries() -> Vec<(String, ProviderEntry)> {
     if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
         return cfg
@@ -262,9 +271,14 @@ pub fn model_info(name: &str) -> ModelInfo {
     let resolved = resolve_alias(name);
     if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
         if let Some(entry) = cfg.models.get(&resolved) {
+            let enabled = entry.enabled.unwrap_or(true);
             return ModelInfo {
                 name: resolved.clone(),
-                context_budget: entry.context_budget.unwrap_or(0),
+                context_budget: if enabled {
+                    entry.context_budget.unwrap_or(0)
+                } else {
+                    0
+                },
                 compact_threshold_ratio: entry.compact_threshold_ratio.unwrap_or(0.8),
                 thinking_enabled: entry.thinking.unwrap_or(false),
                 max_output_tokens: entry.max_tokens,

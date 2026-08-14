@@ -232,6 +232,9 @@ impl ProviderRegistry {
         if let Some(entry) = crate::model_registry::model_entry(model)
             && let Some(ref provider_name) = entry.provider
         {
+            if !crate::model_registry::is_provider_enabled(provider_name) {
+                return None;
+            }
             let config_key = format!("config:{provider_name}");
             if let Some(p) = providers
                 .get(&config_key)
