@@ -3461,6 +3461,15 @@ fn append_workflow_node_boxed(
         WorkflowNodeKind::FanoutBranch { branch_index } => {
             format!("branch[{branch_index}]  {}", node.label)
         }
+        WorkflowNodeKind::Stmt {
+            node_kind: atman_runtime::nodegraph::NodeKind::When { condition_preview },
+        } if !condition_preview.is_empty() && condition_preview != "when" => {
+            format!(
+                "when {} → {}",
+                condition_preview,
+                node.output_preview.as_deref().unwrap_or("?")
+            )
+        }
         _ => node.label.clone(),
     };
     let label = if let Some(stats) = &node.llm_stats {
@@ -3688,18 +3697,42 @@ fn collect_boxed_details(
     out: &mut Vec<Line<'static>>,
 ) {
     use atman_runtime::workflow::{ApprovalState, WorkflowNodeKind};
-    if let WorkflowNodeKind::ToolCall {
-        args_preview,
-        result_preview,
-        ..
-    } = &node.kind
-    {
-        if !args_preview.is_empty() {
-            push_detail_section(out, "args", args_preview);
+    match &node.kind {
+        WorkflowNodeKind::ToolCall {
+            args_preview,
+            result_preview,
+            ..
+        } => {
+            if !args_preview.is_empty() {
+                push_detail_section(out, "args", args_preview);
+            }
+            if let Some(r) = result_preview {
+                push_detail_section(out, "result", r);
+            }
         }
-        if let Some(r) = result_preview {
-            push_detail_section(out, "result", r);
+        WorkflowNodeKind::Stmt {
+            node_kind: atman_runtime::nodegraph::NodeKind::When { condition_preview },
+        } => {
+            if !condition_preview.is_empty() {
+                push_detail_section(out, "condition", condition_preview);
+            }
         }
+        WorkflowNodeKind::Stmt {
+            node_kind: atman_runtime::nodegraph::NodeKind::Llm { model },
+        } => {
+            if let Some(m) = model {
+                push_detail_section(out, "model", m);
+            }
+        }
+        WorkflowNodeKind::Stmt {
+            node_kind: atman_runtime::nodegraph::NodeKind::Subflow { name },
+        } => {
+            push_detail_section(out, "subflow", name);
+        }
+        WorkflowNodeKind::Subflow { flow_name, .. } => {
+            push_detail_section(out, "flow", flow_name);
+        }
+        _ => {}
     }
     if let Some(p) = &node.output_preview {
         push_detail_section(out, "output", p);
