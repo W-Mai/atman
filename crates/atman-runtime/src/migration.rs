@@ -167,6 +167,17 @@ fn scan_skill_references(home: &Path, out: &mut Vec<MigratedRule>) {
             .and_then(|fm| fm.get("description"))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+
+        let skill_content = strip_front_matter(&body).to_string();
+        out.push(MigratedRule {
+            name: skill_name.clone(),
+            source_tool: "skill".into(),
+            source_path: skill_md.clone(),
+            scope: RuleScope::Global,
+            content: skill_content,
+            description: skill_description.clone(),
+        });
+
         for rel in parse_markdown_local_links(&body) {
             let full = skill_dir.join(&rel);
             if let Some(mut rule) = load_file(&full, "skill", RuleScope::Global) {
@@ -299,6 +310,17 @@ fn parse_front_matter(content: &str) -> Option<std::collections::HashMap<String,
         );
     }
     Some(map)
+}
+
+/// Remove the leading YAML front matter from a skill body.
+fn strip_front_matter(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---") else {
+        return content;
+    };
+    let Some(end) = rest.find("\n---") else {
+        return content;
+    };
+    rest[end + 4..].trim_start_matches('\n')
 }
 
 /// First non-empty paragraph (skipping the leading `# ` heading if present) used as
@@ -556,6 +578,10 @@ mod tests {
             .map(|r| r.name.as_str())
             .collect();
         assert!(
+            skill_names.contains(&"demo"),
+            "SKILL.md itself must be indexed: {skill_names:?}"
+        );
+        assert!(
             skill_names.contains(&"skill:demo::references/a.md"),
             "{skill_names:?}"
         );
@@ -563,7 +589,7 @@ mod tests {
             skill_names.contains(&"skill:demo::templates/b.md"),
             "{skill_names:?}"
         );
-        assert_eq!(skill_names.len(), 2, "external / absolute filtered out");
+        assert_eq!(skill_names.len(), 3, "skill body + references: {skill_names:?}");
     }
 
     #[test]
@@ -579,15 +605,24 @@ mod tests {
         write(home.path(), ".claude/skills/code-review/references/rules.md", "# rules\n");
 
         let rules = scan_migrated_rules(dir.path(), home.path());
-        let rule = rules
+        let body_rule = rules
             .iter()
-            .find(|r| r.source_tool == "skill")
-            .expect("expected skill rule");
-        assert_eq!(rule.name, "skill:structured-review::references/rules.md");
+            .find(|r| r.source_tool == "skill" && r.name == "structured-review")
+            .expect("SKILL.md itself must be indexed");
         assert_eq!(
-            rule.description.as_deref(),
-            Some("结构化代码审查，用于 review 请求。"),
-            "front matter description must be attached"
+            body_rule.description.as_deref(),
+            Some("结构化代码审查，用于 review 请求。")
+        );
+        assert!(body_rule.content.contains("# body"));
+        assert!(!body_rule.content.contains("name: structured-review"));
+
+        let ref_rule = rules
+            .iter()
+            .find(|r| r.name == "skill:structured-review::references/rules.md")
+            .expect("referenced rule must remain indexed");
+        assert_eq!(
+            ref_rule.description.as_deref(),
+            Some("结构化代码审查，用于 review 请求。")
         );
     }
 
