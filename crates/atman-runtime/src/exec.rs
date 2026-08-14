@@ -346,7 +346,11 @@ fn exec_stmt<'a>(
                     _ => true,
                 };
                 if truthy {
-                    (exec_stmts(body, env, ctx).await, Some("true".into()))
+                    let prefix = ctx.current_node_id.clone().unwrap_or_default();
+                    (
+                        exec_stmts_prefixed(body, env, ctx, prefix).await,
+                        Some("true".into()),
+                    )
                 } else {
                     (StmtOutcome::Continue, Some("false".into()))
                 }
@@ -378,7 +382,7 @@ fn exec_stmt<'a>(
                     };
                     emit_flow_node_start(ctx, &iter_id, stmt, loop_node_id.as_deref());
                     let iter_ctx = ctx.with_node(&iter_id);
-                    let outcome = exec_stmts(body, env, &iter_ctx).await;
+                    let outcome = exec_stmts_prefixed(body, env, &iter_ctx, iter_id.clone()).await;
                     let preview = match &outcome {
                         StmtOutcome::LoopBreak => Some("break"),
                         StmtOutcome::LoopContinue => Some("continue"),
