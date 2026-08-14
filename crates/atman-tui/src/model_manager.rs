@@ -47,7 +47,15 @@ impl ModelManager {
     }
 
     pub fn refresh(&mut self) {
-        self.groups = atman_runtime::model_registry::all_provider_groups();
+        let config_providers: std::collections::HashSet<String> =
+            atman_runtime::model_registry::all_provider_entries()
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+        self.groups = atman_runtime::model_registry::all_provider_groups()
+            .into_iter()
+            .filter(|g| config_providers.contains(&g.provider_name))
+            .collect();
         self.model_idx = vec![0; self.groups.len()];
         if self.provider_idx >= self.groups.len() {
             self.provider_idx = 0;
@@ -299,13 +307,23 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
             .split(area);
         let main = rows[0];
         let footer_area = rows[1];
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(main);
+        let left_col = columns[0];
+        let right_col = Rect {
+            x: columns[1].x + 1,
+            width: columns[1].width.saturating_sub(1),
+            ..columns[1]
+        };
 
-        crate::wm::shell::render_section_header(f, main, Line::from("Models"), t);
-        let inner = Rect {
-            x: main.x,
-            y: main.y + 2,
-            width: main.width,
-            height: main.height.saturating_sub(2).saturating_sub(1),
+        crate::wm::shell::render_section_header(f, left_col, Line::from("Models"), t);
+        let inner_left = Rect {
+            x: left_col.x,
+            y: left_col.y + 2,
+            width: left_col.width,
+            height: left_col.height.saturating_sub(2).saturating_sub(1),
         };
 
         let mut lines: Vec<Line> = vec![];
@@ -348,7 +366,68 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
             )));
         }
 
-        f.render_widget(Paragraph::new(lines), inner);
+        f.render_widget(Paragraph::new(lines), inner_left);
+
+        crate::wm::shell::render_section_header(f, right_col, Line::from("Details"), t);
+        let inner_right = Rect {
+            x: right_col.x,
+            y: right_col.y + 2,
+            width: right_col.width,
+            height: right_col.height.saturating_sub(2).saturating_sub(1),
+        };
+        let mut detail_lines = vec![];
+        if let Some(m) = self.current_model() {
+            let label = Style::default().fg(t.meta_fg.into());
+            let val = Style::default().fg(t.accent.into());
+            detail_lines.push(Line::from(vec![
+                Span::styled(" Name:     ", label),
+                Span::styled(&m.slug, val),
+            ]));
+            detail_lines.push(Line::from(vec![
+                Span::styled(" Provider: ", label),
+                Span::styled(self.current_provider(), val),
+            ]));
+            detail_lines.push(Line::from(vec![
+                Span::styled(" Budget:   ", label),
+                Span::styled(atman_runtime::humanize::format_count(m.context_budget), val),
+            ]));
+            detail_lines.push(Line::from(vec![
+                Span::styled(" Thinking: ", label),
+                Span::styled(if m.thinking { "yes" } else { "no" }, val),
+            ]));
+            let slug = m.slug.clone();
+            let entries = atman_runtime::model_registry::all_model_entries();
+            if let Some((_, e)) = entries.iter().find(|(n, _)| *n == slug) {
+                if e.model != slug && !e.model.is_empty() {
+                    let model_id = e.model.clone();
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" Model ID: ", label),
+                        Span::styled(model_id, val),
+                    ]));
+                }
+                if let Some(mt) = e.max_tokens {
+                    let mt_str = mt.to_string();
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(" Max Out:  ", label),
+                        Span::styled(mt_str, val),
+                    ]));
+                }
+            }
+        } else {
+            detail_lines.push(Line::from(Span::styled(
+                " Select a model to view details",
+                Style::default().fg(t.meta_fg.into()),
+            )));
+        }
+        f.render_widget(Paragraph::new(detail_lines), inner_right);
+
+        crate::wm::shell::render_column_divider(
+            f,
+            columns[0].right(),
+            columns[0].y,
+            columns[0].height,
+            t,
+        );
 
         let footer = Paragraph::new(Line::from(Span::styled(
             "n:add  a:alias  Enter:edit  Esc:close",

@@ -124,7 +124,7 @@ impl AliasManager {
                         self.selected += 1;
                     }
                 }
-                KeyAction::Char('a') => self.open_form(false, None, None),
+                KeyAction::Char('n') => self.open_form(false, None, None),
                 KeyAction::Char('e') | KeyAction::Submit => {
                     let selected = self.selected;
                     if let Some((alias, _)) = self.aliases.get(selected) {
@@ -419,9 +419,9 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
             let mut state = ListState::default().with_selected(Some(self.selected));
             f.render_stateful_widget(List::new(items), list_area, &mut state);
             let help = if self.aliases.is_empty() {
-                "a:add alias · e:edit · d:delete · Esc:close  (no aliases yet)"
+                "n:add alias · e:edit · d:delete · Esc:close  (no aliases yet)"
             } else {
-                "a:add  e:edit  d:delete  ↑↓:navigate  Esc:close"
+                "n:add  e:edit  d:delete  ↑↓:navigate  Esc:close"
             };
             let footer = Paragraph::new(Line::from(Span::styled(
                 help,

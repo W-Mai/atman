@@ -324,7 +324,7 @@ impl ProviderManager {
                         self.selected += 1;
                     }
                 }
-                KeyAction::Char('a') => self.open_add(),
+                KeyAction::Char('n') => self.open_add(),
                 KeyAction::Char('m') => {
                     if let Some(p) = self.providers.get(self.selected) {
                         if matches!(p.source, ProviderSource::Config) {
@@ -1364,7 +1364,7 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         );
         let help = match self.focus {
             ProviderFocus::ProviderList => {
-                "a:add  e:enable/disable  d:delete  r:refresh  t:test  m:manage models  Enter:edit/logout  Esc:close"
+                "n:add  e:enable/disable  d:delete  r:refresh  t:test  m:manage models  Enter:edit/logout  Esc:close"
             }
         };
         let footer = Paragraph::new(Line::from(Span::styled(
