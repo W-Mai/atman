@@ -90,7 +90,6 @@ pub struct ProviderManager {
     base_url_editor: InputEditor,
     provider_type_editor: InputEditor,
     api_key_env_editor: InputEditor,
-    max_tokens_editor: InputEditor,
     enabled_editor: InputEditor,
     pub in_form: bool,
     form_field: usize,
@@ -273,11 +272,6 @@ impl ProviderManager {
         let mut pt_ed = InputEditor::default();
         pt_ed.insert_str(&entry.kind);
         self.provider_type_editor = pt_ed;
-        let mut mt_ed = InputEditor::default();
-        if let Some(m) = entry.max_tokens {
-            mt_ed.insert_str(&m.to_string());
-        }
-        self.max_tokens_editor = mt_ed;
         let mut en_ed = InputEditor::default();
         en_ed.insert_str(if entry.enabled.unwrap_or(true) {
             "true"
@@ -536,7 +530,6 @@ impl ProviderManager {
         pt_ed.insert_str(atman_runtime::model_registry::DEFAULT_CONFIG_PROVIDER_TYPE);
         self.provider_type_editor = pt_ed;
         self.api_key_env_editor = InputEditor::default();
-        self.max_tokens_editor = InputEditor::default();
         let mut en_ed = InputEditor::default();
         en_ed.insert_str("true");
         self.enabled_editor = en_ed;
@@ -594,7 +587,7 @@ impl ProviderManager {
         control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
         if self.in_form {
-            if self.form_field == 7 {
+            if self.form_field == 6 {
                 match action {
                     KeyAction::Escape => {
                         if self.editing_provider.is_some() {
@@ -612,7 +605,7 @@ impl ProviderManager {
                         self.form_field = 0;
                     }
                     KeyAction::BackTab => {
-                        self.form_field = 6;
+                        self.form_field = 5;
                     }
                     _ => {}
                 }
@@ -624,7 +617,6 @@ impl ProviderManager {
                 2 => &mut self.api_key_editor,
                 3 => &mut self.api_key_env_editor,
                 4 => &mut self.base_url_editor,
-                5 => &mut self.max_tokens_editor,
                 _ => &mut self.enabled_editor,
             };
             match action {
@@ -641,11 +633,11 @@ impl ProviderManager {
                     return self.commit_form(control_tx);
                 }
                 KeyAction::Tab => {
-                    self.form_field = (self.form_field + 1) % 8;
+                    self.form_field = (self.form_field + 1) % 7;
                 }
                 KeyAction::BackTab => {
                     self.form_field = if self.form_field == 0 {
-                        7
+                        6
                     } else {
                         self.form_field - 1
                     };
@@ -670,36 +662,22 @@ impl ProviderManager {
                 }
                 KeyAction::Backspace if self.form_field == 1 => {}
                 KeyAction::Char(_) if self.form_field == 1 => {}
-                KeyAction::CursorLeft if self.form_field == 7 => {
+                KeyAction::CursorLeft if self.form_field == 5 => {
                     let current = self.enabled_editor.buf().trim();
                     let new = if current == "true" { "false" } else { "true" };
                     let mut ed = InputEditor::default();
                     ed.insert_str(new);
                     self.enabled_editor = ed;
                 }
-                KeyAction::CursorRight if self.form_field == 7 => {
+                KeyAction::CursorRight if self.form_field == 5 => {
                     let current = self.enabled_editor.buf().trim();
                     let new = if current == "true" { "false" } else { "true" };
                     let mut ed = InputEditor::default();
                     ed.insert_str(new);
                     self.enabled_editor = ed;
                 }
-                KeyAction::CursorLeft if self.form_field == 6 => {
-                    let current = self.enabled_editor.buf().trim();
-                    let new = if current == "true" { "false" } else { "true" };
-                    let mut ed = InputEditor::default();
-                    ed.insert_str(new);
-                    self.enabled_editor = ed;
-                }
-                KeyAction::CursorRight if self.form_field == 6 => {
-                    let current = self.enabled_editor.buf().trim();
-                    let new = if current == "true" { "false" } else { "true" };
-                    let mut ed = InputEditor::default();
-                    ed.insert_str(new);
-                    self.enabled_editor = ed;
-                }
-                KeyAction::Backspace if self.form_field == 6 => {}
-                KeyAction::Char(_) if self.form_field == 6 => {}
+                KeyAction::Backspace if self.form_field == 5 => {}
+                KeyAction::Char(_) if self.form_field == 5 => {}
                 KeyAction::Backspace => {
                     editor.backspace();
                 }
@@ -805,7 +783,6 @@ impl ProviderManager {
         let api_key_env = self.api_key_env_editor.buf().trim().to_string();
         let base_url = self.base_url_editor.buf().trim().to_string();
         let provider_type = self.provider_type_editor.buf().trim().to_string();
-        let max_tokens: Option<u32> = self.max_tokens_editor.buf().trim().parse().ok();
         let enabled = matches!(
             self.enabled_editor.buf().trim().to_lowercase().as_str(),
             "true" | "1" | "yes" | "on"
@@ -829,7 +806,7 @@ impl ProviderManager {
                     api_key,
                     api_key_env,
                     base_url,
-                    max_tokens,
+                    max_tokens: None,
                     enabled,
                 });
             } else {
@@ -839,7 +816,7 @@ impl ProviderManager {
                     api_key,
                     api_key_env,
                     base_url,
-                    max_tokens,
+                    max_tokens: None,
                     enabled,
                 });
             }
@@ -1053,13 +1030,12 @@ fn render_add_dialog(
     let mut lines = vec![];
     let mut cursor_pos: Option<(u16, u16)> = None;
     if mgr.in_form {
-        let fields: [(&str, &str); 7] = [
+        let fields: [(&str, &str); 6] = [
             ("Name", mgr.name_editor.buf()),
             ("Type", mgr.provider_type_editor.buf()),
             ("API Key", mgr.api_key_editor.buf()),
             ("API Key Env", mgr.api_key_env_editor.buf()),
             ("Base URL", mgr.base_url_editor.buf()),
-            ("Max Output", mgr.max_tokens_editor.buf()),
             ("Enabled", mgr.enabled_editor.buf()),
         ];
         let mut y = inner.y;
@@ -1172,7 +1148,7 @@ fn render_add_dialog(
         }
         y = y.saturating_add(1);
         if y < inner.bottom() {
-            let test_active = mgr.form_field == 7;
+            let test_active = mgr.form_field == 6;
             let test_style = if test_active {
                 Style::default()
                     .fg(theme.modal_bg.into())
@@ -1435,7 +1411,6 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
             2 => &mut self.api_key_editor,
             3 => &mut self.api_key_env_editor,
             4 => &mut self.base_url_editor,
-            5 => &mut self.max_tokens_editor,
             _ => &mut self.enabled_editor,
         };
         editor.insert_str(text);
