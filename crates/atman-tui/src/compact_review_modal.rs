@@ -263,32 +263,15 @@ impl crate::wm::modal::ModalOverlay for CompactReviewModal {
                     self.mode = CompactReviewMode::Viewing;
                     Some(ModalAction::Consumed)
                 }
-                KeyAction::Backspace => {
-                    self.editor.backspace();
-                    Some(ModalAction::Consumed)
-                }
-                KeyAction::DeleteWordBackward => {
-                    self.editor.delete_word_backward();
-                    Some(ModalAction::Consumed)
-                }
-                KeyAction::CursorLeft => {
-                    self.editor.move_left();
-                    Some(ModalAction::Consumed)
-                }
-                KeyAction::CursorRight => {
-                    self.editor.move_right();
-                    Some(ModalAction::Consumed)
-                }
-                KeyAction::CursorHome => {
-                    self.editor.move_home();
-                    Some(ModalAction::Consumed)
-                }
-                KeyAction::CursorEnd => {
-                    self.editor.move_end();
-                    Some(ModalAction::Consumed)
-                }
-                KeyAction::Char(c) => {
-                    self.editor.insert_char(*c);
+                KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::DeleteWordBackward
+                | KeyAction::CursorLeft
+                | KeyAction::CursorRight
+                | KeyAction::CursorHome
+                | KeyAction::CursorEnd
+                | KeyAction::Char(_) => {
+                    self.editor.handle_key(action);
                     Some(ModalAction::Consumed)
                 }
                 _ => Some(ModalAction::Consumed),

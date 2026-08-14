@@ -651,23 +651,16 @@ impl ProviderManager {
                 }
                 KeyAction::Backspace if self.form_field == 5 => {}
                 KeyAction::Char(_) if self.form_field == 5 => {}
-                KeyAction::Backspace => {
-                    editor.backspace();
-                }
-                KeyAction::CursorLeft => {
-                    editor.move_left();
-                }
-                KeyAction::CursorRight => {
-                    editor.move_right();
-                }
-                KeyAction::CursorHome => {
-                    editor.move_home();
-                }
-                KeyAction::CursorEnd => {
-                    editor.move_end();
-                }
-                KeyAction::Char(c) => {
-                    editor.insert_char(*c);
+                KeyAction::DeleteWordBackward
+                | KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::CursorLeft
+                | KeyAction::CursorRight
+                | KeyAction::CursorHome
+                | KeyAction::CursorEnd
+                | KeyAction::Char(_)
+                | KeyAction::Newline => {
+                    editor.handle_key(action);
                 }
                 _ => {}
             }
@@ -675,23 +668,16 @@ impl ProviderManager {
             match action {
                 KeyAction::Escape => self.name_focused = false,
                 KeyAction::Submit => self.commit_add(control_tx),
-                KeyAction::Backspace => {
-                    self.name_editor.backspace();
-                }
-                KeyAction::CursorLeft => {
-                    self.name_editor.move_left();
-                }
-                KeyAction::CursorRight => {
-                    self.name_editor.move_right();
-                }
-                KeyAction::CursorHome => {
-                    self.name_editor.move_home();
-                }
-                KeyAction::CursorEnd => {
-                    self.name_editor.move_end();
-                }
-                KeyAction::Char(c) => {
-                    self.name_editor.insert_char(*c);
+                KeyAction::DeleteWordBackward
+                | KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::CursorLeft
+                | KeyAction::CursorRight
+                | KeyAction::CursorHome
+                | KeyAction::CursorEnd
+                | KeyAction::Char(_)
+                | KeyAction::Newline => {
+                    self.name_editor.handle_key(action);
                 }
                 _ => {}
             }
@@ -1072,9 +1058,8 @@ fn render_add_dialog(
                     value_rect,
                 );
                 if active {
-                    let display_w =
-                        crate::width::width(&display_val).min(inner.width as usize) as u16;
-                    cursor_pos = Some((inner.x + 2 + display_w, y));
+                    let cursor_w = mgr.api_key_editor.cursor_display_col();
+                    cursor_pos = Some((inner.x + 2 + cursor_w.min(inner.width as usize) as u16, y));
                 }
                 y = y.saturating_add(1);
                 let underline = "─".repeat(inner.width as usize);
@@ -1126,7 +1111,14 @@ fn render_add_dialog(
                 value_rect,
             );
             if active && !toggle_hint {
-                cursor_pos = Some((inner.x + 2 + crate::width::width(&display_val) as u16, y));
+                let cursor_w = match i {
+                    0 => mgr.name_editor.cursor_display_col(),
+                    2 => mgr.api_key_editor.cursor_display_col(),
+                    3 => mgr.api_key_env_editor.cursor_display_col(),
+                    4 => mgr.base_url_editor.cursor_display_col(),
+                    _ => 0,
+                } as u16;
+                cursor_pos = Some((inner.x + 2 + cursor_w, y));
             }
             y = y.saturating_add(1);
         }
@@ -1188,7 +1180,7 @@ fn render_add_dialog(
             Style::default().fg(theme.accent.into()),
         )));
         let y = inner.y + (lines.len() as u16) - 1;
-        let x = inner.x + 2 + mgr.name_editor.buf().len() as u16;
+        let x = inner.x + 2 + mgr.name_editor.cursor_display_col() as u16;
         cursor_pos = Some((x, y));
         lines.push(Line::from("Enter to confirm, Esc to cancel"));
     } else {

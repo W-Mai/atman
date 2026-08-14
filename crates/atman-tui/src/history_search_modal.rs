@@ -341,13 +341,16 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             KeyAction::HistoryDown => {
                 self.move_down();
             }
-            KeyAction::CursorLeft => {
+            KeyAction::CursorLeft
+            | KeyAction::CursorRight
+            | KeyAction::CursorHome
+            | KeyAction::CursorEnd
+            | KeyAction::Backspace
+            | KeyAction::Delete
+            | KeyAction::DeleteWordBackward
+            | KeyAction::Char(_) => {
                 self.input_focused = true;
-                self.editor.move_left();
-            }
-            KeyAction::CursorRight => {
-                self.input_focused = true;
-                self.editor.move_right();
+                self.editor.handle_key(action);
             }
             KeyAction::PageUp => self.scroll_preview(true, 10),
             KeyAction::PageDown => self.scroll_preview(false, 10),
@@ -355,14 +358,6 @@ impl crate::wm::modal::ModalOverlay for HistorySearchModal {
             KeyAction::ScrollDown => self.scroll_preview(false, 3),
             KeyAction::Tab => {
                 self.scope = self.scope.toggle();
-            }
-            KeyAction::Char(c) => {
-                self.input_focused = true;
-                self.editor.insert_char(*c);
-            }
-            KeyAction::Backspace => {
-                self.input_focused = true;
-                self.editor.backspace();
             }
             KeyAction::Submit => {
                 self.run_search(app);

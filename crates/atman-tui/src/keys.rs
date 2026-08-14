@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum KeyAction {
     Char(char),
     Backspace,
+    Delete,
     DeleteWordBackward,
     Submit,
     Newline,
@@ -68,7 +69,7 @@ pub fn map(ev: KeyEvent) -> KeyAction {
         (Enter, _, true, _) => KeyAction::Newline,
         (Enter, _, _, _) => KeyAction::Submit,
         (Backspace, _, _, _) => KeyAction::Backspace,
-        (Delete, _, _, _) => KeyAction::Backspace,
+        (Delete, _, _, _) => KeyAction::Delete,
         (Left, _, _, _) => KeyAction::CursorLeft,
         (Right, _, _, _) => KeyAction::CursorRight,
         (Up, _, _, _) => KeyAction::HistoryUp,

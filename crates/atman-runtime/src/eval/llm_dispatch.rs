@@ -27,7 +27,7 @@ impl super::inherited_context::InheritedContextSummarizer for ProviderInheritedS
             let mut source_text = serde_json::to_string(source).ok()?;
             let input_limit = max_tokens.saturating_mul(8).max(512) as usize;
             if source_text.len() > input_limit {
-                source_text.truncate(input_limit);
+                source_text.truncate(super::char_boundary(&source_text, input_limit, false));
             }
             let prompt = format!(
                 "Summarize this prior turn's assistant/system/tool output for context inheritance. Preserve file paths, symbols, commands, errors, decisions, completed work, and unfinished state. Omit hidden reasoning and repetitive tool output. Stay under {max_tokens} tokens.\n\n{source_text}"

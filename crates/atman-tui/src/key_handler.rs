@@ -368,26 +368,24 @@ pub(crate) fn handle_key(
                 }
                 Err(e) => form.error = Some(e),
             },
-            KeyAction::Char(c) => {
+            KeyAction::Char(_)
+            | KeyAction::Backspace
+            | KeyAction::Delete
+            | KeyAction::DeleteWordBackward
+            | KeyAction::CursorHome
+            | KeyAction::CursorEnd
+            | KeyAction::Newline => {
                 form.error = None;
-                match form.field {
-                    0 => form.name.insert_char(c),
-                    2 if form.transport_idx == 0 => form.command.insert_char(c),
-                    2 => form.url.insert_char(c),
-                    3 => form.args.insert_char(c),
-                    4 => form.env.insert_char(c),
-                    _ => {}
-                }
-            }
-            KeyAction::Backspace => {
-                form.error = None;
-                match form.field {
-                    0 => form.name.backspace(),
-                    2 if form.transport_idx == 0 => form.command.backspace(),
-                    2 => form.url.backspace(),
-                    3 => form.args.backspace(),
-                    4 => form.env.backspace(),
-                    _ => {}
+                let editor = match form.field {
+                    0 => Some(&mut form.name),
+                    2 if form.transport_idx == 0 => Some(&mut form.command),
+                    2 => Some(&mut form.url),
+                    3 => Some(&mut form.args),
+                    4 => Some(&mut form.env),
+                    _ => None,
+                };
+                if let Some(editor) = editor {
+                    editor.handle_key(&action);
                 }
             }
             KeyAction::CursorLeft => {
@@ -395,6 +393,11 @@ pub(crate) fn handle_key(
                 match form.field {
                     1 if form.transport_idx > 0 => form.transport_idx -= 1,
                     5 if form.tier_idx > 0 => form.tier_idx -= 1,
+                    0 => form.name.move_left(),
+                    2 if form.transport_idx == 0 => form.command.move_left(),
+                    2 => form.url.move_left(),
+                    3 => form.args.move_left(),
+                    4 => form.env.move_left(),
                     _ => {}
                 }
             }
@@ -403,6 +406,11 @@ pub(crate) fn handle_key(
                 match form.field {
                     1 if form.transport_idx < 2 => form.transport_idx += 1,
                     5 if form.tier_idx < 2 => form.tier_idx += 1,
+                    0 => form.name.move_right(),
+                    2 if form.transport_idx == 0 => form.command.move_right(),
+                    2 => form.url.move_right(),
+                    3 => form.args.move_right(),
+                    4 => form.env.move_right(),
                     _ => {}
                 }
             }
@@ -778,6 +786,11 @@ pub(crate) fn handle_key(
         }
         KeyAction::Backspace => {
             editor.backspace();
+            *interrupt_prompt = None;
+            edited = true;
+        }
+        KeyAction::Delete => {
+            editor.delete_forward();
             *interrupt_prompt = None;
             edited = true;
         }

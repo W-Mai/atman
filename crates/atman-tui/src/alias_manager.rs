@@ -161,23 +161,15 @@ impl AliasManager {
                     self.focus = Focus::Tree;
                 }
                 KeyAction::Submit => self.commit_alias(control_tx),
-                KeyAction::Backspace => {
-                    self.editor.backspace();
-                }
-                KeyAction::CursorLeft => {
-                    self.editor.move_left();
-                }
-                KeyAction::CursorRight => {
-                    self.editor.move_right();
-                }
-                KeyAction::CursorHome => {
-                    self.editor.move_home();
-                }
-                KeyAction::CursorEnd => {
-                    self.editor.move_end();
-                }
-                KeyAction::Char(c) => {
-                    self.editor.insert_char(*c);
+                KeyAction::Backspace
+                | KeyAction::Delete
+                | KeyAction::DeleteWordBackward
+                | KeyAction::CursorLeft
+                | KeyAction::CursorRight
+                | KeyAction::CursorHome
+                | KeyAction::CursorEnd
+                | KeyAction::Char(_) => {
+                    self.editor.handle_key(action);
                 }
                 _ => {}
             },
@@ -311,7 +303,7 @@ fn render_tree_panel(
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
     if mgr.focus == Focus::NameInput {
-        let cursor_x = area.x + 6 + crate::width::width(mgr.editor.buf()) as u16;
+        let cursor_x = area.x + 6 + mgr.editor.cursor_display_col() as u16;
         f.set_cursor_position((cursor_x, area.y));
     }
 }
@@ -485,7 +477,7 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
         self.last_input_rect
-            .map(|r| (r.x + self.editor.buf().chars().count() as u16, r.y))
+            .map(|r| (r.x + self.editor.cursor_display_col() as u16, r.y))
     }
 
     fn title(&self) -> Line<'static> {

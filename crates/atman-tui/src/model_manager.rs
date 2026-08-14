@@ -175,24 +175,13 @@ impl ModelManager {
     }
 
     fn handle_form_key(&mut self, action: &KeyAction) {
-        let editor = match self.form_field {
-            0 => &mut self.name_editor,
-            1 => &mut self.model_editor,
-            3 => &mut self.context_budget_editor,
-            5 => &mut self.max_tokens_editor,
-            _ => &mut self.thinking_editor,
-        };
         match action {
             KeyAction::Escape => {
                 self.show_form = false;
                 self.editing = None;
             }
-            KeyAction::Submit => {
-                self.commit_form();
-            }
-            KeyAction::Tab => {
-                self.form_field = (self.form_field + 1) % 6;
-            }
+            KeyAction::Submit => self.commit_form(),
+            KeyAction::Tab => self.form_field = (self.form_field + 1) % 6,
             KeyAction::BackTab => {
                 self.form_field = if self.form_field == 0 {
                     5
@@ -200,35 +189,33 @@ impl ModelManager {
                     self.form_field - 1
                 };
             }
-            KeyAction::CursorLeft if self.form_field == 4 => {
+            KeyAction::CursorLeft | KeyAction::CursorRight if self.form_field == 4 => {
                 let new = if self.thinking_editor.buf().trim() == "true" {
                     "false"
                 } else {
                     "true"
                 };
-                let mut ed = InputEditor::default();
-                ed.insert_str(new);
-                self.thinking_editor = ed;
+                self.thinking_editor.replace_with(new);
             }
-            KeyAction::CursorRight if self.form_field == 4 => {
-                let new = if self.thinking_editor.buf().trim() == "true" {
-                    "false"
-                } else {
-                    "true"
+            KeyAction::CursorLeft
+            | KeyAction::CursorRight
+            | KeyAction::CursorHome
+            | KeyAction::CursorEnd
+            | KeyAction::Backspace
+            | KeyAction::Delete
+            | KeyAction::DeleteWordBackward
+            | KeyAction::Char(_)
+            | KeyAction::Newline
+                if matches!(self.form_field, 0 | 1 | 3 | 5) =>
+            {
+                let editor = match self.form_field {
+                    0 => &mut self.name_editor,
+                    1 => &mut self.model_editor,
+                    3 => &mut self.context_budget_editor,
+                    5 => &mut self.max_tokens_editor,
+                    _ => unreachable!(),
                 };
-                let mut ed = InputEditor::default();
-                ed.insert_str(new);
-                self.thinking_editor = ed;
-            }
-            KeyAction::Backspace if self.form_field == 2 => {}
-            KeyAction::Char(_) if self.form_field == 2 => {}
-            KeyAction::Backspace if self.form_field == 4 => {}
-            KeyAction::Char(_) if self.form_field == 4 => {}
-            KeyAction::Backspace => {
-                editor.backspace();
-            }
-            KeyAction::Char(c) => {
-                editor.insert_char(*c);
+                editor.handle_key(action);
             }
             _ => {}
         }
@@ -520,8 +507,14 @@ impl ModelManager {
             if active && i != 2 && i != 4 {
                 let prefix = format!(" {label:<16}");
                 let prefix_w = crate::width::width(&prefix) as u16;
-                let val_w = crate::width::width(val) as u16;
-                cursor_pos = Some((inner.x + prefix_w + val_w, y));
+                let cursor_w = match i {
+                    0 => self.name_editor.cursor_display_col(),
+                    1 => self.model_editor.cursor_display_col(),
+                    3 => self.context_budget_editor.cursor_display_col(),
+                    5 => self.max_tokens_editor.cursor_display_col(),
+                    _ => 0,
+                } as u16;
+                cursor_pos = Some((inner.x + prefix_w + cursor_w, y));
             }
             y += 1;
         }

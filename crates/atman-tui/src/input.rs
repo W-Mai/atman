@@ -369,6 +369,28 @@ impl InputEditor {
         self.insert_char('\n');
     }
 
+    /// Apply a key that edits a single-line or multiline text buffer.
+    /// Returns true when the action belongs to the editor.
+    pub fn handle_key(&mut self, action: &crate::keys::KeyAction) -> bool {
+        match action {
+            crate::keys::KeyAction::Backspace => self.backspace(),
+            crate::keys::KeyAction::Delete => self.delete_forward(),
+            crate::keys::KeyAction::DeleteWordBackward => self.delete_word_backward(),
+            crate::keys::KeyAction::CursorLeft => self.move_left(),
+            crate::keys::KeyAction::CursorRight => self.move_right(),
+            crate::keys::KeyAction::CursorHome => self.move_home(),
+            crate::keys::KeyAction::CursorEnd => self.move_end(),
+            crate::keys::KeyAction::Char(c) => self.insert_char(*c),
+            crate::keys::KeyAction::Newline => self.insert_newline(),
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn cursor_display_col(&self) -> usize {
+        crate::width::width(&self.buf[..self.cursor])
+    }
+
     pub fn backspace(&mut self) {
         self.consume_history_view();
         if self.cursor == 0 {
@@ -390,6 +412,18 @@ impl InputEditor {
         let target = word_boundary_backward(&self.buf, self.cursor);
         self.buf.drain(target..self.cursor);
         self.cursor = target;
+    }
+
+    pub fn delete_forward(&mut self) {
+        self.consume_history_view();
+        if self.cursor >= self.buf.len() {
+            return;
+        }
+        let mut next = self.cursor + 1;
+        while next < self.buf.len() && !self.buf.is_char_boundary(next) {
+            next += 1;
+        }
+        self.buf.drain(self.cursor..next);
     }
 
     pub fn move_left(&mut self) {
@@ -779,6 +813,32 @@ mod tests {
         assert_eq!(ed.buf(), "hello ");
         ed.delete_word_backward();
         assert_eq!(ed.buf(), "");
+    }
+
+    #[test]
+    fn shared_key_dispatch_supports_cursor_delete_and_unicode() {
+        let mut ed = InputEditor::default();
+        ed.insert_str("你好吗");
+        assert_eq!(ed.cursor_display_col(), 6);
+        ed.handle_key(&crate::keys::KeyAction::CursorLeft);
+        ed.handle_key(&crate::keys::KeyAction::CursorLeft);
+        assert_eq!(ed.cursor_display_col(), 2);
+        ed.handle_key(&crate::keys::KeyAction::Char('呀'));
+        assert_eq!(ed.buf(), "你呀好吗");
+        ed.handle_key(&crate::keys::KeyAction::Delete);
+        assert_eq!(ed.buf(), "你呀吗");
+        ed.handle_key(&crate::keys::KeyAction::CursorHome);
+        ed.handle_key(&crate::keys::KeyAction::CursorRight);
+        ed.handle_key(&crate::keys::KeyAction::Backspace);
+        assert_eq!(ed.buf(), "呀吗");
+    }
+
+    #[test]
+    fn shared_key_dispatch_deletes_word() {
+        let mut ed = InputEditor::default();
+        ed.insert_str("hello world");
+        assert!(ed.handle_key(&crate::keys::KeyAction::DeleteWordBackward));
+        assert_eq!(ed.buf(), "hello ");
     }
 
     #[test]

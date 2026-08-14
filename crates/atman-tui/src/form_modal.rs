@@ -703,14 +703,18 @@ impl crate::wm::modal::ModalOverlay for FormModal {
             KeyAction::CursorRight if is_confirm => {
                 self.move_cursor(1);
             }
-            KeyAction::Char(c) if is_text => {
-                self.text_editor.insert_char(*c);
-            }
-            KeyAction::Backspace if is_text => {
-                self.text_editor.backspace();
-            }
-            KeyAction::Newline if is_text => {
-                self.text_editor.insert_newline();
+            KeyAction::Backspace
+            | KeyAction::Delete
+            | KeyAction::DeleteWordBackward
+            | KeyAction::CursorLeft
+            | KeyAction::CursorRight
+            | KeyAction::CursorHome
+            | KeyAction::CursorEnd
+            | KeyAction::Char(_)
+            | KeyAction::Newline
+                if is_text =>
+            {
+                self.text_editor.handle_key(action);
             }
             _ => {}
         }
@@ -719,7 +723,7 @@ impl crate::wm::modal::ModalOverlay for FormModal {
 
     fn cursor_position(&self) -> Option<(u16, u16)> {
         self.last_input_rect
-            .map(|r| (r.x + self.text_editor.buf().chars().count() as u16, r.y))
+            .map(|r| (r.x + self.text_editor.cursor_display_col() as u16, r.y))
     }
 
     fn title(&self) -> Line<'static> {

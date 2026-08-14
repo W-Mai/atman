@@ -2190,6 +2190,17 @@ mod tests {
     use atman_dsl::parse::parse_file;
 
     #[test]
+    fn char_boundary_rounds_around_multibyte_characters() {
+        let text = "a你😀b";
+        assert_eq!(char_boundary(text, 2, false), 1);
+        assert_eq!(char_boundary(text, 2, true), 4);
+        assert_eq!(char_boundary(text, 6, false), 4);
+        assert_eq!(char_boundary(text, 6, true), 8);
+        assert_eq!(char_boundary(text, 8, false), 8);
+        assert_eq!(char_boundary(text, 99, false), text.len());
+    }
+
+    #[test]
     fn parse_context_mode_handles_variants() {
         assert!(matches!(
             parse_context_mode("session"),
