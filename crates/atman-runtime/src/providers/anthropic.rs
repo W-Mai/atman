@@ -473,6 +473,32 @@ impl Provider for AnthropicProvider {
             cancel,
         }
     }
+
+    fn test_connection(&self) -> BoxFut<'_, Result<String, String>> {
+        let base_url = self.base_url.clone();
+        let api_key = self.api_key.clone();
+        let name = self.name.clone();
+        Box::pin(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let resp = client
+                .get(format!("{}/v1/models", base_url.trim_end_matches('/')))
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await
+                .map_err(|e| format!("connection failed — {e}"))?;
+            let status = resp.status();
+            if status.is_success() {
+                Ok(format!("\"{name}\" responded OK"))
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                Err(format!("returned {status} — {}", &body[..body.len().min(200)]))
+            }
+        })
+    }
 }
 
 struct PartialToolUse {

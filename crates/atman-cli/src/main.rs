@@ -6959,35 +6959,25 @@ async fn test_provider_endpoint(
     api_key: &str,
     base_url: &str,
 ) -> (String, bool) {
-    let client = reqwest::Client::new();
-    let url = if provider_type == "anthropic" {
-        format!("{}/v1/models", base_url.trim_end_matches('/'))
+    let provider: Box<dyn atman_runtime::provider::Provider> = if provider_type == "anthropic" {
+        Box::new(
+            atman_runtime::providers::anthropic::AnthropicProvider::new(name, api_key)
+                .with_base_url(base_url),
+        )
     } else {
-        format!("{}/models", base_url.trim_end_matches('/'))
+        Box::new(
+            atman_runtime::providers::openai::OpenAiProvider::new(name, api_key)
+                .with_base_url(base_url),
+        )
     };
-    let mut req = client.get(&url);
-    if provider_type == "anthropic" {
-        req = req
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01");
-    } else {
-        req = req.bearer_auth(api_key);
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(15), req.send()).await {
-        Ok(Ok(resp)) => {
-            let status = resp.status();
-            if status.is_success() {
-                (format!("\"{}\" responded OK", name), true)
-            } else {
-                let body = resp.text().await.unwrap_or_default();
-                let short = body.chars().take(200).collect::<String>();
-                (
-                    format!("\"{}\" returned {} — {}", name, status, short),
-                    false,
-                )
-            }
-        }
-        Ok(Err(e)) => (format!("\"{}\" connection failed — {e}", name), false),
-        Err(_) => (format!("\"{}\" timed out after 15s", name), false),
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        provider.test_connection(),
+    )
+    .await
+    {
+        Ok(Ok(msg)) => (msg, true),
+        Ok(Err(msg)) => (format!("\"{name}\" {msg}"), false),
+        Err(_) => (format!("\"{name}\" timed out after 15s"), false),
     }
 }

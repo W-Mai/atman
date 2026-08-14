@@ -513,6 +513,33 @@ impl Provider for CodexProvider {
                 .collect()
         })
     }
+
+    fn test_connection(&self) -> BoxFut<'_, Result<String, String>> {
+        let access_token = self.access_token.clone();
+        let account_id = self.account_id.clone();
+        let name = self.name.clone();
+        Box::pin(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let resp = client
+                .get("https://chatgpt.com/backend-api/wham/models")
+                .query(&[("client_version", "0.0.0")])
+                .bearer_auth(&access_token)
+                .header("ChatGPT-Account-Id", &account_id)
+                .send()
+                .await
+                .map_err(|e| format!("connection failed — {e}"))?;
+            let status = resp.status();
+            if status.is_success() {
+                Ok(format!("\"{name}\" responded OK"))
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                Err(format!("returned {status} — {}", &body[..body.len().min(200)]))
+            }
+        })
+    }
 }
 
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";

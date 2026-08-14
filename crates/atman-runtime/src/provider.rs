@@ -102,9 +102,12 @@ pub trait Provider: Send + Sync {
     fn call<'a>(&'a self, req: LlmRequest) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>>;
     fn call_streaming(&self, req: LlmRequest) -> Observable<AssistantMessage>;
 
-    /// Discover available models from this provider. Default: empty.
     fn discover_models(&self) -> BoxFut<'static, Vec<DiscoveredModel>> {
         Box::pin(async { vec![] })
+    }
+
+    fn test_connection(&self) -> BoxFut<'_, Result<String, String>> {
+        Box::pin(async { Err("test_connection not implemented".into()) })
     }
 }
 
