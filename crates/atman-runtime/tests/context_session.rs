@@ -10,6 +10,32 @@ use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
 use atman_runtime::{Executor, Value, tools};
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn register_recording_models() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    let models = ["recording", "recording-full-window"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ModelEntry {
+                    model: name.to_string(),
+                    provider: Some("recording".into()),
+                    context_budget: Some(200_000),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models,
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 /// Records the messages each LLM call receives so we can assert that
 /// `context: session` actually feeds session history into the provider.
 struct RecordingProvider {
@@ -144,6 +170,8 @@ flow agent_loop(iteration: int) -> string {
 
 #[tokio::test(flavor = "current_thread")]
 async fn context_session_feeds_session_history_into_llm_call() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    register_recording_models();
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("data.txt");
     tokio::fs::write(&file_path, "hello from file")
@@ -263,6 +291,65 @@ async fn context_session_feeds_session_history_into_llm_call() {
     );
 }
 
+const SINGLE_SESSION_CALL: &str = r#"
+flow one_shot() -> string {
+    reply = llm.call(model: "recording-full-window", context: "session")
+    return text_concat(reply)
+}
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+async fn context_session_sends_the_full_live_window_without_request_projection() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    register_recording_models();
+    let provider = Arc::new(RecordingProvider::new(vec![vec![MessagePart::Text {
+        text: "ok".into(),
+    }]]));
+    let session = Arc::new(Session::open_ephemeral());
+    let ex = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&ex.tools);
+    ex.providers.register(provider.clone());
+    let file = parse_file(SINGLE_SESSION_CALL).unwrap();
+
+    for i in 0..7 {
+        session.append_message(
+            Message::user_text(TurnId::now(), format!("session turn {i}")),
+            None,
+        );
+    }
+    let turn_id = TurnId::now();
+    ex.run_in_turn(
+        &file,
+        "one_shot",
+        vec![],
+        Some(turn_id),
+        Some(session.clone()),
+    )
+    .await
+    .unwrap();
+
+    let captured = provider.captured();
+    assert_eq!(captured.len(), 1);
+    let user_texts = captured[0]
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .map(Message::text_concat)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        user_texts.len(),
+        7,
+        "context:session must use the complete live message window"
+    );
+    assert_eq!(
+        user_texts.first().map(String::as_str),
+        Some("session turn 0")
+    );
+    assert_eq!(
+        user_texts.last().map(String::as_str),
+        Some("session turn 6")
+    );
+}
+
 const AGENT_CONTEXT_NONE: &str = r#"
 flow one_shot(user_prompt: string) -> string {
     reply = llm.call(
@@ -275,6 +362,8 @@ flow one_shot(user_prompt: string) -> string {
 
 #[tokio::test(flavor = "current_thread")]
 async fn context_none_default_does_not_read_session_history() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    register_recording_models();
     let provider = Arc::new(RecordingProvider::new(vec![vec![MessagePart::Text {
         text: "ok".into(),
     }]]));
