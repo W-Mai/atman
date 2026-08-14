@@ -11,8 +11,7 @@ flow review_code(file: path) -> Review {
 
     gather = fanout [
         fs.read(file),
-        fetch_rule("code-review"),
-        fetch_confessions(tag: "code-review"),
+        rule.fetch("code-review"),
     ] collect: all
 
     primary = llm.call(
@@ -24,25 +23,25 @@ flow review_code(file: path) -> Review {
     )
 
     verify = llm.call(
-        model: "cheap"
-        messages: [system_msg(@"prompts/verify.md"), user_msg("Verify the review above.")]
-        input: primary
-        schema: { valid: bool, issues: [string] }
+        model: "cheap",
+        messages: [system_msg(@"prompts/verify.md"), user_msg("Verify the review above.")],
+        input: primary,
+        schema: { valid: bool, issues: [string] },
     )
 
     when verify.valid == false {
         primary = llm.call(
-            model: "smart"
-            messages: [system_msg(@"prompts/code-review.md"), user_msg("Try again with more care.")]
-            input: gather
-            schema: Review
-            cache: true
-            retry: 2
+            model: "smart",
+            messages: [system_msg(@"prompts/code-review.md"), user_msg("Try again with more care.")],
+            input: gather,
+            schema: Review,
+            cache: true,
+            retry: 2,
         )
     }
 
     when primary.severity == "critical" {
-        user_confirm("发现严重问题,是否继续?")
+        user_confirm("Critical issue found — proceed?")
     }
 
     audit = preview.push(

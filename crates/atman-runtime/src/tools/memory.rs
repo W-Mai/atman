@@ -721,6 +721,8 @@ impl Tool for MemoryFetchConfessions {
                         ("id".into(), Value::Str(c.id.to_string())),
                         ("trigger".into(), Value::Str(c.trigger)),
                         ("rule_violated".into(), Value::Str(c.rule_violated)),
+                        ("what_i_did".into(), Value::Str(c.what_i_did)),
+                        ("why".into(), Value::Str(c.why)),
                         ("mitigation".into(), Value::Str(c.mitigation)),
                     ])
                 })

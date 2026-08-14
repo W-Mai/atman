@@ -30,17 +30,16 @@ pub mod tool_output;
 pub mod web;
 
 pub fn register_tier_zero(reg: &ToolRegistry) {
-    register_tier_zero_with_rules(reg, memory_stubs::FetchRule::new());
+    register_tier_zero_with_rules(reg, memory_stubs::RuleFetch::new());
 }
 
-pub fn register_tier_zero_with_rules(reg: &ToolRegistry, fetch_rule: memory_stubs::FetchRule) {
+pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stubs::RuleFetch) {
     reg.register(Arc::new(fs::FsRead));
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(fs::FsWrite));
     reg.register(Arc::new(fs::FsEdit));
     reg.register(Arc::new(fs::FsGrep));
-    reg.register(Arc::new(memory_stubs::FetchConfessions));
-    reg.register(Arc::new(fetch_rule));
+    reg.register(Arc::new(rule_fetch));
     reg.register(Arc::new(stdlib::ShellQuote));
     reg.register(Arc::new(stdlib::ToJsonString));
     reg.register(Arc::new(stdlib::ComposeEmailPreview));

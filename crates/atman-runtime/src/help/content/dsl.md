@@ -142,7 +142,7 @@ flow review_code(file: path) -> Review {
     contract {
         scope { read: [project_root], write: [] }
     }
-    gather = fanout [fs.read(file), fetch_rule("code-review")] collect: all
+    gather = fanout [fs.read(file), rule.fetch("code-review")] collect: all
     primary = llm.call(
         model: "smart",
         messages: [system_msg(@"prompts/review.md"), user_msg("Review.")],

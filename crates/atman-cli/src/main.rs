@@ -5599,22 +5599,59 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
         if rules.is_empty() {
             println!("  (none detected in project or user home)");
         } else {
+            let skill_count = rules
+                .iter()
+                .filter(|r| r.source_tool == "skill")
+                .count();
             for r in &rules {
                 let scope = match r.scope {
                     atman_runtime::migration::RuleScope::Project => "project",
                     atman_runtime::migration::RuleScope::Global => "global ",
                 };
+                let desc = r
+                    .description
+                    .as_deref()
+                    .map(|d| format!(" — {d}"))
+                    .unwrap_or_default();
                 println!(
-                    "  [✓] {:<30} [{:<8}] {} — {}",
+                    "  [✓] {:<30} [{:<8}] {} — {}{}",
                     r.name,
                     r.source_tool,
                     scope,
-                    r.source_path.display()
+                    r.source_path.display(),
+                    desc,
                 );
             }
+            println!("  skills: {skill_count} referenced rule(s) from ~/.claude/skills/");
         }
     } else {
         println!("  (HOME env not set)");
+    }
+    println!();
+    println!("confessions:");
+    match atman_runtime::storage::resolve_project_scope_for(&project_root) {
+        Ok(scope) => {
+            let conf_dir = scope.join("confessions");
+            if conf_dir.exists() {
+                let count = std::fs::read_dir(&conf_dir)
+                    .map(|it| {
+                        it.filter_map(|e| e.ok())
+                            .filter(|e| {
+                                e.path()
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| s == "md")
+                                    .unwrap_or(false)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                println!("  [✓] {} — {count} confession(s)", conf_dir.display());
+            } else {
+                println!("  (none — {} missing)", conf_dir.display());
+            }
+        }
+        Err(e) => println!("  [✗] resolve scope failed: {e}"),
     }
     println!();
     println!("mcp:");

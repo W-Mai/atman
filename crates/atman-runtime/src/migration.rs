@@ -9,6 +9,7 @@ pub struct MigratedRule {
     pub source_path: PathBuf,
     pub scope: RuleScope,
     pub content: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -16,6 +17,15 @@ pub struct MigratedRule {
 pub enum RuleScope {
     Project,
     Global,
+}
+
+impl RuleScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuleScope::Project => "project",
+            RuleScope::Global => "global",
+        }
+    }
 }
 
 const MAX_RULE_BYTES: usize = 100_000;
@@ -138,14 +148,32 @@ fn scan_skill_references(home: &Path, out: &mut Vec<MigratedRule>) {
         let Ok(body) = std::fs::read_to_string(&skill_md) else {
             continue;
         };
-        let skill_name = skill_dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unnamed");
+        let front_matter = parse_front_matter(&body);
+        let skill_name = front_matter
+            .as_ref()
+            .and_then(|fm| fm.get("name"))
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                skill_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unnamed".to_string());
+        let skill_description = front_matter
+            .as_ref()
+            .and_then(|fm| fm.get("description"))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         for rel in parse_markdown_local_links(&body) {
             let full = skill_dir.join(&rel);
             if let Some(mut rule) = load_file(&full, "skill", RuleScope::Global) {
                 rule.name = format!("skill:{skill_name}::{}", rel.display());
+                if let Some(desc) = &skill_description {
+                    rule.description = Some(desc.clone());
+                }
                 out.push(rule);
             }
         }
@@ -210,12 +238,14 @@ fn load_file(path: &Path, tool: &str, scope: RuleScope) -> Option<MigratedRule> 
         raw
     };
     let name = extract_rule_name(&content).unwrap_or_else(|| basename(path));
+    let description = extract_rule_description(&content);
     Some(MigratedRule {
         name,
         source_tool: tool.into(),
         source_path: path.to_path_buf(),
         scope,
         content,
+        description,
     })
 }
 
@@ -231,6 +261,80 @@ fn extract_rule_name(content: &str) -> Option<String> {
         break;
     }
     None
+}
+
+/// Extract a human-readable description for a rule.
+/// Priority: YAML front matter `description` key → first non-empty paragraph after
+/// the front matter / leading heading.
+fn extract_rule_description(content: &str) -> Option<String> {
+    if let Some(fm) = parse_front_matter(content) {
+        if let Some(desc) = fm.get("description") {
+            let desc = desc.trim();
+            if !desc.is_empty() {
+                return Some(desc.to_string());
+            }
+        }
+    }
+    first_paragraph(content)
+}
+
+/// Parse `---\nkey: value\n---` YAML front matter. Returns None if absent.
+/// Handles both the simple `key: value` form and (for SKILL.md) the same layout.
+fn parse_front_matter(content: &str) -> Option<std::collections::HashMap<String, String>> {
+    let rest = content.strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let block = &rest[..end];
+    let mut map = std::collections::HashMap::new();
+    for line in block.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        map.insert(
+            key.trim().to_string(),
+            value.trim().trim_matches(|c| c == '"' || c == '\'').to_string(),
+        );
+    }
+    Some(map)
+}
+
+/// First non-empty paragraph (skipping the leading `# ` heading if present) used as
+/// a fallback description when no front matter description exists.
+fn first_paragraph(content: &str) -> Option<String> {
+    let mut para = String::new();
+    let mut in_para = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if in_para {
+                break;
+            }
+            continue;
+        }
+        if !in_para && trimmed.starts_with("# ") {
+            // Skip the leading heading (if any), then treat the next non-empty
+            // non-heading line as the start of the description paragraph.
+            continue;
+        }
+        if !in_para {
+            in_para = true;
+            para = trimmed.to_string();
+        } else if trimmed.starts_with("# ") {
+            break;
+        } else {
+            para.push(' ');
+            para.push_str(trimmed);
+        }
+    }
+    if para.is_empty() {
+        None
+    } else {
+        Some(para)
+    }
 }
 
 fn basename(path: &Path) -> String {
@@ -376,6 +480,7 @@ mod tests {
                 source_path: "/user".into(),
                 scope: RuleScope::Global,
                 content: "global-version".into(),
+                description: None,
             },
             MigratedRule {
                 name: "code-review".into(),
@@ -383,6 +488,7 @@ mod tests {
                 source_path: "/proj".into(),
                 scope: RuleScope::Project,
                 content: "project-version".into(),
+                description: None,
             },
         ];
         let r = resolve_by_name(&rules, "code-review").unwrap();
@@ -461,6 +567,49 @@ mod tests {
     }
 
     #[test]
+    fn skill_front_matter_description_and_name_are_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            home.path(),
+            ".claude/skills/code-review/SKILL.md",
+            "---\nname: structured-review\ndescription: 结构化代码审查，用于 review 请求。\n---\n\n\
+             # body\n\nRead [rules](references/rules.md).\n",
+        );
+        write(home.path(), ".claude/skills/code-review/references/rules.md", "# rules\n");
+
+        let rules = scan_migrated_rules(dir.path(), home.path());
+        let rule = rules
+            .iter()
+            .find(|r| r.source_tool == "skill")
+            .expect("expected skill rule");
+        assert_eq!(rule.name, "skill:structured-review::references/rules.md");
+        assert_eq!(
+            rule.description.as_deref(),
+            Some("结构化代码审查，用于 review 请求。"),
+            "front matter description must be attached"
+        );
+    }
+
+    #[test]
+    fn rule_description_falls_back_to_first_paragraph() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "CLAUDE.md",
+            "# atman rules\n\nBe terse and use rust idioms.\nSecond sentence.\n",
+        );
+        let rules = scan_migrated_rules(dir.path(), home.path());
+        let claude = rules.iter().find(|r| r.source_tool == "claude").unwrap();
+        assert_eq!(
+            claude.description.as_deref(),
+            Some("Be terse and use rust idioms. Second sentence."),
+            "first paragraph fallback"
+        );
+    }
+
+    #[test]
     fn resolve_by_name_with_at_tool_disambiguation() {
         let rules = vec![
             MigratedRule {
@@ -469,6 +618,7 @@ mod tests {
                 source_path: "/x".into(),
                 scope: RuleScope::Global,
                 content: "opencode-version".into(),
+                description: None,
             },
             MigratedRule {
                 name: "code-review".into(),
@@ -476,6 +626,7 @@ mod tests {
                 source_path: "/y".into(),
                 scope: RuleScope::Project,
                 content: "claude-version".into(),
+                description: None,
             },
         ];
         let r = resolve_by_name(&rules, "code-review@opencode").unwrap();

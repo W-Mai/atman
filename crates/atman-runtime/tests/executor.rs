@@ -1,6 +1,6 @@
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::tools::memory_stubs::FetchRule;
+use atman_runtime::tools::memory_stubs::RuleFetch;
 use atman_runtime::{Event, Executor, FlowStatus, Value, tools};
 
 use std::sync::Arc;
@@ -55,16 +55,16 @@ async fn executor_reports_err_status_on_failure() {
 }
 
 #[tokio::test]
-async fn executor_fetch_rule_returns_content() {
+async fn executor_rule_fetch_returns_content() {
     let src = r#"flow t() -> string {
-    return fetch_rule("comment-discipline")
+    return rule.fetch("comment-discipline")
 }
 "#;
     let file = parse_file(src).unwrap();
     let ex = Executor::new();
     tools::register_tier_zero(&ex.tools);
 
-    let rule = FetchRule::new();
+    let rule = RuleFetch::new();
     rule.insert("comment-discipline", "only write why-comments")
         .await;
     ex.tools.register(Arc::new(rule));
@@ -76,7 +76,7 @@ async fn executor_fetch_rule_returns_content() {
 #[tokio::test]
 async fn executor_runs_review_flow_with_mock_provider() {
     let src = r#"flow review_code(file: path) -> Review {
-    gather = fetch_confessions()
+    gather = rule.fetch(query: "none")
     primary = llm.call(
         model: "claude-opus-4.7",
         prompt: "review please",

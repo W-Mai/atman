@@ -325,8 +325,8 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     let events = opts.events.clone();
     let mut executor = Executor::with_events(events);
 
-    let fetch_rule = build_fetch_rule(&opts.project_root, opts.home_dir.as_deref()).await;
-    tools::register_tier_zero_with_rules(&executor.tools, fetch_rule);
+    let rule_fetch = build_rule_fetch(&opts.project_root, opts.home_dir.as_deref()).await;
+    tools::register_tier_zero_with_rules(&executor.tools, rule_fetch);
     tools::register_git_ops(&executor.tools);
     tools::register_watch(&executor.tools);
     let task_registry = atman_runtime::TaskRegistry::new();
@@ -543,20 +543,20 @@ pub fn attach_memory_stores_with_redactor(
     tools::register_spec_memory(&executor.tools, spec_store);
 }
 
-async fn build_fetch_rule(
+async fn build_rule_fetch(
     project_root: &Path,
     home: Option<&Path>,
-) -> atman_runtime::tools::memory_stubs::FetchRule {
-    let fetch_rule = atman_runtime::tools::memory_stubs::FetchRule::new();
+) -> atman_runtime::tools::memory_stubs::RuleFetch {
+    let rule_fetch = atman_runtime::tools::memory_stubs::RuleFetch::new();
     if std::env::var("ATMAN_DISABLE_MIGRATION").is_ok() {
-        return fetch_rule;
+        return rule_fetch;
     }
     let Some(home) = home else {
-        return fetch_rule;
+        return rule_fetch;
     };
     let rules = atman_runtime::migration::scan_migrated_rules(project_root, home);
-    fetch_rule.set_migrated(rules).await;
-    fetch_rule
+    rule_fetch.set_migrated(rules).await;
+    rule_fetch
 }
 
 async fn register_providers_from_env(executor: &mut Executor) {

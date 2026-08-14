@@ -44,6 +44,11 @@ memory.history.read — paginate by turn.
 
 Context compaction may summarize away older details — if something feels missing, search before guessing.
 
+## Rules & Skills
+rule.fetch(name) — load a skill/rule's full content (from ~/.claude/skills/*/SKILL.md, CLAUDE.md, AGENTS.md, .cursorrules, .kiro/steering, aider conventions).
+rule.fetch(query: "keyword") — search rules by name/description, returns {name, description, scope, source}.
+rule.fetch() — list the full rule index. Use it when you suspect a relevant skill/rule exists but don't know its exact name.
+
 ## Asking the user
 form.ask when you genuinely need input. Four kinds: confirm (y/n), single_select, multi_select, text. Batch questions together. Don't spam — every ask is a context switch for the user.
 
@@ -149,20 +154,26 @@ atman is a terminal-based coding agent. It works in a loop: receive LLM response
 
 ## Categories
 
-waiting_for_user: The agent asked a direct question or needs a decision it cannot make alone. It cannot proceed without a human response. Example: Which approach do you prefer? Should I delete these files?
+waiting_for_user: The agent asked a question OR presented something for the user to decide before it can proceed. This includes direct questions, proposed plans/designs awaiting approval, a menu of options, or asking for confirmation. The agent needs a human response to continue. Examples:
+- "Which approach do you prefer?"
+- "Here's my proposed design. Should I proceed with implementation?"
+- "I see two options: A or B. Which do you want?"
+- "Would you like me to design this first?" (a proposal awaiting approval)
+- "I'll lay out the plan first — confirm and I'll start." (presenting a plan for confirmation)
 
 lazy: The task is NOT complete but the agent stopped anyway. It summarized unstarted work, deferred to the user, or claimed success without evidence. Example: The fix should be in auth.rs, you can update it yourself.
 
 forgot_tools: The agent intended to act but wrote the action as prose instead of invoking a tool. The will to work is present, the mechanism was skipped. Example: Let me check the Cargo.toml (but no fs.read call). I will run the tests now (but no bash.spawn).
 
-done: The task is genuinely complete. Prior turns show real tool usage with concrete results. The last message is a final summary or sign-off with nothing left to do. Example: Done, fixed the bug, tests pass, quality gate is green.
+done: The task is genuinely complete OR the agent directly answered the user's question with reasoning (no tools needed). Prior turns show real tool usage with concrete results. The last message is a final summary or sign-off with nothing left to do. Example: Done, fixed the bug, tests pass, quality gate is green.
 
 ## Decision rules
-1. Last message asks the user a question -> waiting_for_user
+1. Last message asks the user a question OR proposes a plan/design/options and asks for confirmation -> waiting_for_user
 2. Prior turns show completed tool work and last message is a wrap-up -> done
 3. Agent describes an action (reading, running, editing) but made no tool call -> forgot_tools
 4. Agent stopped without asking anything and without finishing -> lazy
-5. Never hedge. Pick exactly one. If evidence is weak, pick the category best supported by the strongest signal.
+5. A proposal or design awaiting approval is waiting_for_user, NOT lazy and NOT forgot_tools — the agent is blocked on the user, not stalling.
+6. Never hedge. Pick exactly one. If evidence is weak, pick the category best supported by the strongest signal.
 
 Recent turns (JSON): "#;
 
@@ -171,11 +182,39 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
         capabilities { shell: true }
     }
     session.push(message.user(user_prompt))
+    rules_index = rule.fetch()
+    confessions = memory.fetch_confessions()
+    recent = memory.recent_turns(n: 5)
+    hints = llm.extract(
+        model: "cheap",
+        prompt: "User request: " + user_prompt
+            + "\n\nRecent context:\n" + to_json_string(recent)
+            + "\n\nAvailable rules index (name + description):\n" + to_json_string(rules_index)
+            + "\n\nPast confessions (trigger + mitigation):\n" + to_json_string(confessions)
+            + "\n\nWhich rules are relevant to this task? Which past confessions apply? Return rule names and confession trigger keywords.",
+        fields: {
+            rule_names: [string] -- "relevant rule names",
+            confession_triggers: [string] -- "relevant confession trigger keywords",
+        },
+    )
+    rule_context = list.reduce(
+        list.map(hints.rule_names, |n| rule.fetch(name: n)),
+        |acc, c| acc + "\n\n---\n\n" + c,
+        "",
+    )
+    confession_context = list.reduce(
+        list.map(hints.confession_triggers, |t| memory.fetch_confessions(trigger: t)),
+        |acc, c| acc + "\n\n" + to_json_string(c),
+        "",
+    )
+    system_prompt = @"../prompts/system.md"
+        + "\n\n## Relevant Rules\n" + rule_context
+        + "\n\n## Relevant Past Mistakes\n" + confession_context
     loop {
         reply = llm.call(
             model: "smart",
             context: "session",
-            system: @"../prompts/system.md",
+            system: system_prompt,
             cache: true,
             retry: 12,
             stall_timeout: 120,
@@ -189,6 +228,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 "hunk.review", "hunk.apply", "hunk.plan_edit",
                 "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit", "git.branch", "git.push", "test.run",
                 "memory.confess", "memory.fetch_confessions",
+                "rule.fetch",
                 "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
                 "memory.goal.get", "memory.goal.set", "memory.goal.clear",
                 "memory.recent_turns", "memory.history.search", "memory.history.read",
@@ -214,11 +254,11 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
                 retry: 2,
             )
             when intent == "forgot_tools" {
-                session.push(message.user("You stopped without using tools. Continue your work using the appropriate tools."))
+                session.push(message.user("You described an action in prose but didn't invoke the tool. If you intended to act, call the tool now."))
                 continue
             }
             when intent == "lazy" {
-                session.push(message.user("Continue working. You must use tools to complete the task."))
+                session.push(message.user("The task isn't complete yet. Continue working toward a resolution — if you're genuinely blocked and need input, ask clearly."))
                 continue
             }
             break
@@ -270,6 +310,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
                 "web.fetch", "web.search",
                 "git.diff", "git.show", "git.log", "git.status",
                 "memory.fetch_confessions",
+                "rule.fetch",
                 "plan.read",
                 "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
             ],
@@ -279,16 +320,16 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
         when is_empty(tool_uses) {
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(reply),
+                prompt: @"../prompts/judge-stall.md" + to_json_string(memory.recent_turns(n: 5)),
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
             when intent == "forgot_tools" {
-                session.push(message.user("You stopped without using tools. Continue using the appropriate tools."))
+                session.push(message.user("You described an action in prose but didn't invoke the tool. If you intended to act, call the tool now."))
                 continue
             }
             when intent == "lazy" {
-                session.push(message.user("Continue working. You must use tools to complete the task."))
+                session.push(message.user("The task isn't complete yet. Keep working until you have concrete results or hit a hard blocker."))
                 continue
             }
             break
@@ -320,6 +361,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
                 "git.diff", "git.show", "git.log", "git.status",
                 "test.run",
                 "memory.fetch_confessions",
+                "rule.fetch",
                 "plan.read",
                 "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
             ],
@@ -329,16 +371,16 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         when is_empty(tool_uses) {
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(reply),
+                prompt: @"../prompts/judge-stall.md" + to_json_string(memory.recent_turns(n: 5)),
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
             when intent == "forgot_tools" {
-                session.push(message.user("You stopped without using tools. Continue using the appropriate tools."))
+                session.push(message.user("You described an action in prose but didn't invoke the tool. If you intended to act, call the tool now."))
                 continue
             }
             when intent == "lazy" {
-                session.push(message.user("Continue working. You must use tools to complete the task."))
+                session.push(message.user("The task isn't complete yet. Keep working until you have concrete results or hit a hard blocker."))
                 continue
             }
             break
@@ -370,6 +412,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
                 "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit",
                 "hunk.review", "hunk.apply", "hunk.plan_edit",
                 "memory.fetch_confessions",
+                "rule.fetch",
                 "plan.write", "plan.read", "plan.tick",
                 "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
             ],
@@ -379,16 +422,16 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
         when is_empty(tool_uses) {
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(reply),
+                prompt: @"../prompts/judge-stall.md" + to_json_string(memory.recent_turns(n: 5)),
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
             when intent == "forgot_tools" {
-                session.push(message.user("You stopped without using tools. Continue using the appropriate tools."))
+                session.push(message.user("You described an action in prose but didn't invoke the tool. If you intended to act, call the tool now."))
                 continue
             }
             when intent == "lazy" {
-                session.push(message.user("Continue working. You must use tools to complete the task."))
+                session.push(message.user("The task isn't complete yet. Keep working until you have concrete results or hit a hard blocker."))
                 continue
             }
             break
@@ -417,6 +460,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
                 "fs.read", "fs.list", "fs.grep",
                 "git.diff", "git.show", "git.log", "git.status",
                 "memory.fetch_confessions",
+                "rule.fetch",
                 "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
             ],
         )
@@ -425,16 +469,16 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         when is_empty(tool_uses) {
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(reply),
+                prompt: @"../prompts/judge-stall.md" + to_json_string(memory.recent_turns(n: 5)),
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
             when intent == "forgot_tools" {
-                session.push(message.user("You stopped without using tools. Continue using the appropriate tools."))
+                session.push(message.user("You described an action in prose but didn't invoke the tool. If you intended to act, call the tool now."))
                 continue
             }
             when intent == "lazy" {
-                session.push(message.user("Continue working. You must use tools to complete the task."))
+                session.push(message.user("The task isn't complete yet. Keep working until you have concrete results or hit a hard blocker."))
                 continue
             }
             break
@@ -479,4 +523,28 @@ pub fn ensure_managed_agent_at(config_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atman_dsl::parse::parse_file;
+
+    #[test]
+    fn agent_at_parses() {
+        let file = parse_file(AGENT_AT).expect("AGENT_AT must parse");
+        assert!(
+            file.flows.iter().any(|f| f.name.name == "agent"),
+            "agent flow must exist"
+        );
+    }
+
+    #[test]
+    fn subagent_at_parses() {
+        let file = parse_file(SUBAGENT_AT).expect("SUBAGENT_AT must parse");
+        assert!(
+            file.flows.iter().any(|f| f.name.name == "subagent"),
+            "subagent flow must exist"
+        );
+    }
 }

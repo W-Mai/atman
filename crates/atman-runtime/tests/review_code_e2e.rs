@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::tools::memory_stubs::FetchRule;
+use atman_runtime::tools::memory_stubs::RuleFetch;
 use atman_runtime::{Executor, Value, tools};
 
 const REVIEW_FLOW: &str = r#"flow review_code(file: path) -> Review {
     gather = fanout [
-        fetch_rule("code-review"),
-        fetch_confessions(),
+        rule.fetch("code-review"),
+        rule.fetch(query: "none"),
     ] collect: all
 
     primary = llm.call(
@@ -58,7 +58,7 @@ async fn end_to_end_review_flow_produces_structured_output() {
     let ex = Executor::new();
     tools::register_tier_zero(&ex.tools);
 
-    let rule = FetchRule::new();
+    let rule = RuleFetch::new();
     rule.insert("code-review", "review carefully, look for as-any")
         .await;
     ex.tools.register(Arc::new(rule));
@@ -109,7 +109,7 @@ async fn retry_branch_fires_when_verify_reports_invalid() {
     let file = parse_file(REVIEW_FLOW).unwrap();
     let ex = Executor::new();
     tools::register_tier_zero(&ex.tools);
-    ex.tools.register(Arc::new(FetchRule::new()));
+    ex.tools.register(Arc::new(RuleFetch::new()));
 
     let bad = Value::Struct(vec![("severity".into(), Value::Str("info".into()))]);
     let good = Value::Struct(vec![("severity".into(), Value::Str("critical".into()))]);

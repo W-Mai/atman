@@ -108,13 +108,41 @@ pub fn parse_bool_from_text(text: &str) -> Option<bool> {
 /// Parse a category label from LLM output text.
 /// Matches case-insensitively against the provided categories.
 /// Returns the matched category with its original casing.
+///
+/// Matching strategy, in order:
+/// 1. First word exact match (fast path, most common).
+/// 2. Substring match — the response contains a full category name anywhere.
+/// 3. Fuzzy — a category name contains a non-trivial word from the response.
 pub fn parse_category_from_text(text: &str, categories: &[String]) -> Option<String> {
-    let first_word = text.split_whitespace().next()?.to_lowercase();
+    let lower = text.to_lowercase();
+
+    // 1. First word exact match.
+    let first_word = lower.split_whitespace().next()?;
     for cat in categories {
         if cat.to_lowercase() == first_word {
             return Some(cat.clone());
         }
     }
+
+    // 2. Substring: response contains a full category name.
+    for cat in categories {
+        if lower.contains(&cat.to_lowercase()) {
+            return Some(cat.clone());
+        }
+    }
+
+    // 3. Fuzzy: a category name contains a non-trivial word from the response.
+    for word in lower.split_whitespace() {
+        if word.len() < 4 {
+            continue;
+        }
+        for cat in categories {
+            if cat.to_lowercase().contains(word) {
+                return Some(cat.clone());
+            }
+        }
+    }
+
     None
 }
 
