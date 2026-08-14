@@ -126,6 +126,7 @@ pub enum ModalAction {
     Consumed,
     Dispatched(crate::palette::PaletteEntryId),
     OpenModelManager(String),
+    OpenAliasForModel(String),
 }
 
 pub trait ModalOverlay {
@@ -251,7 +252,15 @@ impl ModalManager {
             }
             ModalKind::ModelManager => {
                 if self.model_manager.open {
-                    self.model_manager.handle_key(action);
+                    let mm_action = crate::wm::modal::ModalOverlay::handle_key(
+                        &mut self.model_manager,
+                        action,
+                        app,
+                        tx,
+                    );
+                    if let Some(ModalAction::OpenAliasForModel(model)) = mm_action {
+                        self.alias_manager.open_form_with_model(&model);
+                    }
                     (true, None)
                 } else {
                     (false, None)
@@ -300,9 +309,6 @@ impl ModalManager {
                     let pm_action = self.provider_manager.handle_key(action, tx);
                     if let Some(ModalAction::OpenModelManager(name)) = pm_action {
                         self.model_manager.open_with_provider(&name);
-                    }
-                    if let Some(model) = self.provider_manager.open_alias_model.take() {
-                        self.alias_manager.open_form_with_model(&model);
                     }
                     if self.provider_manager.add_just_completed {
                         self.provider_manager.add_just_completed = false;

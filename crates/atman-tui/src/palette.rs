@@ -21,6 +21,7 @@ pub enum PaletteEntryId {
     ToggleSidebar,
     ManageProviders,
     ManageAliases,
+    ManageModels,
     SwitchModel,
     ManageMcp,
     SetTrustMode,
@@ -125,6 +126,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Manage Aliases...",
         hint: "Add, edit, and remove model aliases",
         keyword: "aliases alias model rename",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::ManageModels,
+        group: "Providers",
+        label: "Manage Models...",
+        hint: "Add, edit, and remove model configurations",
+        keyword: "models model config context budget thinking",
     },
     PaletteEntry {
         id: PaletteEntryId::SwitchModel,

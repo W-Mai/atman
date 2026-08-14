@@ -536,7 +536,10 @@ impl Provider for CodexProvider {
                 Ok(format!("\"{name}\" responded OK"))
             } else {
                 let body = resp.text().await.unwrap_or_default();
-                Err(format!("returned {status} — {}", &body[..body.len().min(200)]))
+                Err(format!(
+                    "returned {status} — {}",
+                    &body[..body.len().min(200)]
+                ))
             }
         })
     }

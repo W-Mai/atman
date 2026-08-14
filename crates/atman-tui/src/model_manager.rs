@@ -3,7 +3,7 @@ use crate::wm::modal::ModalAction;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
@@ -11,42 +11,34 @@ use crate::keys::KeyAction;
 #[derive(Default)]
 pub struct ModelManager {
     pub open: bool,
-    models: Vec<ModelRow>,
-    selected: usize,
+    groups: Vec<atman_runtime::model_registry::ProviderGroup>,
+    provider_idx: usize,
+    model_idx: Vec<usize>,
     show_form: bool,
     form_field: usize,
     editing: Option<String>,
+    locked_provider: Option<String>,
+    pub open_alias_model: Option<String>,
+    selected_provider: String,
     name_editor: InputEditor,
     model_editor: InputEditor,
-    provider_editor: InputEditor,
     context_budget_editor: InputEditor,
     thinking_editor: InputEditor,
     max_tokens_editor: InputEditor,
 }
 
-#[derive(Clone)]
-struct ModelRow {
-    name: String,
-    model: String,
-    provider: String,
-    context_budget: u64,
-    thinking: bool,
-    max_tokens: Option<u32>,
-    enabled: bool,
-}
-
 impl ModelManager {
     pub fn open(&mut self) {
         self.open = true;
+        self.locked_provider = None;
         self.refresh();
     }
 
     pub fn open_with_provider(&mut self, provider: &str) {
         self.open = true;
+        self.locked_provider = Some(provider.to_string());
         self.refresh();
-        self.open_form();
-        self.provider_editor = InputEditor::default();
-        self.provider_editor.insert_str(provider);
+        self.select_provider(provider);
     }
 
     pub fn close(&mut self) {
@@ -55,68 +47,78 @@ impl ModelManager {
     }
 
     pub fn refresh(&mut self) {
-        let entries = atman_runtime::model_registry::all_model_entries();
-        self.models = entries
-            .iter()
-            .map(|(name, e)| ModelRow {
-                name: name.clone(),
-                model: if e.model.is_empty() {
-                    name.clone()
-                } else {
-                    e.model.clone()
-                },
-                provider: e.provider.clone().unwrap_or_default(),
-                context_budget: e.context_budget.unwrap_or(0),
-                thinking: e.thinking.unwrap_or(false),
-                max_tokens: e.max_tokens,
-                enabled: e.enabled.unwrap_or(true),
-            })
-            .collect();
-        self.models
-            .sort_by(|a, b| a.provider.cmp(&b.provider).then(a.name.cmp(&b.name)));
-        if self.selected >= self.models.len() && !self.models.is_empty() {
-            self.selected = 0;
+        self.groups = atman_runtime::model_registry::all_provider_groups();
+        self.model_idx = vec![0; self.groups.len()];
+        if self.provider_idx >= self.groups.len() {
+            self.provider_idx = 0;
         }
+    }
+
+    fn select_provider(&mut self, name: &str) {
+        if let Some(idx) = self.groups.iter().position(|g| g.provider_name == name) {
+            self.provider_idx = idx;
+        }
+    }
+
+    fn current_model(&self) -> Option<&atman_runtime::model_registry::ModelRow> {
+        self.groups
+            .get(self.provider_idx)
+            .and_then(|g| g.models.get(self.model_idx[self.provider_idx]))
+    }
+
+    fn current_provider(&self) -> &str {
+        self.groups
+            .get(self.provider_idx)
+            .map(|g| g.provider_name.as_str())
+            .unwrap_or("")
     }
 
     fn open_form(&mut self) {
         self.show_form = true;
         self.form_field = 0;
         self.editing = None;
+        self.selected_provider = self.current_provider().to_string();
         self.name_editor = InputEditor::default();
         self.model_editor = InputEditor::default();
-        self.provider_editor = InputEditor::default();
         self.context_budget_editor = InputEditor::default();
         self.thinking_editor = InputEditor::default();
         self.thinking_editor.insert_str("false");
         self.max_tokens_editor = InputEditor::default();
-        let providers = atman_runtime::model_registry::all_provider_entries();
-        if let Some((name, _)) = providers.first() {
-            self.provider_editor.insert_str(name);
-        }
     }
 
     fn open_edit(&mut self) {
-        let Some(row) = self.models.get(self.selected).cloned() else {
-            return;
+        let model = match self.current_model() {
+            Some(m) => m.clone(),
+            None => return,
         };
+        let provider = self.current_provider().to_string();
+        let entries = atman_runtime::model_registry::all_model_entries();
+        let entry = entries
+            .iter()
+            .find(|(n, _)| *n == model.slug)
+            .map(|(_, e)| e.clone());
+        let Some(entry) = entry else { return };
+
         self.show_form = true;
         self.form_field = 0;
-        self.editing = Some(row.name.clone());
+        self.editing = Some(model.slug.clone());
+        self.selected_provider = provider;
         self.name_editor = InputEditor::default();
-        self.name_editor.insert_str(&row.name);
+        self.name_editor.insert_str(&model.slug);
         self.model_editor = InputEditor::default();
-        self.model_editor.insert_str(&row.model);
-        self.provider_editor = InputEditor::default();
-        self.provider_editor.insert_str(&row.provider);
+        self.model_editor.insert_str(if entry.model.is_empty() {
+            &model.slug
+        } else {
+            &entry.model
+        });
         self.context_budget_editor = InputEditor::default();
         self.context_budget_editor
-            .insert_str(&row.context_budget.to_string());
+            .insert_str(&model.context_budget.to_string());
         self.thinking_editor = InputEditor::default();
         self.thinking_editor
-            .insert_str(if row.thinking { "true" } else { "false" });
+            .insert_str(if model.thinking { "true" } else { "false" });
         self.max_tokens_editor = InputEditor::default();
-        if let Some(mt) = row.max_tokens {
+        if let Some(mt) = entry.max_tokens {
             self.max_tokens_editor.insert_str(&mt.to_string());
         }
     }
@@ -129,16 +131,35 @@ impl ModelManager {
         match action {
             KeyAction::Escape => self.close(),
             KeyAction::HistoryUp | KeyAction::Char('k') => {
-                if self.selected > 0 {
-                    self.selected -= 1;
+                if self.groups.is_empty() {
+                    return;
+                }
+                if self.model_idx[self.provider_idx] > 0 {
+                    self.model_idx[self.provider_idx] -= 1;
+                } else if self.provider_idx > 0 {
+                    self.provider_idx -= 1;
+                    let prev = &self.groups[self.provider_idx];
+                    self.model_idx[self.provider_idx] = prev.models.len().saturating_sub(1);
                 }
             }
             KeyAction::HistoryDown | KeyAction::Char('j') => {
-                if !self.models.is_empty() {
-                    self.selected = (self.selected + 1) % self.models.len();
+                if self.groups.is_empty() {
+                    return;
+                }
+                let g = &self.groups[self.provider_idx];
+                if self.model_idx[self.provider_idx] + 1 < g.models.len() {
+                    self.model_idx[self.provider_idx] += 1;
+                } else if self.provider_idx + 1 < self.groups.len() {
+                    self.provider_idx += 1;
+                    self.model_idx[self.provider_idx] = 0;
                 }
             }
-            KeyAction::Char('a') => self.open_form(),
+            KeyAction::Char('n') => self.open_form(),
+            KeyAction::Char('a') => {
+                if let Some(m) = self.current_model() {
+                    self.open_alias_model = Some(m.slug.clone());
+                }
+            }
             KeyAction::Submit => self.open_edit(),
             _ => {}
         }
@@ -148,10 +169,9 @@ impl ModelManager {
         let editor = match self.form_field {
             0 => &mut self.name_editor,
             1 => &mut self.model_editor,
-            2 => &mut self.provider_editor,
             3 => &mut self.context_budget_editor,
-            4 => &mut self.thinking_editor,
-            _ => &mut self.max_tokens_editor,
+            5 => &mut self.max_tokens_editor,
+            _ => &mut self.thinking_editor,
         };
         match action {
             KeyAction::Escape => {
@@ -191,6 +211,8 @@ impl ModelManager {
                 ed.insert_str(new);
                 self.thinking_editor = ed;
             }
+            KeyAction::Backspace if self.form_field == 2 => {}
+            KeyAction::Char(_) if self.form_field == 2 => {}
             KeyAction::Backspace if self.form_field == 4 => {}
             KeyAction::Char(_) if self.form_field == 4 => {}
             KeyAction::Backspace => {
@@ -209,7 +231,7 @@ impl ModelManager {
             return;
         }
         let model = self.model_editor.buf().trim().to_string();
-        let provider = self.provider_editor.buf().trim().to_string();
+        let provider = self.selected_provider.clone();
         let context_budget: u64 = self
             .context_budget_editor
             .buf()
@@ -277,110 +299,59 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
             .split(area);
         let main = rows[0];
         let footer_area = rows[1];
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(main);
-        let left_col = columns[0];
-        let right_col = Rect {
-            x: columns[1].x + 1,
-            width: columns[1].width.saturating_sub(1),
-            ..columns[1]
+
+        crate::wm::shell::render_section_header(f, main, Line::from("Models"), t);
+        let inner = Rect {
+            x: main.x,
+            y: main.y + 2,
+            width: main.width,
+            height: main.height.saturating_sub(2).saturating_sub(1),
         };
 
-        crate::wm::shell::render_section_header(f, left_col, Line::from("Models"), t);
-        let inner_left = Rect {
-            x: left_col.x,
-            y: left_col.y + 2,
-            width: left_col.width,
-            height: left_col.height.saturating_sub(2).saturating_sub(1),
-        };
-        let items: Vec<ListItem> = self
-            .models
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                let selected = i == self.selected;
-                let style = if selected {
+        let mut lines: Vec<Line> = vec![];
+        for (pi, g) in self.groups.iter().enumerate() {
+            let provider_active = pi == self.provider_idx;
+            let p_style = if provider_active {
+                Style::default()
+                    .fg(t.heading.into())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(t.meta_fg.into())
+            };
+            lines.push(Line::from(Span::styled(
+                format!(" {} [{} models]", g.provider_name, g.models.len()),
+                p_style,
+            )));
+            for (mi, m) in g.models.iter().enumerate() {
+                let is_current = pi == self.provider_idx && mi == self.model_idx[pi];
+                let m_style = if is_current {
                     Style::default()
                         .fg(t.accent.into())
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default()
+                    Style::default().fg(t.tinted_fg.into())
                 };
                 let thinking = if m.thinking { " \u{1F9E0}" } else { "" };
                 let budget = atman_runtime::humanize::format_count(m.context_budget);
-                let disabled = if !m.enabled { " (off)" } else { "" };
-                ListItem::new(Line::from(Span::styled(
-                    format!(
-                        " {}  {:<8}  {}{}{}",
-                        m.provider, m.name, budget, thinking, disabled
-                    ),
-                    style,
-                )))
-            })
-            .collect();
-        let mut state = ListState::default().with_selected(Some(self.selected));
-        f.render_stateful_widget(List::new(items), inner_left, &mut state);
-
-        crate::wm::shell::render_section_header(f, right_col, Line::from("Details"), t);
-        let inner_right = Rect {
-            x: right_col.x,
-            y: right_col.y + 2,
-            width: right_col.width,
-            height: right_col.height.saturating_sub(2).saturating_sub(1),
-        };
-        let mut lines = vec![];
-        if let Some(m) = self.models.get(self.selected) {
-            let label = Style::default().fg(t.meta_fg.into());
-            let val = Style::default().fg(t.accent.into());
-            lines.push(Line::from(vec![
-                Span::styled(" Name:     ", label),
-                Span::styled(&m.name, val),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" Model:    ", label),
-                Span::styled(&m.model, val),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" Provider: ", label),
-                Span::styled(&m.provider, val),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" Budget:   ", label),
-                Span::styled(atman_runtime::humanize::format_count(m.context_budget), val),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" Thinking: ", label),
-                Span::styled(if m.thinking { "yes" } else { "no" }, val),
-            ]));
-            if let Some(mt) = m.max_tokens {
-                lines.push(Line::from(vec![
-                    Span::styled(" Max Out:  ", label),
-                    Span::styled(mt.to_string(), val),
-                ]));
+                lines.push(Line::from(Span::styled(
+                    format!("   {}  {}{}", m.slug, budget, thinking),
+                    m_style,
+                )));
             }
-            lines.push(Line::from(vec![
-                Span::styled(" Enabled:  ", label),
-                Span::styled(if m.enabled { "yes" } else { "no" }, val),
-            ]));
-        } else {
+            lines.push(Line::from(""));
+        }
+
+        if lines.is_empty() {
             lines.push(Line::from(Span::styled(
-                " No models. Press a to add one.",
+                " No models. Press n to add one.",
                 Style::default().fg(t.meta_fg.into()),
             )));
         }
-        f.render_widget(Paragraph::new(lines), inner_right);
 
-        crate::wm::shell::render_column_divider(
-            f,
-            columns[0].right(),
-            columns[0].y,
-            columns[0].height,
-            t,
-        );
+        f.render_widget(Paragraph::new(lines), inner);
+
         let footer = Paragraph::new(Line::from(Span::styled(
-            "a:add  Enter:edit  Esc:close",
+            "n:add  a:alias  Enter:edit  Esc:close",
             Style::default().fg(t.meta_fg.into()),
         )))
         .alignment(ratatui::layout::Alignment::Right);
@@ -394,6 +365,9 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
         self.handle_key(action);
+        if let Some(model) = self.open_alias_model.take() {
+            return Some(ModalAction::OpenAliasForModel(model));
+        }
         Some(ModalAction::Consumed)
     }
 
@@ -432,13 +406,16 @@ impl ModelManager {
             width: area.width,
             height: area.height.saturating_sub(2).saturating_sub(1),
         };
-        let fields: [(&str, &str); 6] = [
-            ("Name", self.name_editor.buf()),
-            ("Model ID", self.model_editor.buf()),
-            ("Provider", self.provider_editor.buf()),
-            ("Context Budget", self.context_budget_editor.buf()),
-            ("Thinking", self.thinking_editor.buf()),
-            ("Max Tokens", self.max_tokens_editor.buf()),
+        let fields: [(&str, String); 6] = [
+            ("Name", self.name_editor.buf().to_string()),
+            ("Model ID", self.model_editor.buf().to_string()),
+            ("Provider", self.selected_provider.clone()),
+            (
+                "Context Budget",
+                self.context_budget_editor.buf().to_string(),
+            ),
+            ("Thinking", self.thinking_editor.buf().to_string()),
+            ("Max Tokens", self.max_tokens_editor.buf().to_string()),
         ];
         let label_style = Style::default().fg(t.meta_fg.into());
         let mut cursor_pos: Option<(u16, u16)> = None;
@@ -456,11 +433,11 @@ impl ModelManager {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(format!(" {label:<16}"), label_style),
-                    Span::styled(val.to_string(), val_style),
+                    Span::styled(val.as_str(), val_style),
                 ])),
                 Rect { y, ..inner },
             );
-            if active {
+            if active && i != 2 && i != 4 {
                 let prefix = format!(" {label:<16}");
                 let prefix_w = crate::width::width(&prefix) as u16;
                 let val_w = crate::width::width(val) as u16;

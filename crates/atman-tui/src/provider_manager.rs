@@ -49,7 +49,6 @@ enum ConfirmKind {
 enum ProviderFocus {
     #[default]
     ProviderList,
-    ModelList,
 }
 
 #[derive(Debug, Clone)]
@@ -73,8 +72,6 @@ pub struct ProviderManager {
     pub providers: Vec<ProviderEntry>,
     pub selected: usize,
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
-    model_selected: usize,
-    pub open_alias_model: Option<String>,
     pub refresh_just_triggered: bool,
     pub test_just_triggered: bool,
     pub test_btn_rect: Option<Rect>,
@@ -110,14 +107,23 @@ impl ProviderManager {
         }
     }
 
-    pub fn handle_mouse(&mut self, me: &crossterm::event::MouseEvent, control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>) {
+    pub fn handle_mouse(
+        &mut self,
+        me: &crossterm::event::MouseEvent,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
         if !self.in_form {
             return;
         }
-        let Some(rect) = self.test_btn_rect else { return };
+        let Some(rect) = self.test_btn_rect else {
+            return;
+        };
         let col = me.column;
         let row = me.row;
-        let hit = col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height;
+        let hit = col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height;
         use crossterm::event::MouseEventKind;
         match me.kind {
             MouseEventKind::Moved if hit => {
@@ -308,12 +314,6 @@ impl ProviderManager {
         match self.focus {
             ProviderFocus::ProviderList => match action {
                 KeyAction::Escape => self.close(),
-                KeyAction::Tab => {
-                    if !self.groups.is_empty() {
-                        self.focus = ProviderFocus::ModelList;
-                        self.model_selected = 0;
-                    }
-                }
                 KeyAction::HistoryUp | KeyAction::Char('k') => {
                     if self.selected > 0 {
                         self.selected -= 1;
@@ -327,7 +327,9 @@ impl ProviderManager {
                 KeyAction::Char('a') => self.open_add(),
                 KeyAction::Char('m') => {
                     if let Some(p) = self.providers.get(self.selected) {
-                        return Some(ModalAction::OpenModelManager(p.name.clone()));
+                        if matches!(p.source, ProviderSource::Config) {
+                            return Some(ModalAction::OpenModelManager(p.name.clone()));
+                        }
                     }
                 }
                 KeyAction::Char('e') => {
@@ -360,35 +362,6 @@ impl ProviderManager {
                 }
                 _ => {}
             },
-            ProviderFocus::ModelList => {
-                let g = match self.groups.get(self.selected) {
-                    Some(g) => g,
-                    None => {
-                        self.focus = ProviderFocus::ProviderList;
-                        return None;
-                    }
-                };
-                match action {
-                    KeyAction::Escape => self.focus = ProviderFocus::ProviderList,
-                    KeyAction::Tab => self.focus = ProviderFocus::ProviderList,
-                    KeyAction::HistoryUp | KeyAction::Char('k') => {
-                        if self.model_selected > 0 {
-                            self.model_selected -= 1;
-                        }
-                    }
-                    KeyAction::HistoryDown | KeyAction::Char('j') => {
-                        if self.model_selected + 1 < g.models.len() {
-                            self.model_selected += 1;
-                        }
-                    }
-                    KeyAction::Char('a') => {
-                        if let Some(m) = g.models.get(self.model_selected) {
-                            self.open_alias_model = Some(m.slug.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
         }
         None
     }
@@ -1011,11 +984,16 @@ fn render_model_detail(
         )));
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " Press m to manage models",
-        Style::default().fg(theme.subtle_fg.into()),
-    )));
+    let is_config = provider
+        .map(|p| matches!(p.source, ProviderSource::Config))
+        .unwrap_or(false);
+    if is_config {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Press m to manage models",
+            Style::default().fg(theme.subtle_fg.into()),
+        )));
+    }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -1165,7 +1143,11 @@ fn render_add_dialog(
                     .fg(theme.tinted_fg.into())
                     .bg(theme.border.into())
             };
-            let hint = if test_active { "  ← Enter to test" } else { "" };
+            let hint = if test_active {
+                "  ← Enter to test"
+            } else {
+                ""
+            };
             let test_btn = Rect {
                 x: inner.x + 1,
                 y,
@@ -1382,9 +1364,8 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         );
         let help = match self.focus {
             ProviderFocus::ProviderList => {
-                "a:add  e:enable/disable  d:delete  r:refresh  t:test  m:manage models  Enter:edit/logout  Tab:details  Esc:close"
+                "a:add  e:enable/disable  d:delete  r:refresh  t:test  m:manage models  Enter:edit/logout  Esc:close"
             }
-            ProviderFocus::ModelList => "Tab:providers  a:alias  Esc:back",
         };
         let footer = Paragraph::new(Line::from(Span::styled(
             help,

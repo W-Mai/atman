@@ -544,7 +544,8 @@ impl WindowManager {
                         Some(self.apply_palette_action(id, _app, _control_tx))
                     }
                     crate::wm::ModalAction::Consumed
-                    | crate::wm::ModalAction::OpenModelManager(_) => None,
+                    | crate::wm::ModalAction::OpenModelManager(_)
+                    | crate::wm::ModalAction::OpenAliasForModel(_) => None,
                 })
                 .unwrap_or_default();
             return (consumed, commands);
@@ -690,6 +691,9 @@ impl WindowManager {
             }
             PaletteEntryId::ManageAliases => {
                 self.modals.alias_manager.toggle();
+            }
+            PaletteEntryId::ManageModels => {
+                self.modals.model_manager.open();
             }
             PaletteEntryId::SwitchModel => {
                 self.modals.model_picker.open();
