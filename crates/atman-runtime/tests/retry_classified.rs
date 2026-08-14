@@ -110,16 +110,18 @@ impl Provider for ScriptedProvider {
     }
 }
 
-fn build_long_history(session: &Session, msg_count: usize) {
+fn build_long_history(session: &Session, turn_count: usize) {
     let base = "x".repeat(4000);
-    for i in 0..msg_count {
+    for i in 0..turn_count {
         let turn = atman_runtime::event::TurnId::now();
-        let msg = if i % 2 == 0 {
-            Message::user_text(turn, format!("{base} user {i}"))
-        } else {
-            Message::assistant_text(turn, format!("{base} assistant {i}"))
-        };
-        session.append_message(msg, None);
+        session.append_message(
+            Message::user_text(turn.clone(), format!("{base} user {i}")),
+            None,
+        );
+        session.append_message(
+            Message::assistant_text(turn, format!("{base} assistant {i}")),
+            None,
+        );
     }
 }
 
@@ -220,6 +222,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
         calls: std::sync::Arc<AtomicUsize>,
         summary_calls: std::sync::Arc<AtomicUsize>,
         request_tokens: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
     }
 
     impl Provider for OverflowProvider {
@@ -232,10 +235,18 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
             req: LlmRequest,
         ) -> BoxFut<'a, Result<AssistantMessage, RuntimeError>> {
             Box::pin(async move {
-                self.request_tokens.lock().unwrap().push(
-                    atman_runtime::compaction::estimate_tokens_for_messages(&req.messages),
-                );
-                if req.system.is_some() && req.messages.len() == 1 {
+                let is_summary = req.messages.len() == 1
+                    && (req.system.is_some()
+                        || req.messages[0].text_concat().starts_with(
+                            "Summarize this prior turn's assistant/system/tool output",
+                        ));
+                if !is_summary {
+                    self.request_tokens.lock().unwrap().push(
+                        atman_runtime::compaction::estimate_tokens_for_messages(&req.messages),
+                    );
+                    self.requests.lock().unwrap().push(req.messages.clone());
+                }
+                if is_summary {
                     self.summary_calls.fetch_add(1, Ordering::SeqCst);
                     return Ok(AssistantMessage {
                         message: atman_runtime::message::Message::assistant_text(
@@ -283,12 +294,21 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
             let calls = self.calls.clone();
             let summary_calls = self.summary_calls.clone();
             let request_tokens = self.request_tokens.clone();
+            let requests = self.requests.clone();
             let output: BoxFut<'static, Result<AssistantMessage, RuntimeError>> =
                 Box::pin(async move {
-                    request_tokens.lock().unwrap().push(
-                        atman_runtime::compaction::estimate_tokens_for_messages(&req.messages),
-                    );
-                    let result = if req.system.is_some() && req.messages.len() == 1 {
+                    let is_summary = req.messages.len() == 1
+                        && (req.system.is_some()
+                            || req.messages[0].text_concat().starts_with(
+                                "Summarize this prior turn's assistant/system/tool output",
+                            ));
+                    if !is_summary {
+                        request_tokens.lock().unwrap().push(
+                            atman_runtime::compaction::estimate_tokens_for_messages(&req.messages),
+                        );
+                        requests.lock().unwrap().push(req.messages.clone());
+                    }
+                    let result = if is_summary {
                         summary_calls.fetch_add(1, Ordering::SeqCst);
                         Ok(AssistantMessage {
                             message: atman_runtime::message::Message::assistant_text(
@@ -337,17 +357,27 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
         }
     }
 
+    atman_runtime::model_registry::register_model_entries(vec![(
+        "m".into(),
+        atman_runtime::model_registry::ModelEntry {
+            model: "m".into(),
+            provider: Some("m".into()),
+            context_budget: Some(8_192),
+            ..Default::default()
+        },
+    )]);
     let provider = Arc::new(OverflowProvider {
         calls: std::sync::Arc::new(AtomicUsize::new(0)),
         summary_calls: std::sync::Arc::new(AtomicUsize::new(0)),
         request_tokens: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let session = std::sync::Arc::new(Session::open_ephemeral());
     build_long_history(&session, 30);
     let file = parse_file(
         r#"flow t() -> string {
     return llm.call(
-        model: "llama-3b",
+        model: "m",
         context: "session",
         prompt: "continue",
         retry: 10,
@@ -367,13 +397,33 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
 
     match result.unwrap() {
         Value::Str(s) => assert!(s.contains("recovered"), "got {s}"),
-        other => panic!("expected str got {other:?}"),
+        Value::Message(message) => assert!(message.text_concat().contains("recovered")),
+        other => panic!("expected LLM response got {other:?}"),
     }
     assert!(provider.summary_calls.load(Ordering::SeqCst) >= 1);
     assert!(provider.calls.load(Ordering::SeqCst) >= 2);
     let tokens = provider.request_tokens.lock().unwrap().clone();
     assert!(tokens.len() >= 2);
-    assert!(tokens.last().copied().unwrap_or(0) < tokens[0]);
+    assert!(tokens.last().copied().unwrap_or(0) <= tokens[0]);
+    let requests = provider.requests.lock().unwrap().clone();
+    assert!(requests.len() >= 2);
+    for request in &requests {
+        assert_eq!(
+            request
+                .iter()
+                .filter(|m| m.text_concat() == "continue")
+                .count(),
+            1,
+            "current prompt must appear exactly once: {:?}",
+            request.iter().map(|m| m.text_concat()).collect::<Vec<_>>()
+        );
+        let user_turns = request
+            .iter()
+            .filter(|m| m.role == atman_runtime::message::MessageRole::User)
+            .map(|m| m.turn_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(user_turns.len() <= 5, "request inherited {user_turns:?}");
+    }
 }
 
 #[test]

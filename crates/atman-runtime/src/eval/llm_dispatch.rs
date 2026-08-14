@@ -11,6 +11,50 @@ use super::{
 };
 use super::{append_system_context, call_and_maybe_stream, input_with_cache_for_window};
 
+struct ProviderInheritedSummarizer<'a> {
+    provider: &'a dyn crate::provider::Provider,
+    api_model: &'a str,
+    stall_timeout_secs: u64,
+}
+
+impl super::inherited_context::InheritedContextSummarizer for ProviderInheritedSummarizer<'_> {
+    fn summarize<'a>(
+        &'a self,
+        source: &'a [crate::message::Message],
+        max_tokens: u64,
+    ) -> crate::tool::BoxFut<'a, Option<String>> {
+        Box::pin(async move {
+            let mut source_text = serde_json::to_string(source).ok()?;
+            let input_limit = max_tokens.saturating_mul(8).max(512) as usize;
+            if source_text.len() > input_limit {
+                source_text.truncate(input_limit);
+            }
+            let prompt = format!(
+                "Summarize this prior turn's assistant/system/tool output for context inheritance. Preserve file paths, symbols, commands, errors, decisions, completed work, and unfinished state. Omit hidden reasoning and repetitive tool output. Stay under {max_tokens} tokens.\n\n{source_text}"
+            );
+            let request = crate::provider::LlmRequest {
+                model: self.api_model.to_string(),
+                messages: vec![crate::message::Message::user_text(
+                    crate::event::TurnId::now(),
+                    prompt,
+                )],
+                system: None,
+                input: Value::Unit,
+                schema: None,
+                cache_prompt: true,
+                tools: Vec::new(),
+                thinking_enabled: false,
+                stall_timeout_secs: self.stall_timeout_secs,
+            };
+            self.provider
+                .call(request)
+                .await
+                .ok()
+                .map(|am| am.text_concat())
+        })
+    }
+}
+
 /// Core LLM dispatch with all side effects.
 /// Used as the single implementation behind `llm.call` and higher-level LLM tools.
 pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
@@ -162,9 +206,51 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         }
     }
     let prompt = prompt_for_budget;
+    let retry_extra_messages = if session_messages_len <= final_messages.len() {
+        final_messages[session_messages_len..].to_vec()
+    } else {
+        Vec::new()
+    };
     let mut rewrite_used = false;
     if let Some(session) = ctx.session_runtime.as_ref() {
         append_system_context(&mut system, session_system_context(session).await);
+    }
+    let model_info = crate::model_registry::model_info(&model);
+    let inherited_summarizer = ProviderInheritedSummarizer {
+        provider: provider.as_ref(),
+        api_model: &api_model,
+        stall_timeout_secs,
+    };
+    if matches!(context_mode, ContextMode::Session) && !has_messages_override {
+        let source_messages = final_messages.clone();
+        final_messages = super::inherited_context::project_messages(
+            &source_messages,
+            system.as_deref(),
+            &tool_specs,
+            &input,
+            model_info.context_budget,
+            model_info.max_output_tokens,
+            &turn_id,
+        );
+        super::inherited_context::summarize_projected_messages(
+            &mut final_messages,
+            &source_messages,
+            &api_model,
+            &inherited_summarizer,
+        )
+        .await;
+        if !super::inherited_context::fits_request(
+            &final_messages,
+            system.as_deref(),
+            &tool_specs,
+            &input,
+            model_info.context_budget,
+            model_info.max_output_tokens,
+        ) {
+            return Value::Err(RuntimeError::ToolFailed(
+                "llm: current session context cannot fit within the model budget".into(),
+            ));
+        }
     }
     if let Some(safety) = ctx.safety.as_ref()
         && safety.enabled
@@ -205,7 +291,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
             )));
         }
     }
-    let retry_base_messages = final_messages.clone();
     let can_rebuild_from_session = !matches!(context_mode, ContextMode::None)
         && !has_messages_override
         && ctx.session_runtime.is_some();
@@ -213,7 +298,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let mut saw_context_overflow = false;
     let mut last_err: Option<RuntimeError> = None;
     let retry_kinds_ref = retry_kinds.as_ref();
-    let model_info = crate::model_registry::model_info(&model);
     if model_info.context_budget == 0 {
         return Value::Err(RuntimeError::ToolFailed(format!(
             "model `{model}` is not registered in config.toml — add a [models.{model}] section with context_budget before using it"
@@ -380,8 +464,39 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             context_mode,
                             &turn_id,
                             Some(prompt.as_str()),
-                            &retry_base_messages[session_messages_len..],
+                            &retry_extra_messages,
                         );
+                        if matches!(context_mode, ContextMode::Session) {
+                            let source_messages = final_messages.clone();
+                            final_messages = super::inherited_context::project_messages(
+                                &source_messages,
+                                system.as_deref(),
+                                &tool_specs,
+                                &input,
+                                model_info.context_budget,
+                                model_info.max_output_tokens,
+                                &turn_id,
+                            );
+                            super::inherited_context::summarize_projected_messages(
+                                &mut final_messages,
+                                &source_messages,
+                                &api_model,
+                                &inherited_summarizer,
+                            )
+                            .await;
+                            if !super::inherited_context::fits_request(
+                                &final_messages,
+                                system.as_deref(),
+                                &tool_specs,
+                                &input,
+                                model_info.context_budget,
+                                model_info.max_output_tokens,
+                            ) {
+                                return Value::Err(RuntimeError::ToolFailed(
+                                    "llm: compacted session context cannot fit within the model budget".into(),
+                                ));
+                            }
+                        }
                         last_err = Some(e);
                         continue 'llm_attempts;
                     }

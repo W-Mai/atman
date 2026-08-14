@@ -4,6 +4,12 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [Unreleased]
+
+### 🐛 Fixes
+
+- **Budget-aware inherited context** — session context inheritance now accounts for system prompts, tool schemas, request input, output reserve, and safety margin before selecting recent turns. Older agent output is summarized or omitted without modifying the original session history, and overflow retries use the same bounded projection.
+
 ## [1.7.0] — 2026-08-10
 
 Window Manager architecture overhaul, guided onboarding, history search with regex, command palette dispatch refactor, and 20+ bug fixes across modals, panels, and key event handling.
