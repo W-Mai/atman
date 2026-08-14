@@ -56,6 +56,14 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         .map(|p| (**p).clone())
         .unwrap_or_default();
     let Some(provider) = providers_reg.resolve(&model) else {
+        if let Some(entry) = crate::model_registry::model_entry(&model)
+            && let Some(ref pname) = entry.provider
+            && !crate::model_registry::is_provider_enabled(pname)
+        {
+            return Value::Err(RuntimeError::ToolFailed(format!(
+                "provider `{pname}` is disabled — enable it in Provider Manager"
+            )));
+        }
         return Value::Err(RuntimeError::ToolFailed(format!(
             "no provider registered for model `{model}`"
         )));

@@ -61,7 +61,16 @@ impl AliasManager {
     }
 
     fn refresh_groups(&mut self) {
-        self.groups = atman_runtime::model_registry::all_provider_groups();
+        let config_providers: std::collections::HashSet<String> =
+            atman_runtime::model_registry::all_provider_entries()
+                .into_iter()
+                .filter(|(_, e)| e.enabled.unwrap_or(true))
+                .map(|(n, _)| n)
+                .collect();
+        self.groups = atman_runtime::model_registry::all_provider_groups()
+            .into_iter()
+            .filter(|g| config_providers.contains(&g.provider_name))
+            .collect();
         self.model_idx = vec![0; self.groups.len()];
         self.provider_idx = 0;
         self.focus = Focus::NameInput;
