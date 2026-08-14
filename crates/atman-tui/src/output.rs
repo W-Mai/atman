@@ -3718,11 +3718,9 @@ fn collect_boxed_details(
             }
         }
         WorkflowNodeKind::Stmt {
-            node_kind: atman_runtime::nodegraph::NodeKind::Llm { model },
+            node_kind: atman_runtime::nodegraph::NodeKind::Llm { model: Some(model) },
         } => {
-            if let Some(m) = model {
-                push_detail_section(out, "model", m);
-            }
+            push_detail_section(out, "model", model);
         }
         WorkflowNodeKind::Stmt {
             node_kind: atman_runtime::nodegraph::NodeKind::Subflow { name },

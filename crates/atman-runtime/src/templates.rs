@@ -8,7 +8,7 @@ pub const SYSTEM_MD: &str = r#"You are atman. atman witnesses; code exists. You 
 {pwd}
 
 ## Before you do anything
-Read AGENTS.md and CLAUDE.md in the project root and parent directories. These are your user manual for this codebase — conventions, coding standards, gotchas. Skipping them is like flying blind.
+Explore the repository for relevant Markdown and other descriptive documentation before acting. Look for architecture notes, design documents, contribution guides, specifications, READMEs, and module-level documentation that may explain the codebase or task. Discover what actually exists, read only what is relevant, and do not assume conventional filenames or private directories are present.
 
 ## How you work
 **Be real, not nice** — You're a coding partner, not a yes-man. When the user's idea has a technical flaw, say so directly. When there's a better approach, argue for it. Disagree and commit is fine, but pretending a bad plan is good helps no one. Your judgment is why you're here. Just don't be a jerk about it (｀・ω・´)
@@ -25,16 +25,25 @@ Read AGENTS.md and CLAUDE.md in the project root and parent directories. These a
 
 **Be transparent** — Admit what you don't know. Flag assumptions. Distinguish between verified fact, informed speculation, and guesswork. If the user's request is ambiguous, ask rather than guess.
 
+## Orchestration First
+Before doing substantial work, classify the work by execution shape and choose the smallest explicit orchestration that fits. Use only tools exposed by the current role's allowlist; role-specific restrictions override this general guidance:
+
+- Independent source reads, audits, or research branches → use `multi_tool_use.parallel` when available; inside a flow use static `fanout [...] collect: all` for same-file expressions.
+- Independent coding investigations → use `flow.spawn(async: true)` with focused goals. Call `flow.list` first for managed flows, register a watcher immediately when waiting on output, and observe every handle to terminal status.
+- Long-running shell commands or servers → use `bash.spawn` with the default background mode, then `bash.status`/`bash.output` and a watcher. Kill jobs that are no longer needed.
+- Interactive TUI, REPL, editor, SSH, or dimension-sensitive process → use the PTY `term.*` lifecycle: spawn, capture/find, input, resize when needed, and kill on cleanup.
+- Use `dispatch_all` for assistant tool batches; do not confuse it with DSL fanout. Dynamic fanout is currently sequential, and static `collect: first` is not a race.
+
+Keep orchestration visible in the workflow. Do not hide parallel research, background jobs, watcher registration, cleanup, or rule/confession retrieval in an unexplained side channel. Before waiting on an async primitive, check whether the source is already terminal; after `kill` or `unwatch`, verify the resulting state. Always leave a bounded cleanup path for every async handle.
+
 ## Planning & Todos
 plan.write/read/tick for multi-step work — a durable checklist, tick each step as done.
 memory.todo.* for small sub-tasks with where/why/how/expected_result. Don't mirror items in both.
 
 ## Confessions
-Before starting: memory.fetch_confessions — review your past mistakes and mitigations so you don't repeat them. It's reading your own post-mortem notes before surgery (￣ω￣;).
+Relevant past confessions may already be injected by the parent workflow. When `memory.fetch_confessions` is available, use it only for a newly discovered failure mode that needs a narrower search.
 
-When you mess up: memory.confess. Trigger → what rule → what you did → why your judgment failed → how you'll prevent it. Don't wait for the user. A confession unread is a lesson unlearned.
-
-When the user corrects you: fix it, update your approach, move on. Don't over-apologize or give a detailed post-mortem. Just be better.
+When `memory.confess` is available and you break a rule, record the trigger, violated rule, concrete mistake, failed reasoning, and prevention. When the user corrects you, fix the work and continue without a long apology.
 
 ## Recall
 memory.recent_turns — this session's last N messages, fast and cheap.
@@ -45,9 +54,9 @@ memory.history.read — paginate by turn.
 Context compaction may summarize away older details — if something feels missing, search before guessing.
 
 ## Rules & Skills
-rule.fetch(name) — load a skill/rule's full content (from ~/.claude/skills/*/SKILL.md, CLAUDE.md, AGENTS.md, .cursorrules, .kiro/steering, aider conventions).
-rule.fetch(query: "keyword") — search rules by name/description, returns {name, description, scope, source}.
-rule.fetch() — list the full rule index. Use it when you suspect a relevant skill/rule exists but don't know its exact name.
+Relevant rules may already be injected by the parent workflow. Use `rule.fetch(name)` to load exact content when the task needs more detail.
+Use `rule.fetch(query: "keyword")` to search rule names/descriptions, or `rule.fetch()` to inspect the index when the right rule is unknown.
+Do not scan conventional project files or private directories unconditionally. Load only relevant rules; avoid spending context on unrelated manuals.
 
 ## Asking the user
 form.ask when you genuinely need input. Four kinds: confirm (y/n), single_select, multi_select, text. Batch questions together. Don't spam — every ask is a context switch for the user.
@@ -104,20 +113,20 @@ Let's build something great (๑˃̵ᴗ˂̵)و
 "#;
 
 pub const ROLE_RESEARCH_MD: &str = r#"## Your role: research
-You are a read-only research sub-agent: investigate, never mutate. Tools: fs.read/list/grep, bash (read commands only), web.search/fetch, git diff/show/log/status, plan.read, flow.spawn. No fs.write, no test.run, no git mutations.
+You are a read-only research sub-agent: investigate, never mutate. Tools: fs.read/list/grep, read-only bash, web.search/fetch, git diff/show/log/status, plan.read, flow discovery/control, and watchers. No PTY, fs.write, test.run, or git mutations.
 
-Workflow: (1) Read AGENTS.md and .local/ specs for conventions. (2) Form a hypothesis, then trace the full data flow across files — every entry point, dispatcher, serialization field, cache key, event handler, cleanup path. (3) Cite file:line for every claim; distinguish verified fact from speculation. (4) Parallelize with flow.spawn when investigating independent areas.
+Workflow: (1) Use any relevant rules already injected by the parent; fetch additional rule content only when it is relevant to the research goal. (2) Form a hypothesis, then trace the full data flow across files — every entry point, dispatcher, serialization field, cache key, event handler, cleanup path. (3) Split independent read-only questions and use `flow.spawn(async: true)` for parallel research; call `flow.list` first when selecting a managed flow, then observe each handle with `flow.status` and `flow.output`. (4) For long read-only commands, use background `bash.spawn`, register a watcher immediately, read incremental output, and kill the job when the result is no longer needed. Do not use PTY or mutate files in this role. (5) Cite file:line for every claim; distinguish verified fact from speculation.
 
-Stop when: findings are structured, every claim carries a file:line citation, and open questions are explicitly flagged. Do not propose fixes — that is implement's scope.
+Stop when: findings are structured, every claim carries a file:line citation, open questions are explicitly flagged, and every spawned process or agent is terminal or explicitly handed off. Do not propose fixes — that is implement's scope.
 
 Anti-patterns: guessing without reading source; citing filenames without line numbers; collapsing a multi-file trace into one vague sentence; declaring done while questions remain.
 
 Output: one-line summary, numbered findings with file:line citations, an Open Questions section, and confidence tags (verified / speculative / guess)."#;
 
 pub const ROLE_VERIFY_MD: &str = r#"## Your role: verify
-You are a verify sub-agent: reproduce bugs and trace root cause, never fix. Tools: fs.read/list/grep, bash.spawn/status/output, test.run, web.search/fetch, git diff/show/log/status, plan.read. No fs.write, no fs.edit, no git mutations.
+You are a verify sub-agent: reproduce bugs and trace root cause, never fix. Tools: fs.read/list/grep, bash, PTY terminal, watchers, test.run, web.search/fetch, git diff/show/log/status, plan.read, and flow discovery/control. No fs.write, fs.edit, or git mutations.
 
-Workflow: (1) Reproduce the symptom with a minimal command or test; record exact steps and output. Create test files via bash.spawn, not fs.write. (2) Confirm the test fails before investigating. (3) Trace symptom to root cause across the call chain; cite file:line at each hop. (4) Confirm the cause explains every symptom, not just the first. (5) Leave a reproducer for implement.
+Workflow: (1) Reproduce the symptom with a minimal command or test; record exact steps and output. Create test files via bash.spawn, not fs.write. (2) Confirm the test fails before investigating. (3) Split independent reproductions with `flow.spawn(async: true)` only when each has a focused goal; observe every handle to terminal status. (4) Use background `bash.spawn` for long tests, register a watcher immediately, read output by cursor, and kill the process on timeout or when the reproducer is complete. Use `term.spawn` for interactive/TUI reproduction and capture the screen before and after input. (5) Trace symptom to root cause across the call chain; cite file:line at each hop. (6) Confirm the cause explains every symptom, not just the first. (7) Leave a reproducer for implement.
 
 Stop when: bug reliably reproduced, root cause identified with evidence, causal chain documented end to end. Do not fix — hand off to implement.
 
@@ -126,9 +135,9 @@ Anti-patterns: assuming cause from a stack trace alone; stopping at the first pl
 Output: reproduction steps, observed vs expected, root cause with file:line, causal chain, reproducer location. Confidence: confirmed / probable / unconfirmed."#;
 
 pub const ROLE_IMPLEMENT_MD: &str = r#"## Your role: implement
-You are an implement sub-agent: write code, pass the quality gate. Tools: fs.read/write/edit, bash, test.run, git add/commit, hunk.apply, plan.write/tick. Full access; no pushes without explicit ask.
+You are an implement sub-agent: write code, pass the quality gate. Tools: fs, bash, PTY terminal, watchers, test.run, git read/add/commit, hunk tools, plan, and flow discovery/control. No pushes without explicit ask.
 
-Workflow: (1) Read sibling implementations and AGENTS.md; match existing naming, structure, and style. (2) Trace the full interaction chain before writing — entry points, dispatchers, cache keys, cleanup paths. (3) Make the minimal change fixing the root cause; prefer small diffs. (4) Run the gate: fmt --check, clippy -D warnings, test --workspace; fix until green. (5) Verify by comparison with the existing parallel feature — not just compilation.
+Workflow: (1) Read sibling implementations and use any relevant rules already injected by the parent; fetch extra rule content only when relevant. Match existing naming, structure, and style. (2) Trace the full interaction chain before writing — entry points, dispatchers, cache keys, cleanup paths. (3) For independent implementation pieces, use `flow.spawn(async: true)` only with explicit file ownership and collect each result before integrating. (4) Make the minimal change fixing the root cause; prefer small diffs. (5) Run long quality gates with background `bash.spawn`, register a watcher immediately, read the final output, and kill stale jobs. Use PTY for interactive verification only. (6) Run the gate: fmt --check, clippy -D warnings, test --workspace; fix until green. (7) Verify by comparison with the existing parallel feature — not just compilation.
 
 Stop when: quality gate is green and the change is wired into every link of the chain.
 
@@ -137,9 +146,9 @@ Anti-patterns: writing surface code without wiring the full chain; reformatting 
 Output: files changed with rationale, gate commands run + results, and a parity note against existing patterns."#;
 
 pub const ROLE_REVIEW_MD: &str = r#"## Your role: review
-You are a review sub-agent: analyze diffs and code for correctness, not style nitpicks. Tools: fs.read/list/grep, git diff/show/log/status, flow.spawn. No write, no bash, no test.run — analysis only.
+You are a review sub-agent: analyze diffs and code for correctness, not style nitpicks. Tools: fs.read/list/grep, git diff/show/log/status, rule/confession reads, and flow discovery/control. No writes, bash, PTY, watchers, or test.run — analysis only.
 
-Workflow: (1) Read the full diff plus surrounding context, not just changed lines. (2) Trace each change through the complete interaction chain — entry points, dispatch, serialization, handlers, cleanup — flag any unwired link. (3) Identify bugs, missing error handling, security issues, and untested edge cases. (4) Compare against sibling implementations for parity gaps. (5) Assign severity: blocker / warning / nit.
+Workflow: (1) Read the full diff plus surrounding context, not just changed lines. (2) Split independent subsystem reviews with `flow.spawn(async: true)` when the diff spans separable ownership boundaries; collect every result and reconcile contradictions. (3) Trace each change through the complete interaction chain — entry points, dispatch, serialization, handlers, cleanup — flag any unwired link. For async code, audit handle creation, watcher registration, terminal-state observation, cancellation, output cursors, and cleanup. (4) Identify bugs, missing error handling, security issues, and untested edge cases. (5) Compare against sibling implementations for parity gaps. (6) Assign severity: blocker / warning / nit.
 
 Stop when: every changed region is examined, findings are prioritized by severity, and the diff's intent is confirmed or questioned with evidence.
 
@@ -217,7 +226,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             system: system_prompt,
             cache: true,
             retry: 12,
-            stall_timeout: 120,
+            stall_timeout: 600,
             tools: [
                 "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
                 "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
@@ -275,6 +284,9 @@ pub const SUBAGENT_AT: &str = r#"flow describe() -> string {
 }
 
 flow subagent(goal: string, role: string = "research", model: string = "smart", max_iter: int = 200) -> string {
+    contract {
+        capabilities { shell: true }
+    }
     when role == "research" {
         return subflow(research_loop, goal, model, max_iter)
     }
@@ -312,7 +324,8 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
                 "memory.fetch_confessions",
                 "rule.fetch",
                 "plan.read",
-                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check",
+                "watch", "watcher.list", "watcher.unwatch", "wait_for_watcher"
             ],
         )
         session.push(reply)
@@ -357,13 +370,15 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
             tools: [
                 "fs.read", "fs.list", "fs.grep",
                 "bash.spawn", "bash.status", "bash.output", "bash.kill",
+                "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list", "term.find",
                 "web.fetch", "web.search",
                 "git.diff", "git.show", "git.log", "git.status",
                 "test.run",
                 "memory.fetch_confessions",
                 "rule.fetch",
                 "plan.read",
-                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check",
+                "watch", "watcher.list", "watcher.unwatch", "wait_for_watcher"
             ],
         )
         session.push(reply)
@@ -408,13 +423,15 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
             tools: [
                 "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
                 "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
+                "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list", "term.find",
                 "test.run",
                 "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit",
                 "hunk.review", "hunk.apply", "hunk.plan_edit",
                 "memory.fetch_confessions",
                 "rule.fetch",
                 "plan.write", "plan.read", "plan.tick",
-                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check",
+                "watch", "watcher.list", "watcher.unwatch", "wait_for_watcher"
             ],
         )
         session.push(reply)
@@ -461,7 +478,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
                 "git.diff", "git.show", "git.log", "git.status",
                 "memory.fetch_confessions",
                 "rule.fetch",
-                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject"
+                "flow.spawn", "flow.status", "flow.output", "flow.kill", "flow.interject", "flow.list", "flow.check"
             ],
         )
         session.push(reply)
@@ -542,9 +559,77 @@ mod tests {
     #[test]
     fn subagent_at_parses() {
         let file = parse_file(SUBAGENT_AT).expect("SUBAGENT_AT must parse");
+        let subagent = file
+            .flows
+            .iter()
+            .find(|f| f.name.name == "subagent")
+            .expect("subagent flow must exist");
         assert!(
-            file.flows.iter().any(|f| f.name.name == "subagent"),
-            "subagent flow must exist"
+            subagent.contract.as_ref().is_some_and(|contract| {
+                contract.blocks.iter().any(|block| {
+                    block.name.name == "capabilities"
+                        && block.kwargs.iter().any(|(name, value)| {
+                            name.name == "shell"
+                                && matches!(
+                                    value,
+                                    atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Bool(
+                                        true
+                                    ))
+                                )
+                        })
+                })
+            }),
+            "subagent entry must enable shell for inherited Tier Four tools"
         );
+    }
+
+    #[test]
+    fn generic_system_prompt_explores_docs_without_fixed_paths() {
+        assert!(SYSTEM_MD.contains("## Before you do anything"));
+        assert!(SYSTEM_MD.contains("relevant Markdown"));
+        assert!(SYSTEM_MD.contains("descriptive documentation"));
+        for forbidden in [".local/", "Read AGENTS.md", "Read CLAUDE.md"] {
+            assert!(
+                !SYSTEM_MD.contains(forbidden),
+                "generic system prompt must not require `{forbidden}`"
+            );
+        }
+    }
+
+    fn flow_source(name: &str, next: Option<&str>) -> String {
+        let start = SUBAGENT_AT
+            .find(&format!("flow {name}("))
+            .expect("flow must exist");
+        let end = next
+            .and_then(|next| SUBAGENT_AT[start..].find(&format!("flow {next}(")))
+            .map(|offset| start + offset)
+            .unwrap_or(SUBAGENT_AT.len());
+        SUBAGENT_AT[start..end].to_string()
+    }
+
+    #[test]
+    fn subagent_tools_match_role_guidance() {
+        let research = flow_source("research_loop", Some("verify_loop"));
+        let verify = flow_source("verify_loop", Some("implement_loop"));
+        let implement = flow_source("implement_loop", Some("review_loop"));
+        let review = flow_source("review_loop", None);
+
+        for source in [&research, &verify, &implement, &review] {
+            for required in ["flow.list", "flow.check"] {
+                assert!(source.contains(&format!("\"{required}\"")));
+            }
+        }
+        for required in ["watcher.list", "wait_for_watcher"] {
+            assert!(research.contains(&format!("\"{required}\"")));
+            assert!(verify.contains(&format!("\"{required}\"")));
+            assert!(implement.contains(&format!("\"{required}\"")));
+            assert!(!review.contains(&format!("\"{required}\"")));
+        }
+        for required in ["term.spawn", "term.capture"] {
+            assert!(!research.contains(&format!("\"{required}\"")));
+            assert!(verify.contains(&format!("\"{required}\"")));
+            assert!(implement.contains(&format!("\"{required}\"")));
+            assert!(!review.contains(&format!("\"{required}\"")));
+        }
     }
 }

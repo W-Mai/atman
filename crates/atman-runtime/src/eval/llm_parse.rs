@@ -105,45 +105,20 @@ pub fn parse_bool_from_text(text: &str) -> Option<bool> {
     }
 }
 
-/// Parse a category label from LLM output text.
-/// Matches case-insensitively against the provided categories.
-/// Returns the matched category with its original casing.
-///
-/// Matching strategy, in order:
-/// 1. First word exact match (fast path, most common).
-/// 2. Substring match — the response contains a full category name anywhere.
-/// 3. Fuzzy — a category name contains a non-trivial word from the response.
+/// Parse an explicit category label from the first output token.
+/// Matches case-insensitively and tolerates surrounding markdown/punctuation, but
+/// deliberately rejects explanatory prose. The caller can retry with a stricter
+/// prompt instead of guessing from words that happen to occur inside a label.
 pub fn parse_category_from_text(text: &str, categories: &[String]) -> Option<String> {
-    let lower = text.to_lowercase();
-
-    // 1. First word exact match.
-    let first_word = lower.split_whitespace().next()?;
-    for cat in categories {
-        if cat.to_lowercase() == first_word {
-            return Some(cat.clone());
-        }
-    }
-
-    // 2. Substring: response contains a full category name.
-    for cat in categories {
-        if lower.contains(&cat.to_lowercase()) {
-            return Some(cat.clone());
-        }
-    }
-
-    // 3. Fuzzy: a category name contains a non-trivial word from the response.
-    for word in lower.split_whitespace() {
-        if word.len() < 4 {
-            continue;
-        }
-        for cat in categories {
-            if cat.to_lowercase().contains(word) {
-                return Some(cat.clone());
-            }
-        }
-    }
-
-    None
+    let first_token = text
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+    let normalized = first_token.to_lowercase();
+    categories
+        .iter()
+        .find(|cat| cat.to_lowercase() == normalized)
+        .cloned()
 }
 
 /// Parse a list of strings from LLM output text.
@@ -333,4 +308,54 @@ pub fn validate_struct_fields(s: &[(String, Value)], required: &[&str]) -> Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod category_tests {
+    use super::parse_category_from_text;
+
+    fn categories() -> Vec<String> {
+        ["waiting_for_user", "lazy", "forgot_tools", "done"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn explanatory_tools_text_does_not_become_forgot_tools() {
+        assert_eq!(
+            parse_category_from_text(
+                "The agent already used tools and is summarizing completed work.",
+                &categories(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn explanatory_user_text_does_not_become_waiting_for_user() {
+        assert_eq!(
+            parse_category_from_text(
+                "The user request has been answered and no decision remains.",
+                &categories(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_label_allows_markdown_and_punctuation() {
+        assert_eq!(
+            parse_category_from_text("`done`. Nothing remains.", &categories()),
+            Some("done".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_label_matches_unicode_case() {
+        assert_eq!(
+            parse_category_from_text("état", &["ÉTAT".to_string()]),
+            Some("ÉTAT".to_string())
+        );
+    }
 }

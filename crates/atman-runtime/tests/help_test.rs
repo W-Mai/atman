@@ -102,6 +102,20 @@ fn dsl_topic_contains_key_syntax() {
 }
 
 #[test]
+fn dsl_topic_complete_flow_examples_parse() {
+    let content = help::topic_content("dsl", &ctx_empty()).unwrap();
+    for (index, tail) in content.split("```atman").skip(1).enumerate() {
+        let Some((block, _)) = tail.split_once("```") else {
+            panic!("unterminated atman block {index}")
+        };
+        if block.trim_start().starts_with("flow ") {
+            atman_dsl::parse::parse_file(block)
+                .unwrap_or_else(|error| panic!("atman block {index} does not parse: {error}"));
+        }
+    }
+}
+
+#[test]
 fn features_topic_contains_key_features() {
     let content = help::topic_content("features", &ctx_empty()).unwrap();
     assert!(content.contains("Compaction"));

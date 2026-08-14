@@ -12,6 +12,7 @@ fn register_model() {
             "m".into(),
             ModelEntry {
                 model: "m".into(),
+                provider: Some("mock".into()),
                 context_budget: Some(8_192),
                 ..Default::default()
             },
@@ -124,6 +125,31 @@ flow test() -> string {
     let provider = MockProvider::new("mock").with_model("m", Value::Str("runtime".into()));
     match run(src, provider) {
         Value::Str(s) => assert_eq!(s, "runtime error"),
+        other => panic!("expected string, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_retries_explanatory_prose_then_accepts_explicit_label() {
+    let src = r#"
+flow test() -> string {
+    return llm.classify(
+        model: "m",
+        prompt: "Judge the agent state",
+        categories: ["forgot_tools", "lazy", "done"],
+        retry: 1,
+    )
+}
+"#;
+    let retry_prefix = "Answer with exactly one of these labels: forgot_tools, lazy, done.\n\nJudge the agent state\n\nYour previous response could not be parsed.";
+    let provider = MockProvider::new("mock")
+        .with_prefix("m", retry_prefix, Value::Str("done".into()))
+        .with_model(
+            "m",
+            Value::Str("The agent already used tools and completed the task.".into()),
+        );
+    match run(src, provider) {
+        Value::Str(s) => assert_eq!(s, "done"),
         other => panic!("expected string, got {other:?}"),
     }
 }
