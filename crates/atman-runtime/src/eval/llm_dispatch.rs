@@ -487,7 +487,10 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             let delay_ms = 1000u64 << attempt;
                             if let Some(tx) = stream_tx.as_ref() {
                                 let _ = tx.send(crate::stream::StreamFrame::Note(format!(
-                                    "retrying in {}s…",
+                                    "{} — retry {}/{} in {}s…",
+                                    e,
+                                    attempt + 1,
+                                    retry_count,
                                     delay_ms / 1000
                                 )));
                             }
