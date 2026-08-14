@@ -5599,10 +5599,7 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
         if rules.is_empty() {
             println!("  (none detected in project or user home)");
         } else {
-            let skill_count = rules
-                .iter()
-                .filter(|r| r.source_tool == "skill")
-                .count();
+            let skill_count = rules.iter().filter(|r| r.source_tool == "skill").count();
             for r in &rules {
                 let scope = match r.scope {
                     atman_runtime::migration::RuleScope::Project => "project",

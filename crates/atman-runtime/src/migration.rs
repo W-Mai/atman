@@ -306,7 +306,10 @@ fn parse_front_matter(content: &str) -> Option<std::collections::HashMap<String,
         };
         map.insert(
             key.trim().to_string(),
-            value.trim().trim_matches(|c| c == '"' || c == '\'').to_string(),
+            value
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .to_string(),
         );
     }
     Some(map)
@@ -352,11 +355,7 @@ fn first_paragraph(content: &str) -> Option<String> {
             para.push_str(trimmed);
         }
     }
-    if para.is_empty() {
-        None
-    } else {
-        Some(para)
-    }
+    if para.is_empty() { None } else { Some(para) }
 }
 
 fn basename(path: &Path) -> String {
@@ -589,7 +588,11 @@ mod tests {
             skill_names.contains(&"skill:demo::templates/b.md"),
             "{skill_names:?}"
         );
-        assert_eq!(skill_names.len(), 3, "skill body + references: {skill_names:?}");
+        assert_eq!(
+            skill_names.len(),
+            3,
+            "skill body + references: {skill_names:?}"
+        );
     }
 
     #[test]
@@ -602,7 +605,11 @@ mod tests {
             "---\nname: structured-review\ndescription: 结构化代码审查，用于 review 请求。\n---\n\n\
              # body\n\nRead [rules](references/rules.md).\n",
         );
-        write(home.path(), ".claude/skills/code-review/references/rules.md", "# rules\n");
+        write(
+            home.path(),
+            ".claude/skills/code-review/references/rules.md",
+            "# rules\n",
+        );
 
         let rules = scan_migrated_rules(dir.path(), home.path());
         let body_rule = rules
