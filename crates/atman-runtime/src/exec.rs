@@ -369,14 +369,29 @@ fn exec_stmt<'a>(
             }
             Stmt::Watch(_) => (StmtOutcome::Continue, None),
             Stmt::Loop { body } => {
+                let loop_node_id = ctx.current_node_id.clone();
+                let mut iter = 0u64;
                 loop {
-                    let outcome = exec_stmts(body, env, ctx).await;
+                    let iter_id = match &loop_node_id {
+                        Some(p) => format!("{p}.iter[{iter}]"),
+                        None => format!("iter[{iter}]"),
+                    };
+                    emit_flow_node_start(ctx, &iter_id, stmt, loop_node_id.as_deref());
+                    let iter_ctx = ctx.with_node(&iter_id);
+                    let outcome = exec_stmts(body, env, &iter_ctx).await;
+                    let preview = match &outcome {
+                        StmtOutcome::LoopBreak => Some("break"),
+                        StmtOutcome::LoopContinue => Some("continue"),
+                        _ => None,
+                    };
+                    emit_flow_node_end(ctx, &iter_id, &outcome, loop_node_id.as_deref(), preview);
                     match outcome {
-                        StmtOutcome::Continue => continue,
-                        StmtOutcome::LoopContinue => continue,
+                        StmtOutcome::Continue => {}
+                        StmtOutcome::LoopContinue => {}
                         StmtOutcome::LoopBreak => break,
                         other => return (other, Some("loop interrupted".into())),
                     }
+                    iter += 1;
                 }
                 (StmtOutcome::Continue, Some("loop end".into()))
             }
