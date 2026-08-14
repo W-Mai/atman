@@ -154,16 +154,22 @@ pub(crate) async fn summarize_projected_messages(
     model: &str,
     summarizer: &dyn InheritedContextSummarizer,
 ) {
+    let source_groups = group_turns(source);
     for message in projected.iter_mut().filter(|m| is_inherited_summary(m)) {
-        let turn_source = source
+        let turn_source = source_groups
             .iter()
-            .filter(|candidate| {
-                candidate.turn_id == message.turn_id
-                    && candidate.role != MessageRole::User
-                    && !is_compact_anchor(candidate)
+            .rfind(|group| group.turn_id == message.turn_id)
+            .map(|group| {
+                group
+                    .messages
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.role != MessageRole::User && !is_compact_anchor(candidate)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
             })
-            .cloned()
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
         if turn_source.is_empty() {
             continue;
         }
@@ -252,16 +258,31 @@ struct TurnGroup {
 
 fn group_turns(messages: &[Message]) -> Vec<TurnGroup> {
     let mut groups: Vec<TurnGroup> = Vec::new();
+    let mut prefix = Vec::new();
     for message in messages {
-        if let Some(group) = groups.last_mut()
-            && group.turn_id == message.turn_id
-        {
+        if message.role == MessageRole::User {
+            if let Some(group) = groups.last_mut()
+                && group.turn_id == message.turn_id
+            {
+                group.messages.push(message.clone());
+                continue;
+            }
+            let mut turn_messages = std::mem::take(&mut prefix);
+            turn_messages.push(message.clone());
+            groups.push(TurnGroup {
+                turn_id: message.turn_id.clone(),
+                messages: turn_messages,
+            });
+        } else if let Some(group) = groups.last_mut() {
             group.messages.push(message.clone());
-            continue;
+        } else {
+            prefix.push(message.clone());
         }
+    }
+    if groups.is_empty() && !prefix.is_empty() {
         groups.push(TurnGroup {
-            turn_id: message.turn_id.clone(),
-            messages: vec![message.clone()],
+            turn_id: prefix[0].turn_id.clone(),
+            messages: prefix,
         });
     }
     groups
@@ -281,33 +302,53 @@ fn inherited_summary(turn_id: crate::event::TurnId, original_tokens: u64, budget
 }
 
 fn hard_fit(messages: &mut Vec<Message>, budget: u64, current_turn: &crate::event::TurnId) {
-    while estimate_messages(messages) > budget {
-        let groups = group_turns(messages);
-        if let Some(group) = groups.iter().find(|group| {
+    let mut groups = group_turns(messages);
+    while groups
+        .iter()
+        .flat_map(|group| &group.messages)
+        .map(estimate_tokens_for_message)
+        .sum::<u64>()
+        > budget
+    {
+        if let Some(group) = groups.iter_mut().find(|group| {
             group.turn_id != *current_turn
                 && group.messages.iter().any(|m| {
                     m.role != MessageRole::User && !is_compact_anchor(m) && !is_inherited_summary(m)
                 })
         }) {
-            let turn_id = group.turn_id.clone();
-            messages.retain(|m| {
-                m.turn_id != turn_id
-                    || m.role == MessageRole::User
-                    || is_compact_anchor(m)
-                    || is_inherited_summary(m)
+            group.messages.retain(|m| {
+                m.role == MessageRole::User || is_compact_anchor(m) || is_inherited_summary(m)
             });
-        } else if let Some(group) = groups.iter().find(|group| {
+        } else if let Some(group) = groups.iter_mut().find(|group| {
             group.turn_id != *current_turn && group.messages.iter().any(is_inherited_summary)
         }) {
-            let turn_id = group.turn_id.clone();
-            messages.retain(|m| m.turn_id != turn_id || !is_inherited_summary(m));
-        } else if let Some(group) = groups.iter().find(|group| group.turn_id != *current_turn) {
-            let turn_id = group.turn_id.clone();
-            messages.retain(|m| m.turn_id != turn_id || is_compact_anchor(m));
+            group.messages.retain(|m| !is_inherited_summary(m));
+        } else if let Some(index) = groups.iter().position(|group| {
+            group.turn_id != *current_turn
+                && group
+                    .messages
+                    .iter()
+                    .any(|message| !is_compact_anchor(message))
+        }) {
+            let anchors = groups[index]
+                .messages
+                .iter()
+                .filter(|message| is_compact_anchor(message))
+                .cloned()
+                .collect::<Vec<_>>();
+            if anchors.is_empty() {
+                groups.remove(index);
+            } else {
+                groups[index].messages = anchors;
+            }
         } else {
             break;
         }
     }
+    *messages = groups
+        .into_iter()
+        .flat_map(|group| group.messages)
+        .collect();
 }
 
 fn is_compact_anchor(message: &Message) -> bool {
@@ -420,6 +461,55 @@ mod tests {
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[0].turn_id, repeated);
         assert_eq!(groups[2].turn_id, repeated);
+    }
+
+    #[test]
+    fn user_boundary_keeps_misanchored_agent_output_with_current_turn() {
+        let old = turn("old");
+        let current = turn("current");
+        let messages = vec![
+            user(&old, "old request"),
+            assistant(&old, "old answer"),
+            user(&current, "current request"),
+            assistant(&old, "misanchored current answer"),
+            Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "call-current".into(),
+                    content: "current result".into(),
+                    is_error: false,
+                }],
+                turn_id: current.clone(),
+                origin: crate::message::MessageOrigin::Internal,
+            },
+        ];
+
+        let groups = group_turns(&messages);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1].turn_id, current);
+        assert_eq!(groups[1].messages.len(), 3);
+
+        let out = project_messages(
+            &messages,
+            None,
+            &[],
+            &crate::value::Value::Unit,
+            20_000,
+            Some(1_000),
+            &current,
+        );
+        assert!(
+            out.iter()
+                .any(|message| message.text_concat() == "misanchored current answer")
+        );
+        assert!(out.iter().any(|message| {
+            message.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    MessagePart::ToolResult { content, .. } if content == "current result"
+                )
+            })
+        }));
     }
 
     #[test]

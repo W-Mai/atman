@@ -391,15 +391,28 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let turn_id = atman_runtime::event::TurnId::now();
     session.begin_turn(Message::user_text(turn_id.clone(), "run"));
-    let result =
-        rt.block_on(ex.run_in_turn(&file, "t", vec![], Some(turn_id), Some(session.clone())));
+    let result = rt.block_on(ex.run_in_turn(
+        &file,
+        "t",
+        vec![],
+        Some(turn_id.clone()),
+        Some(session.clone()),
+    ));
     session.end_turn();
 
     match result.unwrap() {
         Value::Str(s) => assert!(s.contains("recovered"), "got {s}"),
-        Value::Message(message) => assert!(message.text_concat().contains("recovered")),
+        Value::Message(message) => {
+            assert!(message.text_concat().contains("recovered"));
+            assert_eq!(message.turn_id, turn_id);
+        }
         other => panic!("expected LLM response got {other:?}"),
     }
+    assert!(session.messages().iter().any(|message| {
+        message.role == atman_runtime::message::MessageRole::Assistant
+            && message.turn_id == turn_id
+            && message.text_concat().contains("recovered")
+    }));
     assert!(provider.summary_calls.load(Ordering::SeqCst) >= 1);
     assert!(provider.calls.load(Ordering::SeqCst) >= 2);
     let tokens = provider.request_tokens.lock().unwrap().clone();

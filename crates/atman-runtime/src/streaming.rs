@@ -116,6 +116,9 @@ impl<'a> LlmStream<'a> {
             .first_token_at
             .map(|t| t.duration_since(self.request_start).as_millis() as u64);
         am.timing = CallTiming { total_ms, ttft_ms };
+        if let Some(turn_id) = &self.turn_id {
+            am.message.turn_id = turn_id.clone();
+        }
         am
     }
 
@@ -855,6 +858,30 @@ mod tests {
                 redirect.map(str::to_string),
             ));
         entry.injection_notify.notify_one();
+    }
+
+    #[tokio::test]
+    async fn authoritative_turn_id_overrides_provider_turn_for_both_call_paths() {
+        let provider = ScriptProvider::new(vec![vec![Step::Done(0)]]);
+        let old_turn = crate::event::TurnId::now();
+        let current_turn = crate::event::TurnId::now();
+        let mut request = req(1);
+        request.messages = vec![
+            Message::user_text(old_turn, "inherited history"),
+            Message::user_text(current_turn.clone(), "current request"),
+        ];
+
+        let mut call =
+            LlmStream::new(&provider, request.clone()).with_turn_id(Some(current_turn.clone()));
+        let call_message = call.run().await.unwrap();
+        assert_eq!(call_message.message.turn_id, current_turn);
+
+        let (stream_tx, _stream_rx) = broadcast::channel(16);
+        let mut stream = LlmStream::new(&provider, request)
+            .with_turn_id(Some(current_turn.clone()))
+            .with_stream_tx(stream_tx);
+        let stream_message = stream.run().await.unwrap();
+        assert_eq!(stream_message.message.turn_id, current_turn);
     }
 
     #[tokio::test]
