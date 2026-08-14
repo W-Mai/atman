@@ -26,6 +26,7 @@ pub enum NodeKind {
     Message { role: String },
     FixUntilTest,
     When { condition_preview: String },
+    Loop,
     Return,
 }
 
@@ -91,7 +92,7 @@ fn extract_stmt(stmt: &Stmt, prefix: &str, out: &mut Vec<StaticNode>) {
             }
             out.push(StaticNode {
                 node_id: prefix.to_string(),
-                kind: NodeKind::Return,
+                kind: NodeKind::Loop,
                 label: "loop".into(),
                 children: inner,
             });
@@ -211,7 +212,7 @@ fn extract_node(node: &Node, prefix: &str, out: &mut Vec<StaticNode>) {
     });
 }
 
-fn format_expr_short(expr: &Expr) -> String {
+pub fn format_expr_short(expr: &Expr) -> String {
     match expr {
         Expr::Literal(atman_dsl::ast::Literal::Bool(b)) => b.to_string(),
         Expr::Literal(atman_dsl::ast::Literal::Str(s)) => format!("\"{s}\""),

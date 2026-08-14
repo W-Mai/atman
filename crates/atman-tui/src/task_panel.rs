@@ -107,6 +107,7 @@ pub fn node_kind_glyph(kind: &atman_runtime::nodegraph::NodeKind) -> (&'static s
         NodeKind::Message { .. } => ("✉", t.tinted_fg.into()),
         NodeKind::FixUntilTest => ("↻", t.warn.into()),
         NodeKind::When { .. } => ("⋯", t.subtle_fg.into()),
+        NodeKind::Loop => ("↻", t.accent.into()),
         NodeKind::Return => ("←", t.success.into()),
     }
 }

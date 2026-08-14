@@ -140,16 +140,26 @@ fn emit_flow_node_start(
     stmt: &Stmt,
     parent_node_id: Option<&str>,
 ) {
+    let (kind, label) = stmt_to_node_kind_label(stmt);
+    emit_flow_node_start_raw(ctx, node_id, kind, &label, parent_node_id);
+}
+
+fn emit_flow_node_start_raw(
+    ctx: &EvalCtx<'_>,
+    node_id: &str,
+    kind: crate::nodegraph::NodeKind,
+    label: &str,
+    parent_node_id: Option<&str>,
+) {
     let Some(run_id) = ctx.flow_run_id.clone() else {
         return;
     };
-    let (kind, label) = stmt_to_node_kind_label(stmt);
     if let Some(sink) = ctx.events {
         sink.emit(crate::event::Event::FlowNodeStart {
             run_id: run_id.clone(),
             node_id: node_id.to_string(),
             kind: kind.clone(),
-            label: label.clone(),
+            label: label.to_string(),
             parent_node_id: parent_node_id.map(String::from),
         });
     }
@@ -158,7 +168,7 @@ fn emit_flow_node_start(
             run_id: run_id.0.to_string(),
             node_id: node_id.to_string(),
             kind,
-            label,
+            label: label.to_string(),
             parent_node_id: parent_node_id.map(String::from),
         });
     }
@@ -251,14 +261,17 @@ fn stmt_to_node_kind_label(stmt: &Stmt) -> (crate::nodegraph::NodeKind, String) 
     match stmt {
         Stmt::Bind { value, .. } | Stmt::Expr(value) => expr_to_node_kind_label(value),
         Stmt::Return { .. } => (NodeKind::Return, "return".into()),
-        Stmt::When { .. } => (
-            NodeKind::When {
-                condition_preview: "when".into(),
-            },
-            "when …".into(),
-        ),
+        Stmt::When { cond, .. } => {
+            let preview = crate::nodegraph::format_expr_short(cond);
+            (
+                NodeKind::When {
+                    condition_preview: preview.clone(),
+                },
+                format!("when {preview}"),
+            )
+        }
         Stmt::Watch(_) => (NodeKind::Return, "watch".into()),
-        Stmt::Loop { .. } => (NodeKind::Return, "loop".into()),
+        Stmt::Loop { .. } => (NodeKind::Loop, "loop".into()),
         Stmt::Break => (NodeKind::Return, "break".into()),
         Stmt::Continue => (NodeKind::Return, "continue".into()),
     }
@@ -380,7 +393,13 @@ fn exec_stmt<'a>(
                         Some(p) => format!("{p}.iter[{iter}]"),
                         None => format!("iter[{iter}]"),
                     };
-                    emit_flow_node_start(ctx, &iter_id, stmt, loop_node_id.as_deref());
+                    emit_flow_node_start_raw(
+                        ctx,
+                        &iter_id,
+                        crate::nodegraph::NodeKind::Return,
+                        &format!("iteration {iter}"),
+                        loop_node_id.as_deref(),
+                    );
                     let iter_ctx = ctx.with_node(&iter_id);
                     let outcome = exec_stmts_prefixed(body, env, &iter_ctx, iter_id.clone()).await;
                     let preview = match &outcome {
