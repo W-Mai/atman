@@ -2037,6 +2037,38 @@ async fn cmd_repl_once(
                             atman_runtime::notify!(success, "Provider \"{name}\" updated");
                         }
                     }
+                    atman_tui::TuiControl::UpsertConfigModel {
+                        old_name,
+                        name,
+                        model,
+                        provider,
+                        context_budget,
+                        thinking,
+                        max_tokens,
+                        enabled,
+                    } => {
+                        match atman_runtime::model_registry::upsert_model_config(
+                            atman_runtime::model_registry::ModelConfigUpdate {
+                                old_name: old_name.as_deref(),
+                                name: &name,
+                                model: &model,
+                                provider: provider.as_deref(),
+                                context_budget,
+                                thinking,
+                                max_tokens,
+                                enabled,
+                            },
+                        ) {
+                            Ok(()) => {
+                                let _ = cmd_tx_for_models
+                                    .send(atman_tui::TuiCommand::ProviderModelsUpdated);
+                                atman_runtime::notify!(success, "Model \"{name}\" saved");
+                            }
+                            Err(e) => {
+                                atman_runtime::notify!(error, "Model \"{name}\" save failed: {e}");
+                            }
+                        }
+                    }
                     atman_tui::TuiControl::OpenAliasManager { .. } => {
                         // handled internally in the TUI — no-op here
                     }

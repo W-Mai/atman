@@ -1366,6 +1366,7 @@ pub(crate) async fn run_frames(
                         }
                         TuiCommand::ProviderModelsUpdated => {
                             app.wm.modals.provider_manager.refresh_list();
+                            app.wm.modals.model_manager.refresh();
                             if app.wm.modals.onboarding_open {
                                 app.wm.modals.onboarding.try_advance_to_model_select();
                             }

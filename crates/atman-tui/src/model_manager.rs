@@ -132,9 +132,13 @@ impl ModelManager {
         }
     }
 
-    pub fn handle_key(&mut self, action: &KeyAction) {
+    pub fn handle_key(
+        &mut self,
+        action: &KeyAction,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
         if self.show_form {
-            self.handle_form_key(action);
+            self.handle_form_key(action, control_tx);
             return;
         }
         match action {
@@ -174,13 +178,17 @@ impl ModelManager {
         }
     }
 
-    fn handle_form_key(&mut self, action: &KeyAction) {
+    fn handle_form_key(
+        &mut self,
+        action: &KeyAction,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
         match action {
             KeyAction::Escape => {
                 self.show_form = false;
                 self.editing = None;
             }
-            KeyAction::Submit => self.commit_form(),
+            KeyAction::Submit => self.commit_form(control_tx),
             KeyAction::Tab => self.form_field = (self.form_field + 1) % 6,
             KeyAction::BackTab => {
                 self.form_field = if self.form_field == 0 {
@@ -221,7 +229,10 @@ impl ModelManager {
         }
     }
 
-    fn commit_form(&mut self) {
+    fn commit_form(
+        &mut self,
+        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+    ) {
         let name = self.name_editor.buf().trim().to_string();
         if name.is_empty() {
             return;
@@ -237,9 +248,14 @@ impl ModelManager {
         let thinking = self.thinking_editor.buf().trim() == "true";
         let max_tokens: Option<u32> = self.max_tokens_editor.buf().trim().parse().ok();
 
-        let entry = atman_runtime::model_registry::ModelEntry {
+        let Some(tx) = control_tx else {
+            return;
+        };
+        let _ = tx.send(crate::TuiControl::UpsertConfigModel {
+            old_name: self.editing.clone(),
+            name,
             model: if model.is_empty() {
-                name.clone()
+                self.name_editor.buf().trim().to_string()
             } else {
                 model
             },
@@ -248,32 +264,13 @@ impl ModelManager {
             } else {
                 Some(provider)
             },
-            context_budget: Some(context_budget),
-            thinking: Some(thinking),
+            context_budget,
+            thinking,
             max_tokens,
-            enabled: Some(true),
-            ..Default::default()
-        };
-
-        let mut entries = atman_runtime::model_registry::all_model_entries();
-        if let Some(ref editing) = self.editing {
-            entries.retain(|(n, _)| n != editing);
-        }
-        entries.push((name, entry));
-        let cfg = atman_runtime::model_registry::ModelConfig {
-            models: entries.into_iter().collect(),
-            providers: atman_runtime::model_registry::all_provider_entries()
-                .into_iter()
-                .collect(),
-            aliases: atman_runtime::model_registry::all_aliases()
-                .into_iter()
-                .map(|(name, model)| (name, atman_runtime::model_registry::AliasEntry { model }))
-                .collect(),
-        };
-        atman_runtime::model_registry::set_model_config(cfg);
+            enabled: true,
+        });
         self.show_form = false;
         self.editing = None;
-        self.refresh();
     }
 }
 
@@ -429,9 +426,9 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         &mut self,
         action: &crate::keys::KeyAction,
         _app: &mut crate::app::AppState,
-        _tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) -> Option<ModalAction> {
-        self.handle_key(action);
+        self.handle_key(action, tx);
         if let Some(model) = self.open_alias_model.take() {
             return Some(ModalAction::OpenAliasForModel(model));
         }

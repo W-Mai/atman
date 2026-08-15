@@ -883,42 +883,86 @@ pub fn upsert_provider_config(
     Ok(())
 }
 
-pub fn upsert_model_config(
-    name: &str,
-    provider: &str,
-    _api_key: Option<&str>,
-    _base_url: Option<&str>,
-    context_budget: u64,
-    thinking: bool,
+#[derive(Debug, Clone)]
+pub struct ModelConfigUpdate<'a> {
+    pub old_name: Option<&'a str>,
+    pub name: &'a str,
+    pub model: &'a str,
+    pub provider: Option<&'a str>,
+    pub context_budget: u64,
+    pub thinking: bool,
+    pub max_tokens: Option<u32>,
+    pub enabled: bool,
+}
+
+fn apply_model_config_update(
+    doc: &mut toml_edit::DocumentMut,
+    update: ModelConfigUpdate<'_>,
 ) -> anyhow::Result<()> {
-    let text = read_config_toml().unwrap_or_default();
-    let mut raw: toml::Value = if text.trim().is_empty() {
-        toml::Value::Table(toml::value::Table::new())
-    } else {
-        toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse config.toml: {e}"))?
-    };
-    let models = raw
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config.toml is not a table"))?
-        .entry("models")
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-    if let Some(table) = models.as_table_mut() {
-        let mut entry = toml::value::Table::new();
-        entry.insert(
-            "provider".to_string(),
-            toml::Value::String(provider.to_string()),
-        );
-        entry.insert(
-            "context_budget".to_string(),
-            toml::Value::Integer(context_budget as i64),
-        );
-        if thinking {
-            entry.insert("thinking".to_string(), toml::Value::Boolean(true));
-        }
-        entry.insert("enabled".to_string(), toml::Value::Boolean(true));
-        table.insert(name.to_string(), toml::Value::Table(entry));
+    if doc.get("models").is_none() {
+        doc.insert("models", toml_edit::Item::Table(toml_edit::Table::new()));
     }
-    let new_text = toml::to_string_pretty(&raw).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+    {
+        let models = doc
+            .get_mut("models")
+            .and_then(|item| item.as_table_mut())
+            .ok_or_else(|| anyhow::anyhow!("models is not a table"))?;
+        if let Some(old_name) = update.old_name.filter(|old| *old != update.name) {
+            models.remove(old_name);
+        }
+        let entry = models
+            .entry(update.name)
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("model entry is not a table"))?;
+        entry.insert("model", toml_edit::value(update.model));
+        if let Some(provider) = update.provider {
+            entry.insert("provider", toml_edit::value(provider));
+        } else {
+            entry.remove("provider");
+        }
+        entry.insert(
+            "context_budget",
+            toml_edit::value(update.context_budget as i64),
+        );
+        entry.insert("thinking", toml_edit::value(update.thinking));
+        if let Some(max_tokens) = update.max_tokens {
+            entry.insert("max_tokens", toml_edit::value(max_tokens as i64));
+        } else {
+            entry.remove("max_tokens");
+        }
+        entry.insert("enabled", toml_edit::value(update.enabled));
+    }
+
+    if let Some(old_name) = update.old_name.filter(|old| *old != update.name)
+        && let Some(aliases) = doc.get_mut("alias").and_then(|item| item.as_table_mut())
+    {
+        for (_, alias) in aliases.iter_mut() {
+            if let Some(table) = alias.as_table_mut() {
+                if table.get("model").and_then(|item| item.as_str()) == Some(old_name) {
+                    table.insert("model", toml_edit::value(update.name));
+                }
+            } else if let Some(inline) = alias.as_inline_table_mut()
+                && inline.get("model").and_then(|value| value.as_str()) == Some(old_name)
+            {
+                inline.insert("model", toml_edit::Value::from(update.name));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn upsert_model_config(update: ModelConfigUpdate<'_>) -> anyhow::Result<()> {
+    let text = read_config_toml().unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = if text.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        text.parse()
+            .map_err(|e| anyhow::anyhow!("parse config.toml: {e}"))?
+    };
+    apply_model_config_update(&mut doc, update)?;
+
+    let new_text = doc.to_string();
     write_config_toml(&new_text)?;
     reload_from_text(&new_text);
     Ok(())
@@ -1337,5 +1381,59 @@ smart = { model = "Codex:codex/gpt-5" }
         assert!(out.contains("# top comment"));
         assert!(out.contains("# smart line comment"));
         assert!(out.contains("model = \"claude-opus-4.7\""));
+    }
+
+    #[test]
+    fn model_config_update_replaces_name_and_preserves_other_sections() {
+        let mut doc = r#"
+# keep this comment
+[providers.openai]
+kind = "openai"
+
+[alias]
+smart = { model = "old-name" }
+cheap = { model = "other-name" }
+
+[alias.deep]
+model = "old-name"
+
+[models.old-name]
+model = "old-id"
+provider = "openai"
+enabled = true
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+
+        apply_model_config_update(
+            &mut doc,
+            ModelConfigUpdate {
+                old_name: Some("old-name"),
+                name: "new-name",
+                model: "new-id",
+                provider: Some("openai"),
+                context_budget: 128_000,
+                thinking: true,
+                max_tokens: Some(4096),
+                enabled: false,
+            },
+        )
+        .unwrap();
+
+        let out = doc.to_string();
+        assert!(out.contains("# keep this comment"));
+        assert!(out.contains("[providers.openai]"));
+        assert!(out.contains("[alias]"));
+        assert!(out.contains("smart = { model = \"new-name\" }"));
+        assert!(out.contains("cheap = { model = \"other-name\" }"));
+        assert!(out.contains("[alias.deep]"));
+        assert!(out.contains("model = \"new-name\""));
+        assert!(out.contains("[models.new-name]"));
+        assert!(!out.contains("[models.old-name]"));
+        assert!(out.contains("model = \"new-id\""));
+        assert!(out.contains("context_budget = 128000"));
+        assert!(out.contains("thinking = true"));
+        assert!(out.contains("max_tokens = 4096"));
+        assert!(out.contains("enabled = false"));
     }
 }

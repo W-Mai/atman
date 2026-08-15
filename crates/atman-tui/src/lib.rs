@@ -150,6 +150,16 @@ pub enum TuiControl {
         max_tokens: Option<u32>,
         enabled: bool,
     },
+    UpsertConfigModel {
+        old_name: Option<String>,
+        name: String,
+        model: String,
+        provider: Option<String>,
+        context_budget: u64,
+        thinking: bool,
+        max_tokens: Option<u32>,
+        enabled: bool,
+    },
     AuthLogout {
         id: String,
     },
