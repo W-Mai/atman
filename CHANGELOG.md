@@ -6,14 +6,51 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-08-15
+
+Provider/model management, LLM execution reliability, workflow visualization, context compaction, DSL control flow, and CLI self-upgrade improvements.
+
 ### ✨ Features
 
-- **CLI self-upgrade** — `atman upgrade` downloads and runs the official platform installer with bounded response validation, installation-source confirmation, and controlled shell execution.
+- **CLI self-upgrade** — `atman upgrade` downloads and runs the official platform installer with bounded response validation, installation-source confirmation, controlled shell execution, and PATH-shadowing diagnostics.
+- **Model Manager** — model configuration can be created, edited, renamed, enabled, disabled, and removed from the TUI. Models can be opened from Provider Manager and the command palette, with alias shortcuts and a detail panel.
+- **Provider Manager testing** — provider connectivity can be tested from the TUI, with API-key handling and runtime provider registration updated without restarting the application.
+- **Model discovery** — OpenAI-compatible providers can discover available models; known model metadata supplies context budgets and model defaults when the API returns identifiers only.
+- **Loop control flow** — the DSL supports loop nodes, iteration labels, `break`, `continue`, and `when` conditions with corresponding workflow visualization.
+- **Lambda expressions and dynamic fanout** — lambda syntax, lambda values, combinators, and runtime-generated fanout branches are available in flows.
+- **LLM utility tools** — `llm.classify`, `llm.extract`, and `llm.generate_branches` provide structured LLM operations.
+- **Workflow visualization** — loop iterations, conditional expressions, node details, and LLM statistics are represented in the workflow panel with stable node identity.
+- **History search** — project and session history support substring search and case-insensitive regex syntax through the TUI and `memory.history.search`.
+- **Command palette** — palette selection now dispatches all available commands, including panel navigation and history search.
+- **Guided onboarding** — first-run provider and model setup supports provider creation, model selection, alias setup, skip, and completion persistence.
+- **Runtime rule and confession retrieval** — named skill bodies, project rules, and confession records can be indexed and retrieved through the runtime memory tools.
 
 ### 🐛 Fixes
 
-- **Model Manager persistence** — model edits now persist to `config.toml`, reload the live registry, preserve unrelated TOML content, and retarget aliases when a model's config name changes.
-- **Persistent budget-aware compaction** — context budget selection now runs only during compaction. The compacted replacement window is written to the live session handle and checkpoint, and later LLM calls read that persisted window without request-time filtering.
+- **Model configuration persistence** — model edits persist to `config.toml`, preserve unrelated TOML content, reload the live registry, and retarget aliases when a model name changes.
+- **Provider/model enabled state** — disabled providers and models are excluded consistently from registration, resolution, aliases, onboarding, and model selection, with clear errors for disabled selections.
+- **Provider configuration parsing** — provider sections use the unified configuration parser across CLI, daemon, and runtime paths.
+- **Provider form behavior** — provider/model fields, paste routing, detail restoration, add-entry shortcuts, and removal of the obsolete Max Output field are synchronized across the management forms.
+- **LLM streaming isolation** — internal LLM calls no longer leak thinking or content frames into user-facing session streams. Streaming construction now enforces valid state transitions at the type level.
+- **LLM provider requests** — OpenAI-compatible requests include thinking configuration correctly, tool names use one mapping, and runtime provider registration remains consistent after updates.
+- **LLM retry diagnostics** — retry notifications include the provider error and attempt count.
+- **Context boundaries** — internal LLM calls are isolated from the session context window, inherited context is bounded by request budget, and user-turn boundaries are preserved.
+- **Budget-aware compaction** — compaction selects a budget-aware context window, persists the replacement window to the live session and checkpoint, and lets later LLM calls read the persisted compacted context.
+- **Event streaming reliability** — session stream fallbacks cover internal dispatch paths, event writers remain alive on write failures, buffered events recover automatically, and retries are idempotent.
+- **Tool result sanitization** — sanitized tool results retain one message per result and flatten nested error values correctly.
+- **TUI workflow restoration** — restoring a session no longer closes the workflow panel when a user message is pushed.
+- **TUI text editing** — backspace handling, CJK width calculation, provider-name truncation, and panel alignment use display width consistently.
+- **Onboarding state** — completed onboarding no longer reappears on every launch, and model selection filters by usable API credentials rather than context budget.
+- **History search execution** — Enter now executes searches, special characters no longer break queries, and cursor movement remains aligned for CJK text.
+- **MCP modal behavior** — Escape handling and the MCP panel help bar remain correct while add forms and scrolling content are active.
+- **Configuration migration** — versioned configuration migration, provider/model splitting, and alias defaults remain compatible with existing configuration files.
+
+### ♻️ Refactors
+
+- **Unified `llm.call` path** — legacy LLM node handling and duplicate streaming paths were consolidated into the regular tool dispatch path with shared safety and watch-rule behavior.
+- **Provider trait testing** — provider connectivity tests are owned by the Provider trait and shared by CLI/runtime integrations.
+- **Runtime registration** — executor constructors register `llm.call` consistently and remove obsolete fallback paths.
+- **Agent templates** — agent and sub-agent templates use shared loop and judge behavior with the same retry semantics.
 
 ## [1.7.0] — 2026-08-10
 

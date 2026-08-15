@@ -13,7 +13,7 @@ keywords = ["atman", "tui", "terminal", "ratatui"]
 categories = ["command-line-interface", "development-tools"]
 
 [dependencies]
-atman-runtime = { path = "../atman-runtime", version = "1.7.0" }
+atman-runtime = { path = "../atman-runtime", version = "1.8.0" }
 anyhow.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
