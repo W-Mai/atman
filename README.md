@@ -70,56 +70,7 @@ model = "deepseek/deepseek-v4-pro"
 
 `atman` turns coding-agent workflows into reproducible flows written in the `.at` language — atman's own DSL for wiring LLM calls, tools, approvals, and sub-agents. Instead of a single chat where the model decides what to do next, you write a `.at` flow that decides what happens next; the LLM executes what it's assigned. Every run emits a typed event trace you can replay, audit, and monitor.
 
-```
-flow agent(user_prompt: string) -> string {
-    contract {
-        capabilities { shell: true }
-    }
-    _prompt_lands_via_begin_turn = user_prompt
-    return subflow(agent_loop, 0)
-}
-
-flow agent_loop(iteration: int) -> string {
-    when iteration >= 200 {
-        return "[agent: 200-iteration ceiling — task likely stuck, ask the user before continuing]"
-    }
-    reply = llm.call(
-        model: "smart",
-        context: "session",
-        system: "Planning tools: use plan.write/read/tick for the active high-level route through a multi-step task. A plan is a durable ordered checklist that atman injects back into every LLM call; create or revise one for work that spans several steps, files, tool calls, or turns, then call plan.tick when a plan step is truly complete. Use memory.todo.set/done/cancel/delete/list for concrete execution items inside the current plan step: small trackable units with where/why/how/expected_result, especially when you need a visible work queue or may pause and resume. Do not mirror the same item in both systems. If a plan step is enough, do not create a todo. If a todo becomes the whole strategy, replace it with a plan. Typical flow: set or read the plan, execute one plan step, create todos only for that step's sub-work, finish/cancel those todos, then tick the plan step.",
-        cache: true,
-        retry: 12,
-        tools: [
-            "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
-            "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
-            "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list",
-            "web.fetch", "web.search",
-            "hunk.review", "hunk.apply", "hunk.plan_edit",
-            "git.diff", "git.show", "git.log", "git.status", "git.add", "git.commit", "git.branch", "git.push", "test.run",
-            "memory.confess", "memory.fetch_confessions",
-            "memory.todo.set", "memory.todo.done", "memory.todo.cancel", "memory.todo.delete", "memory.todo.list",
-            "memory.goal.get", "memory.goal.set", "memory.goal.clear",
-            "memory.recent_turns", "memory.history.search", "memory.history.read",
-            "memory.spec.status", "memory.spec.update", "memory.spec.deviate",
-            "plan.write", "plan.read", "plan.tick",
-            "agent.spawn",
-            "form.ask",
-            "preview.push",
-            "session.push", "sleep"
-        ],
-    )
-    tool_uses = extract_tool_uses(reply)
-    when is_empty(tool_uses) {
-        return text_concat(reply)
-    }
-    tool_results = dispatch_all(tool_uses)
-    session.push(tool_results)
-    j = iteration + 1
-    return subflow(agent_loop, j)
-}
-```
-
-Run it:
+The managed agent template lives at [`examples/agent.at`](examples/agent.at). It demonstrates a bounded recursive loop around `llm.call`, session context, plan/todo tools, history search, retries, and tool dispatch. Run it with:
 
 ```bash
 atman run examples/agent.at --flow agent user_prompt="read Cargo.toml and list the workspace members"
@@ -150,11 +101,38 @@ The LLM is just one node type inside that program. `llm.call(...)` is a stochast
 
 A `.at` file declares types, providers, tools, routes, lifecycle hooks, and flows. Flows are block-based and parsed by `syn`.
 
-### A test-fix loop
+### The managed agent loop
+
+`atman init` writes a managed `commands/agent.at` template. The current template first records the user turn, loads relevant rules and past confessions, samples recent history, asks a cheap model to select relevant context, and then runs a tool loop with `llm.call`, retries, compaction, and tool dispatch. See [`examples/agent.at`](examples/agent.at) for a smaller standalone agent-loop example.
+
+`loop` is unconditional. A flow must leave it with `break`, `return`, an error, or cancellation; use `continue` to start the next iteration:
+
+```atman
+flow run_agent(user_prompt: string) -> string {
+    contract { capabilities { shell: true } }
+    session.push(message.user(user_prompt))
+    loop {
+        reply = llm.call(model: "smart", context: "session", tools: ["fs.read", "bash.spawn"])
+        tool_uses = extract_tool_uses(reply)
+        when is_empty(tool_uses) {
+            break
+        }
+        session.push(dispatch_all(tool_uses))
+    }
+    return text_concat(reply)
+}
+```
+
+Run the managed flow through the default route after `atman init`, or run the example explicitly:
+
+```bash
+atman run examples/agent.at --flow agent user_prompt="read Cargo.toml and list the workspace members"
+```
+### An approval-gated edit-and-test loop
 
 From [`examples/edit_and_verify.at`](examples/edit_and_verify.at):
 
-```
+```atman
 flow edit_and_verify(file: path, instruction: string) -> EditResult {
     contract {
         scope {
@@ -206,28 +184,33 @@ atman run examples/edit_and_verify.at --flow edit_and_verify \
 
 ### Node types
 
-| Node | Purpose |
-|---|---|
-| `llm.call(model:, prompt:, tools:, ...)` | Call an LLM with model, prompt, messages, tools, context, cache, retry |
-| `fs.read(path)` / `fs.edit(...)` / `bash.spawn(cmd)` | Tool dispatch |
-| `subflow(name, args)` | Spawn a child flow with isolated scope |
-| `user_confirm(msg)` | Pause for human approval |
-| `user_ask(prompt, schema)` | Structured user input |
-| `fanout [a, b, c] collect: all` | Concurrent fan-out |
-| `retry { ... } max: N` / `fallback { a } else { b }` | Composers |
+| Node | Syntax | Purpose |
+|---|---|---|
+| LLM | `llm.call(...)` | Stochastic model call with prompt/messages, tools, context, retry, cache, and compaction |
+| Tool call | `fs.read(...)`, `bash.spawn(...)` | Dispatch a registered tool |
+| Subflow | `subflow(name, args)` | Spawn a child flow with isolated scope |
+| Approval | `user_confirm(msg)` | Pause for human approval |
+| User input | `user_ask(prompt, schema)` | Request structured user input |
+| Fanout | `fanout [...] collect: all` | Run independent expressions concurrently |
+| List | `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, `list.reduce` | Apply lambdas to list values |
+| Composers | `retry { ... }`, `fallback { ... }` | Retry or choose fallback execution |
 
 ### Routing + lifecycle
 
-```
-route "^review\\b"  -> flow review_code
-route "^fix\\b(.*)" -> flow fix_issue
-default_route       -> flow agent
+```atman
+route "review " { flow: review_code }
+route "fix " { flow: fix_issue }
+default_route { flow: agent }
 
-on session.start { system_msg("boot") }
-on turn.end       { memory.confess("checked in") }
+on session.start {
+    system_msg("boot")
+}
+on turn.end {
+    memory.confess("checked in")
+}
 ```
 
-See [`examples/`](examples/) for 9 canonical flows: agent loop, code review with fanout, hunk review, edit-and-verify, parallel exploration, and more.
+See [`examples/`](examples/) for the canonical flows covering agent loops, code review, hunk review, edit-and-verify, parallel exploration, mail, and more.
 
 ## Tools
 
@@ -235,7 +218,7 @@ See [`examples/`](examples/) for 9 canonical flows: agent loop, code review with
 
 | Category | Tools | Tier |
 |---|---|---|
-| `fs` | read (0), list (0), grep (1), write (2), edit (2) | 0–2 |
+| `fs` | read, list, grep, write, edit | 0–2 |
 | `bash` | spawn, status, output, kill, list | 4 |
 | `term` | spawn, input, capture, resize, kill, list | 4 |
 | `web` | fetch, search | 3 |
@@ -282,6 +265,7 @@ atman run <file.at> [--flow <name>] [--mock] [--ephemeral]
 atman logs tail [session] [--follow]
 atman session list | show | search | sanitize
 atman cost [session] [--all]
+atman upgrade [--yes] [--verbose] [--no-modify-path]
 atman monitor [--port 65098]       # web UI
 atman daemon start | stop | status | run
 atman flow snapshot | versions | diff | rollback | lint | test
@@ -335,7 +319,7 @@ atman/
     atman-proto/     # JSON-RPC 2.0 envelope + daemon request/response types
     atman-daemon/    # Daemon binary, Unix socket, HTTP+SSE, session pool
     atman-tui/       # Terminal UI — themes, workflow panel, diff preview, input
-  examples/          # 9 canonical .at flow examples
+  examples/          # canonical .at flow examples
   docs/              # Quickstart, context strategy, list combinators
 ```
 

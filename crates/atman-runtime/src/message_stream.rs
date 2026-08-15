@@ -74,18 +74,23 @@ impl MessageStream {
         raw: Vec<(u64, Message)>,
     ) -> Self {
         let full: Arc<Vec<Message>> = Arc::new(raw.iter().map(|(_, msg)| msg.clone()).collect());
-        let start = full.iter().rposition(is_compaction_summary).unwrap_or(0);
+        let window_messages: Arc<Vec<Message>> =
+            Arc::new(compacted.iter().map(|(_, msg)| msg.clone()).collect());
+        let start = window_messages
+            .iter()
+            .rposition(is_compaction_summary)
+            .unwrap_or(0);
         let window = MessageWindow {
-            messages: Arc::clone(&full),
+            messages: window_messages,
             start,
         };
         Self {
             events,
-            initial_compacted: compacted,
-            initial_raw: raw,
+            initial_compacted: compacted.clone(),
+            initial_raw: raw.clone(),
             acc: Mutex::new(Acc {
-                compacted: Vec::new(),
-                full_raw: Vec::new(),
+                compacted,
+                full_raw: raw,
                 replayed: 0,
                 full_cache: full,
                 window_cache: window,
@@ -474,6 +479,33 @@ mod tests {
         assert_eq!(window[1].text_concat(), "retained current user");
         assert_eq!(window[2].text_concat(), "next provider output");
         assert!(!window.iter().any(|message| message.text_concat() == "old"));
+    }
+
+    #[test]
+    fn reopened_session_uses_compacted_window_before_new_events() {
+        let initial_compacted = vec![
+            (10, compact_summary("checkpoint summary")),
+            (11, assistant("retained tail")),
+        ];
+        let initial_raw = vec![(1, user("dead user")), (2, assistant("dead assistant"))];
+        let ms = MessageStream::with_initial(
+            Arc::new(Mutex::new(Vec::new())),
+            initial_compacted,
+            initial_raw,
+        );
+
+        let window = ms.window();
+        assert_eq!(window.len(), 2);
+        assert!(matches!(
+            window[0].parts[0],
+            MessagePart::CompactSummary { .. }
+        ));
+        assert_eq!(window[1].text_concat(), "retained tail");
+
+        let full = ms.full_messages();
+        assert_eq!(full.len(), 2);
+        assert_eq!(full[0].text_concat(), "dead user");
+        assert_eq!(full[1].text_concat(), "dead assistant");
     }
 
     #[test]

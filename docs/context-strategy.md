@@ -1,103 +1,173 @@
-# context strategy — why the default agent looks the way it does
+# Context strategy
 
-Long-lived agent conversations grow the LLM bill quadratically. This doc pins the trade-offs and the layered plan so the next reader doesn't have to re-derive them.
+Atman separates durable session history, the active message window, workflow-selected
+memory, and the final provider request. Treating all four as one "context window"
+hides important behavior.
 
-## the cost model
+## The request model
 
-Every turn hands the model roughly `K` new user + assistant + tool tokens. If you keep full history, turn N's input is `K·N` tokens. After `N` turns the *cumulative* input paid is
+Every `llm.call` is assembled from four independent inputs:
 
-    K · N · (N + 1) / 2  ≈  O(N²)
+```text
+LlmRequest
+├── system
+│   ├── flow-provided system prompt
+│   └── runtime session context
+│       ├── persistent goal, when set
+│       ├── working directory
+│       ├── active plan, when set
+│       └── available model aliases
+├── messages
+│   └── selected by `messages:`, `context:`, or `prompt:`
+├── input
+│   └── optional structured value supplied by the flow
+└── tools
+    └── schemas for the tools named by the flow
+```
 
-Provider prompt caching (Anthropic, OpenAI) helps by dropping the per-turn incremental cost by ~10× when the prefix is stable — but the shape stays O(N²). Cache also expires (Anthropic default TTL 5 min, up to 1 h) and any change to the earlier prefix invalidates everything downstream.
+`schema` controls structured output; it is not conversation history. Pending runtime
+injections may also be rendered into the message list immediately before dispatch.
+Provider adapters serialize these components into the provider-specific wire format.
 
-So "just feed the model everything" is fine for short sessions, expensive over 20+ turns, and disastrous for hour-long agent runs.
+When an `llm.call` runs with a session runtime, the runtime appends goal,
+working-directory, active-plan, and model information to its system prompt, even if
+the call itself uses an isolated `prompt:` rather than session messages. The managed
+agent adds a second, workflow-owned layer: it reads `prompts/system.md`, selects
+relevant rules and past confessions, and includes those in its own `system:` value.
+Rules and confessions are therefore selected by the managed workflow, not injected
+automatically by every `llm.call`.
 
-## the three layers
+## Message selection
 
-Atman ships **layer 1** by default and gives you the primitives for **layer 2**. Layer 3 is deferred until real signal shows up.
+The flow chooses one message source:
 
-Note: `commands/agent.at` is a managed atman template. `atman init`, CLI `/agent` startup, and daemon launches of that managed flow may overwrite it. Do not edit it directly; to customize the default agent, copy the template into your own `.at` file and change `routes.at`'s `default_route` to point at your flow.
+| Form | Messages sent |
+|---|---|
+| `messages: [...]` | Exactly the explicit message list. Cannot be combined with `prompt:` or `context:`. |
+| `context: "session"` | The current session message window. An optional `prompt:` is appended as a user message. |
+| `context: "session_recent(n)"` | The last `n` messages from the current session window. |
+| `prompt: "..."` | One user message, with no session history. This is also the default when `context:` is omitted. |
 
-### layer 1 — sliding window (default)
+The managed `commands/agent.at` uses `context: "session"`. It does **not** feed
+`memory.recent_turns` to the main model as a fixed sliding window.
 
-Feed the last `n` messages. `commands/agent.at` uses
+At the start of the managed flow, `memory.recent_turns(n: 5)` is used only as input
+to the cheap rule/confession selector. The same tool is used later by the stall
+classifier. Those helper calls do not define the main model's session context.
 
-    messages = memory.recent_turns(n: 10)
+## Session history and active window
 
-`n=10` is small on purpose:
+The durable event stream is the source of session history. The runtime derives the
+message stream from user, assistant, and tool events, plus checkpoints. The active
+window is the message list currently used by `context: "session"`.
 
-- Every turn costs `O(n·K)` tokens, so total cost across a session is `O(N·n·K)` = linear in turns
-- Enough for the model to keep the immediate reference frame
-- Small enough to force the agent to *ask* when it needs older info
+Before compaction these are effectively the retained conversation messages. After
+compaction, the active window contains a structured compact summary followed by
+recent messages. A checkpoint persists that replacement and synchronizes the live
+message handle, so subsequent `context: "session"` calls use the compacted window.
 
-If you want to tune this behavior, do not edit the managed `commands/agent.at` in place. Create your own `.at` file, adjust its context strategy there, and route to it from `routes.at`.
+History recall is separate from automatic prompt assembly:
 
-### layer 2 — anchor-based recall (opt-in, not yet shipped)
+- `memory.history.search` searches persisted session messages through FTS5.
+- `memory.history.read` reads a selected range.
+- `memory.history.count` reports the available history size.
+- `memory.recent_turns` returns a small recent slice for workflow logic.
 
-Older context lives on disk in the session's event stream. When the sliding window drops something the agent still needs, an FTS query against `anchor-sqlite-fts` retrieves the top-k relevant older messages by keyword.
+Search results are not inserted into the next prompt automatically. The flow or agent
+must inspect them and deliberately carry the relevant facts forward, for example in a
+message, the goal, the active plan, or a tool result.
 
-This is not yet a stdlib tool. The infra is there (`anchor-sqlite-fts` spec), but wiring a `memory.recall(query, k)` tool waits on the first real complaint that layer 1's window isn't enough. Building it before someone hits the wall is speculating.
+## Budget and compaction
 
-### layer 3 — rolling summary (already partly shipped)
+For session-context calls without an explicit `messages:` override, the runtime
+computes a history budget from:
 
-`context-compaction` already collapses old assistant + tool blocks into a short summary when the `llm` node's `context_budget` kwarg trips. That happens *inside* the `llm` call at wire time, not in the flow layer. Users don't opt in.
+```text
+model context budget
+- reserved output tokens
+- safety margin
+- fixed request tokens
+  - system prompt and runtime system context
+  - structured input
+  - tool schemas
+  - appended prompt
+= budget available to session messages
+```
 
-Layer 3 gives layer 1 a soft ceiling: even if you crank `n` up, the compaction pass keeps the actual token payload bounded.
+This distinction matters: a large tool registry or system prompt reduces the space
+available to conversation history even when the message list has not changed.
 
-## goal — the anchor that never gets evicted
+When the active window exceeds the model-derived trigger, auto-compaction selects an
+older contiguous range and asks an LLM for an anchored handoff summary. Range
+selection preserves a recent tail using all of these lower bounds:
 
-Every layer above operates on `messages`. Goals are different:
+- at least 10 recent messages;
+- at least 5 recent user turns;
+- a recent token tail of roughly 5% of the history budget.
 
-- Stored as `<session_dir>/goal.txt`, not as a message
-- Auto-injected as a system-prompt prefix on **every** `llm` call
-- Never enters the message list, therefore never subject to sliding window, compaction, or anything else that could evict it
+The summary replaces the selected range only when the replacement is smaller. Tool
+use/result pairs are sanitized, the replacement is checkpointed, and the live
+session window is updated. Depending on `[compaction].review`, manual or all
+compactions may be reviewed before commit. If the provider reports an actual context
+overflow, the runtime can compact and rebuild the request once before normal retry
+handling continues.
 
-Set from the REPL:
+Compaction is lossy by design. It preserves an operational handoff, not every detail.
+Use history search for older evidence and durable memory for facts that must remain
+prominent.
 
-    atman> :goal ship the atman agent by friday
-    atman> :goal                 # show current
-    atman> :goal clear           # erase
+## Durable anchors
 
-Or from a flow:
+Different stores solve different retention problems:
 
-    memory.goal.set(text: "ship the atman agent by friday")
+| Store | Prompt behavior | Intended use |
+|---|---|---|
+| Goal | Runtime appends it to every session-backed LLM system prompt | The current objective |
+| Plan | Runtime appends the active plan to the system prompt | High-level ordered route |
+| Todos | Not automatically injected as a list; available through tools and UI | Concrete execution items inside a plan step |
+| Confessions | Managed agent selects relevant records before its main loop | Avoid repeating known failures |
+| Rules | Managed agent selects and loads relevant rules before its main loop | Task-specific operating constraints |
+| Specs | Available through memory tools | Feature progress and deviations |
 
-There's deliberately no `include_goal: false` kwarg on the `llm` node. "Not evictable" is the contract — an opt-out would leak that contract. If you need an `llm` call without the goal, clear it first.
+Goal and plan survive message compaction because they are stored outside the message
+window and reassembled into the system prompt. Clearing either store removes that
+anchor from later calls.
 
-## todos — the plan the agent maintains itself
+## Managed agent composition
 
-The default agent has `memory.todo.set` and `memory.todo.done` in its `tools:` list. When a user hands it a multi-step task, the agent is expected to break it down and update entries as it makes progress. Todos live in `<session_dir>/todos.jsonl` and survive across turns.
+The default agent currently follows this sequence:
 
-Goal answers "what am I trying to do." Todos answer "which step am I on."
+1. Push the user request into session history.
+2. Load the rule index, confession index, and five recent messages.
+3. Ask a cheap extraction call which rules and confession triggers are relevant.
+4. Load the selected full rule text and matching confession records.
+5. Build the managed system prompt from `prompts/system.md` plus selected context.
+6. Enter a `loop` whose main call uses `context: "session"` and the managed system prompt.
+7. Dispatch tool calls and push their results into session history.
+8. When no tools are requested, classify whether the agent is done, blocked, lazy, or forgot tools; continue or break accordingly.
 
-## the second template — synthesize context in a subflow
+This is retrieval before the main loop plus full active-session context inside the
+loop. It is not a fixed ten-message sliding window and not automatic semantic recall.
 
-`memory.recent_turns` is a plain tool, so the flow author can also route through a dedicated synth flow instead of feeding raw history to the agent:
+## Choosing a strategy
 
-    flow agent(user_prompt: string) -> string {
-        ctx = subflow(synthesize_context, memory.recent_turns(n: 20))
-        return subflow(agent_loop, concat(ctx, [user_msg(user_prompt)]), 0)
-    }
+- Use `context: "session"` for a conversational agent that should see the compacted
+  session window.
+- Use `context: "session_recent(n)"` when a deliberately bounded recent slice is the
+  correct contract.
+- Use explicit `messages:` for isolated calls with a fully controlled prompt.
+- Use `prompt:` without context for classifiers, extractors, and one-shot workers that
+  should not inherit conversation history.
+- Put the stable objective in the goal and the ordered route in the plan.
+- Search history when compaction or recency removed evidence needed for the task.
+- Keep large structured artifacts in files or stores and retrieve only the relevant
+  portion instead of repeatedly injecting them.
 
-`atman init` does not ship this template today because no real user has hit the pain point where layer 1 alone falls over. When someone does, we'll add `commands/agent_with_context_synth.at` alongside the default agent so both routes are one `route`-line change apart.
+## Implementation references
 
-## when to escalate
-
-Rough signal → next layer:
-
-| symptom                                        | action                                        |
-| ---------------------------------------------- | --------------------------------------------- |
-| agent loses thread within ~10 turns            | raise `n`, or add `memory.recall` (layer 2)   |
-| session token count explodes past 15-turn mark | check `context-compaction` is triggering      |
-| agent forgets the top-level objective          | use `:goal` — that's exactly what it's for    |
-| agent redoes work it already did               | check `memory.todo.*` is in `tools:` list     |
-
-Nothing here is enforced or measured yet. That's on purpose — the `atman monitor` UI already surfaces token usage per turn; adding policy before we know the shape of real usage would be premature.
-
-## references
-
-- `crates/atman-runtime/src/tools/memory.rs` — the tools listed here
-- `crates/atman-runtime/src/eval.rs` — where the goal prefix is spliced into `LlmRequest.system`
-- `crates/atman-runtime/src/session.rs` — `Session::messages()` backs `memory.recent_turns` (in-memory, no disk race)
-- `.local/specs/context-compaction/` — layer 3 spec
-- `docs/quickstart.md` — first-hour walkthrough that touches goals and todos in passing
+- `crates/atman-runtime/src/eval/llm_context.rs` — message-source selection
+- `crates/atman-runtime/src/eval/llm_dispatch.rs` — final request assembly and compaction entry
+- `crates/atman-runtime/src/eval/mod.rs` — runtime system context
+- `crates/atman-runtime/src/compaction.rs` — budgeting, range selection, summary, and checkpointing
+- `crates/atman-runtime/src/templates.rs` — managed agent composition
+- `crates/atman-runtime/src/message_stream.rs` — event stream to active messages

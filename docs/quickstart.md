@@ -4,7 +4,22 @@ From zero to a running code agent. Reads top-to-bottom in ~10 minutes.
 
 ## 1. Install
 
-Prereqs: rustc 1.85+, git, and (optional but recommended) an Anthropic or OpenAI API key.
+Prereqs: Rust 1.85+, git, and (optional but recommended) an Anthropic or OpenAI API key.
+
+For a released binary on macOS or Linux:
+
+```bash
+curl -fsSL https://atman.run/install.sh | sh
+```
+
+Other installation options:
+
+```bash
+brew install W-Mai/cellar/atman-cli
+cargo install atman-cli --locked
+```
+
+For a local checkout:
 
 ```bash
 git clone <your atman checkout url> ~/src/atman
@@ -12,13 +27,21 @@ cd ~/src/atman
 cargo install --path crates/atman-cli
 ```
 
-`cargo install` drops the `atman` binary into `~/.cargo/bin`. Make sure that's on your `$PATH`.
+The installers place `atman` in a platform-specific executable directory. For Cargo-managed installs, make sure `~/.cargo/bin` is on your `$PATH`.
 
 Verify:
 
 ```bash
 atman version
 ```
+
+To update an installation managed by the official installer:
+
+```bash
+atman upgrade
+```
+
+`atman upgrade` does not update a Homebrew Cellar. Use `brew upgrade atman-cli` for Homebrew-managed installs.
 
 ## 2. Scaffold your config
 
@@ -33,6 +56,8 @@ This writes:
 ├── config.toml                # all sections optional, defaults are fine
 ├── on_session_start.at        # REPL greeting flow
 ├── routes.at                  # bare-text → slash-command routing
+├── prompts/
+│   └── system.md             # managed system prompt
 └── commands/
     ├── agent.at               # canonical code-agent loop
     └── hello.at               # smoke-test flow
@@ -76,7 +101,7 @@ atman
 You'll land in an interactive prompt:
 
 ```
-atman v1.0.0 — type `:help` for commands, `:exit` to leave
+atman v1.8.0 — type `:help` for commands, `:exit` to leave
 [atman] session=… events=/…/events.jsonl
 atman ready. `/hello` for a smoke test, plain text to chat.
 atman>
@@ -86,7 +111,7 @@ Three input modes:
 
 - `:name`     — REPL builtin (`:help`, `:exit`, `:cost`, `:goal`, `:suggest`, …).
 - `/name arg` — run `~/.config/atman/commands/<name>.at`.
-- plain text — routes.at kicks in. Anything unmatched falls into the code agent flow.
+- plain text — `routes.at` handles configured prefixes and its default route.
 
 Try the smoke test first:
 
@@ -111,7 +136,7 @@ While a flow is running you can:
 
 ## 6. Anchor the agent on a session goal
 
-The default agent reads the sliding window of your last 10 messages and forgets anything older. When the agent needs an anchor that can't get evicted — "what am I actually trying to accomplish this session" — set a goal:
+The default agent uses the active session message window. As the conversation grows, automatic compaction replaces older ranges with an operational summary while retaining recent turns. Put the objective that must remain explicit outside that lossy window in the session goal:
 
 ```
 atman> :goal ship the atman agent MVP by friday
@@ -122,9 +147,9 @@ atman> :goal clear
 [atman] goal cleared
 ```
 
-`:goal` is stored in `<session_dir>/goal.txt` and auto-injected as a system-prompt prefix on every LLM call in this session. It never enters the message list, so context compaction, sliding window, and recall never touch it. See `docs/context-strategy.md` for the O(N²) cost math that motivated this design.
+`:goal` is stored in `<session_dir>/goal.txt` and appended to the system context of every LLM call running with this session. It does not enter the message list, so message compaction does not rewrite it. See `docs/context-strategy.md` for the complete request structure and compaction model.
 
-The agent also has `memory.todo.set` / `memory.todo.done` in its tool list, so it will break multi-step tasks into todos on its own — goal is the north star, todos are the plan.
+Use the goal for the objective, `plan.write` / `plan.tick` for the high-level ordered route, and `memory.todo.*` for concrete execution items inside the current plan step. Goal and active plan are reassembled into the system context; todos remain available through tools and the UI.
 
 ## 7. First flow snapshot / test
 
@@ -165,7 +190,7 @@ First run writes `hello.at.snap.json`. Subsequent runs compare the current outpu
 
 ## Troubleshooting
 
-- **"no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml"** — REPL doesn't know what to do with your bare text. Either add a route or `atman init` again to write the `default_route { flow: agent }` fallback.
+- **"no route matched"** — REPL doesn't know what to do with your bare text. Check `~/.config/atman/routes.at`, or use `/name args...` for a command flow.
 - **`unreachable: connect: ...` on a provider row** — check the base URL and that you can `curl` it. Corporate proxies + custom CAs need `SSL_CERT_FILE`.
 - **REPL prints nothing after your input** — you're in the agent loop. Watch `atman logs tail --follow` or `atman monitor` to see what's happening.
 - **Agent forgets what you asked two turns ago** — set a `:goal`. `commands/agent.at` is a managed atman template and is overwritten on agent start; to customize behavior, create your own `.at` file and point `routes.at`'s `default_route` at it. See `docs/context-strategy.md` for context-layer options.

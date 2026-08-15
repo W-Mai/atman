@@ -428,6 +428,17 @@ pub struct WatchRules {
     pub(crate) warn_elapsed_ms_gt: Vec<(u64, WarnRule)>,
 }
 
+impl WatchRules {
+    pub(crate) fn is_active(&self) -> bool {
+        !self.token_matches.is_empty()
+            || self.tokens_gt.is_some()
+            || self.elapsed_ms_gt.is_some()
+            || !self.warn_token.is_empty()
+            || !self.warn_tokens_gt.is_empty()
+            || !self.warn_elapsed_ms_gt.is_empty()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct WarnRule {
     pub(crate) target: String,

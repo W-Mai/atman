@@ -33,10 +33,16 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     let retry_kinds = args.retry_kinds.clone();
     let cache_prompt = args.cache_prompt;
     let context_mode = parse_context_mode(&args.context_mode);
-    let stream_tx = if matches!(context_mode, ContextMode::None) {
+    let watch_active = ctx
+        .watch_rules
+        .as_ref()
+        .is_some_and(crate::streaming::WatchRules::is_active);
+    let stream_tx = if matches!(context_mode, ContextMode::None) && !watch_active {
         None
     } else {
-        ctx.stream_tx.clone()
+        ctx.stream_tx
+            .clone()
+            .or_else(|| Some(tokio::sync::broadcast::channel(64).0))
     };
     let tool_specs = args.tool_specs.clone();
     let stall_timeout_secs = args.stall_timeout_secs;
@@ -342,7 +348,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             drop(compact_guard.take());
                         }
                         let _append_compact_guard = session.acquire_compact_lock().await;
-                        session.append_message(am.message.clone(), None);
+                        session.append_message(am.message.clone(), ctx.flow_run_id.clone());
                         drop(_append_compact_guard);
                         crate::compaction::start_auto_compact_with_budget(
                             session.clone(),

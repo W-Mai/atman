@@ -53,12 +53,13 @@
     <span class="atman-proof-pill">JSON-RPC + SSE</span>
     <span class="atman-proof-pill">MCP consumer</span>
     <span class="atman-proof-pill">Provider-agnostic</span>
+    <span class="atman-proof-pill">CLI self-upgrade</span>
     <span class="atman-proof-pill">Human-in-the-loop</span>
 </div>
 
 <div class="atman-stats">
   <div class="atman-stat">
-    <strong>5</strong>
+    <strong>6</strong>
     <span>crates</span>
   </div>
   <div class="atman-stat">
@@ -89,7 +90,7 @@
     <div class="atman-pillar">
       <span class="atman-icon atman-icon-llm"></span>
       <h3>LLM is one node</h3>
-      <p><code>llm { ... }</code> is a stochastic node. Tool dispatch, approval gates, retry, subflow recursion, context compaction — all deterministic orchestration around it.</p>
+      <p><code>llm.call(...)</code> is a stochastic node. Tool dispatch, approval gates, retry, subflow recursion, context compaction — all deterministic orchestration around it.</p>
     </div>
     <div class="atman-pillar">
       <span class="atman-icon atman-icon-note"></span>

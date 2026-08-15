@@ -1,111 +1,92 @@
 # How to filter and map lists in atman
 
-`atman-runtime`'s stdlib registers six list combinators at Tier Zero:
+The `.at` DSL supports lambda expressions and dynamic fanout. Use the list combinators when a list operation needs flow-defined logic, and use fanout for concurrent execution.
 
-| tool            | signature                                        |
-|-----------------|--------------------------------------------------|
-| `list_map`      | `(list, fn_name) -> list`                        |
-| `list_filter`   | `(list, fn_name) -> list`                        |
-| `list_find`     | `(list, fn_name) -> item \| unit`                |
-| `list_any`      | `(list, fn_name) -> bool`                        |
-| `list_all`      | `(list, fn_name) -> bool`                        |
-| `list_reduce`   | `(list, fn_name, init) -> value`                 |
+## Lambda expressions
 
-Each looks `fn_name` up in `ctx.registry` (the `ToolRegistry` handed to the running flow) and calls that tool once per element. Predicates (`filter` / `find` / `any` / `all`) must return `bool`; anything else surfaces `RuntimeError::TypeMismatch`.
+A lambda is written as `|parameter| expression`:
 
-## Filter with a built-in predicate
+```atman
+flow double_values(xs: list) -> list {
+    return list.map(xs, |x| x * 2)
+}
+```
 
-`is_empty` returns `true` for empty lists and empty strings. Drop the empty strings out of a list:
+The built-in list combinators are `list.map`, `list.filter`, `list.find`, `list.any`, `list.all`, and `list.reduce`. They evaluate lambda calls sequentially.
+
+For example, filter non-empty strings:
 
 ```atman
 flow keep_non_empty(items: list) -> list {
-    empties = list_filter(items, "is_empty")
-    return empties
+    return list.filter(items, |item| item != "")
 }
 ```
 
-That gives you the *empty* ones back. For the negation, pair `list_map` with a Rust-side predicate that returns the inverse, or write a small tool of your own (below).
+## Dynamic fanout
 
-## Reduce for aggregation
-
-`list_reduce` folds left-to-right using `fn(acc, elem) -> acc'`. Adding integers:
+Dynamic fanout evaluates a source expression, applies a lambda to each item, and collects the branch results:
 
 ```atman
-flow sum_of(xs: list) -> int {
-    total = list_reduce(xs, "add_ints", 0)
-    return total
+flow summarize_items(items: list) -> list {
+    return fanout items { |item| llm.call(
+        model: "smart",
+        prompt: "Summarize: " + item
+    ) } collect: all
 }
 ```
 
-`add_ints` is not in stdlib today — register your own (below).
+`collect: all` waits for every branch and preserves the result list. `collect: first` returns the first completed branch.
 
-## Bringing your own predicate
-
-The combinators do **not** yet resolve `fn_name` against flows declared in the same `.at` file. Predicates must live in the tool registry, which means Rust code. Two options.
-
-### Option 1 — write a `Tool` impl and register it
-
-```rust
-use atman_runtime::error::RuntimeError;
-use atman_runtime::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
-use atman_runtime::value::Value;
-
-pub struct IsBig;
-
-impl Tool for IsBig {
-    fn name(&self) -> &str {
-        "is_big"
-    }
-    fn tier(&self) -> Tier {
-        Tier::Zero
-    }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
-        Box::pin(async move {
-            match args.positional(0)? {
-                Value::Int(n) => Ok(Value::Bool(*n > 10)),
-                other => Err(RuntimeError::TypeMismatch {
-                    expected: "int".into(),
-                    actual: other.kind_name().into(),
-                }),
-            }
-        })
-    }
-}
-```
-
-Register once before running the flow (e.g. in the caller that owns the `Executor`):
-
-```rust
-use std::sync::Arc;
-
-atman_runtime::tools::register_tier_zero(&mut executor.tools);
-executor.tools.register(Arc::new(IsBig));
-```
-
-Now the DSL can call it:
+Static fanout evaluates an explicit list of expressions:
 
 ```atman
-flow big_ints(xs: list) -> list {
-    return list_filter(xs, "is_big")
+flow compare_files() -> list {
+    return fanout [
+        fs.read(path: "src/main.rs"),
+        fs.read(path: "src/lib.rs")
+    ] collect: all
 }
 ```
 
-### Option 2 — wait for flow-callable combinators
+Use `fanout` for independent work. Keep dependent operations as ordinary sequential expressions so their data flow remains explicit.
 
-Making `list_filter([1,2,3], "my_flow")` resolve `"my_flow"` against the current file's `flow` declarations needs an invoker plumbed through `ToolCtx`. Design lives in `.local/specs/expressiveness-tier-decision/` (Slice B); it lights up when a real workflow surfaces the request.
+## Loop control
 
-## Combining with the pipe operator
-
-`|>` prepends the left value as the first positional arg of the right call. Pairing it with combinators keeps the reading direction natural:
+Use `loop` for repeated work. `break` exits the loop and `continue` skips to the next iteration:
 
 ```atman
-flow show_big(xs: list) -> int {
-    return xs |> list_filter("is_big") |> len()
+flow retry_until_ready() -> string {
+    attempts = 0
+    loop {
+        attempts = attempts + 1
+        when attempts >= 3 {
+            break
+        }
+        when attempts < 2 {
+            continue
+        }
+    }
+    return "ready"
 }
 ```
 
-## Reference
+`when` bodies are ordinary statement blocks and can contain nested flow operations.
 
-- Combinator source: `crates/atman-runtime/src/tools/stdlib.rs`
-- Decision context: `.local/specs/expressiveness-tier-decision/`
-- Sample custom `Tool` impls: search for `impl Tool for` in `crates/atman-runtime/src/tools/`
+## Pipe expressions
+
+`|>` passes the left value as the first positional argument of the call on the right:
+
+```atman
+flow first_item(xs: list) -> value {
+    return xs |> first()
+}
+```
+
+Use named arguments when a tool has several parameters. The pipe form is useful when each step consumes the result of the previous step.
+
+## Current references
+
+- Lambda parser and AST: `crates/atman-dsl/src/parse.rs`, `crates/atman-dsl/src/ast.rs`
+- `crates/atman-runtime/src/eval/mod.rs`
+- Canonical examples: `examples/agent.at`, `examples/review_code.at`, and `examples/look_into.at`
+- Flow tests: `atman flow test <path>`
