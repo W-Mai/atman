@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
@@ -6,28 +8,6 @@ use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
 use atman_runtime::{Executor, Value};
-
-static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn install_mock_model() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock".into(),
-            ModelEntry {
-                model: "mock".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
-}
 
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
     Message {
@@ -40,8 +20,7 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 
 #[tokio::test]
 async fn run_in_turn_appends_assistant_message_to_session() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = r#"flow ask() -> string {
     return llm.call(model: "mock", prompt: "hi", context: "session")
 }
@@ -93,8 +72,7 @@ async fn run_in_turn_appends_assistant_message_to_session() {
 
 #[tokio::test]
 async fn run_without_turn_does_not_touch_session() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = r#"flow ask() -> string {
     return llm.call(model: "mock", prompt: "hi")
 }
@@ -111,8 +89,7 @@ async fn run_without_turn_does_not_touch_session() {
 
 #[tokio::test]
 async fn assistant_msg_event_carries_flow_run_id() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = r#"flow ask() -> string {
     return llm.call(model: "mock", prompt: "hi", context: "session")
 }

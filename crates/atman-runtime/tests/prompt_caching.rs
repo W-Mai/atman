@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use atman_runtime::provider::{LlmRequest, Provider};
@@ -89,23 +91,14 @@ async fn cache_prompt_false_sends_plain_string_content() {
 
 #[tokio::test]
 async fn cache_kwarg_flows_from_dsl_to_provider() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "test".into(),
-            ModelEntry {
-                model: "test".into(),
-                provider: Some("anthropic".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "test",
+            "anthropic",
+            8_192,
+            None,
+        )]))
+        .await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))

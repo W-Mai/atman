@@ -1,30 +1,16 @@
 use atman_dsl::parse::parse_file;
 use atman_runtime::Executor;
-use atman_runtime::model_registry::{MODEL_CONFIG_LOCK, ModelConfig, ModelEntry, set_model_config};
+mod common;
+
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::value::Value;
 use std::sync::Arc;
 
-fn register_model() {
-    set_model_config(ModelConfig {
-        models: [(
-            "m".into(),
-            ModelEntry {
-                model: "m".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        ..Default::default()
-    });
-}
-
 fn run(src: &str, provider: MockProvider) -> Value {
-    let _lock = MODEL_CONFIG_LOCK.lock().unwrap();
-    register_model();
+    let _registry =
+        common::SyncModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "m", "mock", 8_192, None,
+        )]));
     let parsed = parse_file(src).expect("parse");
     let ex = Executor::new();
     atman_runtime::tools::register_tier_zero(&ex.tools);

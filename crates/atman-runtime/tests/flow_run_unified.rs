@@ -4,6 +4,8 @@
 //! the flow_registry (so flow.output("root") / flow.interject("root") work)
 //! and the session's current_root pointer is set.
 
+mod common;
+
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
@@ -36,18 +38,6 @@ impl Drop for HomeGuard {
             }
         }
     }
-}
-
-fn install_mock_model() {
-    atman_runtime::model_registry::register_model_entries(vec![(
-        "mock".to_string(),
-        atman_runtime::model_registry::ModelEntry {
-            model: "mock".to_string(),
-            provider: Some("mock".to_string()),
-            context_budget: Some(100_000),
-            ..Default::default()
-        },
-    )]);
 }
 
 const SIMPLE_FLOW: &str = r#"flow t(n: Int) -> Int {
@@ -164,7 +154,11 @@ async fn flow_interject_unknown_handle_errors() {
 #[tokio::test]
 async fn flow_interject_cancels_running_subagent_llm() {
     let _home_lock = HOME_TEST_LOCK.lock().await;
-    install_mock_model();
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "mock", "mock", 100_000, None,
+        )]))
+        .await;
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::tool::{Tool, ToolRegistry};
     use atman_runtime::tools::agent_ctrl::{
@@ -259,7 +253,11 @@ flow test_flow(goal: string) -> string {
 #[tokio::test]
 async fn l1_nudge_text_appears_in_entry_messages() {
     let _home_lock = HOME_TEST_LOCK.lock().await;
-    install_mock_model();
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "mock", "mock", 100_000, None,
+        )]))
+        .await;
     use atman_runtime::Value;
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::tool::{Tool, ToolRegistry};
@@ -282,19 +280,6 @@ flow test_flow(goal: string) -> string {
     let _home = HomeGuard::set(tmp.path());
 
     let registry = Arc::new(FlowRegistry::new());
-    atman_runtime::model_registry::register_model_entries(vec![(
-        "mock".to_string(),
-        atman_runtime::model_registry::ModelEntry {
-            model: "mock".to_string(),
-            provider: Some("mock".to_string()),
-            context_budget: Some(100000),
-            compact_threshold_ratio: None,
-            thinking: Some(false),
-            max_tokens: None,
-            enabled: Some(true),
-            discovered: false,
-        },
-    )]);
     let providers = atman_runtime::provider::ProviderRegistry::new();
     providers.register(Arc::new(
         MockProvider::new("mock")

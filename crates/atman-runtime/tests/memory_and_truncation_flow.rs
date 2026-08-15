@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
@@ -48,23 +50,7 @@ async fn confess_three_and_fetch_returns_three_via_flow() {
 
 #[tokio::test]
 async fn long_prompt_triggers_context_truncated_event_and_flow_completes() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock".into(),
-            ModelEntry {
-                model: "mock".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = format!(
         r#"flow t() -> string {{
     reply = llm.call(

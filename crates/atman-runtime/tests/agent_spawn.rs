@@ -1,4 +1,5 @@
-use atman_runtime::model_registry::{AliasEntry, ModelConfig, ModelEntry};
+mod common;
+
 use atman_runtime::provider::ProviderRegistry;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tool::{Tool, ToolArgs, ToolCtx, ToolRegistry};
@@ -6,27 +7,14 @@ use atman_runtime::tools::agent_ctrl::{AgentSpawn, FlowRegistry, FlowRunStatus};
 use atman_runtime::value::Value;
 use std::sync::Arc;
 
-struct ModelConfigGuard {
-    previous: ModelConfig,
-}
-
-impl Drop for ModelConfigGuard {
-    fn drop(&mut self) {
-        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap();
-        atman_runtime::model_registry::set_model_config(self.previous.clone());
-    }
-}
-
-fn spawn_test_setup(
+async fn spawn_test_setup(
     with_provider: bool,
 ) -> (
     tempfile::TempDir,
     ToolCtx,
     String,
     Arc<FlowRegistry>,
-    ModelConfigGuard,
+    common::ModelRegistryGuard,
 ) {
     let tmp = tempfile::tempdir().unwrap();
     let flow_path = tmp.path().join("spawn_test.at");
@@ -43,37 +31,7 @@ fn spawn_test_setup(
     )
     .unwrap();
 
-    let previous = {
-        let _lock = atman_runtime::model_registry::MODEL_CONFIG_LOCK
-            .lock()
-            .unwrap();
-        let previous = ModelConfig {
-            models: atman_runtime::model_registry::all_model_entries()
-                .into_iter()
-                .collect(),
-            providers: atman_runtime::model_registry::all_provider_entries()
-                .into_iter()
-                .collect(),
-            aliases: atman_runtime::model_registry::all_aliases()
-                .into_iter()
-                .map(|(name, model)| (name, AliasEntry { model }))
-                .collect(),
-        };
-        atman_runtime::model_registry::set_model_config(ModelConfig {
-            models: [(
-                "mock".into(),
-                ModelEntry {
-                    model: "mock".into(),
-                    context_budget: Some(8_192),
-                    ..Default::default()
-                },
-            )]
-            .into_iter()
-            .collect(),
-            ..Default::default()
-        });
-        previous
-    };
+    let registry_guard = common::ModelRegistryGuard::mock("mock").await;
 
     let registry = Arc::new(FlowRegistry::new());
     let tools = ToolRegistry::new();
@@ -95,7 +53,7 @@ fn spawn_test_setup(
         ctx,
         flow_path.display().to_string(),
         registry,
-        ModelConfigGuard { previous },
+        registry_guard,
     )
 }
 
@@ -119,7 +77,7 @@ async fn wait_for_status(registry: &FlowRegistry, handle: &str) -> FlowRunStatus
 
 #[tokio::test]
 async fn agent_spawn_returns_final_assistant_text_when_no_tools_used() {
-    let (_tmp, ctx, flow_path, registry, _guard) = spawn_test_setup(true);
+    let (_tmp, ctx, flow_path, registry, _guard) = spawn_test_setup(true).await;
     let args = ToolArgs {
         positional: Vec::new(),
         named: vec![
@@ -162,7 +120,7 @@ async fn agent_spawn_returns_final_assistant_text_when_no_tools_used() {
 
 #[tokio::test]
 async fn agent_spawn_reports_missing_provider_gracefully() {
-    let (_tmp, ctx, flow_path, registry, _guard) = spawn_test_setup(false);
+    let (_tmp, ctx, flow_path, registry, _guard) = spawn_test_setup(false).await;
     let args = ToolArgs {
         positional: Vec::new(),
         named: vec![

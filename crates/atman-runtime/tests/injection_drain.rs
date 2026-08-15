@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -10,28 +12,6 @@ use atman_runtime::provider::{
 use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
 use atman_runtime::{Executor, RuntimeError};
-
-static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn install_prov_model() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "prov".into(),
-            ModelEntry {
-                model: "prov".into(),
-                provider: Some("prov".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
-}
 
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
     Message {
@@ -108,8 +88,11 @@ impl Provider for RecordingProvider {
 
 #[tokio::test]
 async fn pending_injection_appears_in_next_llm_request_messages() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_prov_model();
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "prov", "prov", 8_192, None,
+        )]))
+        .await;
     let src = r#"flow ask() -> string {
     return llm.call(model: "prov", prompt: "hi")
 }
@@ -156,8 +139,11 @@ async fn pending_injection_appears_in_next_llm_request_messages() {
 
 #[tokio::test]
 async fn no_pending_injection_yields_bare_user_message() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_prov_model();
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "prov", "prov", 8_192, None,
+        )]))
+        .await;
     let src = r#"flow ask() -> string {
     return llm.call(model: "prov", prompt: "hi")
 }
@@ -188,8 +174,11 @@ async fn no_pending_injection_yields_bare_user_message() {
 
 #[tokio::test]
 async fn injection_drained_once_not_reused_by_next_node() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_prov_model();
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "prov", "prov", 8_192, None,
+        )]))
+        .await;
     let src = r#"flow chained() -> string {
     a = llm.call(model: "prov", prompt: "first")
     b = llm.call(model: "prov", prompt: "second")

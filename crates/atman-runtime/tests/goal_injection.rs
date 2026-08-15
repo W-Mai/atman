@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
@@ -6,28 +8,6 @@ use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, Session, Value};
-
-static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn install_mock_model() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock".into(),
-            ModelEntry {
-                model: "mock".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
-}
 
 fn mock_that_echoes_system() -> Arc<CapturedProvider> {
     Arc::new(CapturedProvider::default())
@@ -101,8 +81,7 @@ impl atman_runtime::provider::Provider for CapturedProvider {
 
 #[tokio::test]
 async fn goal_prefix_lands_in_llm_system_prompt() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir())
@@ -111,7 +90,6 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
 
     let provider = mock_that_echoes_system();
     let ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
@@ -140,15 +118,13 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
 
 #[tokio::test]
 async fn goal_prefix_prepends_user_system_and_keeps_both() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir()).set("stay minimal").unwrap();
 
     let provider = mock_that_echoes_system();
     let ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
@@ -181,14 +157,12 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
 
 #[tokio::test]
 async fn no_goal_leaves_system_untouched() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     let provider = mock_that_echoes_system();
     let ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
@@ -212,15 +186,13 @@ async fn no_goal_leaves_system_untouched() {
 
 #[tokio::test]
 async fn goal_survives_multiple_turns_in_same_session() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir()).set("persistent goal").unwrap();
 
     let provider = mock_that_echoes_system();
     let ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
 
     let src = r#"flow t() -> string {
@@ -250,7 +222,6 @@ async fn dsl_goal_set_persists_to_disk() {
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     let ex = Executor::new();
-    atman_runtime::tools::register_tier_zero(&ex.tools);
     let todo = Arc::new(atman_runtime::memory::TodoStore::at(session.dir()));
     let conf = Arc::new(atman_runtime::memory::ConfessionStore::at(session.dir()));
     let goal = Arc::new(GoalStore::at(session.dir()));

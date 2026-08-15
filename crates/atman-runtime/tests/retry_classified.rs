@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -357,15 +359,7 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
         }
     }
 
-    atman_runtime::model_registry::register_model_entries(vec![(
-        "m".into(),
-        atman_runtime::model_registry::ModelEntry {
-            model: "m".into(),
-            provider: Some("m".into()),
-            context_budget: Some(8_192),
-            ..Default::default()
-        },
-    )]);
+    let _registry = common::SyncModelRegistryGuard::mock("m");
     let provider = Arc::new(OverflowProvider {
         calls: std::sync::Arc::new(AtomicUsize::new(0)),
         summary_calls: std::sync::Arc::new(AtomicUsize::new(0)),

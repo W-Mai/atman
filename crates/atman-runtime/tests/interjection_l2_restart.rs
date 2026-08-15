@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,23 +11,14 @@ use atman_runtime::{Executor, Session, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn l2_injection_mid_stream_triggers_restart_with_correction() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock-slow".into(),
-            ModelEntry {
-                model: "mock-slow".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "mock-slow",
+            "mock",
+            8_192,
+            None,
+        )]))
+        .await;
     let root = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(root.path()).unwrap());
     let sink = session.sink().clone();

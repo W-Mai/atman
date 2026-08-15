@@ -1,36 +1,21 @@
-use std::sync::Arc;
+mod common;
+
 use std::time::Duration;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{Executor, RuntimeError, Value};
-
-static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn install_mock_model() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock-model".into(),
-            ModelEntry {
-                model: "mock-model".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
-}
+use atman_runtime::{RuntimeError, Value};
 
 #[tokio::test]
 async fn watch_tokens_consumed_aborts_when_exceeded() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "mock-model",
+            "mock",
+            8_192,
+            None,
+        )]))
+        .await;
     let src = r#"flow review() -> string {
     primary = llm.call(
         model: "mock-model",
@@ -45,14 +30,16 @@ async fn watch_tokens_consumed_aborts_when_exceeded() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let ex = Executor::new();
-    ex.providers
-        .register(Arc::new(MockProvider::new("mock").with_model(
+    let ex = common::executor();
+    common::register_provider(
+        &ex,
+        MockProvider::new("mock").with_model(
             "mock-model",
             Value::Str(
                 "this is a fairly long response that will exceed five tokens once split".into(),
             ),
-        )));
+        ),
+    );
 
     let err = ex.run(&file, "review", vec![]).await.unwrap_err();
     match err {
@@ -63,8 +50,14 @@ async fn watch_tokens_consumed_aborts_when_exceeded() {
 
 #[tokio::test]
 async fn watch_elapsed_aborts_slow_stream() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "mock-model",
+            "mock",
+            8_192,
+            None,
+        )]))
+        .await;
     let src = r#"flow review() -> string {
     primary = llm.call(
         model: "mock-model",
@@ -79,15 +72,16 @@ async fn watch_elapsed_aborts_slow_stream() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let ex = Executor::new();
-    ex.providers.register(Arc::new(
+    let ex = common::executor();
+    common::register_provider(
+        &ex,
         MockProvider::new("mock")
             .with_model(
                 "mock-model",
                 Value::Str("this response streams slowly across many chunks".into()),
             )
             .with_chunk_delay(Duration::from_millis(80)),
-    ));
+    );
 
     let err = ex.run(&file, "review", vec![]).await.unwrap_err();
     match err {
@@ -98,8 +92,14 @@ async fn watch_elapsed_aborts_slow_stream() {
 
 #[tokio::test]
 async fn watch_tokens_consumed_does_not_fire_when_under_budget() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "mock-model",
+            "mock",
+            8_192,
+            None,
+        )]))
+        .await;
     let src = r#"flow review() -> string {
     primary = llm.call(
         model: "mock-model",
@@ -114,10 +114,11 @@ async fn watch_tokens_consumed_does_not_fire_when_under_budget() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let ex = Executor::new();
-    ex.providers.register(Arc::new(
+    let ex = common::executor();
+    common::register_provider(
+        &ex,
         MockProvider::new("mock").with_model("mock-model", Value::Str("short reply".into())),
-    ));
+    );
 
     let out = ex.run(&file, "review", vec![]).await.unwrap();
     assert!(matches!(out, Value::Str(s) if s == "short reply"));

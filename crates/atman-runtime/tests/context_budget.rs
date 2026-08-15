@@ -1,9 +1,9 @@
-use std::sync::Arc;
+mod common;
 
 use atman_dsl::parse::parse_file;
+use atman_runtime::Value;
 use atman_runtime::eval::truncate_prompt_to_budget;
 use atman_runtime::providers::mock::MockProvider;
-use atman_runtime::{Executor, Value};
 
 #[test]
 fn truncate_leaves_short_prompt_unchanged() {
@@ -24,23 +24,7 @@ fn truncate_keeps_head_and_tail_dropping_middle() {
 
 #[tokio::test]
 async fn context_budget_kwarg_shrinks_prompt_before_provider() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "echo".into(),
-            ModelEntry {
-                model: "echo".into(),
-                provider: Some("echo".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    let registry = common::ModelRegistryGuard::mock("echo").await;
     let src = r#"flow t(text: string) -> string {
     return llm.call(
         model: "echo",
@@ -50,13 +34,14 @@ async fn context_budget_kwarg_shrinks_prompt_before_provider() {
 }
 "#;
     let file = parse_file(src).unwrap();
-    let ex = Executor::new();
-    ex.providers.register(Arc::new(
+    let runtime = common::TestRuntime::new(
+        registry,
         MockProvider::new("echo").with_fallback(Value::Str("ok".into())),
-    ));
+    );
 
     let long_prompt: String = "X".repeat(2000);
-    let out = ex
+    let out = runtime
+        .executor
         .run(&file, "t", vec![("text".into(), Value::Str(long_prompt))])
         .await
         .unwrap();

@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
@@ -7,23 +9,7 @@ use tempfile::TempDir;
 
 #[tokio::test]
 async fn session_writes_events_to_jsonl_file() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock".into(),
-            ModelEntry {
-                model: "mock".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let root = TempDir::new().unwrap();
     let session = Session::open(root.path()).unwrap();
     let events_path = session.events_path().unwrap().to_path_buf();

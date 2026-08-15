@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -23,15 +25,17 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 
 #[tokio::test]
 async fn flow_cancel_before_start_returns_cancelled_error() {
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = r#"flow ask() -> string {
     return llm.call(model: "mock", prompt: "hi")
 }
 "#;
     let file = parse_file(src).unwrap();
-    let executor = Executor::new();
-    executor.providers.register(Arc::new(
+    let executor = common::executor();
+    common::register_provider(
+        &executor,
         MockProvider::new("mock").with_model("mock", Value::Str("would-run".into())),
-    ));
+    );
 
     let session = std::sync::Arc::new(Session::open_ephemeral());
     let turn_id = TurnId::now();
@@ -122,23 +126,11 @@ impl Provider for CancelAfterFirstProvider {
 
 #[tokio::test]
 async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "prov".into(),
-            ModelEntry {
-                model: "prov".into(),
-                provider: Some("prov".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "prov", "prov", 8_192, None,
+        )]))
+        .await;
     let src = r#"flow chained() -> string {
     a = llm.call(model: "prov", prompt: "first")
     b = llm.call(model: "prov", prompt: "second")

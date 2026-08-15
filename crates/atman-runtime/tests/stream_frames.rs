@@ -1,43 +1,21 @@
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::stream::StreamFrame;
-use atman_runtime::{Executor, Session, Value, tools};
-
-static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn install_mock_model() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock".into(),
-            ModelEntry {
-                model: "mock".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
-}
+use atman_runtime::{Executor, Session, Value};
 
 #[tokio::test]
 async fn llm_chunks_flow_from_provider_to_session_stream() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let mut rx = session.stream_subscribe();
 
     let ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
     ex.providers.register(Arc::new(
         MockProvider::new("mock")
             .with_fallback(Value::Str("hi from mock".into()))
@@ -84,7 +62,6 @@ async fn tool_use_frames_wrap_dispatch() {
     let mut rx = session.stream_subscribe();
 
     let ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
 
     let src = r#"flow t() -> int {
     n = len([1, 2, 3])
@@ -122,7 +99,6 @@ async fn zero_subscribers_makes_stream_send_a_noop() {
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
     let ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
 
     let src = r#"flow t() -> int {
     return len([1, 2, 3])

@@ -1,35 +1,11 @@
+mod common;
+
 use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tools::memory_stubs::RuleFetch;
-use atman_runtime::{Executor, Value, tools};
-
-static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn install_test_models() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    let models = ["claude-opus-4.7", "gpt-4o-mini"]
-        .into_iter()
-        .map(|model| {
-            (
-                model.to_string(),
-                ModelEntry {
-                    model: model.to_string(),
-                    provider: Some("mock".into()),
-                    context_budget: Some(8_192),
-                    ..Default::default()
-                },
-            )
-        })
-        .collect();
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models,
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
-}
+use atman_runtime::{Executor, Value};
 
 const REVIEW_FLOW: &str = r#"flow review_code(file: path) -> Review {
     gather = fanout [
@@ -80,11 +56,13 @@ fn examples_review_code_at_parses() {
 
 #[tokio::test]
 async fn end_to_end_review_flow_produces_structured_output() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_test_models();
+    let _registry = common::ModelRegistryGuard::acquire(common::config([
+        common::model_for_provider("claude-opus-4.7", "mock", 8_192, None),
+        common::model_for_provider("gpt-4o-mini", "mock", 8_192, None),
+    ]))
+    .await;
     let file = parse_file(REVIEW_FLOW).unwrap();
     let ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
 
     let rule = RuleFetch::new();
     rule.insert("code-review", "review carefully, look for as-any")
@@ -134,11 +112,13 @@ async fn end_to_end_review_flow_produces_structured_output() {
 
 #[tokio::test]
 async fn retry_branch_fires_when_verify_reports_invalid() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_test_models();
+    let _registry = common::ModelRegistryGuard::acquire(common::config([
+        common::model_for_provider("claude-opus-4.7", "mock", 8_192, None),
+        common::model_for_provider("gpt-4o-mini", "mock", 8_192, None),
+    ]))
+    .await;
     let file = parse_file(REVIEW_FLOW).unwrap();
     let ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
     ex.tools.register(Arc::new(RuleFetch::new()));
 
     let bad = Value::Struct(vec![("severity".into(), Value::Str("info".into()))]);

@@ -3,6 +3,8 @@ use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tools::memory_stubs::RuleFetch;
 use atman_runtime::{Event, Executor, FlowStatus, Value, tools};
 
+mod common;
+
 use std::sync::Arc;
 
 #[tokio::test]
@@ -75,23 +77,14 @@ async fn executor_rule_fetch_returns_content() {
 
 #[tokio::test]
 async fn executor_runs_review_flow_with_mock_provider() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "claude-opus-4.7".into(),
-            ModelEntry {
-                model: "claude-opus-4.7".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    let _registry =
+        common::ModelRegistryGuard::acquire(common::config([common::model_for_provider(
+            "claude-opus-4.7",
+            "mock",
+            8_192,
+            None,
+        )]))
+        .await;
     let src = r#"flow review_code(file: path) -> Review {
     gather = rule.fetch(query: "none")
     primary = llm.call(

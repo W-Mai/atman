@@ -1,33 +1,38 @@
+mod common;
+
 use atman_runtime::Session;
 use atman_runtime::event::TurnId;
 use atman_runtime::message::{Message, MessageOrigin};
 
-static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+fn compaction_config() -> atman_runtime::model_registry::ModelConfig {
+    use atman_runtime::model_registry::ModelEntry;
 
-fn install_compaction_test_models() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    let models = ["llama-3b", "mock-summary", "llama-workflow-compact"]
-        .into_iter()
-        .map(|name| {
-            (
-                name.to_string(),
-                ModelEntry {
-                    model: name.to_string(),
-                    provider: (name == "llama-workflow-compact")
-                        .then(|| "workflow-compact".to_string()),
-                    context_budget: Some(40_000),
-                    compact_threshold_ratio: Some(0.8),
-                    ..Default::default()
-                },
-            )
-        })
-        .collect();
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models,
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    common::config([
+        (
+            "llama-3b".into(),
+            ModelEntry {
+                model: "llama-3b".into(),
+                context_budget: Some(40_000),
+                compact_threshold_ratio: Some(0.8),
+                ..Default::default()
+            },
+        ),
+        (
+            "mock-summary".into(),
+            ModelEntry {
+                model: "mock-summary".into(),
+                context_budget: Some(40_000),
+                compact_threshold_ratio: Some(0.8),
+                ..Default::default()
+            },
+        ),
+        common::model_for_provider(
+            "llama-workflow-compact",
+            "workflow-compact",
+            40_000,
+            Some(0.8),
+        ),
+    ])
 }
 
 fn build_long_history(session: &Session, msg_count: usize) {
@@ -45,8 +50,7 @@ fn build_long_history(session: &Session, msg_count: usize) {
 
 #[tokio::test]
 async fn compact_messages_replaces_middle_span() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_compaction_test_models();
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
@@ -66,8 +70,7 @@ async fn compact_messages_replaces_middle_span() {
 
 #[tokio::test]
 async fn compact_messages_refreshes_window_from_compacted_history() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_compaction_test_models();
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     build_long_history(&session, 20);
@@ -194,8 +197,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
         normal_calls: AtomicUsize::new(0),
         second_call_tokens: std::sync::Mutex::new(None),
     });
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_compaction_test_models();
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     let session = std::sync::Arc::new(Session::open_ephemeral());
     build_long_history(&session, 20);
 
@@ -230,24 +232,17 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
 
 #[tokio::test]
 async fn compact_messages_returns_none_below_budget() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-    let _lock = TEST_CFG_LOCK.lock().await;
-    let cfg = ModelConfig {
-        models: [(
-            "claude-opus-4.7".into(),
-            ModelEntry {
-                model: "claude-opus-4.7".into(),
-                context_budget: Some(200_000),
-                compact_threshold_ratio: Some(0.8),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    };
-    atman_runtime::model_registry::set_model_config(cfg);
+    use atman_runtime::model_registry::ModelEntry;
+    let _registry = common::ModelRegistryGuard::acquire(common::config([(
+        "claude-opus-4.7".into(),
+        ModelEntry {
+            model: "claude-opus-4.7".into(),
+            context_budget: Some(200_000),
+            compact_threshold_ratio: Some(0.8),
+            ..Default::default()
+        },
+    )]))
+    .await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("claude-opus-4.7", 0, 0, 0, 0, None, None);
@@ -265,8 +260,7 @@ async fn compact_messages_returns_none_below_budget() {
 #[tokio::test]
 async fn maybe_auto_compact_emits_warning_when_no_range_found() {
     use atman_runtime::compaction::maybe_auto_compact;
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_compaction_test_models();
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let big = "y".repeat(50_000);
@@ -285,8 +279,7 @@ async fn maybe_auto_compact_emits_warning_when_no_range_found() {
 
 #[tokio::test]
 async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_compaction_test_models();
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
     use atman_runtime::provider::ProviderRegistry;
@@ -331,7 +324,6 @@ async fn setup_review_env() -> (
     std::sync::Arc<Session>,
     atman_runtime::provider::ProviderRegistry,
 ) {
-    install_compaction_test_models();
     use atman_runtime::provider::ProviderRegistry;
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::value::Value;
@@ -369,7 +361,7 @@ fn wait_for_pending_and_decide(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_accept_as_is_commits_llm_summary() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     use atman_runtime::CompactReviewDecision;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
@@ -399,7 +391,7 @@ async fn review_accept_as_is_commits_llm_summary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_accept_edited_commits_user_summary() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     use atman_runtime::CompactReviewDecision;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
@@ -435,7 +427,7 @@ async fn review_accept_edited_commits_user_summary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_reject_skips_commit() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     use atman_runtime::CompactReviewDecision;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
@@ -460,7 +452,7 @@ async fn review_reject_skips_commit() {
 
 #[tokio::test]
 async fn review_manual_only_skips_review_on_auto_path() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
     let (_tmp, session, providers) = setup_review_env().await;
@@ -478,7 +470,7 @@ async fn review_manual_only_skips_review_on_auto_path() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_always_without_subscriber_auto_accepts_daemon_shape() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
     let (_tmp, session, providers) = setup_review_env().await;
@@ -496,8 +488,7 @@ async fn review_always_without_subscriber_auto_accepts_daemon_shape() {
 
 #[tokio::test]
 async fn cooldown_blocks_repeat_compaction_within_window() {
-    let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    install_compaction_test_models();
+    let _registry = common::ModelRegistryGuard::acquire(compaction_config()).await;
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);

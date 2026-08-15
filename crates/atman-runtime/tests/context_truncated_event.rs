@@ -1,32 +1,14 @@
+mod common;
+
 use atman_dsl::parse::parse_file;
 use atman_runtime::event::{Event, EventSink};
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, Value};
 use std::sync::Arc;
 
-fn install_mock_model() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock".into(),
-            ModelEntry {
-                model: "mock".into(),
-                provider: Some("mock".into()),
-                context_budget: Some(8_192),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
-}
-
 #[tokio::test]
 async fn context_truncated_event_emitted_when_prompt_exceeds_budget() {
-    install_mock_model();
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let long_body = "x".repeat(20_000);
     let src = format!(
         r#"flow t() -> string {{
@@ -76,6 +58,7 @@ async fn context_truncated_event_emitted_when_prompt_exceeds_budget() {
 
 #[tokio::test]
 async fn context_truncated_event_not_emitted_when_prompt_under_budget() {
+    let _registry = common::ModelRegistryGuard::mock("mock").await;
     let src = r#"flow t() -> string {
     reply = llm.call(
         model: "mock",

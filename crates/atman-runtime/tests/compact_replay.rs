@@ -1,3 +1,5 @@
+mod common;
+
 use atman_runtime::Session;
 use atman_runtime::event::TurnId;
 use atman_runtime::message::Message;
@@ -21,23 +23,16 @@ fn build_long_history(session: &Session, msg_count: usize) {
 
 #[tokio::test]
 async fn resume_shows_the_compacted_view_not_the_raw_history() {
-    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-
-    atman_runtime::model_registry::set_model_config(ModelConfig {
-        models: [(
-            "mock-summary".into(),
-            ModelEntry {
-                model: "mock-summary".into(),
-                context_budget: Some(40_000),
-                compact_threshold_ratio: Some(0.8),
-                ..Default::default()
-            },
-        )]
-        .into_iter()
-        .collect(),
-        providers: std::collections::HashMap::new(),
-        aliases: std::collections::HashMap::new(),
-    });
+    let _registry = common::ModelRegistryGuard::acquire(common::config([(
+        "mock-summary".into(),
+        atman_runtime::model_registry::ModelEntry {
+            model: "mock-summary".into(),
+            context_budget: Some(40_000),
+            compact_threshold_ratio: Some(0.8),
+            ..Default::default()
+        },
+    )]))
+    .await;
     let tmp = tempfile::tempdir().unwrap();
     let sid = {
         let session = Session::open(tmp.path()).unwrap();
