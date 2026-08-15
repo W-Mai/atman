@@ -526,6 +526,16 @@ pub(crate) fn apply_envelope_to_messages(
                 acc.insert(insertion_idx, replacement);
             }
         }
+        crate::event::Event::Checkpoint { messages, .. } => {
+            acc.clear();
+            acc.extend(
+                messages
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, message)| (u64::MAX.saturating_sub(index as u64), message)),
+            );
+        }
         crate::event::Event::AttachmentDegraded {
             message_seq,
             part_index,

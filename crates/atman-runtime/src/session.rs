@@ -1303,6 +1303,138 @@ impl Session {
         self.compact_messages(summary, range, tokens)
     }
 
+    pub fn commit_rewritten_window(
+        &self,
+        replacement: Vec<Message>,
+        before_tokens: u64,
+        before_window_tokens: u64,
+        rewritten_count: usize,
+    ) -> Option<CompactResult> {
+        let after_tokens = crate::compaction::estimate_tokens_for_messages(&replacement);
+        if rewritten_count == 0 || after_tokens >= before_window_tokens {
+            return None;
+        }
+        let summary = format!(
+            "[atman: persistently compacted output from {rewritten_count} retained messages]"
+        );
+        self.sink.mark_compacted();
+        self.sink.emit(Event::ContextCompact {
+            session_id: self.id.to_string(),
+            before_tokens,
+            after_tokens,
+            compacted_range_start: 0,
+            compacted_range_end: 0,
+            summary_text: Some(summary.clone()),
+            replacement_msg_seq: None,
+        });
+        self.sink.emit(Event::CompactionSummary {
+            session_id: self.id.to_string(),
+            range_start: 0,
+            range_end: 0,
+            compacted_count: rewritten_count,
+            before_tokens,
+            after_tokens,
+            summary: summary.clone(),
+        });
+        let _ = self
+            .watch
+            .stream_tx
+            .send(crate::stream::StreamFrame::CompactionSummary {
+                phase: crate::stream::CompactionPhase::Finished,
+                range_start: 0,
+                range_end: 0,
+                summary,
+                before_tokens,
+                after_tokens,
+                compacted_count: rewritten_count,
+            });
+        self.compaction
+            .last_input_tokens
+            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut messages) = self.messages.lock() {
+            *messages = replacement.clone();
+        }
+        self.sink.emit(Event::Checkpoint {
+            session_id: self.id.to_string(),
+            messages: replacement,
+            window_tokens: after_tokens,
+        });
+        self.refresh_window_snapshot();
+        Some(CompactResult {
+            before_tokens,
+            after_tokens,
+            compacted_start: 0,
+            compacted_end: 0,
+        })
+    }
+
+    pub fn commit_compacted_window(
+        &self,
+        summary: String,
+        replacement: Vec<Message>,
+        range: crate::compaction::CompactRange,
+        before_tokens: u64,
+        before_window_tokens: u64,
+    ) -> Option<CompactResult> {
+        let after_tokens = crate::compaction::estimate_tokens_for_messages(&replacement);
+        if after_tokens >= before_window_tokens {
+            self.push_system_note(format!(
+                "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
+                after_tokens, before_window_tokens
+            ));
+            return None;
+        }
+        self.sink.mark_compacted();
+        self.sink.emit(Event::ContextCompact {
+            session_id: self.id.to_string(),
+            before_tokens,
+            after_tokens,
+            compacted_range_start: range.start as u64,
+            compacted_range_end: range.end.saturating_sub(1) as u64,
+            summary_text: Some(summary.clone()),
+            replacement_msg_seq: None,
+        });
+        self.sink.emit(Event::CompactionSummary {
+            session_id: self.id.to_string(),
+            range_start: range.start as u64,
+            range_end: range.end.saturating_sub(1) as u64,
+            compacted_count: range.end - range.start,
+            before_tokens,
+            after_tokens,
+            summary: summary.clone(),
+        });
+        let _ = self
+            .watch
+            .stream_tx
+            .send(crate::stream::StreamFrame::CompactionSummary {
+                phase: crate::stream::CompactionPhase::Finished,
+                range_start: range.start,
+                range_end: range.end.saturating_sub(1),
+                summary,
+                before_tokens,
+                after_tokens,
+                compacted_count: range.end - range.start,
+            });
+        self.compaction
+            .last_input_tokens
+            .store(after_tokens, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut messages) = self.messages.lock() {
+            *messages = replacement.clone();
+        }
+        self.sink.emit(Event::Checkpoint {
+            session_id: self.id.to_string(),
+            messages: replacement,
+            window_tokens: after_tokens,
+        });
+        self.refresh_window_snapshot();
+        Some(CompactResult {
+            before_tokens,
+            after_tokens,
+            compacted_start: range.start,
+            compacted_end: range.end,
+        })
+    }
+
     pub fn compact_messages(
         &self,
         summary: String,
@@ -1704,6 +1836,102 @@ mod tests {
     fn write_events(dir: &Path, lines: &[&str]) {
         let path = dir.join("events.jsonl");
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    }
+
+    #[test]
+    fn commit_rewritten_window_uses_checkpoint_without_legacy_range_replay() {
+        let session = Session::open_ephemeral();
+        let original = vec![
+            Message::user_text(TurnId::now(), "first user"),
+            Message::assistant_text(TurnId::now(), "large output".repeat(2_000)),
+            Message::user_text(TurnId::now(), "current user"),
+        ];
+        for message in original.clone() {
+            session.append_message(message, None);
+        }
+        let replacement = vec![
+            original[0].clone(),
+            Message::assistant_text(TurnId::now(), "persisted omission"),
+            original[2].clone(),
+        ];
+        let before_tokens = crate::compaction::estimate_tokens_for_messages(&original);
+
+        session
+            .commit_rewritten_window(replacement.clone(), before_tokens, before_tokens, 1)
+            .expect("rewrite commit");
+
+        assert_eq!(session.messages().as_ref(), replacement.as_slice());
+        let events = session.sink().snapshot();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::ContextCompact {
+                replacement_msg_seq: None,
+                ..
+            }
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::SystemMsg { .. }))
+        );
+        let checkpoint = events
+            .into_iter()
+            .find(|event| matches!(event, Event::Checkpoint { .. }))
+            .expect("checkpoint");
+        let replay = crate::message_stream::MessageStream::new(std::sync::Arc::new(
+            std::sync::Mutex::new(vec![crate::event::EventEnvelope::new(1, checkpoint)]),
+        ));
+        assert_eq!(&*replay.window(), replacement.as_slice());
+    }
+
+    #[test]
+    fn commit_compacted_window_updates_live_handle_and_checkpoint_replay() {
+        let session = Session::open_ephemeral();
+        let old = vec![
+            Message::user_text(TurnId::now(), "old user".repeat(2_000)),
+            Message::assistant_text(TurnId::now(), "old assistant".repeat(2_000)),
+            Message::user_text(TurnId::now(), "current user"),
+        ];
+        for message in old.clone() {
+            session.append_message(message, None);
+        }
+        let replacement = vec![
+            Message::system_compact_summary(TurnId::now(), "anchor", 0, 1, 2),
+            old[2].clone(),
+            Message::assistant_text(TurnId::now(), "persisted omission"),
+        ];
+        let before_tokens = crate::compaction::estimate_tokens_for_messages(&old);
+        let range = crate::compaction::CompactRange {
+            start: 0,
+            end: 2,
+            tokens_saved_estimate: before_tokens,
+        };
+
+        session
+            .commit_compacted_window(
+                "anchor".into(),
+                replacement.clone(),
+                range,
+                before_tokens,
+                before_tokens,
+            )
+            .expect("commit");
+
+        assert_eq!(session.messages().as_ref(), replacement.as_slice());
+        assert_eq!(
+            session.messages_handle().lock().unwrap().as_slice(),
+            replacement.as_slice()
+        );
+        let checkpoint = session
+            .sink()
+            .snapshot()
+            .into_iter()
+            .find(|event| matches!(event, Event::Checkpoint { .. }))
+            .expect("checkpoint");
+        let replay = crate::message_stream::MessageStream::new(std::sync::Arc::new(
+            std::sync::Mutex::new(vec![crate::event::EventEnvelope::new(1, checkpoint)]),
+        ));
+        assert_eq!(&*replay.window(), replacement.as_slice());
     }
 
     #[test]

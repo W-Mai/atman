@@ -324,7 +324,7 @@ impl ModelInfo {
 
     pub fn compaction_target_after(&self) -> u64 {
         let trigger = self.compaction_trigger_threshold();
-        let budget_cap = (self.context_budget as f64 * 0.60) as u64;
+        let budget_cap = (self.context_budget as f64 * 0.25) as u64;
         let trigger_cap = (trigger as f64 * 0.75) as u64;
         budget_cap.min(trigger_cap)
     }
@@ -1171,6 +1171,7 @@ mod tests {
             target < trigger,
             "target {target} should be less than trigger {trigger}"
         );
+        assert_eq!(target, 50_000, "compaction target should be 25% of context");
     }
 
     #[test]

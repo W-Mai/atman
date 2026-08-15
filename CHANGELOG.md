@@ -4,6 +4,12 @@ All notable changes to atman are documented in this file.
 
 ---
 
+## [Unreleased]
+
+### 🐛 Fixes
+
+- **Persistent budget-aware compaction** — context budget selection now runs only during compaction. The compacted replacement window is written to the live session handle and checkpoint, and later LLM calls read that persisted window without request-time filtering.
+
 ## [1.7.0] — 2026-08-10
 
 Window Manager architecture overhaul, guided onboarding, history search with regex, command palette dispatch refactor, and 20+ bug fixes across modals, panels, and key event handling.

@@ -78,16 +78,8 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         })
         .unwrap_or_else(|| model.clone());
     let has_messages_override = args.messages_override.is_some();
-    if !matches!(context_mode, ContextMode::None)
-        && !has_messages_override
-        && let Some(session) = ctx.session_runtime.as_ref()
-    {
-        crate::compaction::start_auto_compact(
-            session.clone(),
-            model.clone(),
-            providers_reg.clone(),
-        )
-        .await;
+    if let Some(session) = ctx.session_runtime.as_ref() {
+        append_system_context(&mut system, session_system_context(session).await);
     }
     if let Some(budget) = args.context_budget {
         if let Some(p) = args.prompt.as_mut() {
@@ -105,6 +97,26 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                 });
             }
         }
+    }
+    let compaction_budget = crate::compaction::CompactionBudgetContext {
+        fixed_input_tokens: Some(fixed_input_tokens(
+            &system,
+            &input,
+            &tool_specs,
+            args.prompt.as_deref(),
+        )),
+    };
+    if !matches!(context_mode, ContextMode::None)
+        && !has_messages_override
+        && let Some(session) = ctx.session_runtime.as_ref()
+    {
+        crate::compaction::start_auto_compact_with_budget(
+            session.clone(),
+            model.clone(),
+            providers_reg.clone(),
+            compaction_budget,
+        )
+        .await;
     }
     let mut compact_guard = if !matches!(context_mode, ContextMode::None)
         && !has_messages_override
@@ -163,9 +175,6 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     }
     let prompt = prompt_for_budget;
     let mut rewrite_used = false;
-    if let Some(session) = ctx.session_runtime.as_ref() {
-        append_system_context(&mut system, session_system_context(session).await);
-    }
     if let Some(safety) = ctx.safety.as_ref()
         && safety.enabled
     {
@@ -335,10 +344,11 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                         let _append_compact_guard = session.acquire_compact_lock().await;
                         session.append_message(am.message.clone(), None);
                         drop(_append_compact_guard);
-                        crate::compaction::start_auto_compact(
+                        crate::compaction::start_auto_compact_with_budget(
                             session.clone(),
                             model.clone(),
                             providers_reg.clone(),
+                            compaction_budget,
                         )
                         .await;
                     }
@@ -373,8 +383,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             .expect("checked by can_rebuild_from_session");
                         session.request_manual_compact();
                         drop(compact_guard.take());
-                        crate::compaction::maybe_auto_compact(session, &model, &providers_reg)
-                            .await;
+                        crate::compaction::maybe_auto_compact_with_budget(
+                            session,
+                            &model,
+                            &providers_reg,
+                            compaction_budget,
+                        )
+                        .await;
                         final_messages = rebuild_session_llm_messages(
                             session,
                             context_mode,
@@ -519,7 +534,13 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
     if let Some(session) = ctx.session_runtime.as_ref()
         && !saw_context_overflow
     {
-        crate::compaction::start_auto_compact(session.clone(), model.clone(), providers_reg).await;
+        crate::compaction::start_auto_compact_with_budget(
+            session.clone(),
+            model.clone(),
+            providers_reg,
+            compaction_budget,
+        )
+        .await;
     }
     if let Some(tx) = stream_tx.as_ref() {
         let _ = tx.send(crate::stream::StreamFrame::Note(format!(
@@ -531,4 +552,25 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
         )));
     }
     Value::Err(last_err.unwrap_or(RuntimeError::ToolFailed("llm failed".into())))
+}
+
+fn fixed_input_tokens(
+    system: &Option<String>,
+    input: &Value,
+    tools: &[crate::tool::ToolSpec],
+    prompt: Option<&str>,
+) -> u64 {
+    let system_tokens = system
+        .as_deref()
+        .map(crate::provider::estimate_tokens)
+        .unwrap_or(0);
+    let input_tokens = crate::provider::estimate_tokens(&input.to_json().to_string());
+    let tool_tokens = serde_json::to_string(tools)
+        .map(|json| crate::provider::estimate_tokens(&json))
+        .unwrap_or(0);
+    let prompt_tokens = prompt.map(crate::provider::estimate_tokens).unwrap_or(0);
+    system_tokens
+        .saturating_add(input_tokens)
+        .saturating_add(tool_tokens)
+        .saturating_add(prompt_tokens)
 }

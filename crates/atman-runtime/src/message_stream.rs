@@ -450,6 +450,33 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_replaces_live_window_and_accepts_following_messages() {
+        let old = user("old");
+        let summary = compact_summary("checkpoint summary");
+        let retained = user("retained current user");
+        let events = event_envelopes(vec![
+            make_msg_event("user_msg", &old, 1),
+            Event::Checkpoint {
+                session_id: "test".into(),
+                messages: vec![summary.clone(), retained.clone()],
+                window_tokens: 10,
+            },
+            make_msg_event("assistant_msg", &assistant("next provider output"), 3),
+        ]);
+        let ms = MessageStream::new(events);
+
+        let window = ms.window();
+        assert_eq!(window.len(), 3);
+        assert!(matches!(
+            window[0].parts[0],
+            MessagePart::CompactSummary { .. }
+        ));
+        assert_eq!(window[1].text_concat(), "retained current user");
+        assert_eq!(window[2].text_concat(), "next provider output");
+        assert!(!window.iter().any(|message| message.text_concat() == "old"));
+    }
+
+    #[test]
     fn reopened_session_keeps_initial_messages_after_new_events() {
         let initial_compacted = vec![
             (1, compact_summary("compaction summary")),

@@ -3,6 +3,34 @@ use crate::message::{Message, MessagePart, MessageRole};
 pub const KEEP_RECENT_MESSAGES: usize = 10;
 pub const KEEP_RECENT_USER_TURNS: usize = 5;
 const KEEP_RECENT_TOKEN_FRACTION: f64 = 0.05;
+const COMPACTION_SAFETY_MARGIN_MIN: u64 = 2_000;
+const COMPACTION_SAFETY_MARGIN_MAX_RATIO: f64 = 0.05;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompactionBudgetContext {
+    pub fixed_input_tokens: Option<u64>,
+}
+
+impl CompactionBudgetContext {
+    pub fn history_budget(self, info: &crate::model_registry::ModelInfo) -> Option<u64> {
+        let fixed_input_tokens = self.fixed_input_tokens?;
+        let output_cap = (info.context_budget as f64 * 0.20) as u64;
+        let output_floor = 8_000_u64.min(output_cap);
+        let output_reserve = (info.max_output_tokens.unwrap_or(32_000) as u64)
+            .max(output_floor)
+            .min(output_cap);
+        let safety_cap = (info.context_budget as f64 * COMPACTION_SAFETY_MARGIN_MAX_RATIO) as u64;
+        let safety_margin = ((info.context_budget as f64 * 0.02) as u64)
+            .max(COMPACTION_SAFETY_MARGIN_MIN.min(safety_cap))
+            .min(safety_cap);
+        Some(
+            info.context_budget
+                .saturating_sub(output_reserve)
+                .saturating_sub(safety_margin)
+                .saturating_sub(fixed_input_tokens),
+        )
+    }
+}
 
 pub fn estimate_tokens_for_message(msg: &Message) -> u64 {
     let mut chars = 0usize;
@@ -137,16 +165,26 @@ pub fn filter_orphan_tool_messages(messages: &mut Vec<Message>) {
             })
         })
         .collect();
+    let result_ids: std::collections::HashSet<String> = messages
+        .iter()
+        .flat_map(|m| {
+            m.parts.iter().filter_map(|p| match p {
+                MessagePart::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+        })
+        .collect();
     let mut seen_results: std::collections::HashSet<String> = std::collections::HashSet::new();
     messages.retain(|m| {
         for p in &m.parts {
-            if let MessagePart::ToolResult { tool_use_id, .. } = p {
-                if !use_ids.contains(tool_use_id) {
-                    return false;
+            match p {
+                MessagePart::ToolUse { id, .. } if !result_ids.contains(id) => return false,
+                MessagePart::ToolResult { tool_use_id, .. } => {
+                    if !use_ids.contains(tool_use_id) || !seen_results.insert(tool_use_id.clone()) {
+                        return false;
+                    }
                 }
-                if !seen_results.insert(tool_use_id.clone()) {
-                    return false;
-                }
+                _ => {}
             }
         }
         true
@@ -215,8 +253,23 @@ pub async fn maybe_auto_compact(
     model: &str,
     providers: &crate::provider::ProviderRegistry,
 ) {
+    maybe_auto_compact_with_budget(
+        session,
+        model,
+        providers,
+        CompactionBudgetContext::default(),
+    )
+    .await;
+}
+
+pub async fn maybe_auto_compact_with_budget(
+    session: &crate::session::Session,
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+    budget_context: CompactionBudgetContext,
+) {
     let _compact_guard = session.acquire_compact_lock().await;
-    maybe_auto_compact_locked(session, model, providers).await;
+    maybe_auto_compact_locked(session, model, providers, budget_context).await;
 }
 
 pub fn spawn_auto_compact(
@@ -243,6 +296,21 @@ pub async fn start_auto_compact(
     model: String,
     providers: crate::provider::ProviderRegistry,
 ) {
+    start_auto_compact_with_budget(
+        session,
+        model,
+        providers,
+        CompactionBudgetContext::default(),
+    )
+    .await;
+}
+
+pub async fn start_auto_compact_with_budget(
+    session: std::sync::Arc<crate::session::Session>,
+    model: String,
+    providers: crate::provider::ProviderRegistry,
+    budget_context: CompactionBudgetContext,
+) {
     let compact_guard = session.acquire_compact_lock_owned().await;
     tokio::task::spawn_blocking(move || {
         let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -254,7 +322,7 @@ pub async fn start_auto_compact(
             return;
         };
         rt.block_on(async move {
-            maybe_auto_compact_locked(&session, &model, &providers).await;
+            maybe_auto_compact_locked(&session, &model, &providers, budget_context).await;
             drop(compact_guard);
         });
     });
@@ -264,17 +332,22 @@ async fn maybe_auto_compact_locked(
     session: &crate::session::Session,
     model: &str,
     providers: &crate::provider::ProviderRegistry,
+    budget_context: CompactionBudgetContext,
 ) {
     let forced = session.take_manual_compact_request();
     let info = crate::model_registry::model_info(model);
     let trigger = info.compaction_trigger_threshold();
-    let target = info.compaction_target_after();
+    let target = budget_context
+        .history_budget(&info)
+        .map(|budget| budget.min(info.compaction_target_after()))
+        .unwrap_or_else(|| info.compaction_target_after());
     let msgs = session.messages();
+    let window_tokens = estimate_tokens_for_messages(&msgs);
     let provider_tokens = session.last_input_tokens();
     let current = if provider_tokens > 0 {
         provider_tokens
     } else {
-        estimate_tokens_for_messages(&msgs)
+        window_tokens
     };
     if !forced && current <= trigger {
         return;
@@ -283,13 +356,36 @@ async fn maybe_auto_compact_locked(
         return;
     }
     let Some(range) = find_compact_range(&msgs, target) else {
-        session.emit_compact_warning(
-            model,
-            current,
-            trigger,
-            info.context_budget,
-            "no compactible span — history too short or already fully compacted",
-        );
+        let (replacement, rewritten_count) =
+            build_budgeted_turn_rewrite(&msgs, target, model, providers).await;
+        let after_tokens = estimate_tokens_for_messages(&replacement);
+        if rewritten_count == 0 || after_tokens >= window_tokens || after_tokens > target {
+            session.emit_compact_warning(
+                model,
+                current,
+                trigger,
+                info.context_budget,
+                "no compactible span — retained user content cannot fit the history budget",
+            );
+            return;
+        }
+        match session.commit_rewritten_window(
+            replacement,
+            window_tokens,
+            window_tokens,
+            rewritten_count,
+        ) {
+            Some(_) => {}
+            None => {
+                session.emit_compact_warning(
+                    model,
+                    current,
+                    trigger,
+                    info.context_budget,
+                    "retained turn output rewrite did not shrink the transcript",
+                );
+            }
+        }
         return;
     };
     let _ = session
@@ -354,22 +450,30 @@ async fn maybe_auto_compact_locked(
                 return;
             }
         };
-    let after_tokens = estimate_compacted_message_tokens(&msgs, &range, &final_summary);
-    if after_tokens >= current {
+    let replacement =
+        build_budgeted_replacement(&msgs, &range, &final_summary, target, model, providers).await;
+    let after_tokens = estimate_tokens_for_messages(&replacement);
+    if after_tokens >= window_tokens {
         send_failed(
             session,
             &format!(
-                "compaction skipped: summary would not shrink transcript ({} >= {} tokens)",
-                after_tokens, current
+                "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
+                after_tokens, window_tokens
             ),
         );
         session.push_system_note(format!(
-            "compaction skipped: summary would not shrink transcript ({} >= {} tokens)",
-            after_tokens, current
+            "compaction skipped: replacement would not shrink transcript ({} >= {} tokens)",
+            after_tokens, window_tokens
         ));
         return;
     }
-    match session.compact_messages(final_summary, range, current) {
+    match session.commit_compacted_window(
+        final_summary,
+        replacement,
+        range,
+        window_tokens,
+        window_tokens,
+    ) {
         Some(result) => {
             session.push_system_note(format!(
                 "auto-compacted {}..{} — {} → {} tokens",
@@ -537,6 +641,147 @@ async fn generate_llm_summary(
     Ok(text)
 }
 
+async fn build_budgeted_turn_rewrite(
+    messages: &[Message],
+    history_budget: u64,
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+) -> (Vec<Message>, usize) {
+    let mut replacement = messages.to_vec();
+    let mut group_index = 0;
+    let mut rewritten_count = 0;
+    while estimate_tokens_for_messages(&replacement) > history_budget {
+        let groups = user_turn_ranges(&replacement);
+        let Some((start, end)) = groups.get(group_index).copied() else {
+            break;
+        };
+        let output = replacement[start + 1..end].to_vec();
+        if output.is_empty() {
+            group_index += 1;
+            continue;
+        }
+        let output_tokens = estimate_tokens_for_messages(&output);
+        let summary = generate_llm_summary(None, &output, model, providers)
+            .await
+            .unwrap_or_else(|_| deterministic_turn_omission(&output));
+        let mut summary_message = Message::assistant_text(
+            replacement[start].turn_id.clone(),
+            format!("[atman: compacted turn output]\n{summary}\n[/atman: compacted turn output]"),
+        );
+        if estimate_tokens_for_message(&summary_message) >= output_tokens {
+            summary_message = Message::assistant_text(
+                replacement[start].turn_id.clone(),
+                deterministic_turn_omission(&output),
+            );
+        }
+        rewritten_count += output.len();
+        replacement.splice(start + 1..end, [summary_message]);
+        group_index += 1;
+    }
+    filter_orphan_tool_messages(&mut replacement);
+    (replacement, rewritten_count)
+}
+
+async fn build_budgeted_replacement(
+    messages: &[Message],
+    range: &CompactRange,
+    anchor_summary: &str,
+    history_budget: u64,
+    model: &str,
+    providers: &crate::provider::ProviderRegistry,
+) -> Vec<Message> {
+    let turn_id = messages
+        .get(range.start)
+        .map(|message| message.turn_id.clone())
+        .unwrap_or_else(crate::event::TurnId::now);
+    let mut replacement =
+        replace_range_with_summary(messages, range, anchor_summary.to_string(), turn_id);
+    filter_orphan_tool_messages(&mut replacement);
+    if estimate_tokens_for_messages(&replacement) <= history_budget {
+        return replacement;
+    }
+
+    let mut group_index = 0;
+    loop {
+        let groups = user_turn_ranges(&replacement);
+        if group_index >= groups.len()
+            || estimate_tokens_for_messages(&replacement) <= history_budget
+        {
+            break;
+        }
+        let (start, end) = groups[group_index];
+        let output: Vec<Message> = replacement[start + 1..end].to_vec();
+        if output.is_empty() {
+            group_index += 1;
+            continue;
+        }
+        let output_tokens = estimate_tokens_for_messages(&output);
+        let summary = generate_llm_summary(None, &output, model, providers)
+            .await
+            .unwrap_or_else(|_| deterministic_turn_omission(&output));
+        let mut summary_message = Message::assistant_text(
+            replacement[start].turn_id.clone(),
+            format!("[atman: compacted turn output]\n{summary}\n[/atman: compacted turn output]"),
+        );
+        if estimate_tokens_for_message(&summary_message) >= output_tokens {
+            summary_message = Message::assistant_text(
+                replacement[start].turn_id.clone(),
+                deterministic_turn_omission(&output),
+            );
+        }
+        replacement.splice(start + 1..end, [summary_message]);
+        group_index += 1;
+    }
+
+    if estimate_tokens_for_messages(&replacement) > history_budget {
+        let groups = user_turn_ranges(&replacement);
+        for (start, end) in groups.into_iter().rev() {
+            let output = replacement[start + 1..end].to_vec();
+            if !output.is_empty() {
+                replacement.splice(
+                    start + 1..end,
+                    [Message::assistant_text(
+                        replacement[start].turn_id.clone(),
+                        deterministic_turn_omission(&output),
+                    )],
+                );
+            }
+        }
+    }
+
+    if estimate_tokens_for_messages(&replacement) > history_budget {
+        replacement.retain(|message| message.role == MessageRole::User);
+    }
+
+    filter_orphan_tool_messages(&mut replacement);
+    replacement
+}
+
+fn user_turn_ranges(messages: &[Message]) -> Vec<(usize, usize)> {
+    let starts: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| (message.role == MessageRole::User).then_some(index))
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, start)| {
+            (
+                *start,
+                starts.get(index + 1).copied().unwrap_or(messages.len()),
+            )
+        })
+        .collect()
+}
+
+fn deterministic_turn_omission(messages: &[Message]) -> String {
+    format!(
+        "[atman: omitted {} oversized assistant/system/tool messages during persistent compaction]",
+        messages.len()
+    )
+}
+
 fn format_slice_for_summary(slice: &[Message]) -> String {
     let mut out = String::new();
     for (i, msg) in slice.iter().enumerate() {
@@ -660,6 +905,159 @@ mod tests {
     }
     fn system(text: &str) -> Message {
         Message::system_text(TurnId::now(), text)
+    }
+
+    #[test]
+    fn compaction_budget_reserves_output_safety_and_fixed_input_only_at_compact_time() {
+        let info = crate::model_registry::ModelInfo {
+            name: "test".into(),
+            context_budget: 100_000,
+            compact_threshold_ratio: 0.8,
+            thinking_enabled: false,
+            max_output_tokens: Some(10_000),
+        };
+        let budget = CompactionBudgetContext {
+            fixed_input_tokens: Some(5_000),
+        }
+        .history_budget(&info);
+        assert_eq!(budget, Some(100_000 - 10_000 - 2_000 - 5_000));
+    }
+
+    #[test]
+    fn compaction_budget_saturates_when_fixed_input_exceeds_context() {
+        let info = crate::model_registry::ModelInfo {
+            name: "test".into(),
+            context_budget: 20_000,
+            compact_threshold_ratio: 0.8,
+            thinking_enabled: false,
+            max_output_tokens: None,
+        };
+        assert_eq!(
+            CompactionBudgetContext {
+                fixed_input_tokens: Some(100_000)
+            }
+            .history_budget(&info),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn budgeted_replacement_groups_by_user_boundary_and_persists_omission() {
+        let first_turn = TurnId::now();
+        let second_turn = TurnId::now();
+        let mut messages = vec![system(&"old".repeat(20_000)), assistant("old answer")];
+        messages.push(Message::user_text(first_turn.clone(), "first user"));
+        messages.push(Message::assistant_text(
+            second_turn.clone(),
+            "first output".repeat(4_000),
+        ));
+        messages.push(assistant_with_tool_use(
+            "calling tool",
+            "fs.read",
+            serde_json::json!({"path": "/tmp/example"}),
+        ));
+        messages.push(tool_result(
+            "call_test",
+            &"tool output".repeat(4_000),
+            false,
+        ));
+        messages.push(Message::user_text(second_turn.clone(), "current user"));
+        messages.push(Message::assistant_text(
+            first_turn,
+            "current output".repeat(4_000),
+        ));
+        let range = CompactRange {
+            start: 0,
+            end: 2,
+            tokens_saved_estimate: 1,
+        };
+
+        let replacement = build_budgeted_replacement(
+            &messages,
+            &range,
+            "anchor",
+            500,
+            "missing-provider",
+            &crate::provider::ProviderRegistry::default(),
+        )
+        .await;
+
+        let texts: Vec<String> = replacement.iter().map(Message::text_concat).collect();
+        assert!(texts.iter().any(|text| text == "current user"));
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("omitted 3 oversized"))
+        );
+        assert!(!replacement.iter().any(|message| {
+            message.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    MessagePart::ToolUse { .. } | MessagePart::ToolResult { .. }
+                )
+            })
+        }));
+        assert_eq!(user_turn_ranges(&replacement).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn turn_rewrite_compacts_oversized_tool_output_without_dropping_recent_users() {
+        let first = TurnId::now();
+        let current = TurnId::now();
+        let messages = vec![
+            Message::user_text(first, "first user"),
+            assistant_with_tool_use(
+                &"calling tool".repeat(2_000),
+                "fs.read",
+                serde_json::json!({"path": "/tmp/example"}),
+            ),
+            tool_result("call_test", &"tool output".repeat(8_000), false),
+            Message::user_text(current, "current user"),
+        ];
+
+        assert!(find_compact_range(&messages, 500).is_none());
+        let (replacement, rewritten_count) = build_budgeted_turn_rewrite(
+            &messages,
+            500,
+            "missing-provider",
+            &crate::provider::ProviderRegistry::default(),
+        )
+        .await;
+
+        assert_eq!(rewritten_count, 2);
+        assert!(estimate_tokens_for_messages(&replacement) <= 500);
+        let users: Vec<String> = replacement
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .map(Message::text_concat)
+            .collect();
+        assert_eq!(users, vec!["first user", "current user"]);
+        assert!(replacement.iter().any(|message| {
+            message
+                .text_concat()
+                .contains("omitted 2 oversized assistant/system/tool messages")
+        }));
+        assert!(!replacement.iter().any(|message| {
+            message.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    MessagePart::ToolUse { .. } | MessagePart::ToolResult { .. }
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn user_turn_ranges_ignore_misanchored_turn_ids() {
+        let first = TurnId::now();
+        let second = TurnId::now();
+        let messages = vec![
+            Message::user_text(first.clone(), "u1"),
+            Message::assistant_text(second.clone(), "a1"),
+            Message::user_text(second, "u2"),
+            Message::assistant_text(first, "a2"),
+        ];
+        assert_eq!(user_turn_ranges(&messages), vec![(0, 2), (2, 4)]);
     }
 
     #[test]
