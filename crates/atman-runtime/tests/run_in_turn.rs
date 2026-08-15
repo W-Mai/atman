@@ -7,6 +7,28 @@ use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::session::Session;
 use atman_runtime::{Executor, Value};
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn install_mock_model() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "mock".into(),
+            ModelEntry {
+                model: "mock".into(),
+                provider: Some("mock".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
     Message {
         role: MessageRole::User,
@@ -18,8 +40,10 @@ fn user_msg(turn_id: TurnId, text: &str) -> Message {
 
 #[tokio::test]
 async fn run_in_turn_appends_assistant_message_to_session() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let src = r#"flow ask() -> string {
-    return llm.call(model: "mock", prompt: "hi")
+    return llm.call(model: "mock", prompt: "hi", context: "session")
 }
 "#;
     let file = parse_file(src).unwrap();
@@ -44,18 +68,33 @@ async fn run_in_turn_appends_assistant_message_to_session() {
         .unwrap();
     session.end_turn();
 
-    assert!(matches!(&out, Value::Str(s) if s == "hello world"));
+    assert!(matches!(&out, Value::Message(message) if message.text_concat() == "hello world"));
 
     let msgs = session.messages();
-    assert_eq!(msgs.len(), 2);
+    assert_eq!(
+        msgs.len(),
+        1,
+        "flow-scoped assistant stays out of main transcript"
+    );
     assert_eq!(msgs[0].role, MessageRole::User);
-    assert_eq!(msgs[1].role, MessageRole::Assistant);
-    assert_eq!(msgs[1].text_concat(), "hello world");
-    assert_eq!(msgs[1].turn_id, turn_id);
+
+    let has_correlated_assistant = session.sink().snapshot().iter().any(|event| {
+        matches!(
+            event,
+            atman_runtime::Event::AssistantMsg {
+                turn_id: t,
+                flow_run_id: Some(_),
+                message,
+            } if *t == turn_id && message.text_concat() == "hello world"
+        )
+    });
+    assert!(has_correlated_assistant);
 }
 
 #[tokio::test]
 async fn run_without_turn_does_not_touch_session() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let src = r#"flow ask() -> string {
     return llm.call(model: "mock", prompt: "hi")
 }
@@ -72,8 +111,10 @@ async fn run_without_turn_does_not_touch_session() {
 
 #[tokio::test]
 async fn assistant_msg_event_carries_flow_run_id() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let src = r#"flow ask() -> string {
-    return llm.call(model: "mock", prompt: "hi")
+    return llm.call(model: "mock", prompt: "hi", context: "session")
 }
 "#;
     let file = parse_file(src).unwrap();

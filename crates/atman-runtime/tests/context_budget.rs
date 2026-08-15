@@ -24,6 +24,23 @@ fn truncate_keeps_head_and_tail_dropping_middle() {
 
 #[tokio::test]
 async fn context_budget_kwarg_shrinks_prompt_before_provider() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "echo".into(),
+            ModelEntry {
+                model: "echo".into(),
+                provider: Some("echo".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
     let src = r#"flow t(text: string) -> string {
     return llm.call(
         model: "echo",

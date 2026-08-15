@@ -59,7 +59,7 @@ fn is_plan_related_matches_plan_tool_use_and_result() {
 }
 
 #[test]
-fn find_compact_range_skips_plan_messages() {
+fn find_compact_range_keeps_recent_tail_containing_plan_messages() {
     let big = "y".repeat(4000);
     let mut msgs: Vec<Message> = Vec::new();
     for i in 0..5 {
@@ -81,11 +81,9 @@ fn find_compact_range_skips_plan_messages() {
     for i in 0..5 {
         msgs.push(Message::user_text(TurnId::now(), format!("{big} tail {i}")));
     }
-    let range = find_compact_range(&msgs, 100).expect("expected compaction target");
-    let covers_plan = range.start <= 3 && range.end > 3;
     assert!(
-        !covers_plan,
-        "range {range:?} must not include the plan.tick message at index 3"
+        find_compact_range(&msgs, 100).is_none(),
+        "the recent 10-message tail, including plan.tick, must remain intact"
     );
 }
 

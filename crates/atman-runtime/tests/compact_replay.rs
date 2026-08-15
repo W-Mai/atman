@@ -21,6 +21,23 @@ fn build_long_history(session: &Session, msg_count: usize) {
 
 #[tokio::test]
 async fn resume_shows_the_compacted_view_not_the_raw_history() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "mock-summary".into(),
+            ModelEntry {
+                model: "mock-summary".into(),
+                context_budget: Some(40_000),
+                compact_threshold_ratio: Some(0.8),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
     let tmp = tempfile::tempdir().unwrap();
     let sid = {
         let session = Session::open(tmp.path()).unwrap();
@@ -37,9 +54,40 @@ async fn resume_shows_the_compacted_view_not_the_raw_history() {
             after_count < before_count,
             "expected compaction to shrink transcript, before={before_count} after={after_count}"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        session.id().to_string()
+        let sid = session.id().to_string();
+        session.shutdown().await;
+        sid
     };
+    let events_path = tmp.path().join("sessions").join(&sid).join("events.jsonl");
+    let events = std::fs::read_to_string(&events_path).unwrap();
+    assert!(
+        events.contains("\"type\":\"checkpoint\""),
+        "persistent compaction must write a checkpoint; tail: {}",
+        events.lines().rev().take(5).collect::<Vec<_>>().join("\n")
+    );
+    let parsed = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let checkpoint_index = parsed
+        .iter()
+        .position(|event| event["type"] == "checkpoint")
+        .unwrap();
+    assert_eq!(
+        checkpoint_index,
+        parsed.len() - 1,
+        "checkpoint must be the final persisted event; trailing types: {:?}",
+        parsed[checkpoint_index + 1..]
+            .iter()
+            .map(|event| event["type"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        parsed[checkpoint_index]["messages"]
+            .as_array()
+            .is_some_and(|messages| messages.len() < 60),
+        "checkpoint must contain the compacted replacement window"
+    );
     let resumed = Session::open_existing(tmp.path(), &sid).unwrap();
     let messages = resumed.messages();
     let has_summary = messages

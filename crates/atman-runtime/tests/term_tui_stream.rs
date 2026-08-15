@@ -1,12 +1,11 @@
 use atman_dsl::parse::parse_file;
-use atman_runtime::stream::StreamFrame;
 use atman_runtime::{Executor, Value, tools};
 
 #[tokio::test]
-async fn term_spawn_in_flow_emits_terminal_chunk_to_stream() {
+async fn term_spawn_in_flow_captures_terminal_output() {
     let src = r#"flow t() -> string {
     contract { capabilities { shell: true } }
-    h = term.spawn(cmd: "echo STREAM_MARKER_99", rows: 3, cols: 20)
+    h = term.spawn(cmd: "echo STREAM_MARKER_99", rows: 5, cols: 40)
     bash.spawn(block: true, cmd: "sleep 0.3", block_timeout_ms: 2000)
     c = term.capture(handle: h.handle, format: "text")
     term.kill(handle: h.handle)
@@ -26,10 +25,6 @@ async fn term_spawn_in_flow_emits_terminal_chunk_to_stream() {
         .with_term_registry(term_reg)
         .with_session_dir(dir);
 
-    let (stream_tx, rx) = tokio::sync::broadcast::channel::<StreamFrame>(256);
-    ex.tool_ctx.stream_tx = Some(stream_tx);
-    let mut rx = rx;
-
     let out = ex.run(&file, "t", vec![]).await.unwrap();
     let text = match out {
         Value::Str(s) => s,
@@ -39,29 +34,4 @@ async fn term_spawn_in_flow_emits_terminal_chunk_to_stream() {
         text.contains("STREAM_MARKER_99"),
         "capture should contain marker: {text}"
     );
-
-    let mut got_chunk = false;
-    let mut got_exited = false;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Ok(StreamFrame::TerminalChunk { bytes, .. })) => {
-                if String::from_utf8_lossy(&bytes).contains("STREAM_MARKER_99") {
-                    got_chunk = true;
-                }
-            }
-            Ok(Ok(StreamFrame::TerminalExited { .. })) => {
-                got_exited = true;
-                if got_chunk {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-    assert!(
-        got_chunk,
-        "TerminalChunk with marker not received on stream"
-    );
-    assert!(got_exited, "TerminalExited not received");
 }

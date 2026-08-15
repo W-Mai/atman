@@ -148,14 +148,14 @@ fn openai_wire_body_carries_tool_specs_as_function_calls() {
     assert_eq!(tools.len(), 2);
     let first = &tools[0];
     assert_eq!(first["type"].as_str(), Some("function"));
-    assert_eq!(first["function"]["name"].as_str(), Some("fs.read"));
+    assert_eq!(first["function"]["name"].as_str(), Some("fs_read"));
     assert_eq!(
         first["function"]["description"].as_str(),
         Some("read a file")
     );
     assert!(first["function"]["parameters"]["properties"]["path"].is_object());
     let second = &tools[1];
-    assert_eq!(second["function"]["name"].as_str(), Some("bash.exec"));
+    assert_eq!(second["function"]["name"].as_str(), Some("bash_exec"));
     assert!(second["function"].get("description").is_none());
 }
 

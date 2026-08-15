@@ -4,6 +4,32 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, Value, tools};
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn install_test_models() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    let models = [("claude-opus-4.7", "mock"), ("mock", "mock")]
+        .into_iter()
+        .map(|(model, provider)| {
+            (
+                model.to_string(),
+                ModelEntry {
+                    model: model.to_string(),
+                    provider: Some(provider.to_string()),
+                    context_budget: Some(8_192),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models,
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 #[test]
 fn examples_edit_and_verify_at_parses() {
     let src = std::fs::read_to_string("../../examples/edit_and_verify.at").unwrap();
@@ -57,6 +83,8 @@ const EDIT_FLOW: &str = r#"flow edit_and_verify(file: path, instruction: string,
 
 #[tokio::test]
 async fn edit_and_verify_reverts_file_when_check_fails() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("subject.txt");
     let original = "hello\n";
@@ -123,6 +151,8 @@ const FIX_LOOP_FLOW: &str = r#"flow demo(target: path, script: string) -> string
 
 #[tokio::test]
 async fn fix_until_test_passes_iterates_until_bash_check_passes() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("subject.txt");
     std::fs::write(&target, "original\n").unwrap();
@@ -171,6 +201,8 @@ async fn fix_until_test_passes_iterates_until_bash_check_passes() {
 
 #[tokio::test]
 async fn fix_until_test_passes_returns_gave_up_after_max_iters() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("subject.txt");
     std::fs::write(&target, "original\n").unwrap();
@@ -211,6 +243,8 @@ async fn fix_until_test_passes_returns_gave_up_after_max_iters() {
 
 #[tokio::test]
 async fn edit_and_verify_keeps_edit_when_check_passes() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("subject.txt");
     std::fs::write(&file_path, "hello\n").unwrap();

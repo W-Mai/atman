@@ -4,6 +4,8 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, Value};
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[test]
 fn examples_look_into_at_parses_with_subflow() {
     let src = std::fs::read_to_string("../../examples/look_into.at").unwrap();
@@ -15,6 +17,28 @@ fn examples_look_into_at_parses_with_subflow() {
 
 #[tokio::test]
 async fn look_into_fanout_subflow_synthesizes_via_mock_providers() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    let models = ["gpt-4o-mini", "claude-opus-4.7"]
+        .into_iter()
+        .map(|model| {
+            (
+                model.to_string(),
+                ModelEntry {
+                    model: model.to_string(),
+                    provider: Some("mock".into()),
+                    context_budget: Some(8_192),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models,
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
     // Inline flow avoids `@"..."` FileRef which resolves against process CWD.
     const FLOW: &str = r#"flow look_into(question: string) -> Report {
     findings = fanout [

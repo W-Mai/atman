@@ -7,6 +7,28 @@ use atman_runtime::provider::LlmRequest;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, Session, Value};
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn install_mock_model() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "mock".into(),
+            ModelEntry {
+                model: "mock".into(),
+                provider: Some("mock".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 fn mock_that_echoes_system() -> Arc<CapturedProvider> {
     Arc::new(CapturedProvider::default())
 }
@@ -79,6 +101,8 @@ impl atman_runtime::provider::Provider for CapturedProvider {
 
 #[tokio::test]
 async fn goal_prefix_lands_in_llm_system_prompt() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir())
@@ -116,6 +140,8 @@ async fn goal_prefix_lands_in_llm_system_prompt() {
 
 #[tokio::test]
 async fn goal_prefix_prepends_user_system_and_keeps_both() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir()).set("stay minimal").unwrap();
@@ -127,9 +153,9 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
 
     let src = r#"flow t() -> string {
     return llm.call(
-        model: "mock"
-        prompt: "hi"
-        system: "you are a helpful assistant"
+        model: "mock",
+        prompt: "hi",
+        system: "you are a helpful assistant",
     )
 }
 "#;
@@ -155,6 +181,8 @@ async fn goal_prefix_prepends_user_system_and_keeps_both() {
 
 #[tokio::test]
 async fn no_goal_leaves_system_untouched() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
 
@@ -184,6 +212,8 @@ async fn no_goal_leaves_system_untouched() {
 
 #[tokio::test]
 async fn goal_survives_multiple_turns_in_same_session() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     GoalStore::at(session.dir()).set("persistent goal").unwrap();

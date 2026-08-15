@@ -4,8 +4,32 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, RuntimeError, Value};
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn install_mock_model() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "mock-model".into(),
+            ModelEntry {
+                model: "mock-model".into(),
+                provider: Some("mock".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 #[tokio::test]
 async fn watch_token_abort_stops_flow_when_forbidden_pattern_appears() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let src = r#"flow review() -> string {
     primary = llm.call(
         model: "mock-model",
@@ -36,6 +60,8 @@ async fn watch_token_abort_stops_flow_when_forbidden_pattern_appears() {
 
 #[tokio::test]
 async fn watch_token_does_not_fire_on_clean_output() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_mock_model();
     let src = r#"flow review() -> string {
     primary = llm.call(
         model: "mock-model",

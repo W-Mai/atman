@@ -7,6 +7,23 @@ use tempfile::TempDir;
 
 #[tokio::test]
 async fn session_writes_events_to_jsonl_file() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "mock".into(),
+            ModelEntry {
+                model: "mock".into(),
+                provider: Some("mock".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
     let root = TempDir::new().unwrap();
     let session = Session::open(root.path()).unwrap();
     let events_path = session.events_path().unwrap().to_path_buf();
@@ -38,7 +55,15 @@ async fn session_writes_events_to_jsonl_file() {
         .collect();
     assert_eq!(
         types,
-        vec!["flow_start", "flow_graph", "llm_call", "flow_end"]
+        vec![
+            "flow_start",
+            "flow_graph",
+            "flow_node_start",
+            "tool_node",
+            "llm_call",
+            "flow_node_end",
+            "flow_end",
+        ]
     );
 }
 

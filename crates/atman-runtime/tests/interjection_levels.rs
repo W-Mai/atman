@@ -12,6 +12,28 @@ use atman_runtime::session::Session;
 use atman_runtime::tool::BoxFut;
 use atman_runtime::{Executor, RuntimeError, Value};
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn install_rec_model() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "rec".into(),
+            ModelEntry {
+                model: "rec".into(),
+                provider: Some("rec".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 fn user_msg(turn_id: TurnId, text: &str) -> Message {
     Message {
         role: MessageRole::User,
@@ -87,6 +109,8 @@ fn joined_messages(calls: &[Vec<Message>]) -> String {
 
 #[tokio::test]
 async fn l2_course_correct_renders_as_user_correction_tag() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_rec_model();
     let src = r#"flow ask() -> string {
     return llm.call(model: "rec", prompt: "hi")
 }
@@ -196,6 +220,8 @@ flow g() -> string { return "reached" }
 
 #[tokio::test]
 async fn l1_and_l2_both_appear_in_next_llm_request() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_rec_model();
     let src = r#"flow ask() -> string {
     return llm.call(model: "rec", prompt: "hi")
 }

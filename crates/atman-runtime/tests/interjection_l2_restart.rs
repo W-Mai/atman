@@ -9,6 +9,23 @@ use atman_runtime::{Executor, Session, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn l2_injection_mid_stream_triggers_restart_with_correction() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "mock-slow".into(),
+            ModelEntry {
+                model: "mock-slow".into(),
+                provider: Some("mock".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
     let root = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(root.path()).unwrap());
     let sink = session.sink().clone();
@@ -22,7 +39,7 @@ async fn l2_injection_mid_stream_triggers_restart_with_correction() {
 
     let src = r#"
 flow t(user: string) -> string {
-    reply = llm.call(model: "mock-slow", prompt: user)
+    reply = llm.call(model: "mock-slow", prompt: user, context: "session")
     watch reply {
         on token(match: "___never_match_but_forces_streaming___") {
             abort("unused")
@@ -39,13 +56,19 @@ flow t(user: string) -> string {
 
     let injector = async {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        session
-            .enqueue_injection_with_level(
+        let entry = session
+            .flow_registry
+            .lookup("root")
+            .expect("root flow entry");
+        entry.pending_injections.lock().unwrap().push(
+            atman_runtime::injection::Injection::with_level(
+                turn_id.clone(),
                 "use tokio not std::thread",
                 InjectionLevel::L2CourseCorrect,
                 None,
-            )
-            .expect("enqueue");
+            ),
+        );
+        entry.injection_notify.notify_one();
     };
 
     let flow = ex.run_in_turn(
@@ -61,8 +84,8 @@ flow t(user: string) -> string {
     session.end_turn();
 
     match result {
-        Value::Str(_) | Value::Err(_) => {}
-        other => panic!("expected str or err, got {other:?}"),
+        Value::Message(_) | Value::Err(_) => {}
+        other => panic!("expected message or err, got {other:?}"),
     }
 
     let events = sink.snapshot();

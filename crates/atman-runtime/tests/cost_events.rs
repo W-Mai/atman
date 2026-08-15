@@ -5,8 +5,36 @@ use atman_runtime::{Event, Executor, Value};
 
 use std::sync::Arc;
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn install_test_models() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    let models = [("mock-model", "mock"), ("flaky", "flaky")]
+        .into_iter()
+        .map(|(model, provider)| {
+            (
+                model.to_string(),
+                ModelEntry {
+                    model: model.to_string(),
+                    provider: Some(provider.to_string()),
+                    context_budget: Some(8_192),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models,
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 #[tokio::test]
 async fn llm_call_event_records_wallclock_and_tokens() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let src = r#"flow t() -> string {
     return llm.call(
         model: "mock-model",
@@ -46,6 +74,8 @@ async fn llm_call_event_records_wallclock_and_tokens() {
 
 #[tokio::test]
 async fn llm_call_event_records_retry_attempts() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let src = r#"flow t() -> string {
     return llm.call(
         model: "flaky",

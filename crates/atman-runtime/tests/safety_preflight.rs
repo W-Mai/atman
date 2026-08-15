@@ -10,6 +10,32 @@ use atman_runtime::safety::{
 use atman_runtime::tool::BoxFut;
 use atman_runtime::{Executor, Value};
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn install_test_models() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    let models = ["mock", "rewrite-mock"]
+        .into_iter()
+        .map(|model| {
+            (
+                model.to_string(),
+                ModelEntry {
+                    model: model.to_string(),
+                    provider: Some(model.to_string()),
+                    context_budget: Some(8_192),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models,
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 struct StaticClassifier {
     verdict: ScanVerdict,
     kind: &'static str,
@@ -55,6 +81,8 @@ async fn run(safety: SafetyConfig, sink: EventSink) -> Result<Value, RuntimeErro
 
 #[tokio::test]
 async fn safety_disabled_never_touches_classifier() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let cfg = SafetyConfig {
         enabled: false,
         mode: SafetyMode::Deny,
@@ -80,6 +108,8 @@ async fn safety_disabled_never_touches_classifier() {
 
 #[tokio::test]
 async fn safety_warn_mode_emits_events_but_still_runs_the_call() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let cfg = SafetyConfig {
         enabled: true,
         mode: SafetyMode::Warn,
@@ -113,6 +143,8 @@ async fn safety_warn_mode_emits_events_but_still_runs_the_call() {
 
 #[tokio::test]
 async fn safety_deny_mode_blocks_and_never_calls_provider() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let cfg = SafetyConfig {
         enabled: true,
         mode: SafetyMode::Deny,
@@ -150,6 +182,8 @@ async fn safety_deny_mode_blocks_and_never_calls_provider() {
 
 #[tokio::test]
 async fn safety_auto_rewrite_retries_after_provider_content_filter_error() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     use atman_runtime::event::{NodeEvent, Observable};
     use atman_runtime::message::{Message, MessageOrigin, MessageRole};
     use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
@@ -297,6 +331,8 @@ flow t(prompt: string) -> string {
 
 #[tokio::test]
 async fn safety_noop_classifier_passes_through() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_test_models();
     let cfg = SafetyConfig {
         enabled: true,
         mode: SafetyMode::Deny,

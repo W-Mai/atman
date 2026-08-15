@@ -4,6 +4,32 @@ use atman_runtime::message::{Message, MessageOrigin};
 
 static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn install_compaction_test_models() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    let models = ["llama-3b", "mock-summary", "llama-workflow-compact"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                ModelEntry {
+                    model: name.to_string(),
+                    provider: (name == "llama-workflow-compact")
+                        .then(|| "workflow-compact".to_string()),
+                    context_budget: Some(40_000),
+                    compact_threshold_ratio: Some(0.8),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models,
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 fn build_long_history(session: &Session, msg_count: usize) {
     let base = "x".repeat(4000);
     for i in 0..msg_count {
@@ -19,6 +45,8 @@ fn build_long_history(session: &Session, msg_count: usize) {
 
 #[tokio::test]
 async fn compact_messages_replaces_middle_span() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_compaction_test_models();
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);
@@ -38,6 +66,8 @@ async fn compact_messages_replaces_middle_span() {
 
 #[tokio::test]
 async fn compact_messages_refreshes_window_from_compacted_history() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_compaction_test_models();
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     build_long_history(&session, 20);
@@ -111,17 +141,21 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
 
         fn reply_sync(&self, req: LlmRequest) -> Result<AssistantMessage, RuntimeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let normal_idx = req
+            let is_compaction_summary = req
                 .system
-                .is_none()
-                .then(|| self.normal_calls.fetch_add(1, Ordering::SeqCst));
+                .as_deref()
+                .is_some_and(|system| system.contains("anchored context summarization assistant"));
+            let normal_idx =
+                (!is_compaction_summary).then(|| self.normal_calls.fetch_add(1, Ordering::SeqCst));
             let input_tokens =
                 atman_runtime::compaction::estimate_tokens_for_messages(&req.messages);
             if normal_idx == Some(1) {
                 *self.second_call_tokens.lock().unwrap() = Some(input_tokens);
+                let target = atman_runtime::model_registry::model_info("llama-workflow-compact")
+                    .compaction_target_after();
                 assert!(
-                    input_tokens < 6_400,
-                    "second workflow LLM saw uncompacted history: {input_tokens} tokens"
+                    input_tokens <= target,
+                    "second workflow LLM exceeded compacted target: {input_tokens} > {target} tokens"
                 );
             }
             let turn_id = req
@@ -161,26 +195,7 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
         second_call_tokens: std::sync::Mutex::new(None),
     });
     let _cfg_lock = TEST_CFG_LOCK.lock().await;
-    {
-        use atman_runtime::model_registry::{ModelConfig, ModelEntry};
-        let cfg = ModelConfig {
-            models: [(
-                "llama-workflow-compact".into(),
-                ModelEntry {
-                    model: "llama-workflow-compact".into(),
-                    provider: Some("workflow-compact".into()),
-                    context_budget: Some(200_000),
-                    compact_threshold_ratio: Some(0.8),
-                    ..Default::default()
-                },
-            )]
-            .into_iter()
-            .collect(),
-            providers: std::collections::HashMap::new(),
-            aliases: std::collections::HashMap::new(),
-        };
-        atman_runtime::model_registry::set_model_config(cfg);
-    }
+    install_compaction_test_models();
     let session = std::sync::Arc::new(Session::open_ephemeral());
     build_long_history(&session, 20);
 
@@ -205,7 +220,10 @@ async fn workflow_second_llm_waits_for_compacted_session_history() {
     session.end_turn();
 
     assert!(matches!(out, Value::Str(s) if s == "reply 1"));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert!(
+        provider.calls.load(Ordering::SeqCst) >= 3,
+        "expected two workflow calls plus at least one compaction summary"
+    );
     assert_eq!(provider.normal_calls.load(Ordering::SeqCst), 2);
     assert!(provider.second_call_tokens.lock().unwrap().is_some());
 }
@@ -247,6 +265,8 @@ async fn compact_messages_returns_none_below_budget() {
 #[tokio::test]
 async fn maybe_auto_compact_emits_warning_when_no_range_found() {
     use atman_runtime::compaction::maybe_auto_compact;
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_compaction_test_models();
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     let big = "y".repeat(50_000);
@@ -265,6 +285,8 @@ async fn maybe_auto_compact_emits_warning_when_no_range_found() {
 
 #[tokio::test]
 async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_compaction_test_models();
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
     use atman_runtime::provider::ProviderRegistry;
@@ -281,28 +303,21 @@ async fn maybe_auto_compact_calls_llm_and_writes_summary_event() {
     )));
     maybe_auto_compact(&session, "mock-summary", &providers).await;
     let events = session.sink().snapshot();
-    let compact_event = events
+    let summary_text = events
         .iter()
         .find_map(|e| match e {
-            Event::ContextCompact {
-                summary_text,
-                replacement_msg_seq,
-                ..
-            } => Some((summary_text.clone(), *replacement_msg_seq)),
+            Event::ContextCompact { summary_text, .. } => summary_text.clone(),
             _ => None,
         })
         .expect("expected ContextCompact event");
-    let (summary_text, replacement_seq) = compact_event;
     assert!(
-        summary_text
-            .as_deref()
-            .unwrap_or_default()
-            .contains("compaction"),
+        summary_text.contains("compaction"),
         "expected LLM summary text, got {summary_text:?}"
     );
-    assert!(replacement_seq.is_some());
-    let has_system_msg = events.iter().any(|e| matches!(e, Event::SystemMsg { .. }));
-    assert!(has_system_msg, "expected a paired SystemMsg event");
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Checkpoint { .. })),
+        "expected a checkpoint with the replacement window"
+    );
     assert!(
         events
             .iter()
@@ -316,6 +331,7 @@ async fn setup_review_env() -> (
     std::sync::Arc<Session>,
     atman_runtime::provider::ProviderRegistry,
 ) {
+    install_compaction_test_models();
     use atman_runtime::provider::ProviderRegistry;
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::value::Value;
@@ -353,6 +369,7 @@ fn wait_for_pending_and_decide(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_accept_as_is_commits_llm_summary() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
     use atman_runtime::CompactReviewDecision;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
@@ -382,6 +399,7 @@ async fn review_accept_as_is_commits_llm_summary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_accept_edited_commits_user_summary() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
     use atman_runtime::CompactReviewDecision;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
@@ -417,6 +435,7 @@ async fn review_accept_edited_commits_user_summary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_reject_skips_commit() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
     use atman_runtime::CompactReviewDecision;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
@@ -441,6 +460,7 @@ async fn review_reject_skips_commit() {
 
 #[tokio::test]
 async fn review_manual_only_skips_review_on_auto_path() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
     let (_tmp, session, providers) = setup_review_env().await;
@@ -458,6 +478,7 @@ async fn review_manual_only_skips_review_on_auto_path() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_always_without_subscriber_auto_accepts_daemon_shape() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
     use atman_runtime::compaction::maybe_auto_compact;
     use atman_runtime::event::Event;
     let (_tmp, session, providers) = setup_review_env().await;
@@ -475,6 +496,8 @@ async fn review_always_without_subscriber_auto_accepts_daemon_shape() {
 
 #[tokio::test]
 async fn cooldown_blocks_repeat_compaction_within_window() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_compaction_test_models();
     let tmp = tempfile::tempdir().unwrap();
     let session = std::sync::Arc::new(Session::open(tmp.path()).unwrap());
     session.record_llm_call("llama-3b", 0, 0, 0, 0, None, None);

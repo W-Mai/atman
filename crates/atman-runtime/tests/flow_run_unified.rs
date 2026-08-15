@@ -13,6 +13,43 @@ use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
 use atman_runtime::tools::agent_ctrl::{FlowInterject, FlowRegistry};
 use atman_runtime::{Executor, Value, tools};
 
+static HOME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl HomeGuard {
+    fn set(home: &std::path::Path) -> Self {
+        let old = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        Self(old)
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.0.take() {
+                Some(old) => std::env::set_var("HOME", old),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
+fn install_mock_model() {
+    atman_runtime::model_registry::register_model_entries(vec![(
+        "mock".to_string(),
+        atman_runtime::model_registry::ModelEntry {
+            model: "mock".to_string(),
+            provider: Some("mock".to_string()),
+            context_budget: Some(100_000),
+            ..Default::default()
+        },
+    )]);
+}
+
 const SIMPLE_FLOW: &str = r#"flow t(n: Int) -> Int {
     return n + 1
 }
@@ -126,6 +163,8 @@ async fn flow_interject_unknown_handle_errors() {
 
 #[tokio::test]
 async fn flow_interject_cancels_running_subagent_llm() {
+    let _home_lock = HOME_TEST_LOCK.lock().await;
+    install_mock_model();
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::tool::{Tool, ToolRegistry};
     use atman_runtime::tools::agent_ctrl::{
@@ -141,6 +180,7 @@ flow test_flow(goal: string) -> string {
     reply = llm.call(
         model: "mock",
         prompt: goal,
+        context: "session",
     )
     return text_concat(reply)
 }
@@ -148,24 +188,24 @@ flow test_flow(goal: string) -> string {
     let mut f = std::fs::File::create(commands_dir.join("test_interject.at")).unwrap();
     f.write_all(flow_src.as_bytes()).unwrap();
 
-    let home = tmp.path().to_path_buf();
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", &home);
-    }
+    let _home = HomeGuard::set(tmp.path());
 
     let registry = Arc::new(FlowRegistry::new());
     let providers = atman_runtime::provider::ProviderRegistry::new();
     providers.register(Arc::new(
-        MockProvider::new("mock").with_fallback(atman_runtime::Value::Str("ok".into())),
+        MockProvider::new("mock")
+            .with_fallback(atman_runtime::Value::Str("ok".into()))
+            .with_chunk_delay(std::time::Duration::from_secs(1)),
     ));
     let tools = ToolRegistry::new();
     atman_runtime::tools::register_tier_zero(&tools);
+    let (stream_tx, _) = tokio::sync::broadcast::channel::<atman_runtime::stream::StreamFrame>(256);
 
     let ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
-        .with_flow_registry(registry.clone());
+        .with_flow_registry(registry.clone())
+        .with_stream_tx(stream_tx);
 
     let spawn_args = ToolArgs {
         positional: vec![],
@@ -200,7 +240,7 @@ flow test_flow(goal: string) -> string {
 
     let interject_args = ToolArgs {
         positional: vec![Value::Str(handle.clone()), Value::Str("stop now".into())],
-        named: vec![],
+        named: vec![("level".into(), Value::Str("l4_hard_stop".into()))],
     };
     let _ = FlowInterject.call(interject_args, &ctx).await.unwrap();
 
@@ -214,20 +254,12 @@ flow test_flow(goal: string) -> string {
         "sub-agent should be err after interjection, got: {:?}",
         status
     );
-
-    if let Some(old) = old_home {
-        unsafe {
-            std::env::set_var("HOME", old);
-        }
-    } else {
-        unsafe {
-            std::env::remove_var("HOME");
-        }
-    }
 }
 
 #[tokio::test]
 async fn l1_nudge_text_appears_in_entry_messages() {
+    let _home_lock = HOME_TEST_LOCK.lock().await;
+    install_mock_model();
     use atman_runtime::Value;
     use atman_runtime::providers::mock::MockProvider;
     use atman_runtime::tool::{Tool, ToolRegistry};
@@ -247,11 +279,7 @@ flow test_flow(goal: string) -> string {
     let mut f = std::fs::File::create(commands_dir.join("test_l1.at")).unwrap();
     f.write_all(flow_src.as_bytes()).unwrap();
 
-    let home = tmp.path().to_path_buf();
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", &home);
-    }
+    let _home = HomeGuard::set(tmp.path());
 
     let registry = Arc::new(FlowRegistry::new());
     atman_runtime::model_registry::register_model_entries(vec![(
@@ -342,14 +370,4 @@ flow test_flow(goal: string) -> string {
         pending.is_empty(),
         "pending_injections should be empty after drain"
     );
-
-    if let Some(old) = old_home {
-        unsafe {
-            std::env::set_var("HOME", old);
-        }
-    } else {
-        unsafe {
-            std::env::remove_var("HOME");
-        }
-    }
 }

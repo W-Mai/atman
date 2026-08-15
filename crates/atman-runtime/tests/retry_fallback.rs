@@ -15,6 +15,28 @@ use atman_runtime::value::Value;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+static TEST_CFG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn install_flaky_model() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "flaky".into(),
+            ModelEntry {
+                model: "flaky".into(),
+                provider: Some("flaky".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
+}
+
 struct FlakyProvider {
     name: String,
     fail_first_n: AtomicU32,
@@ -94,6 +116,8 @@ impl Provider for FlakyProvider {
 
 #[tokio::test]
 async fn retry_recovers_after_flakes() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_flaky_model();
     let src = r#"flow t() -> string {
     primary = llm.call(
         model: "flaky",
@@ -113,6 +137,8 @@ async fn retry_recovers_after_flakes() {
 
 #[tokio::test]
 async fn retry_exhausted_falls_back_to_alternate_llm() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_flaky_model();
     let src = r#"flow t() -> string {
     primary = llm.call(
         model: "flaky",
@@ -132,6 +158,8 @@ async fn retry_exhausted_falls_back_to_alternate_llm() {
 
 #[tokio::test]
 async fn retry_exhausted_without_fallback_returns_err() {
+    let _cfg_lock = TEST_CFG_LOCK.lock().await;
+    install_flaky_model();
     let src = r#"flow t() -> string {
     primary = llm.call(
         model: "flaky",

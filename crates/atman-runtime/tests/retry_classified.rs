@@ -149,7 +149,7 @@ fn retry_classified_only_retries_on_listed_kinds() {
         model: "m",
         prompt: "hi",
         retry: 3,
-        retry_classified: [timeout, rate_limit],
+        retry_classified: ["timeout", "rate_limit"],
     )
 }
 "#;
@@ -177,7 +177,7 @@ fn retry_classified_gives_up_immediately_on_kind_not_in_list() {
         model: "m",
         prompt: "hi",
         retry: 3,
-        retry_classified: [timeout, rate_limit],
+        retry_classified: ["timeout", "rate_limit"],
     )
 }
 "#;
@@ -408,10 +408,15 @@ fn context_overflow_compacts_and_resends_without_normal_retries() {
         }
         other => panic!("expected LLM response got {other:?}"),
     }
-    assert!(session.messages().iter().any(|message| {
-        message.role == atman_runtime::message::MessageRole::Assistant
-            && message.turn_id == turn_id
-            && message.text_concat().contains("recovered")
+    assert!(session.sink().snapshot().iter().any(|event| {
+        matches!(
+            event,
+            atman_runtime::Event::AssistantMsg {
+                turn_id: event_turn,
+                flow_run_id: Some(_),
+                message,
+            } if *event_turn == turn_id && message.text_concat().contains("recovered")
+        )
     }));
     assert!(provider.summary_calls.load(Ordering::SeqCst) >= 1);
     assert!(provider.calls.load(Ordering::SeqCst) >= 2);
@@ -447,7 +452,7 @@ fn retry_classified_unknown_kind_fails_parse_time() {
         model: "m",
         prompt: "hi",
         retry: 1,
-        retry_classified: [not_a_real_kind],
+        retry_classified: ["not_a_real_kind"],
     )
 }
 "#,

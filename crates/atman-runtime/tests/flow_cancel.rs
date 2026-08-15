@@ -122,6 +122,23 @@ impl Provider for CancelAfterFirstProvider {
 
 #[tokio::test]
 async fn flow_cancel_between_nodes_stops_before_next_node_runs() {
+    use atman_runtime::model_registry::{ModelConfig, ModelEntry};
+
+    atman_runtime::model_registry::set_model_config(ModelConfig {
+        models: [(
+            "prov".into(),
+            ModelEntry {
+                model: "prov".into(),
+                provider: Some("prov".into()),
+                context_budget: Some(8_192),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        providers: std::collections::HashMap::new(),
+        aliases: std::collections::HashMap::new(),
+    });
     let src = r#"flow chained() -> string {
     a = llm.call(model: "prov", prompt: "first")
     b = llm.call(model: "prov", prompt: "second")

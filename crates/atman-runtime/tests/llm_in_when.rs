@@ -6,12 +6,12 @@ use atman_runtime::value::Value;
 use std::sync::Arc;
 
 fn register_model() {
-    let _lock = MODEL_CONFIG_LOCK.lock().unwrap();
     set_model_config(ModelConfig {
         models: [(
             "m".into(),
             ModelEntry {
                 model: "m".into(),
+                provider: Some("mock".into()),
                 context_budget: Some(8_192),
                 ..Default::default()
             },
@@ -23,6 +23,7 @@ fn register_model() {
 }
 
 fn run(src: &str, provider: MockProvider) -> Value {
+    let _lock = MODEL_CONFIG_LOCK.lock().unwrap();
     register_model();
     let parsed = parse_file(src).expect("parse");
     let ex = Executor::new();

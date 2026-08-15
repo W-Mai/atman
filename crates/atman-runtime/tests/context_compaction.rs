@@ -42,10 +42,23 @@ async fn full_compaction_pipeline_shrinks_message_list() {
         assistant_msg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
         user_msg("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
         assistant_msg("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+        user_msg("old-1"),
+        assistant_msg("old-2"),
+        user_msg("old-3"),
+        assistant_msg("old-4"),
+        user_msg("old-5"),
+        assistant_msg("old-6"),
+        user_msg("old-7"),
+        assistant_msg("old-8"),
+        user_msg("old-9"),
+        assistant_msg("old-10"),
         user_msg("tail-1"),
         assistant_msg("tail-2"),
     ]
     range = find_compact_range(msgs, 20)
+    when range.found == false {
+        return -1
+    }
     compacted = replace_messages_range(msgs, range.start, range.end, "middle turns discussed X and Y")
     return len(compacted)
 }"#,
@@ -54,9 +67,10 @@ async fn full_compaction_pipeline_shrinks_message_list() {
     let Value::Int(n) = out else {
         panic!("expected int, got {out:?}");
     };
+    assert!(n >= 0, "expected a compactible range, got {n}");
     assert!(
-        n < 7,
-        "compacted must be smaller than the original 7, got {n}"
+        n < 17,
+        "compacted must be smaller than the original 17, got {n}"
     );
     assert!(n >= 3, "must retain head + summary + tail, got {n}");
 }
