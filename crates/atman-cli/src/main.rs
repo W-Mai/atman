@@ -14,6 +14,7 @@ mod migrate_source;
 mod repl_completer;
 mod suggest;
 mod sync;
+mod upgrade;
 
 #[derive(Parser, Debug)]
 #[command(name = "atman", version, about = "atman witnesses; code exists")]
@@ -62,6 +63,18 @@ enum Cmd {
         scene: Option<String>,
     },
     Version,
+    /// Update atman with the official installer from atman.run.
+    Upgrade {
+        /// Skip confirmation when the current executable is not the installer target.
+        #[arg(long)]
+        yes: bool,
+        /// Pass verbose output through to the official installer.
+        #[arg(long)]
+        verbose: bool,
+        /// Prevent the installer from editing shell profile PATH entries.
+        #[arg(long)]
+        no_modify_path: bool,
+    },
     Monitor {
         #[arg(long, default_value_t = 65098)]
         port: u16,
@@ -293,6 +306,19 @@ fn main() -> Result<()> {
 
 async fn async_main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Cmd::Upgrade {
+        yes,
+        verbose,
+        no_modify_path,
+    }) = &cli.cmd
+    {
+        return upgrade::run(upgrade::UpgradeOptions {
+            yes: *yes,
+            verbose: *verbose,
+            no_modify_path: *no_modify_path,
+        })
+        .await;
+    }
     run_startup_config_migration();
     // Install default notifier (TUI replaces with its own sink on boot).
     atman_runtime::notify::install(std::sync::Arc::new(atman_runtime::notify::CliSink));
@@ -308,6 +334,9 @@ async fn async_main() -> Result<()> {
         Some(Cmd::Version) => {
             println!("atman v{}", env!("CARGO_PKG_VERSION"));
             Ok(())
+        }
+        Some(Cmd::Upgrade { .. }) => {
+            unreachable!("upgrade is dispatched before notifier and theme initialization")
         }
         Some(Cmd::Run {
             file,

@@ -45,8 +45,11 @@ cargo install atman-cli --locked
 
 atman init          # scaffold ~/.config/atman/
 atman doctor        # verify config + providers
+atman upgrade       # update with the official installer
 atman               # launch the TUI
 ```
+
+`atman upgrade` downloads the official installer over HTTPS before executing it. On macOS and Linux it installs to Cargo home, usually `~/.cargo/bin`; it does not upgrade a Homebrew installation. Use `brew upgrade atman-cli` for Homebrew, or `cargo install atman-cli --locked` for a Cargo-managed installation.
 
 Set an API key via env var (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) or inline in `~/.config/atman/config.toml`:
 

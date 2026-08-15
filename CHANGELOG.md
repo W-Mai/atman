@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **CLI self-upgrade** — `atman upgrade` downloads and runs the official platform installer with bounded response validation, installation-source confirmation, and controlled shell execution.
+
 ### 🐛 Fixes
 
 - **Model Manager persistence** — model edits now persist to `config.toml`, reload the live registry, preserve unrelated TOML content, and retarget aliases when a model's config name changes.
