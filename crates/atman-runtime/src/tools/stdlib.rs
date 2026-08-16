@@ -892,32 +892,45 @@ fn prepare_dispatch(
     registry: &crate::tool::ToolRegistry,
     ctx: &ToolCtx,
 ) -> Result<Vec<PreparedEntry>, RuntimeError> {
-    let mut prepared = Vec::with_capacity(uses.len());
-    for (index, entry) in uses.iter().enumerate() {
-        let Value::Struct(fields) = entry else {
-            return Err(RuntimeError::TypeMismatch {
-                expected: "struct {id, name, input}".into(),
-                actual: entry.kind_name().into(),
-            });
-        };
-        let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        let id = match get("id") {
-            Some(Value::Str(s)) => s,
-            _ => {
-                return Err(RuntimeError::ToolFailed(
-                    "dispatch_all: tool_use missing `id` string".into(),
-                ));
-            }
-        };
-        let name = match get("name") {
-            Some(Value::Str(s)) => s,
-            _ => {
-                return Err(RuntimeError::ToolFailed(
-                    "dispatch_all: tool_use missing `name` string".into(),
-                ));
-            }
-        };
-        let input = get("input").unwrap_or(Value::Unit);
+    let parsed = uses
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let Value::Struct(fields) = entry else {
+                return Err(RuntimeError::TypeMismatch {
+                    expected: "struct {id, name, input}".into(),
+                    actual: entry.kind_name().into(),
+                });
+            };
+            let get = |key: &str| {
+                fields
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            };
+            let id = match get("id") {
+                Some(Value::Str(id)) => id,
+                _ => {
+                    return Err(RuntimeError::ToolFailed(
+                        "dispatch_all: tool_use missing `id` string".into(),
+                    ));
+                }
+            };
+            let name = match get("name") {
+                Some(Value::Str(name)) => name,
+                _ => {
+                    return Err(RuntimeError::ToolFailed(
+                        "dispatch_all: tool_use missing `name` string".into(),
+                    ));
+                }
+            };
+            Ok((index, id, name, get("input").unwrap_or(Value::Unit)))
+        })
+        .collect::<Result<Vec<_>, RuntimeError>>()?;
+
+    let mut prepared = Vec::with_capacity(parsed.len());
+    for (index, id, name, input) in parsed {
+        emit_tool_node(ctx, &id, &name, &input);
         let Some(tool) = registry.get(&name) else {
             prepared.push(PreparedEntry::Failed {
                 index,
@@ -929,10 +942,18 @@ fn prepare_dispatch(
             Value::Struct(fields) => fields.clone(),
             Value::Unit => Vec::new(),
             other => {
-                return Err(RuntimeError::TypeMismatch {
-                    expected: "struct or unit for tool input".into(),
-                    actual: other.kind_name().into(),
+                prepared.push(PreparedEntry::Failed {
+                    index,
+                    msg: build_error_result(
+                        ctx,
+                        &id,
+                        &format!(
+                            "tool `{name}` expected struct or unit input, got {}",
+                            other.kind_name()
+                        ),
+                    ),
                 });
+                continue;
             }
         };
         let missing = missing_required_fields(&tool.input_schema(), &named);
@@ -952,7 +973,6 @@ fn prepare_dispatch(
             });
             continue;
         }
-        emit_tool_node(ctx, &id, &name, &input);
         prepared.push(PreparedEntry::Ready {
             index,
             id,
@@ -1059,129 +1079,50 @@ async fn partition_and_gate(
 }
 
 async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
-    if batch.is_empty() {
-        return;
+    use futures::StreamExt;
+
+    let mut pending = futures::stream::FuturesUnordered::new();
+    for a in batch {
+        pending.push(async move {
+            let result = a.tool.call(a.call_args, ctx).await;
+            (a.index, a.id, a.name, result)
+        });
     }
-    let futs = batch.iter().map(|a| a.tool.call(a.call_args.clone(), ctx));
-    let results = futures::future::join_all(futs).await;
-    for (a, r) in batch.into_iter().zip(results) {
-        emit_dispatch_node_start(ctx, &a.id, &a.name);
-        let (content, is_error) = match &r {
-            Ok(v) => (render_tool_result_text(v), false),
-            Err(e) => (format!("{e}"), true),
-        };
-        emit_dispatch_node_end(ctx, &a.id, &a.name, is_error);
-        if let Ok(v) = &r {
-            emit_diff_preview_if_relevant(ctx, &a.name, v);
-        }
-        let msg = crate::message::Message {
-            role: crate::message::MessageRole::Tool,
-            parts: vec![crate::message::MessagePart::ToolResult {
-                tool_use_id: a.id.clone(),
-                content,
-                is_error,
-            }],
-            turn_id: ctx
-                .turn_id
-                .clone()
-                .unwrap_or_else(crate::event::TurnId::now),
-            origin: crate::message::MessageOrigin::User,
-        };
-        emit_tool_result(ctx, &msg);
-        out_slots[a.index] = Some(Value::Message(msg));
+    while let Some((index, id, name, result)) = pending.next().await {
+        out_slots[index] = Some(finish_dispatch(ctx, &id, &name, result));
     }
 }
 
 async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
     for a in batch {
-        emit_dispatch_node_start(ctx, &a.id, &a.name);
-        let r = a.tool.call(a.call_args, ctx).await;
-        let (content, is_error) = match &r {
-            Ok(v) => (render_tool_result_text(v), false),
-            Err(e) => (format!("{e}"), true),
-        };
-        emit_dispatch_node_end(ctx, &a.id, &a.name, is_error);
-        if let Ok(v) = &r {
-            emit_diff_preview_if_relevant(ctx, &a.name, v);
-        }
-        let msg = crate::message::Message {
-            role: crate::message::MessageRole::Tool,
-            parts: vec![crate::message::MessagePart::ToolResult {
-                tool_use_id: a.id.clone(),
-                content,
-                is_error,
-            }],
-            turn_id: ctx
-                .turn_id
-                .clone()
-                .unwrap_or_else(crate::event::TurnId::now),
-            origin: crate::message::MessageOrigin::User,
-        };
-        emit_tool_result(ctx, &msg);
-        out_slots[a.index] = Some(Value::Message(msg));
+        let result = a.tool.call(a.call_args, ctx).await;
+        out_slots[a.index] = Some(finish_dispatch(ctx, &a.id, &a.name, result));
     }
 }
 
-fn emit_dispatch_node_start(ctx: &ToolCtx, id: &str, name: &str) {
-    use crate::nodegraph::NodeKind;
-    let kind = NodeKind::ToolCall {
-        path: name.to_string(),
+fn finish_dispatch(ctx: &ToolCtx, id: &str, name: &str, result: ToolResult) -> Value {
+    let (content, is_error) = match &result {
+        Ok(v) => (render_tool_result_text(v), false),
+        Err(e) => (format!("{e}"), true),
     };
-    let label = format!("⟶ {name}");
-    let node_id = format!("dispatch:{id}");
-    if let Some(sink) = ctx.events.as_ref()
-        && let Some(run_id) = ctx.flow_run_id.as_ref()
-    {
-        sink.emit(crate::event::Event::FlowNodeStart {
-            run_id: run_id.clone(),
-            node_id: node_id.clone(),
-            kind: kind.clone(),
-            label: label.clone(),
-            parent_node_id: ctx.current_node_id.clone(),
-        });
+    if let Ok(v) = &result {
+        emit_diff_preview_if_relevant(ctx, name, v);
     }
-    if let Some(tx) = &ctx.stream_tx
-        && let Some(run_id) = ctx.flow_run_id.as_ref()
-    {
-        let _ = tx.send(crate::stream::StreamFrame::FlowNodeStart {
-            run_id: run_id.0.to_string(),
-            node_id,
-            kind,
-            label,
-            parent_node_id: ctx.current_node_id.clone(),
-        });
-    }
-}
-
-fn emit_dispatch_node_end(ctx: &ToolCtx, id: &str, name: &str, is_error: bool) {
-    let node_id = format!("dispatch:{id}");
-    let status = if is_error {
-        crate::event::FlowNodeStatus::Err
-    } else {
-        crate::event::FlowNodeStatus::Ok
+    let msg = crate::message::Message {
+        role: crate::message::MessageRole::Tool,
+        parts: vec![crate::message::MessagePart::ToolResult {
+            tool_use_id: id.to_string(),
+            content,
+            is_error,
+        }],
+        turn_id: ctx
+            .turn_id
+            .clone()
+            .unwrap_or_else(crate::event::TurnId::now),
+        origin: crate::message::MessageOrigin::User,
     };
-    let preview = name.to_string();
-    if let Some(sink) = ctx.events.as_ref()
-        && let Some(run_id) = ctx.flow_run_id.as_ref()
-    {
-        sink.emit(crate::event::Event::FlowNodeEnd {
-            run_id: run_id.clone(),
-            node_id: node_id.clone(),
-            status: status.clone(),
-            output_preview: Some(preview.clone()),
-        });
-    }
-    if let Some(tx) = &ctx.stream_tx
-        && let Some(run_id) = ctx.flow_run_id.as_ref()
-    {
-        let _ = tx.send(crate::stream::StreamFrame::FlowNodeEnd {
-            run_id: run_id.0.to_string(),
-            node_id,
-            status,
-            output_preview: Some(preview),
-            parent_node_id: ctx.current_node_id.clone(),
-        });
-    }
+    emit_tool_result(ctx, &msg);
+    Value::Message(msg)
 }
 
 type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);
@@ -1253,15 +1194,14 @@ fn value_struct_string(value: &Value, field: &str) -> Option<String> {
 }
 
 fn emit_tool_node(ctx: &ToolCtx, id: &str, name: &str, input: &Value) {
-    if let (Some(sink), Some(run_id), Some(parent_node)) = (
-        ctx.events.as_ref(),
-        ctx.flow_run_id.clone(),
-        &ctx.current_node_id,
-    ) {
-        let args_preview = format!("{:?}", input)
-            .chars()
-            .take(4000)
-            .collect::<String>();
+    let (Some(run_id), Some(parent_node)) = (&ctx.flow_run_id, &ctx.current_node_id) else {
+        return;
+    };
+    let args_preview = format!("{:?}", input)
+        .chars()
+        .take(4000)
+        .collect::<String>();
+    if let Some(sink) = &ctx.events {
         sink.emit(crate::event::Event::ToolNode {
             run_id: run_id.clone(),
             parent_node_id: parent_node.clone(),
@@ -1269,15 +1209,15 @@ fn emit_tool_node(ctx: &ToolCtx, id: &str, name: &str, input: &Value) {
             tool_name: name.to_string(),
             args_preview: args_preview.clone(),
         });
-        if let Some(tx) = &ctx.stream_tx {
-            let _ = tx.send(crate::stream::StreamFrame::ToolNode {
-                run_id: run_id.0.to_string(),
-                parent_node_id: parent_node.clone(),
-                tool_use_id: id.to_string(),
-                tool: name.to_string(),
-                args_preview,
-            });
-        }
+    }
+    if let Some(tx) = &ctx.stream_tx {
+        let _ = tx.send(crate::stream::StreamFrame::ToolNode {
+            run_id: run_id.0.to_string(),
+            parent_node_id: parent_node.clone(),
+            tool_use_id: id.to_string(),
+            tool: name.to_string(),
+            args_preview,
+        });
     }
 }
 
@@ -1315,11 +1255,7 @@ fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) {
         crate::tools::tool_output::maybe_truncate_tool_message(msg, ctx.session_dir.as_deref());
     if let Some(tx) = &ctx.stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
-            flow_run_id: if ctx.session_runtime.is_some() {
-                None
-            } else {
-                ctx.flow_run_id.as_ref().map(|r| r.0.to_string())
-            },
+            flow_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
             message: msg,
         });
     } else if let Some(sink) = &ctx.events {
@@ -1435,6 +1371,218 @@ mod tests {
         assert_eq!(shell_quote("It's fine"), "'It'\\''s fine'");
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a'b'c"), "'a'\\''b'\\''c'");
+    }
+
+    struct ControlledTool {
+        name: &'static str,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+    }
+
+    impl Tool for ControlledTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async move {
+                let _permit = self.release.acquire().await.unwrap();
+                Ok(Value::Str(self.name.to_string()))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_emits_each_scoped_result_as_its_tool_finishes() {
+        let fast_release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let slow_release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(ControlledTool {
+            name: "fast",
+            release: fast_release.clone(),
+        }));
+        registry.register(std::sync::Arc::new(ControlledTool {
+            name: "slow",
+            release: slow_release.clone(),
+        }));
+        let run_id = crate::event::FlowRunId::now();
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(32);
+        let ctx = ToolCtx::new()
+            .with_anchors(None, Some(run_id.clone()), None)
+            .with_current_node(Some("dispatch_all".into()))
+            .with_registry(std::sync::Arc::new(registry))
+            .with_stream_tx(stream_tx);
+        let uses = Value::List(vec![
+            Value::Struct(vec![
+                ("id".into(), Value::Str("slow_id".into())),
+                ("name".into(), Value::Str("slow".into())),
+                ("input".into(), Value::Struct(Vec::new())),
+            ]),
+            Value::Struct(vec![
+                ("id".into(), Value::Str("fast_id".into())),
+                ("name".into(), Value::Str("fast".into())),
+                ("input".into(), Value::Struct(Vec::new())),
+            ]),
+        ]);
+        let task = tokio::spawn(async move {
+            DispatchAll
+                .call(
+                    ToolArgs {
+                        positional: vec![uses],
+                        named: Vec::new(),
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap()
+        });
+
+        fast_release.add_permits(1);
+        let fast_result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let crate::stream::StreamFrame::ToolResultMsg {
+                    flow_run_id,
+                    message,
+                } = stream_rx.recv().await.unwrap()
+                    && message.parts.iter().any(|part| {
+                        matches!(
+                            part,
+                            crate::message::MessagePart::ToolResult { tool_use_id, .. }
+                                if tool_use_id == "fast_id"
+                        )
+                    })
+                {
+                    break flow_run_id;
+                }
+            }
+        })
+        .await
+        .expect("fast result before slow release");
+        assert_eq!(fast_result.as_deref(), Some(run_id.0.to_string().as_str()));
+        assert!(!task.is_finished());
+
+        slow_release.add_permits(1);
+        let Value::List(results) = task.await.unwrap() else {
+            panic!("dispatch result list");
+        };
+        let ids: Vec<&str> = results
+            .iter()
+            .map(|value| match value {
+                Value::Message(message) => match &message.parts[0] {
+                    crate::message::MessagePart::ToolResult { tool_use_id, .. } => {
+                        tool_use_id.as_str()
+                    }
+                    _ => panic!("tool result part"),
+                },
+                _ => panic!("tool result message"),
+            })
+            .collect();
+        assert_eq!(ids, vec!["slow_id", "fast_id"]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_unknown_tool_finishes_its_workflow_node_with_error() {
+        use crate::workflow::{NodeStatus, WorkflowGraph};
+
+        let registry = crate::tool::ToolRegistry::new();
+        let run_id = crate::event::FlowRunId::now();
+        let run = run_id.0.to_string();
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let ctx = ToolCtx::new()
+            .with_anchors(None, Some(run_id), None)
+            .with_current_node(Some("dispatch_all".into()))
+            .with_registry(std::sync::Arc::new(registry))
+            .with_stream_tx(stream_tx);
+        let uses = Value::List(vec![Value::Struct(vec![
+            ("id".into(), Value::Str("unknown_id".into())),
+            ("name".into(), Value::Str("missing.tool".into())),
+            ("input".into(), Value::Struct(Vec::new())),
+        ])]);
+
+        DispatchAll
+            .call(
+                ToolArgs {
+                    positional: vec![uses],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let mut graph = WorkflowGraph::new(crate::event::TurnId::now());
+        graph.apply_stream_frame(&crate::stream::StreamFrame::FlowStart {
+            run_id: run.clone(),
+            flow_name: "agent_loop".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+        });
+        graph.apply_stream_frame(&crate::stream::StreamFrame::FlowNodeStart {
+            run_id: run.clone(),
+            node_id: "dispatch_all".into(),
+            kind: crate::nodegraph::NodeKind::ToolCall {
+                path: "dispatch_all".into(),
+            },
+            label: "dispatch_all".into(),
+            parent_node_id: None,
+        });
+        while let Ok(frame) = stream_rx.try_recv() {
+            graph.apply_stream_frame(&frame);
+        }
+
+        let node = graph
+            .find_node(&format!("tool:{run}:unknown_id"))
+            .expect("unknown tool node");
+        assert_eq!(node.status, NodeStatus::Err);
+        assert!(matches!(
+            &node.kind,
+            crate::workflow::WorkflowNodeKind::ToolCall {
+                result_preview: Some(preview),
+                ..
+            } if preview.contains("unknown tool")
+        ));
+        let result = node.output_preview.as_deref().unwrap();
+        assert!(result.contains("unknown tool"));
+        assert!(
+            graph
+                .root
+                .iter()
+                .flat_map(|root| &root.children)
+                .all(|child| {
+                    !matches!(
+                        &child.kind,
+                        crate::workflow::WorkflowNodeKind::ToolCall { tool_use_id, .. }
+                            if tool_use_id == "unknown_id"
+                    )
+                })
+        );
+    }
+
+    #[test]
+    fn prepare_dispatch_does_not_emit_partial_nodes_for_malformed_batch() {
+        let registry = crate::tool::ToolRegistry::new();
+        let run_id = crate::event::FlowRunId::now();
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let ctx = ToolCtx::new()
+            .with_anchors(None, Some(run_id), None)
+            .with_current_node(Some("dispatch_all".into()))
+            .with_stream_tx(stream_tx);
+        let uses = vec![
+            Value::Struct(vec![
+                ("id".into(), Value::Str("valid_id".into())),
+                ("name".into(), Value::Str("missing.tool".into())),
+            ]),
+            Value::Struct(vec![("name".into(), Value::Str("missing.tool".into()))]),
+        ];
+
+        assert!(prepare_dispatch(&uses, &registry, &ctx).is_err());
+        assert!(matches!(
+            stream_rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

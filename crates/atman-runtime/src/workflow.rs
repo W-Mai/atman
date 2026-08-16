@@ -268,6 +268,9 @@ impl WorkflowGraph {
                 let rid = run_id.0.to_string();
                 let scoped_parent = scope_id(&rid, parent_node_id);
                 let id = tool_node_id(&rid, tool_use_id);
+                if find_node(&self.root, &id).is_some() {
+                    return;
+                }
                 let node = WorkflowNode {
                     id,
                     kind: WorkflowNodeKind::ToolCall {
@@ -290,46 +293,7 @@ impl WorkflowGraph {
                     parent.children.push(node);
                 }
             }
-            Event::AssistantMsg {
-                flow_run_id,
-                message,
-                ..
-            } => {
-                let Some(flow_id) = flow_run_id.as_ref().map(|r| r.0.to_string()) else {
-                    return;
-                };
-                for part in &message.parts {
-                    if let crate::message::MessagePart::ToolUse { id, name, input } = part {
-                        let node_id = tool_node_id(&flow_id, id);
-                        if find_node(&self.root, &node_id).is_some() {
-                            continue;
-                        }
-                        let args_preview = serde_json::to_string(input).unwrap_or_default();
-                        let args_preview: String = args_preview.chars().take(200).collect();
-                        let node = WorkflowNode {
-                            id: node_id,
-                            kind: WorkflowNodeKind::ToolCall {
-                                tool_use_id: id.clone(),
-                                tool: name.clone(),
-                                args_preview: args_preview.clone(),
-                                result_preview: None,
-                            },
-                            label: name.clone(),
-                            status: NodeStatus::Running,
-                            started_at: Some(chrono::Utc::now()),
-                            ended_at: None,
-                            output_preview: None,
-                            children: Vec::new(),
-                            parallelism: Parallelism::Serial,
-                            approval: None,
-                            llm_stats: None,
-                        };
-                        if let Some(parent) = find_node_mut(&mut self.root, &flow_id) {
-                            parent.children.push(node);
-                        }
-                    }
-                }
-            }
+            Event::AssistantMsg { .. } => {}
             Event::ToolResultMsg {
                 flow_run_id,
                 message,
@@ -343,12 +307,11 @@ impl WorkflowGraph {
                         is_error,
                     } = part
                     {
-                        let scoped_hit = flow_id.as_deref().and_then(|rid| {
-                            let id = tool_node_id(rid, tool_use_id);
-                            find_node_mut(&mut self.root, &id).map(|_| id)
-                        });
-                        let node = match scoped_hit {
-                            Some(id) => find_node_mut(&mut self.root, &id),
+                        let node = match flow_id.as_deref() {
+                            Some(rid) => {
+                                let id = tool_node_id(rid, tool_use_id);
+                                find_node_mut(&mut self.root, &id)
+                            }
                             None => find_tool_node_by_tool_use_id(&mut self.root, tool_use_id),
                         };
                         if let Some(n) = node {
@@ -600,8 +563,12 @@ impl WorkflowGraph {
                 ..
             } => {
                 let scoped_parent = scope_id(run_id, parent_node_id);
+                let id = tool_node_id(run_id, tool_use_id);
+                if find_node(&self.root, &id).is_some() {
+                    return;
+                }
                 let node = WorkflowNode {
-                    id: tool_node_id(run_id, tool_use_id),
+                    id,
                     kind: WorkflowNodeKind::ToolCall {
                         tool_use_id: tool_use_id.clone(),
                         tool: tool.clone(),
@@ -662,10 +629,17 @@ impl WorkflowGraph {
                     message: message.clone(),
                 });
             }
-            StreamFrame::ToolResultMsg { message, .. } => {
+            StreamFrame::ToolResultMsg {
+                flow_run_id,
+                message,
+            } => {
+                let scoped_run_id = flow_run_id
+                    .as_deref()
+                    .and_then(|rid| uuid::Uuid::parse_str(rid).ok())
+                    .map(crate::event::FlowRunId);
                 self.apply_event(&Event::ToolResultMsg {
                     turn_id: crate::event::TurnId::now(),
-                    flow_run_id: None,
+                    flow_run_id: scoped_run_id,
                     message: message.clone(),
                 });
             }
@@ -923,6 +897,119 @@ mod tests {
         assert_eq!(tool.id, tool_node_id(&rid.0.to_string(), "tu_1"));
         assert!(matches!(tool.kind, WorkflowNodeKind::ToolCall { .. }));
         assert_eq!(g.root[0].status, NodeStatus::Ok);
+    }
+
+    #[test]
+    fn assistant_tool_use_waits_for_scoped_tool_node_and_result() {
+        use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
+        use crate::stream::StreamFrame;
+
+        let mut graph = WorkflowGraph::new(TurnId::now());
+        let run_id = FlowRunId::now();
+        let run = run_id.0.to_string();
+        graph.apply_event(&flow_start(run_id.clone(), "agent_loop"));
+        graph.apply_event(&stmt_start(run_id.clone(), "llm", None));
+        graph.apply_stream_frame(&StreamFrame::AssistantMsg {
+            flow_run_id: Some(run.clone()),
+            message: Message {
+                role: MessageRole::Assistant,
+                parts: vec![MessagePart::ToolUse {
+                    id: "tu_1".into(),
+                    name: "fs.read".into(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                }],
+                turn_id: TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+        assert!(graph.find_node(&tool_node_id(&run, "tu_1")).is_none());
+
+        graph.apply_event(&stmt_start(run_id.clone(), "dispatch_all", None));
+        graph.apply_stream_frame(&StreamFrame::ToolNode {
+            run_id: run.clone(),
+            parent_node_id: "dispatch_all".into(),
+            tool_use_id: "tu_1".into(),
+            tool: "fs.read".into(),
+            args_preview: "{path: a.rs}".into(),
+        });
+        graph.apply_stream_frame(&StreamFrame::ToolResultMsg {
+            flow_run_id: Some(run.clone()),
+            message: Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "tu_1".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                }],
+                turn_id: TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+
+        let dispatch = graph
+            .find_node(&scope_id(&run, "dispatch_all"))
+            .expect("dispatch statement");
+        assert_eq!(dispatch.children.len(), 1);
+        assert_eq!(dispatch.children[0].status, NodeStatus::Ok);
+        assert_eq!(
+            dispatch.children[0].output_preview.as_deref(),
+            Some("contents")
+        );
+        assert!(
+            graph.root[0]
+                .children
+                .iter()
+                .all(|node| !matches!(node.kind, WorkflowNodeKind::ToolCall { .. }))
+        );
+    }
+
+    #[test]
+    fn scoped_tool_result_updates_only_matching_run() {
+        use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
+        use crate::stream::StreamFrame;
+
+        let mut graph = WorkflowGraph::new(TurnId::now());
+        let run_a = FlowRunId::now();
+        let run_b = FlowRunId::now();
+        for run_id in [&run_a, &run_b] {
+            graph.apply_event(&flow_start(run_id.clone(), "agent_loop"));
+            graph.apply_event(&stmt_start(run_id.clone(), "dispatch_all", None));
+            graph.apply_stream_frame(&StreamFrame::ToolNode {
+                run_id: run_id.0.to_string(),
+                parent_node_id: "dispatch_all".into(),
+                tool_use_id: "same_id".into(),
+                tool: "fs.read".into(),
+                args_preview: String::new(),
+            });
+        }
+        graph.apply_stream_frame(&StreamFrame::ToolResultMsg {
+            flow_run_id: Some(run_a.0.to_string()),
+            message: Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "same_id".into(),
+                    content: "done".into(),
+                    is_error: false,
+                }],
+                turn_id: TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+
+        assert_eq!(
+            graph
+                .find_node(&tool_node_id(&run_a.0.to_string(), "same_id"))
+                .unwrap()
+                .status,
+            NodeStatus::Ok
+        );
+        assert_eq!(
+            graph
+                .find_node(&tool_node_id(&run_b.0.to_string(), "same_id"))
+                .unwrap()
+                .status,
+            NodeStatus::Running
+        );
     }
 
     #[test]

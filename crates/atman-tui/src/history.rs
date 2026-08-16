@@ -16,6 +16,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
     let mut spawned_roots: HashSet<String> = HashSet::new();
     let mut flow_dones: HashMap<String, (bool, bool)> = HashMap::new();
     let mut llm_models: HashMap<String, String> = HashMap::new();
+    let mut tool_runs: HashMap<String, Option<String>> = HashMap::new();
     for entry in entries {
         match entry {
             TranscriptEntry::Message { message, .. } => {
@@ -52,6 +53,20 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                 llm_models
                     .entry(rid.0.to_string())
                     .or_insert_with(|| model.clone());
+            }
+            TranscriptEntry::ToolNode {
+                run_id,
+                tool_use_id,
+                ..
+            } => {
+                tool_runs
+                    .entry(tool_use_id.clone())
+                    .and_modify(|existing| {
+                        if existing.as_deref() != Some(run_id.as_str()) {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(run_id.clone()));
             }
             _ => {}
         }
@@ -165,12 +180,36 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                     // Panel closing is handled by FlowStart (new root flow) and
                     // FlowDone (flow completion) instead.
                 }
+                let inferred_tool_run =
+                    if matches!(msg.role, MessageRole::Tool) && flow_run_id.is_none() {
+                        let results: Vec<_> = msg
+                            .parts
+                            .iter()
+                            .filter_map(|part| match part {
+                                MessagePart::ToolResult { tool_use_id, .. } => Some(tool_use_id),
+                                _ => None,
+                            })
+                            .collect();
+                        results.first().and_then(|first_id| {
+                            let first_run = tool_runs.get(*first_id).and_then(Clone::clone)?;
+                            results
+                                .iter()
+                                .all(|tool_use_id| {
+                                    tool_runs.get(*tool_use_id).and_then(Clone::clone)
+                                        == Some(first_run.clone())
+                                })
+                                .then_some(first_run)
+                        })
+                    } else {
+                        None
+                    };
+                let workflow_run_id = flow_run_id.as_deref().or(inferred_tool_run.as_deref());
                 if matches!(msg.role, MessageRole::Assistant | MessageRole::Tool)
-                    && flow_run_id.is_some()
+                    && workflow_run_id.is_some()
                     && let Some(idx) = current_workflow_idx
                     && let Some(OutputItem::WorkflowPanel { graph, .. }) = out.get_mut(idx)
                 {
-                    apply_message_to_workflow(graph, msg, flow_run_id.as_deref());
+                    apply_message_to_workflow(graph, msg, workflow_run_id);
                 }
                 if let Some(rid) = flow_run_id
                     && let Some(root_id) = find_spawned_root(rid)
@@ -1460,6 +1499,73 @@ mod tests {
             _ => None,
         });
         assert_eq!(diff_item.as_deref(), Some(diff));
+    }
+
+    #[test]
+    fn flatten_transcript_scopes_persisted_tool_result_from_tool_node() {
+        use atman_runtime::nodegraph::NodeKind;
+        use atman_runtime::workflow::NodeStatus;
+
+        let run_id = "run-persisted-tool".to_string();
+        let entries = vec![
+            TranscriptEntry::FlowStart {
+                run_id: run_id.clone(),
+                flow_name: "agent_loop".into(),
+                parent_run_id: None,
+                parent_node_id: None,
+                spawned: false,
+                ts: None,
+            },
+            TranscriptEntry::FlowNodeStart {
+                run_id: run_id.clone(),
+                node_id: "dispatch_all".into(),
+                kind: NodeKind::ToolCall {
+                    path: "dispatch_all".into(),
+                },
+                label: "dispatch_all".into(),
+                parent_node_id: None,
+                ts: None,
+            },
+            TranscriptEntry::ToolNode {
+                run_id: run_id.clone(),
+                parent_node_id: "dispatch_all".into(),
+                tool_use_id: "tu_persisted".into(),
+                tool_name: "fs.read".into(),
+                args_preview: String::new(),
+                ts: None,
+            },
+            TranscriptEntry::Message {
+                message: Message {
+                    role: MessageRole::Tool,
+                    parts: vec![MessagePart::ToolResult {
+                        tool_use_id: "tu_persisted".into(),
+                        content: "contents".into(),
+                        is_error: false,
+                    }],
+                    turn_id: TurnId::now(),
+                    origin: atman_runtime::message::MessageOrigin::User,
+                },
+                flow_run_id: None,
+            },
+        ];
+
+        let out = flatten_transcript(&entries);
+        let graph = out
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::WorkflowPanel { graph, .. } => Some(graph),
+                _ => None,
+            })
+            .expect("workflow panel");
+        let dispatch = graph
+            .find_node(&format!("{run_id}::dispatch_all"))
+            .expect("dispatch node");
+        assert_eq!(dispatch.children.len(), 1);
+        assert_eq!(dispatch.children[0].status, NodeStatus::Ok);
+        assert_eq!(
+            dispatch.children[0].output_preview.as_deref(),
+            Some("contents")
+        );
     }
 
     #[test]

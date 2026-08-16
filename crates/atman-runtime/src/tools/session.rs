@@ -75,10 +75,11 @@ impl Tool for SessionPush {
                     ctx.session_dir.as_deref(),
                 );
                 emit_message_event(ctx, &msg);
-                let flow_run_id = if ctx.session_runtime.is_some() {
-                    None
-                } else {
-                    ctx.flow_run_id.as_ref().map(|r| r.0.to_string())
+                let flow_run_id = match msg.role {
+                    MessageRole::Assistant | MessageRole::Tool => {
+                        ctx.flow_run_id.as_ref().map(|r| r.0.to_string())
+                    }
+                    MessageRole::User | MessageRole::System => None,
                 };
                 if let Some(tx) = &ctx.stream_tx {
                     let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
@@ -146,5 +147,64 @@ mod tests {
         assert_eq!(tool.name(), "session.push");
         assert_eq!(tool.tier(), Tier::Zero);
         assert!(tool.description().is_some());
+    }
+
+    #[tokio::test]
+    async fn session_push_scopes_live_tool_result_without_scoping_session_history() {
+        use crate::event::{Event, FlowRunId, TurnId};
+        use crate::message::{MessageOrigin, MessagePart};
+
+        let session = std::sync::Arc::new(crate::session::Session::open_ephemeral());
+        let run_id = FlowRunId::now();
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let ctx = ToolCtx::new()
+            .with_anchors(Some(TurnId::now()), Some(run_id.clone()), None)
+            .with_events(session.sink().clone())
+            .with_session_messages_handle(session.messages_handle())
+            .with_session_runtime(session.clone())
+            .with_stream_tx(stream_tx);
+        let message = Message {
+            role: MessageRole::Tool,
+            parts: vec![MessagePart::ToolResult {
+                tool_use_id: "tu_1".into(),
+                content: "done".into(),
+                is_error: false,
+            }],
+            turn_id: TurnId::now(),
+            origin: MessageOrigin::User,
+        };
+
+        SessionPush
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Message(message)],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let crate::stream::StreamFrame::ToolResultMsg { flow_run_id, .. } =
+            stream_rx.recv().await.unwrap()
+        else {
+            panic!("tool result frame");
+        };
+        assert_eq!(flow_run_id.as_deref(), Some(run_id.0.to_string().as_str()));
+        assert!(session.sink().snapshot().iter().any(|event| {
+            matches!(
+                event,
+                Event::ToolResultMsg {
+                    flow_run_id: None,
+                    ..
+                }
+            )
+        }));
+        assert!(
+            session
+                .messages()
+                .iter()
+                .any(|message| message.role == MessageRole::Tool)
+        );
     }
 }

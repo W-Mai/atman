@@ -1610,22 +1610,18 @@ impl AppState {
     }
 
     fn route_to_workflow_panel(&mut self, frame: &StreamFrame) {
-        let mut mutated = false;
-        let target = if let StreamFrame::FlowDone { run_id, .. } = frame {
-            self.workflow_run_to_panel
-                .get(run_id)
-                .and_then(|&idx| self.items.get_mut(idx))
-        } else {
-            self.items
-                .iter_mut()
-                .rev()
-                .find(|it| matches!(it, OutputItem::WorkflowPanel { .. }))
+        let target_idx = match frame_run_id(frame) {
+            Some(run_id) => self.workflow_run_to_panel.get(run_id).copied(),
+            None => self
+                .items
+                .iter()
+                .rposition(|item| matches!(item, OutputItem::WorkflowPanel { .. })),
         };
-        if let Some(OutputItem::WorkflowPanel { graph, .. }) = target {
+        let Some(idx) = target_idx else {
+            return;
+        };
+        if let Some(OutputItem::WorkflowPanel { graph, .. }) = self.items.get_mut(idx) {
             graph.apply_stream_frame(frame);
-            mutated = true;
-        }
-        if mutated {
             self.items_version = self.items_version.wrapping_add(1);
         }
     }
@@ -2429,6 +2425,7 @@ mod tests {
     #[test]
     fn flow_start_populates_workflow_panel_with_root() {
         let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("look_into", "r1"));
         let graph = atman_runtime::nodegraph::FlowGraph {
             flow_name: "look_into".into(),
             root: Vec::new(),
@@ -2476,6 +2473,7 @@ mod tests {
     fn workflow_stream_mutations_bump_items_version() {
         let mut app = AppState::new("s".into(), None);
         let baseline = app.items_version;
+        app.apply_stream_frame(flow_start("f", "r1"));
         app.apply_stream_frame(StreamFrame::FlowGraph {
             run_id: "r1".into(),
             graph: atman_runtime::nodegraph::FlowGraph {
@@ -2501,6 +2499,7 @@ mod tests {
     #[test]
     fn ctrl_o_targets_latest_workflow_tool_node() {
         let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("f", "r1"));
         app.apply_stream_frame(StreamFrame::FlowGraph {
             run_id: "r1".into(),
             graph: atman_runtime::nodegraph::FlowGraph {
@@ -2533,6 +2532,7 @@ mod tests {
     #[test]
     fn nested_node_start_attaches_under_parent() {
         let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("f", "r1"));
         app.apply_stream_frame(StreamFrame::FlowGraph {
             run_id: "r1".into(),
             graph: atman_runtime::nodegraph::FlowGraph {
@@ -2696,6 +2696,67 @@ mod tests {
         );
         assert!(panels[1].1, "new panel must be open");
         assert!(app.workflow_run_to_panel.contains_key("r2"));
+    }
+
+    #[test]
+    fn scoped_tool_frames_route_to_their_run_panel() {
+        use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
+        use atman_runtime::workflow::NodeStatus;
+
+        let mut app = AppState::new("s".into(), None);
+        app.apply_stream_frame(flow_start("first", "r1"));
+        app.push_user_turn("next".into());
+        app.apply_stream_frame(flow_start("second", "r2"));
+
+        app.apply_stream_frame(StreamFrame::FlowNodeStart {
+            run_id: "r1".into(),
+            node_id: "dispatch_all".into(),
+            kind: atman_runtime::nodegraph::NodeKind::ToolCall {
+                path: "dispatch_all".into(),
+            },
+            label: "dispatch_all".into(),
+            parent_node_id: None,
+        });
+        app.apply_stream_frame(StreamFrame::ToolNode {
+            run_id: "r1".into(),
+            parent_node_id: "dispatch_all".into(),
+            tool_use_id: "tu_1".into(),
+            tool: "fs.read".into(),
+            args_preview: String::new(),
+        });
+        app.apply_stream_frame(StreamFrame::ToolResultMsg {
+            flow_run_id: Some("r1".into()),
+            message: Message {
+                role: MessageRole::Tool,
+                parts: vec![MessagePart::ToolResult {
+                    tool_use_id: "tu_1".into(),
+                    content: "done".into(),
+                    is_error: false,
+                }],
+                turn_id: atman_runtime::event::TurnId::now(),
+                origin: MessageOrigin::User,
+            },
+        });
+
+        let first_idx = app.workflow_run_to_panel["r1"];
+        let second_idx = app.workflow_run_to_panel["r2"];
+        let OutputItem::WorkflowPanel {
+            graph: first_graph, ..
+        } = &app.items[first_idx]
+        else {
+            panic!("first workflow panel");
+        };
+        let tool = first_graph.find_node("tool:r1:tu_1").expect("r1 tool");
+        assert_eq!(tool.status, NodeStatus::Ok);
+        let OutputItem::WorkflowPanel {
+            graph: second_graph,
+            ..
+        } = &app.items[second_idx]
+        else {
+            panic!("second workflow panel");
+        };
+        assert!(second_graph.find_node("tool:r1:tu_1").is_none());
+        assert!(second_graph.find_node("r1::dispatch_all").is_none());
     }
 
     #[test]
