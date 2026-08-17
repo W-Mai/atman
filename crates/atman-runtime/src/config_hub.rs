@@ -293,6 +293,62 @@ impl ConfigHub {
         }))
     }
 
+    pub fn web_fetch_config(&self) -> Result<crate::tools::web::WebConfig, ConfigError> {
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawWeb {
+            #[serde(default)]
+            max_bytes: Option<usize>,
+            #[serde(default)]
+            url_allowlist: Vec<String>,
+            #[serde(default)]
+            url_denylist: Vec<String>,
+        }
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawWebFile {
+            #[serde(default)]
+            web: RawWeb,
+        }
+
+        let text = self.read_config_toml()?;
+        let mut config = crate::tools::web::WebConfig::default();
+        if text.trim().is_empty() {
+            return Ok(config);
+        }
+        let file: RawWebFile = toml::from_str(&text)
+            .map_err(|error| ConfigError::Invalid(format!("parse web fetch config: {error}")))?;
+        if let Some(value) = file.web.max_bytes {
+            config.max_bytes = value;
+        }
+        if !file.web.url_allowlist.is_empty() {
+            config.url_allowlist = file.web.url_allowlist;
+        }
+        if !file.web.url_denylist.is_empty() {
+            config.url_denylist = file.web.url_denylist;
+        }
+        Ok(config)
+    }
+
+    pub fn web_search_config(&self) -> Result<crate::tools::web::SearchConfig, ConfigError> {
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawWeb {
+            #[serde(default)]
+            search: Option<crate::tools::web::SearchConfig>,
+        }
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawWebFile {
+            #[serde(default)]
+            web: RawWeb,
+        }
+
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(crate::tools::web::SearchConfig::default());
+        }
+        let file: RawWebFile = toml::from_str(&text)
+            .map_err(|error| ConfigError::Invalid(format!("parse web search config: {error}")))?;
+        Ok(file.web.search.unwrap_or_default())
+    }
+
     pub fn trust_config(&self) -> Result<crate::trust::TrustConfig, ConfigError> {
         #[derive(Debug, serde::Deserialize, Default)]
         struct RawTrustFile {
@@ -777,6 +833,78 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn web_configs_default_when_config_or_section_is_missing() {
+        for text in [None, Some("[theme]\nmode = \"dark\"\n")] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            let fetch = hub.web_fetch_config().unwrap();
+            assert_eq!(fetch.max_bytes, 1_000_000);
+            assert!(fetch.url_allowlist.is_empty());
+            assert!(fetch.url_denylist.is_empty());
+            let search = hub.web_search_config().unwrap();
+            assert_eq!(search.provider_name(), "tavily");
+        }
+    }
+
+    #[test]
+    fn web_configs_parse_fetch_and_search_fields() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            r#"
+[web]
+max_bytes = 4096
+url_allowlist = ["https://ok.example"]
+url_denylist = ["https://ok.example/private"]
+
+[web.search]
+provider = "searxng"
+base_url = "http://localhost:8080"
+max_results = 6
+"#,
+        );
+
+        let fetch = hub.web_fetch_config().unwrap();
+        assert_eq!(fetch.max_bytes, 4096);
+        assert_eq!(fetch.url_allowlist, vec!["https://ok.example"]);
+        assert_eq!(fetch.url_denylist, vec!["https://ok.example/private"]);
+        assert_eq!(hub.web_search_config().unwrap().provider_name(), "searxng");
+    }
+
+    #[test]
+    fn web_fetch_schema_error_does_not_break_valid_search() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            "[web]\nmax_bytes = \"large\"\n[web.search]\nprovider = \"none\"\n",
+        );
+
+        assert!(matches!(
+            hub.web_fetch_config(),
+            Err(ConfigError::Invalid(_))
+        ));
+        assert_eq!(hub.web_search_config().unwrap().provider_name(), "none");
+    }
+
+    #[test]
+    fn web_search_schema_error_does_not_break_valid_fetch() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            "[web]\nmax_bytes = 2048\n[web.search]\nprovider = \"unknown\"\n",
+        );
+
+        assert_eq!(hub.web_fetch_config().unwrap().max_bytes, 2048);
+        assert!(matches!(
+            hub.web_search_config(),
+            Err(ConfigError::Invalid(_))
         ));
     }
 
