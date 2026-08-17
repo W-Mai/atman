@@ -65,6 +65,29 @@ pub struct RedactConfig {
     pub custom_patterns: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxConfig {
+    pub enabled: bool,
+    pub strict: bool,
+    pub extra_read: Vec<PathBuf>,
+    pub extra_write: Vec<PathBuf>,
+    pub template_path: Option<PathBuf>,
+    pub allow_network: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            strict: false,
+            extra_read: Vec::new(),
+            extra_write: Vec::new(),
+            template_path: None,
+            allow_network: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderConfigUpdate<'a> {
     pub name: &'a str,
@@ -268,6 +291,54 @@ impl ConfigHub {
             "llm" => InterjectionMode::Llm,
             other => InterjectionMode::Unknown(other.to_string()),
         }))
+    }
+
+    pub fn sandbox_config(&self) -> Result<SandboxConfig, ConfigError> {
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawSandbox {
+            #[serde(default)]
+            enabled: Option<bool>,
+            #[serde(default)]
+            strict: bool,
+            #[serde(default)]
+            extra_read: Vec<String>,
+            #[serde(default)]
+            extra_write: Vec<String>,
+            #[serde(default)]
+            template_path: Option<String>,
+            #[serde(default)]
+            allow_network: Option<bool>,
+        }
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawSandboxFile {
+            #[serde(default)]
+            sandbox: RawSandbox,
+        }
+
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(SandboxConfig::default());
+        }
+        let file: RawSandboxFile = toml::from_str(&text)
+            .map_err(|error| ConfigError::Invalid(format!("parse sandbox config: {error}")))?;
+        Ok(SandboxConfig {
+            enabled: file.sandbox.enabled.unwrap_or(true),
+            strict: file.sandbox.strict,
+            extra_read: file
+                .sandbox
+                .extra_read
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            extra_write: file
+                .sandbox
+                .extra_write
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            template_path: file.sandbox.template_path.map(PathBuf::from),
+            allow_network: file.sandbox.allow_network.unwrap_or(false),
+        })
     }
 
     pub fn redact_config(&self) -> Result<RedactConfig, ConfigError> {
@@ -645,6 +716,65 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn sandbox_config_defaults_when_config_or_section_is_missing() {
+        for text in [None, Some("[theme]\nmode = \"dark\"\n")] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            assert_eq!(hub.sandbox_config().unwrap(), SandboxConfig::default());
+        }
+    }
+
+    #[test]
+    fn sandbox_config_preserves_paths_and_defaults_missing_enabled() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            r#"
+[sandbox]
+strict = true
+extra_read = ["../read"]
+extra_write = ["/tmp/write"]
+template_path = "profiles/custom.sb"
+allow_network = true
+"#,
+        );
+
+        assert_eq!(
+            hub.sandbox_config().unwrap(),
+            SandboxConfig {
+                enabled: true,
+                strict: true,
+                extra_read: vec![PathBuf::from("../read")],
+                extra_write: vec![PathBuf::from("/tmp/write")],
+                template_path: Some(PathBuf::from("profiles/custom.sb")),
+                allow_network: true,
+            }
+        );
+    }
+
+    #[test]
+    fn sandbox_config_allows_explicit_opt_out() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[sandbox]\nenabled = false\n");
+
+        assert!(!hub.sandbox_config().unwrap().enabled);
+    }
+
+    #[test]
+    fn sandbox_config_rejects_invalid_schema() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[sandbox]\nextra_read = \"/tmp\"\n");
+
+        assert!(matches!(
+            hub.sandbox_config(),
+            Err(ConfigError::Invalid(message)) if message.contains("parse sandbox config")
         ));
     }
 

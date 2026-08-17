@@ -8,9 +8,8 @@ use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::providers::openai::OpenAiProvider;
 use atman_runtime::sandbox::Sandbox;
 use atman_runtime::{Executor, Value, tools};
-use serde::Deserialize;
 
-pub use atman_runtime::config_hub::RedactConfig;
+pub use atman_runtime::config_hub::{RedactConfig, SandboxConfig};
 
 pub struct BootstrapOptions {
     pub events: EventSink,
@@ -18,29 +17,6 @@ pub struct BootstrapOptions {
     pub config_dir: Option<PathBuf>,
     pub project_root: PathBuf,
     pub home_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SandboxConfig {
-    pub enabled: bool,
-    pub strict: bool,
-    pub extra_read: Vec<PathBuf>,
-    pub extra_write: Vec<PathBuf>,
-    pub template_path: Option<PathBuf>,
-    pub allow_network: bool,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            strict: false,
-            extra_read: Vec::new(),
-            extra_write: Vec::new(),
-            template_path: None,
-            allow_network: false,
-        }
-    }
 }
 
 pub fn load_redact_config(config_dir: Option<&Path>) -> RedactConfig {
@@ -389,56 +365,9 @@ pub fn load_sandbox_config(config_dir: Option<&Path>) -> SandboxConfig {
     let Some(dir) = config_dir else {
         return SandboxConfig::default();
     };
-    let path = dir.join("config.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return SandboxConfig::default();
-    };
-    parse_sandbox_config(&text)
-}
-
-pub fn parse_sandbox_config(text: &str) -> SandboxConfig {
-    #[derive(Debug, Deserialize, Default)]
-    struct RawSandbox {
-        #[serde(default)]
-        enabled: Option<bool>,
-        #[serde(default)]
-        strict: bool,
-        #[serde(default)]
-        extra_read: Vec<String>,
-        #[serde(default)]
-        extra_write: Vec<String>,
-        #[serde(default)]
-        template_path: Option<String>,
-        #[serde(default)]
-        allow_network: Option<bool>,
-    }
-    #[derive(Debug, Deserialize, Default)]
-    struct RawSandboxFile {
-        #[serde(default)]
-        sandbox: RawSandbox,
-    }
-    let file: RawSandboxFile = match toml::from_str(text) {
-        Ok(f) => f,
-        Err(_) => return SandboxConfig::default(),
-    };
-    SandboxConfig {
-        enabled: file.sandbox.enabled.unwrap_or(true),
-        strict: file.sandbox.strict,
-        extra_read: file
-            .sandbox
-            .extra_read
-            .into_iter()
-            .map(PathBuf::from)
-            .collect(),
-        extra_write: file
-            .sandbox
-            .extra_write
-            .into_iter()
-            .map(PathBuf::from)
-            .collect(),
-        template_path: file.sandbox.template_path.map(PathBuf::from),
-        allow_network: file.sandbox.allow_network.unwrap_or(false),
-    }
+    atman_runtime::config_hub::ConfigHub::from_config_dir(dir)
+        .sandbox_config()
+        .unwrap_or_default()
 }
 
 pub fn attach_memory_stores(
@@ -809,23 +738,50 @@ mod tests {
     }
 
     #[test]
-    fn parse_sandbox_config_defaults_missing_enabled_to_true() {
-        let cfg = parse_sandbox_config("[sandbox]\nstrict = true\n");
-        assert!(cfg.enabled);
-        assert!(cfg.strict);
-    }
+    fn load_sandbox_config_defaults_missing_file_to_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = load_sandbox_config(Some(dir.path()));
 
-    #[test]
-    fn parse_sandbox_config_defaults_missing_section_to_enabled() {
-        let cfg = parse_sandbox_config("[preview]\ntimeout_ms = 1000\n");
         assert!(cfg.enabled);
         assert!(!cfg.strict);
+        assert_eq!(cfg.extra_read, Vec::<PathBuf>::new());
     }
 
     #[test]
-    fn parse_sandbox_config_allows_explicit_opt_out() {
-        let cfg = parse_sandbox_config("[sandbox]\nenabled = false\n");
+    fn load_sandbox_config_preserves_paths_and_explicit_values() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[sandbox]
+enabled = false
+strict = true
+extra_read = ["../read"]
+extra_write = ["/tmp/write"]
+template_path = "profiles/custom.sb"
+allow_network = true
+"#,
+        )
+        .unwrap();
+
+        let cfg = load_sandbox_config(Some(dir.path()));
         assert!(!cfg.enabled);
+        assert!(cfg.strict);
+        assert_eq!(cfg.extra_read, vec![PathBuf::from("../read")]);
+        assert_eq!(cfg.extra_write, vec![PathBuf::from("/tmp/write")]);
+        assert_eq!(cfg.template_path, Some(PathBuf::from("profiles/custom.sb")));
+        assert!(cfg.allow_network);
+    }
+
+    #[test]
+    fn load_sandbox_config_keeps_invalid_toml_at_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[sandbox\n").unwrap();
+
+        assert_eq!(
+            load_sandbox_config(Some(dir.path())),
+            SandboxConfig::default()
+        );
     }
 
     #[test]
