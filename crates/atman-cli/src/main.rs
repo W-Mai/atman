@@ -3897,8 +3897,11 @@ fn apply_session_config(session: &atman_runtime::Session) {
     let env_mode = std::env::var("ATMAN_FS_ACCESS")
         .ok()
         .and_then(|s| s.parse::<atman_runtime::fs_access::FsAccessMode>().ok());
-    let cfg_mode = parse_fs_access_mode(&text);
-    if let Some(mode) = env_mode.or(cfg_mode) {
+    let config_mode = atman_runtime::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.fs_access_mode())
+        .ok()
+        .flatten();
+    if let Some(mode) = select_fs_access_mode(env_mode, config_mode) {
         session.set_fs_access_mode(mode);
     }
     if let Some(mc) = atman_runtime::model_registry::parse_config(&text) {
@@ -3919,35 +3922,11 @@ pub fn load_model_config_from_disk() {
     let _ = hub.reload();
 }
 
-// Reads [fs_access] mode = "..." out of the same config.toml we already
-// scan for other tiny settings. Kept as a hand-rolled section walk so
-// unrelated syntax errors elsewhere in the file don't kill boot.
-pub fn parse_fs_access_mode(text: &str) -> Option<atman_runtime::fs_access::FsAccessMode> {
-    use std::str::FromStr;
-    let mut in_section = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('[')
-            && let Some(name) = rest.strip_suffix(']')
-        {
-            in_section = name.trim() == "fs_access";
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == "mode" {
-            let raw = v.trim().trim_matches('"');
-            return atman_runtime::fs_access::FsAccessMode::from_str(raw).ok();
-        }
-    }
-    None
+fn select_fs_access_mode(
+    env_mode: Option<atman_runtime::fs_access::FsAccessMode>,
+    config_mode: Option<atman_runtime::fs_access::FsAccessMode>,
+) -> Option<atman_runtime::fs_access::FsAccessMode> {
+    env_mode.or(config_mode)
 }
 
 fn parse_compact_review_mode(text: &str) -> Option<atman_runtime::CompactReviewMode> {
@@ -6887,5 +6866,35 @@ async fn test_provider_endpoint(
         Ok(Ok(msg)) => (msg, true),
         Ok(Err(msg)) => (format!("\"{name}\" {msg}"), false),
         Err(_) => (format!("\"{name}\" timed out after 15s"), false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atman_runtime::fs_access::FsAccessMode;
+
+    #[test]
+    fn fs_access_env_mode_overrides_config_mode() {
+        assert_eq!(
+            select_fs_access_mode(
+                Some(FsAccessMode::ReadOnly),
+                Some(FsAccessMode::DangerFullAccess),
+            ),
+            Some(FsAccessMode::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn fs_access_config_mode_is_used_without_env_mode() {
+        assert_eq!(
+            select_fs_access_mode(None, Some(FsAccessMode::WorkspaceWrite)),
+            Some(FsAccessMode::WorkspaceWrite)
+        );
+    }
+
+    #[test]
+    fn fs_access_mode_is_none_without_env_or_config() {
+        assert_eq!(select_fs_access_mode(None, None), None);
     }
 }

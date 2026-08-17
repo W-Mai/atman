@@ -1,5 +1,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Mutex;
 
 use crate::model_registry::ModelConfigUpdate;
@@ -123,6 +124,31 @@ impl ConfigHub {
                 "invalid theme.mode: {mode:?}"
             ))),
         }
+    }
+
+    pub fn fs_access_mode(&self) -> Result<Option<crate::fs_access::FsAccessMode>, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        let Some(fs_access) = document.get("fs_access") else {
+            return Ok(None);
+        };
+        let Some(fs_access) = fs_access.as_table() else {
+            return Err(ConfigError::Invalid("fs_access is not a table".into()));
+        };
+        let Some(mode) = fs_access.get("mode") else {
+            return Ok(None);
+        };
+        let Some(mode) = mode.as_str() else {
+            return Err(ConfigError::Invalid(
+                "fs_access.mode is not a string".into(),
+            ));
+        };
+        crate::fs_access::FsAccessMode::from_str(mode)
+            .map(Some)
+            .map_err(ConfigError::Invalid)
     }
 
     pub fn upsert_model(&self, update: ModelConfigUpdate<'_>) -> Result<(), ConfigError> {
@@ -458,6 +484,62 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn fs_access_mode_defaults_to_none_when_config_is_missing() {
+        let (_dir, hub) = temp_hub();
+
+        assert_eq!(hub.fs_access_mode().unwrap(), None);
+    }
+
+    #[test]
+    fn fs_access_mode_defaults_to_none_when_section_or_mode_is_missing() {
+        for text in ["[theme]\nmode = \"dark\"\n", "[fs_access]\n"] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, text);
+
+            assert_eq!(hub.fs_access_mode().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn fs_access_mode_parses_canonical_and_alias_values() {
+        for (mode, expected) in [
+            ("read-only", crate::fs_access::FsAccessMode::ReadOnly),
+            ("ws", crate::fs_access::FsAccessMode::WorkspaceWrite),
+            (
+                "danger-full-access",
+                crate::fs_access::FsAccessMode::DangerFullAccess,
+            ),
+        ] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[fs_access]\nmode = {mode:?}\n"));
+
+            assert_eq!(hub.fs_access_mode().unwrap(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn fs_access_mode_rejects_unknown_mode() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[fs_access]\nmode = \"chaos\"\n");
+
+        assert!(matches!(
+            hub.fs_access_mode(),
+            Err(ConfigError::Invalid(message)) if message.contains("unknown fs access mode")
+        ));
+    }
+
+    #[test]
+    fn fs_access_mode_rejects_non_string_mode() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[fs_access]\nmode = true\n");
+
+        assert!(matches!(
+            hub.fs_access_mode(),
+            Err(ConfigError::Invalid(message)) if message.contains("fs_access.mode")
         ));
     }
 
