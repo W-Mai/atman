@@ -10,6 +10,8 @@ use atman_runtime::sandbox::Sandbox;
 use atman_runtime::{Executor, Value, tools};
 use serde::Deserialize;
 
+pub use atman_runtime::config_hub::RedactConfig;
+
 pub struct BootstrapOptions {
     pub events: EventSink,
     pub mock: bool,
@@ -41,62 +43,13 @@ impl Default for SandboxConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct RedactConfig {
-    pub enabled: bool,
-    pub partial: bool,
-    pub allowlist: Vec<String>,
-    pub custom_patterns: Vec<(String, String)>,
-}
-
 pub fn load_redact_config(config_dir: Option<&Path>) -> RedactConfig {
     let Some(dir) = config_dir else {
         return RedactConfig::default();
     };
-    let path = dir.join("config.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return RedactConfig::default();
-    };
-    parse_redact_config(&text)
-}
-
-pub fn parse_redact_config(text: &str) -> RedactConfig {
-    #[derive(Debug, Deserialize, Default)]
-    struct RawPattern {
-        kind: String,
-        regex: String,
-    }
-    #[derive(Debug, Deserialize, Default)]
-    struct RawRedact {
-        #[serde(default)]
-        enabled: bool,
-        #[serde(default)]
-        mode: Option<String>,
-        #[serde(default)]
-        allowlist: Vec<String>,
-        #[serde(default)]
-        custom_patterns: Vec<RawPattern>,
-    }
-    #[derive(Debug, Deserialize, Default)]
-    struct RawRedactFile {
-        #[serde(default)]
-        redact: RawRedact,
-    }
-    let file: RawRedactFile = match toml::from_str(text) {
-        Ok(f) => f,
-        Err(_) => return RedactConfig::default(),
-    };
-    RedactConfig {
-        enabled: file.redact.enabled,
-        partial: file.redact.mode.as_deref() == Some("partial"),
-        allowlist: file.redact.allowlist,
-        custom_patterns: file
-            .redact
-            .custom_patterns
-            .into_iter()
-            .map(|p| (p.kind, p.regex))
-            .collect(),
-    }
+    atman_runtime::config_hub::ConfigHub::from_config_dir(dir)
+        .redact_config()
+        .unwrap_or_default()
 }
 
 pub fn build_redactor(config_dir: Option<&Path>) -> Option<Arc<atman_runtime::redact::Redactor>> {
@@ -873,5 +826,58 @@ mod tests {
     fn parse_sandbox_config_allows_explicit_opt_out() {
         let cfg = parse_sandbox_config("[sandbox]\nenabled = false\n");
         assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn load_redact_config_preserves_missing_file_default() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            load_redact_config(Some(dir.path())),
+            RedactConfig::default()
+        );
+        assert_eq!(load_redact_config(None), RedactConfig::default());
+    }
+
+    #[test]
+    fn load_redact_config_and_build_redactor_use_hub_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[redact]
+enabled = true
+mode = "partial"
+allowlist = ["safe@example.com"]
+custom_patterns = [{ kind = "ticket", regex = "T-[0-9]+" }]
+"#,
+        )
+        .unwrap();
+
+        let config = load_redact_config(Some(dir.path()));
+        assert!(config.enabled);
+        assert!(config.partial);
+        assert_eq!(config.custom_patterns.len(), 1);
+
+        let redactor = build_redactor(Some(dir.path())).unwrap();
+        assert!(
+            redactor
+                .scan("ticket T-42")
+                .iter()
+                .any(|hit| hit.kind == "ticket")
+        );
+        assert!(redactor.scan("safe@example.com").is_empty());
+    }
+
+    #[test]
+    fn load_redact_config_keeps_invalid_toml_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[redact\n").unwrap();
+
+        assert_eq!(
+            load_redact_config(Some(dir.path())),
+            RedactConfig::default()
+        );
+        assert!(build_redactor(Some(dir.path())).is_none());
     }
 }

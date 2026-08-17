@@ -57,6 +57,14 @@ pub enum InterjectionMode {
     Unknown(String),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RedactConfig {
+    pub enabled: bool,
+    pub partial: bool,
+    pub allowlist: Vec<String>,
+    pub custom_patterns: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderConfigUpdate<'a> {
     pub name: &'a str,
@@ -260,6 +268,48 @@ impl ConfigHub {
             "llm" => InterjectionMode::Llm,
             other => InterjectionMode::Unknown(other.to_string()),
         }))
+    }
+
+    pub fn redact_config(&self) -> Result<RedactConfig, ConfigError> {
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawPattern {
+            kind: String,
+            regex: String,
+        }
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawRedact {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            mode: Option<String>,
+            #[serde(default)]
+            allowlist: Vec<String>,
+            #[serde(default)]
+            custom_patterns: Vec<RawPattern>,
+        }
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawRedactFile {
+            #[serde(default)]
+            redact: RawRedact,
+        }
+
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(RedactConfig::default());
+        }
+        let file: RawRedactFile = toml::from_str(&text)
+            .map_err(|error| ConfigError::Invalid(format!("parse redact config: {error}")))?;
+        Ok(RedactConfig {
+            enabled: file.redact.enabled,
+            partial: file.redact.mode.as_deref() == Some("partial"),
+            allowlist: file.redact.allowlist,
+            custom_patterns: file
+                .redact
+                .custom_patterns
+                .into_iter()
+                .map(|pattern| (pattern.kind, pattern.regex))
+                .collect(),
+        })
     }
 
     pub fn upsert_model(&self, update: ModelConfigUpdate<'_>) -> Result<(), ConfigError> {
@@ -595,6 +645,64 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn redact_config_defaults_when_config_is_missing_or_section_is_missing() {
+        for text in [None, Some("[theme]\nmode = \"dark\"\n")] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            assert_eq!(hub.redact_config().unwrap(), RedactConfig::default());
+        }
+    }
+
+    #[test]
+    fn redact_config_parses_mode_patterns_and_allowlist() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            r#"
+[redact]
+enabled = true
+mode = "partial"
+allowlist = ["safe@example.com"]
+custom_patterns = [{ kind = "ticket", regex = "T-[0-9]+" }]
+"#,
+        );
+
+        assert_eq!(
+            hub.redact_config().unwrap(),
+            RedactConfig {
+                enabled: true,
+                partial: true,
+                allowlist: vec!["safe@example.com".into()],
+                custom_patterns: vec![("ticket".into(), "T-[0-9]+".into())],
+            }
+        );
+    }
+
+    #[test]
+    fn redact_config_treats_unknown_mode_as_full() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[redact]\nenabled = true\nmode = \"unknown\"\n");
+
+        let config = hub.redact_config().unwrap();
+        assert!(config.enabled);
+        assert!(!config.partial);
+    }
+
+    #[test]
+    fn redact_config_rejects_invalid_schema() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[redact]\nenabled = \"yes\"\n");
+
+        assert!(matches!(
+            hub.redact_config(),
+            Err(ConfigError::Invalid(message)) if message.contains("parse redact config")
         ));
     }
 
