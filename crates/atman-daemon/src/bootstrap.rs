@@ -561,62 +561,12 @@ fn register_providers_from_config(executor: &mut Executor) {
 pub fn load_preview_config(
     config_dir: Option<&Path>,
 ) -> atman_runtime::tools::preview::PreviewConfig {
-    let cfg = atman_runtime::tools::preview::PreviewConfig::default();
     let Some(dir) = config_dir else {
-        return cfg;
+        return atman_runtime::tools::preview::PreviewConfig::default();
     };
-    let path = dir.join("config.toml");
-    if !path.exists() {
-        return cfg;
-    }
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return cfg;
-    };
-    parse_preview_config(&text, cfg)
-}
-
-pub fn parse_preview_config(
-    text: &str,
-    mut cfg: atman_runtime::tools::preview::PreviewConfig,
-) -> atman_runtime::tools::preview::PreviewConfig {
-    let mut in_section = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('[')
-            && let Some(name) = rest.strip_suffix(']')
-        {
-            in_section = name.trim() == "preview";
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let key = k.trim();
-        let val = v.trim().trim_matches('"');
-        match key {
-            "base_url" => cfg.base_url = val.to_string(),
-            "timeout_ms" => {
-                if let Ok(n) = val.parse::<u64>() {
-                    cfg.timeout_ms = n;
-                }
-            }
-            "project_abs_path" => cfg.project_abs_path = val.to_string(),
-            "project_hint_slug" => cfg.project_hint_slug = Some(val.to_string()),
-            "max_body_bytes" => {
-                if let Ok(n) = val.parse::<usize>() {
-                    cfg.max_body_bytes = n;
-                }
-            }
-            _ => {}
-        }
-    }
-    cfg
+    atman_runtime::config_hub::ConfigHub::from_config_dir(dir)
+        .preview_config()
+        .unwrap_or_default()
 }
 
 pub fn default_config_dir() -> Result<PathBuf> {
@@ -729,6 +679,32 @@ pub fn default_data_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_preview_config_uses_hub_projection_and_defaults_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let default = atman_runtime::tools::preview::PreviewConfig::default();
+
+        let missing = load_preview_config(Some(dir.path()));
+        assert_eq!(missing.base_url, default.base_url);
+        assert_eq!(missing.timeout_ms, default.timeout_ms);
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[preview]\nbase_url = \"http://127.0.0.1:9000\"\ntimeout_ms = 250\nmax_body_bytes = 4096\n",
+        )
+        .unwrap();
+        let configured = load_preview_config(Some(dir.path()));
+        assert_eq!(configured.base_url, "http://127.0.0.1:9000");
+        assert_eq!(configured.timeout_ms, 250);
+        assert_eq!(configured.max_body_bytes, 4096);
+
+        std::fs::write(dir.path().join("config.toml"), "[preview\n").unwrap();
+        let invalid = load_preview_config(Some(dir.path()));
+        assert_eq!(invalid.base_url, default.base_url);
+        assert_eq!(invalid.timeout_ms, default.timeout_ms);
+        assert_eq!(invalid.max_body_bytes, default.max_body_bytes);
+    }
 
     #[test]
     fn sandbox_config_defaults_to_enabled() {

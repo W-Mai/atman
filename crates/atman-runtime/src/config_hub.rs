@@ -293,6 +293,51 @@ impl ConfigHub {
         }))
     }
 
+    pub fn preview_config(&self) -> Result<crate::tools::preview::PreviewConfig, ConfigError> {
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawPreview {
+            #[serde(default)]
+            base_url: Option<String>,
+            #[serde(default)]
+            timeout_ms: Option<u64>,
+            #[serde(default)]
+            project_abs_path: Option<String>,
+            #[serde(default)]
+            project_hint_slug: Option<String>,
+            #[serde(default)]
+            max_body_bytes: Option<usize>,
+        }
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawPreviewFile {
+            #[serde(default)]
+            preview: RawPreview,
+        }
+
+        let text = self.read_config_toml()?;
+        let mut config = crate::tools::preview::PreviewConfig::default();
+        if text.trim().is_empty() {
+            return Ok(config);
+        }
+        let file: RawPreviewFile = toml::from_str(&text)
+            .map_err(|error| ConfigError::Invalid(format!("parse preview config: {error}")))?;
+        if let Some(value) = file.preview.base_url {
+            config.base_url = value;
+        }
+        if let Some(value) = file.preview.timeout_ms {
+            config.timeout_ms = value;
+        }
+        if let Some(value) = file.preview.project_abs_path {
+            config.project_abs_path = value;
+        }
+        if let Some(value) = file.preview.project_hint_slug {
+            config.project_hint_slug = Some(value);
+        }
+        if let Some(value) = file.preview.max_body_bytes {
+            config.max_body_bytes = value;
+        }
+        Ok(config)
+    }
+
     pub fn sandbox_config(&self) -> Result<SandboxConfig, ConfigError> {
         #[derive(Debug, serde::Deserialize, Default)]
         struct RawSandbox {
@@ -716,6 +761,58 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn preview_config_defaults_when_config_or_section_is_missing() {
+        for text in [None, Some("[theme]\nmode = \"dark\"\n")] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            let config = hub.preview_config().unwrap();
+            let expected = crate::tools::preview::PreviewConfig::default();
+            assert_eq!(config.base_url, expected.base_url);
+            assert_eq!(config.timeout_ms, expected.timeout_ms);
+            assert_eq!(config.project_abs_path, expected.project_abs_path);
+            assert_eq!(config.project_hint_slug, expected.project_hint_slug);
+            assert_eq!(config.max_body_bytes, expected.max_body_bytes);
+        }
+    }
+
+    #[test]
+    fn preview_config_parses_all_supported_fields() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            r#"
+[preview]
+base_url = "http://127.0.0.1:9000"
+timeout_ms = 4500
+project_abs_path = "/tmp/project"
+project_hint_slug = "project"
+max_body_bytes = 2048
+"#,
+        );
+
+        let config = hub.preview_config().unwrap();
+        assert_eq!(config.base_url, "http://127.0.0.1:9000");
+        assert_eq!(config.timeout_ms, 4500);
+        assert_eq!(config.project_abs_path, "/tmp/project");
+        assert_eq!(config.project_hint_slug.as_deref(), Some("project"));
+        assert_eq!(config.max_body_bytes, 2048);
+    }
+
+    #[test]
+    fn preview_config_rejects_invalid_schema() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[preview]\ntimeout_ms = \"slow\"\n");
+
+        assert!(matches!(
+            hub.preview_config(),
+            Err(ConfigError::Invalid(message)) if message.contains("parse preview config")
         ));
     }
 
