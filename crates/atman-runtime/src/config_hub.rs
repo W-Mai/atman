@@ -205,6 +205,27 @@ impl ConfigHub {
             .ok_or_else(|| ConfigError::Invalid(format!("invalid compaction.review: {review:?}")))
     }
 
+    pub fn suggest_model(&self) -> Result<Option<String>, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        let Some(suggest) = document.get("suggest") else {
+            return Ok(None);
+        };
+        let Some(suggest) = suggest.as_table() else {
+            return Err(ConfigError::Invalid("suggest is not a table".into()));
+        };
+        let Some(model) = suggest.get("model") else {
+            return Ok(None);
+        };
+        let Some(model) = model.as_str() else {
+            return Err(ConfigError::Invalid("suggest.model is not a string".into()));
+        };
+        Ok(Some(model.to_string()))
+    }
+
     pub fn upsert_model(&self, update: ModelConfigUpdate<'_>) -> Result<(), ConfigError> {
         self.update_config_toml(|doc| {
             validate_model_name(doc, update.old_name, update.name)?;
@@ -538,6 +559,43 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn suggest_model_defaults_to_none_when_config_or_value_is_missing() {
+        for text in [
+            None,
+            Some("[theme]\nmode = \"dark\"\n"),
+            Some("[suggest]\n"),
+        ] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            assert_eq!(hub.suggest_model().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn suggest_model_returns_configured_string_including_empty() {
+        for value in ["smart", ""] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[suggest]\nmodel = {value:?}\n"));
+
+            assert_eq!(hub.suggest_model().unwrap().as_deref(), Some(value));
+        }
+    }
+
+    #[test]
+    fn suggest_model_rejects_non_string_value() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[suggest]\nmodel = 42\n");
+
+        assert!(matches!(
+            hub.suggest_model(),
+            Err(ConfigError::Invalid(message)) if message.contains("suggest.model")
         ));
     }
 

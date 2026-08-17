@@ -3984,41 +3984,15 @@ fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_dsl::ast
 }
 
 fn load_suggest_model() -> String {
-    let default = "gpt-4o-mini".to_string();
-    let Ok(cfg) = config_dir() else {
-        return default;
-    };
-    let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
-        return default;
-    };
-    let raw = parse_suggest_model(&text).unwrap_or(default);
-    atman_runtime::model_registry::resolve_alias(&raw)
+    let configured = atman_runtime::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.suggest_model())
+        .ok()
+        .flatten();
+    atman_runtime::model_registry::resolve_alias(&select_suggest_model(configured))
 }
 
-fn parse_suggest_model(text: &str) -> Option<String> {
-    let mut in_section = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('[')
-            && let Some(name) = rest.strip_suffix(']')
-        {
-            in_section = name.trim() == "suggest";
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == "model" {
-            return Some(v.trim().trim_matches('"').to_string());
-        }
-    }
-    None
+fn select_suggest_model(configured: Option<String>) -> String {
+    configured.unwrap_or_else(|| "gpt-4o-mini".to_string())
 }
 
 async fn cmd_cost(session_id: Option<String>, all: bool) -> Result<()> {
@@ -6826,6 +6800,13 @@ async fn test_provider_endpoint(
 mod tests {
     use super::*;
     use atman_runtime::fs_access::FsAccessMode;
+
+    #[test]
+    fn suggest_model_uses_configured_value_or_default() {
+        assert_eq!(select_suggest_model(Some("smart".into())), "smart");
+        assert_eq!(select_suggest_model(Some(String::new())), "");
+        assert_eq!(select_suggest_model(None), "gpt-4o-mini");
+    }
 
     #[test]
     fn auto_snapshot_env_true_overrides_config_false() {
