@@ -151,6 +151,35 @@ impl ConfigHub {
             .map_err(ConfigError::Invalid)
     }
 
+    pub fn auto_snapshot(&self) -> Result<Option<bool>, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        let Some(registry) = document.get("registry") else {
+            return Ok(None);
+        };
+        let Some(registry) = registry.as_table() else {
+            return Err(ConfigError::Invalid("registry is not a table".into()));
+        };
+        let Some(auto_snapshot) = registry.get("auto_snapshot") else {
+            return Ok(None);
+        };
+        if let Some(value) = auto_snapshot.as_bool() {
+            return Ok(Some(value));
+        }
+        if let Some(value) = auto_snapshot.as_integer() {
+            return Ok(Some(value == 1));
+        }
+        if let Some(value) = auto_snapshot.as_str() {
+            return Ok(Some(value == "true"));
+        }
+        Err(ConfigError::Invalid(
+            "registry.auto_snapshot has an unsupported type".into(),
+        ))
+    }
+
     pub fn upsert_model(&self, update: ModelConfigUpdate<'_>) -> Result<(), ConfigError> {
         self.update_config_toml(|doc| {
             validate_model_name(doc, update.old_name, update.name)?;
@@ -484,6 +513,63 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn auto_snapshot_defaults_to_none_when_config_or_value_is_missing() {
+        for text in [
+            None,
+            Some("[theme]\nmode = \"dark\"\n"),
+            Some("[registry]\n"),
+        ] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            assert_eq!(hub.auto_snapshot().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn auto_snapshot_reads_boolean_values() {
+        for value in [true, false] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[registry]\nauto_snapshot = {value}\n"));
+
+            assert_eq!(hub.auto_snapshot().unwrap(), Some(value));
+        }
+    }
+
+    #[test]
+    fn auto_snapshot_reads_integer_values() {
+        for (value, expected) in [(1, true), (0, false)] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[registry]\nauto_snapshot = {value}\n"));
+
+            assert_eq!(hub.auto_snapshot().unwrap(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn auto_snapshot_only_enables_exact_true_string() {
+        for (value, expected) in [("true", true), ("yes", false)] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[registry]\nauto_snapshot = {value:?}\n"));
+
+            assert_eq!(hub.auto_snapshot().unwrap(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn auto_snapshot_rejects_unsupported_type() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[registry]\nauto_snapshot = [true]\n");
+
+        assert!(matches!(
+            hub.auto_snapshot(),
+            Err(ConfigError::Invalid(message)) if message.contains("registry.auto_snapshot")
         ));
     }
 

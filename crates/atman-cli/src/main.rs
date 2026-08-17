@@ -3957,44 +3957,20 @@ fn parse_compact_review_mode(text: &str) -> Option<atman_runtime::CompactReviewM
 }
 
 fn load_auto_snapshot() -> bool {
-    if let Ok(v) = std::env::var("ATMAN_AUTO_SNAPSHOT")
-        && matches!(v.trim(), "1" | "true" | "yes" | "on")
-    {
+    let env_value = std::env::var("ATMAN_AUTO_SNAPSHOT").ok();
+    if select_auto_snapshot(env_value.as_deref(), None) {
         return true;
     }
-    let Ok(cfg) = config_dir() else {
-        return false;
-    };
-    let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
-        return false;
-    };
-    parse_auto_snapshot(&text).unwrap_or(false)
+    atman_runtime::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.auto_snapshot())
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }
 
-fn parse_auto_snapshot(text: &str) -> Option<bool> {
-    let mut in_section = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('[')
-            && let Some(name) = rest.strip_suffix(']')
-        {
-            in_section = name.trim() == "registry";
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == "auto_snapshot" {
-            return Some(matches!(v.trim(), "true" | "1" | "\"true\"" | "yes"));
-        }
-    }
-    None
+fn select_auto_snapshot(env_value: Option<&str>, config_value: Option<bool>) -> bool {
+    env_value.is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        || config_value.unwrap_or(false)
 }
 
 fn auto_snapshot_flows(source_path: &Path, source: &str, parsed: &atman_dsl::ast::File) {
@@ -6873,6 +6849,21 @@ async fn test_provider_endpoint(
 mod tests {
     use super::*;
     use atman_runtime::fs_access::FsAccessMode;
+
+    #[test]
+    fn auto_snapshot_env_true_overrides_config_false() {
+        assert!(select_auto_snapshot(Some(" yes "), Some(false)));
+    }
+
+    #[test]
+    fn auto_snapshot_false_like_env_does_not_override_config_true() {
+        assert!(select_auto_snapshot(Some("false"), Some(true)));
+    }
+
+    #[test]
+    fn auto_snapshot_defaults_to_false_without_env_or_config() {
+        assert!(!select_auto_snapshot(None, None));
+    }
 
     #[test]
     fn fs_access_env_mode_overrides_config_mode() {
