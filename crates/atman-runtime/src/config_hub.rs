@@ -49,6 +49,14 @@ pub enum ThemePreference {
     Dark,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterjectionMode {
+    Off,
+    Rule,
+    Llm,
+    Unknown(String),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderConfigUpdate<'a> {
     pub name: &'a str,
@@ -224,6 +232,34 @@ impl ConfigHub {
             return Err(ConfigError::Invalid("suggest.model is not a string".into()));
         };
         Ok(Some(model.to_string()))
+    }
+
+    pub fn interjection_mode(&self) -> Result<Option<InterjectionMode>, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        let Some(interjection) = document.get("interjection") else {
+            return Ok(None);
+        };
+        let Some(interjection) = interjection.as_table() else {
+            return Err(ConfigError::Invalid("interjection is not a table".into()));
+        };
+        let Some(classifier) = interjection.get("classifier") else {
+            return Ok(None);
+        };
+        let Some(classifier) = classifier.as_str() else {
+            return Err(ConfigError::Invalid(
+                "interjection.classifier is not a string".into(),
+            ));
+        };
+        Ok(Some(match classifier {
+            "off" => InterjectionMode::Off,
+            "rule" => InterjectionMode::Rule,
+            "llm" => InterjectionMode::Llm,
+            other => InterjectionMode::Unknown(other.to_string()),
+        }))
     }
 
     pub fn upsert_model(&self, update: ModelConfigUpdate<'_>) -> Result<(), ConfigError> {
@@ -559,6 +595,48 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn interjection_mode_defaults_to_none_when_config_or_value_is_missing() {
+        for text in [
+            None,
+            Some("[theme]\nmode = \"dark\"\n"),
+            Some("[interjection]\n"),
+        ] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            assert_eq!(hub.interjection_mode().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn interjection_mode_parses_supported_and_unknown_values() {
+        for (value, expected) in [
+            ("off", InterjectionMode::Off),
+            ("rule", InterjectionMode::Rule),
+            ("llm", InterjectionMode::Llm),
+            ("custom", InterjectionMode::Unknown("custom".into())),
+        ] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[interjection]\nclassifier = {value:?}\n"));
+
+            assert_eq!(hub.interjection_mode().unwrap(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn interjection_mode_rejects_non_string_value() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[interjection]\nclassifier = true\n");
+
+        assert!(matches!(
+            hub.interjection_mode(),
+            Err(ConfigError::Invalid(message)) if message.contains("interjection.classifier")
         ));
     }
 

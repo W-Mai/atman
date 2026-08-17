@@ -5618,54 +5618,34 @@ fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {
 fn build_interjection_classifier()
 -> Option<std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>> {
     let cfg_dir = config_dir().ok()?;
-    let text = std::fs::read_to_string(cfg_dir.join("config.toml")).ok()?;
-    let mode = parse_interjection_mode(&text);
-    match mode.as_deref() {
-        Some("off") => None,
-        Some("rule") | None => Some(std::sync::Arc::new(
-            atman_runtime::injection_classifier::RuleClassifier::default(),
-        )),
-        Some("llm") => Some(std::sync::Arc::new(
-            atman_runtime::injection_classifier::ComposedClassifier::new(
-                atman_runtime::injection_classifier::RuleClassifier::default(),
-            ),
-        )),
-        Some(other) => {
-            atman_runtime::notify!(
-                warn,
-                "unknown [interjection] classifier = `{other}` — falling back to rule"
-            );
-            Some(std::sync::Arc::new(
-                atman_runtime::injection_classifier::RuleClassifier::default(),
-            ))
-        }
-    }
+    std::fs::read_to_string(cfg_dir.join("config.toml")).ok()?;
+    let mode = atman_runtime::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.interjection_mode())
+        .ok()
+        .flatten();
+    classifier_for_interjection_mode(mode)
 }
 
-fn parse_interjection_mode(text: &str) -> Option<String> {
-    let mut in_section = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('[')
-            && let Some(name) = rest.strip_suffix(']')
-        {
-            in_section = name.trim() == "interjection";
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == "classifier" {
-            return Some(v.trim().trim_matches('"').to_string());
+fn classifier_for_interjection_mode(
+    mode: Option<atman_runtime::config_hub::InterjectionMode>,
+) -> Option<std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>> {
+    use atman_runtime::config_hub::InterjectionMode;
+    use atman_runtime::injection_classifier::{ComposedClassifier, RuleClassifier};
+
+    match mode {
+        Some(InterjectionMode::Off) => None,
+        Some(InterjectionMode::Rule) | None => Some(std::sync::Arc::new(RuleClassifier::default())),
+        Some(InterjectionMode::Llm) => Some(std::sync::Arc::new(ComposedClassifier::new(
+            RuleClassifier::default(),
+        ))),
+        Some(InterjectionMode::Unknown(value)) => {
+            atman_runtime::notify!(
+                warn,
+                "unknown [interjection] classifier = `{value}` — falling back to rule"
+            );
+            Some(std::sync::Arc::new(RuleClassifier::default()))
         }
     }
-    None
 }
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
@@ -6800,6 +6780,35 @@ async fn test_provider_endpoint(
 mod tests {
     use super::*;
     use atman_runtime::fs_access::FsAccessMode;
+
+    #[test]
+    fn interjection_modes_build_expected_classifier() {
+        use atman_runtime::config_hub::InterjectionMode;
+
+        assert!(classifier_for_interjection_mode(Some(InterjectionMode::Off)).is_none());
+        assert_eq!(
+            classifier_for_interjection_mode(None).unwrap().kind(),
+            "rule"
+        );
+        assert_eq!(
+            classifier_for_interjection_mode(Some(InterjectionMode::Rule))
+                .unwrap()
+                .kind(),
+            "rule"
+        );
+        assert_eq!(
+            classifier_for_interjection_mode(Some(InterjectionMode::Llm))
+                .unwrap()
+                .kind(),
+            "composed"
+        );
+        assert_eq!(
+            classifier_for_interjection_mode(Some(InterjectionMode::Unknown("custom".into())))
+                .unwrap()
+                .kind(),
+            "rule"
+        );
+    }
 
     #[test]
     fn suggest_model_uses_configured_value_or_default() {
