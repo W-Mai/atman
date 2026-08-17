@@ -41,6 +41,13 @@ impl From<toml_edit::TomlError> for ConfigError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemePreference {
+    Auto,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderConfigUpdate<'a> {
     pub name: &'a str,
@@ -87,6 +94,34 @@ impl ConfigHub {
             Ok(text) => Ok(text),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
             Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn theme_preference(&self) -> Result<ThemePreference, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(ThemePreference::Auto);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        let Some(theme) = document.get("theme") else {
+            return Ok(ThemePreference::Auto);
+        };
+        let Some(theme) = theme.as_table() else {
+            return Err(ConfigError::Invalid("theme is not a table".into()));
+        };
+        let Some(mode) = theme.get("mode") else {
+            return Ok(ThemePreference::Auto);
+        };
+        let Some(mode) = mode.as_str() else {
+            return Err(ConfigError::Invalid("theme.mode is not a string".into()));
+        };
+        match mode.to_ascii_lowercase().as_str() {
+            "auto" => Ok(ThemePreference::Auto),
+            "light" => Ok(ThemePreference::Light),
+            "dark" => Ok(ThemePreference::Dark),
+            _ => Err(ConfigError::Invalid(format!(
+                "invalid theme.mode: {mode:?}"
+            ))),
         }
     }
 
@@ -379,6 +414,51 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hub = ConfigHub::from_config_dir(dir.path());
         (dir, hub)
+    }
+
+    fn write_config(hub: &ConfigHub, text: &str) {
+        std::fs::write(hub.config_toml_path(), text).unwrap();
+    }
+
+    #[test]
+    fn theme_preference_defaults_to_auto_when_config_is_missing() {
+        let (_dir, hub) = temp_hub();
+
+        assert_eq!(hub.theme_preference().unwrap(), ThemePreference::Auto);
+    }
+
+    #[test]
+    fn theme_preference_defaults_to_auto_when_mode_is_missing() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[theme]\n");
+
+        assert_eq!(hub.theme_preference().unwrap(), ThemePreference::Auto);
+    }
+
+    #[test]
+    fn theme_preference_parses_supported_modes() {
+        for (mode, expected) in [
+            ("auto", ThemePreference::Auto),
+            ("light", ThemePreference::Light),
+            ("LiGhT", ThemePreference::Light),
+            ("dark", ThemePreference::Dark),
+        ] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[theme]\nmode = {mode:?}\n"));
+
+            assert_eq!(hub.theme_preference().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn theme_preference_rejects_unknown_mode() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[theme]\nmode = \"sepia\"\n");
+
+        assert!(matches!(
+            hub.theme_preference(),
+            Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
     }
 
     fn model<'a>(

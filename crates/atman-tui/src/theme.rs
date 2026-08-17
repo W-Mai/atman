@@ -211,7 +211,9 @@ pub fn detect_mode() -> ThemeMode {
             _ => {}
         }
     }
-    if let Some(mode) = read_config_theme_mode() {
+    let preference =
+        atman_runtime::config_hub::ConfigHub::global().and_then(|hub| hub.theme_preference());
+    if let Some(mode) = mode_from_preference(preference) {
         return mode;
     }
     let mut opts = terminal_colorsaurus::QueryOptions::default();
@@ -223,42 +225,43 @@ pub fn detect_mode() -> ThemeMode {
     }
 }
 
-fn read_config_theme_mode() -> Option<ThemeMode> {
-    let cfg = atman_runtime::storage::config_dir().ok()?;
-    let text = std::fs::read_to_string(cfg.join("config.toml")).ok()?;
-    let mut in_section = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('[')
-            && let Some(name) = rest.strip_suffix(']')
-        {
-            in_section = name.trim() == "theme";
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            let v = v.trim().trim_matches('"').trim_matches('\'');
-            if k == "mode" {
-                return match v.to_ascii_lowercase().as_str() {
-                    "light" => Some(ThemeMode::Light),
-                    "dark" => Some(ThemeMode::Dark),
-                    _ => None,
-                };
-            }
-        }
+fn mode_from_preference(
+    preference: Result<
+        atman_runtime::config_hub::ThemePreference,
+        atman_runtime::config_hub::ConfigError,
+    >,
+) -> Option<ThemeMode> {
+    use atman_runtime::config_hub::ThemePreference;
+
+    match preference {
+        Ok(ThemePreference::Light) => Some(ThemeMode::Light),
+        Ok(ThemePreference::Dark) => Some(ThemeMode::Dark),
+        Ok(ThemePreference::Auto) | Err(_) => None,
     }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_preference_maps_explicit_modes_and_falls_back() {
+        use atman_runtime::config_hub::{ConfigError, ThemePreference};
+
+        assert_eq!(
+            mode_from_preference(Ok(ThemePreference::Light)),
+            Some(ThemeMode::Light)
+        );
+        assert_eq!(
+            mode_from_preference(Ok(ThemePreference::Dark)),
+            Some(ThemeMode::Dark)
+        );
+        assert_eq!(mode_from_preference(Ok(ThemePreference::Auto)), None);
+        assert_eq!(
+            mode_from_preference(Err(ConfigError::Invalid("invalid theme".into()))),
+            None
+        );
+    }
 
     #[test]
     fn lerp_at_zero_returns_a() {
