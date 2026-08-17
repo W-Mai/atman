@@ -190,17 +190,28 @@ mod tests {
 
     #[test]
     fn apply_writes_all_fields() {
+        use atman_runtime::trust::{OutsideBehavior, Theme, TrustConfig, TrustMode};
+
         let mut app = crate::app::AppState::new("s".into(), None);
         app.sidebar_collapsed = true;
         app.mouse_captured = false;
+        app.trust.mode = TrustMode::Calm;
 
         let state = PersistedUiState {
+            trust: TrustConfig {
+                mode: TrustMode::Eager,
+                theme: Theme::Weather,
+                outside: OutsideBehavior::Deny,
+            },
             sidebar_visible: true,
             mouse_captured: true,
             goal_collapsed: true,
             ..PersistedUiState::default()
         };
         state.apply(&mut app);
+        assert_eq!(app.trust.mode, TrustMode::Eager);
+        assert_eq!(app.trust.theme, Theme::Weather);
+        assert_eq!(app.trust.outside, OutsideBehavior::Deny);
         assert!(!app.sidebar_collapsed);
         assert!(app.mouse_captured);
         assert!(app.goal_collapsed);

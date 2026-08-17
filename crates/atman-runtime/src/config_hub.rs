@@ -293,6 +293,22 @@ impl ConfigHub {
         }))
     }
 
+    pub fn trust_config(&self) -> Result<crate::trust::TrustConfig, ConfigError> {
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawTrustFile {
+            #[serde(default)]
+            trust: crate::trust::TrustConfig,
+        }
+
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(crate::trust::TrustConfig::default());
+        }
+        let file: RawTrustFile = toml::from_str(&text)
+            .map_err(|error| ConfigError::Invalid(format!("parse trust config: {error}")))?;
+        Ok(file.trust)
+    }
+
     pub fn preview_config(&self) -> Result<crate::tools::preview::PreviewConfig, ConfigError> {
         #[derive(Debug, serde::Deserialize, Default)]
         struct RawPreview {
@@ -761,6 +777,46 @@ mod tests {
         assert!(matches!(
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
+        ));
+    }
+
+    #[test]
+    fn trust_config_defaults_when_config_or_section_is_missing() {
+        for text in [None, Some("[theme]\nmode = \"dark\"\n")] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            let config = hub.trust_config().unwrap();
+            assert_eq!(config.mode, crate::trust::TrustMode::Steady);
+            assert_eq!(config.theme, crate::trust::Theme::Default);
+            assert_eq!(config.outside, crate::trust::OutsideBehavior::Approve);
+        }
+    }
+
+    #[test]
+    fn trust_config_parses_mode_theme_and_outside() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            "[trust]\nmode = \"eager\"\ntheme = \"weather\"\noutside = \"deny\"\n",
+        );
+
+        let config = hub.trust_config().unwrap();
+        assert_eq!(config.mode, crate::trust::TrustMode::Eager);
+        assert_eq!(config.theme, crate::trust::Theme::Weather);
+        assert_eq!(config.outside, crate::trust::OutsideBehavior::Deny);
+    }
+
+    #[test]
+    fn trust_config_rejects_invalid_enum() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[trust]\noutside = \"sometimes\"\n");
+
+        assert!(matches!(
+            hub.trust_config(),
+            Err(ConfigError::Invalid(message)) if message.contains("parse trust config")
         ));
     }
 

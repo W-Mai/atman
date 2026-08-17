@@ -593,35 +593,12 @@ pub fn load_web_config(config_dir: Option<&Path>) -> WebConfig {
 }
 
 pub fn load_trust_config(config_dir: Option<&Path>) -> atman_runtime::trust::TrustConfig {
-    let mut cfg = atman_runtime::trust::TrustConfig::default();
     let Some(dir) = config_dir else {
-        return cfg;
+        return atman_runtime::trust::TrustConfig::default();
     };
-    let path = dir.join("config.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return cfg;
-    };
-    #[derive(Debug, Default, serde::Deserialize)]
-    struct RawFile {
-        #[serde(default)]
-        trust: RawTrust,
-    }
-    #[derive(Debug, Default, serde::Deserialize)]
-    struct RawTrust {
-        #[serde(default)]
-        mode: Option<atman_runtime::trust::TrustMode>,
-        #[serde(default)]
-        theme: Option<atman_runtime::trust::Theme>,
-    }
-    if let Ok(file) = toml::from_str::<RawFile>(&text) {
-        if let Some(m) = file.trust.mode {
-            cfg.mode = m;
-        }
-        if let Some(t) = file.trust.theme {
-            cfg.theme = t;
-        }
-    }
-    cfg
+    atman_runtime::config_hub::ConfigHub::from_config_dir(dir)
+        .trust_config()
+        .unwrap_or_default()
 }
 
 pub fn parse_web_config(text: &str, cfg: &mut WebConfig) {
@@ -679,6 +656,33 @@ pub fn default_data_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_trust_config_uses_all_hub_fields_and_defaults_on_error() {
+        use atman_runtime::trust::{OutsideBehavior, Theme, TrustMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[trust]\nmode = \"eager\"\ntheme = \"weather\"\noutside = \"deny\"\n",
+        )
+        .unwrap();
+
+        let configured = load_trust_config(Some(dir.path()));
+        assert_eq!(configured.mode, TrustMode::Eager);
+        assert_eq!(configured.theme, Theme::Weather);
+        assert_eq!(configured.outside, OutsideBehavior::Deny);
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[trust]\nmode = \"invalid\"\n",
+        )
+        .unwrap();
+        let invalid = load_trust_config(Some(dir.path()));
+        assert_eq!(invalid.mode, TrustMode::Steady);
+        assert_eq!(invalid.theme, Theme::Default);
+        assert_eq!(invalid.outside, OutsideBehavior::Approve);
+    }
 
     #[test]
     fn load_preview_config_uses_hub_projection_and_defaults_on_error() {
