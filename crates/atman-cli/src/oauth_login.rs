@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use atman_runtime::auth_store::{AuthStore, ProviderKind, StoredProvider};
+use atman_runtime::auth_store::{ProviderKind, StoredProvider};
 use atman_runtime::oauth::OAuthProvider;
 use atman_runtime::provider::Provider;
 
@@ -38,9 +38,8 @@ pub async fn oauth_login<P: OAuthProvider + Provider>(
                         enabled: true,
                         model_cache: None,
                     };
-                    let mut store = AuthStore::load().unwrap_or_default();
-                    store.add(provider.clone());
-                    let _ = store.save();
+                    let _ = atman_runtime::config_hub::ConfigHub::global()
+                        .and_then(|hub| hub.add_auth_provider(provider.clone()));
 
                     // Discover models immediately after login.
                     let discover_provider = P::from_stored(&provider);

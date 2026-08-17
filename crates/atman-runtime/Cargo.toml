@@ -41,6 +41,7 @@ toml_edit.workspace = true
 blake3.workspace = true
 git2.workspace = true
 portable-pty.workspace = true
+fs2.workspace = true
 vt100.workspace = true
 
 [dev-dependencies]

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::model_registry::ModelConfigUpdate;
 
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -106,10 +107,18 @@ pub struct ProviderConfigUpdate<'a> {
     pub enabled: bool,
 }
 
+pub struct AuthTokenUpdate {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: i64,
+    pub account: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigHub {
     config_dir: PathBuf,
     daemon_config_path: Option<PathBuf>,
+    auth_path: PathBuf,
 }
 
 impl ConfigHub {
@@ -120,9 +129,12 @@ impl ConfigHub {
     }
 
     pub fn from_config_dir(dir: impl Into<PathBuf>) -> Self {
+        let config_dir = dir.into();
+        let auth_path = config_dir.join("auth.json");
         Self {
-            config_dir: dir.into(),
+            config_dir,
             daemon_config_path: None,
+            auth_path,
         }
     }
 
@@ -145,9 +157,118 @@ impl ConfigHub {
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         Self {
+            auth_path: config_dir.join("auth.json"),
             config_dir,
             daemon_config_path: Some(path),
         }
+    }
+
+    pub fn from_auth_path(path: impl Into<PathBuf>) -> Self {
+        let auth_path = path.into();
+        let config_dir = auth_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        Self {
+            config_dir,
+            daemon_config_path: None,
+            auth_path,
+        }
+    }
+
+    pub fn load_auth(&self) -> Result<crate::auth_store::AuthStore, ConfigError> {
+        load_auth_from_path(&self.auth_path)
+    }
+
+    pub fn update_auth<T>(
+        &self,
+        mutate: impl FnOnce(&mut crate::auth_store::AuthStore) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
+        use fs2::FileExt;
+
+        let _guard = AUTH_WRITE_LOCK.lock().unwrap();
+        let parent = self.auth_path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let lock_path = parent.join(".auth.json.lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        set_sensitive_file_permissions(
+            &self
+                .auth_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(".auth.json.lock"),
+        )?;
+        lock.lock_exclusive()?;
+        let mut store = load_auth_from_path(&self.auth_path)?;
+        let result = mutate(&mut store)?;
+        self.write_auth(&store)?;
+        Ok(result)
+    }
+
+    pub fn add_auth_provider(
+        &self,
+        provider: crate::auth_store::StoredProvider,
+    ) -> Result<(), ConfigError> {
+        self.update_auth(|store| {
+            store.providers.push(provider);
+            Ok(())
+        })
+    }
+
+    pub fn remove_auth_provider(&self, id: &str) -> Result<bool, ConfigError> {
+        self.update_auth(|store| Ok(store.remove(id)))
+    }
+
+    pub fn set_auth_provider_enabled(&self, id: &str, enabled: bool) -> Result<bool, ConfigError> {
+        self.update_auth(|store| {
+            let Some(provider) = store
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == id)
+            else {
+                return Ok(false);
+            };
+            provider.enabled = enabled;
+            Ok(true)
+        })
+    }
+
+    pub fn update_auth_tokens(
+        &self,
+        id: &str,
+        update: AuthTokenUpdate,
+    ) -> Result<bool, ConfigError> {
+        self.update_auth(|store| {
+            let Some(provider) = store
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == id)
+            else {
+                return Ok(false);
+            };
+            provider.access_token = update.access_token;
+            provider.expires_at = update.expires_at;
+            if update.refresh_token.is_some() {
+                provider.refresh_token = update.refresh_token;
+            }
+            if update.account.is_some() {
+                provider.account = update.account;
+            }
+            Ok(true)
+        })
+    }
+
+    pub fn update_auth_model_cache(
+        &self,
+        id: &str,
+        cache: crate::auth_store::ModelCache,
+    ) -> Result<bool, ConfigError> {
+        self.update_auth(|store| Ok(store.update_model_cache(id, cache)))
     }
 
     pub fn load_or_init_daemon_config(&self) -> Result<DaemonConfig, ConfigError> {
@@ -749,29 +870,13 @@ impl ConfigHub {
             .daemon_config_path
             .as_deref()
             .ok_or_else(|| ConfigError::Invalid("daemon config path is not configured".into()))?;
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(
-            ".{}.{}.tmp",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("daemon.toml"),
-            uuid::Uuid::new_v4().simple()
-        ));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
-        set_sensitive_file_permissions(&tmp)?;
-        use std::io::Write;
-        file.write_all(text.as_bytes())?;
-        drop(file);
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        write_sensitive_atomic(path, text.as_bytes())
+    }
+
+    fn write_auth(&self, store: &crate::auth_store::AuthStore) -> Result<(), ConfigError> {
+        let json = serde_json::to_vec_pretty(store)
+            .map_err(|error| ConfigError::Invalid(format!("serialize auth store: {error}")))?;
+        write_sensitive_atomic(&self.auth_path, &json)
     }
 
     fn write_mcp(&self, configs: &[crate::mcp::McpServerConfig]) -> Result<(), ConfigError> {
@@ -792,6 +897,41 @@ impl ConfigHub {
         std::fs::rename(tmp, self.config_dir.join(filename))?;
         Ok(())
     }
+}
+
+fn load_auth_from_path(path: &Path) -> Result<crate::auth_store::AuthStore, ConfigError> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| ConfigError::Invalid(format!("parse {}: {error}", path.display()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(crate::auth_store::AuthStore::default())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_sensitive_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("sensitive-config");
+    let tmp = parent.join(format!(".{filename}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    set_sensitive_file_permissions(&tmp)?;
+    use std::io::Write;
+    file.write_all(contents)?;
+    drop(file);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 fn generate_daemon_token() -> String {
@@ -942,6 +1082,158 @@ mod tests {
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
         ));
+    }
+
+    fn auth_provider(id: &str) -> crate::auth_store::StoredProvider {
+        crate::auth_store::StoredProvider {
+            id: id.into(),
+            name: id.into(),
+            kind: crate::auth_store::ProviderKind::Codex,
+            access_token: "old-access".into(),
+            refresh_token: Some("old-refresh".into()),
+            expires_at: 1,
+            account: Some("old-account".into()),
+            enabled: true,
+            model_cache: None,
+        }
+    }
+
+    #[test]
+    fn auth_transactions_preserve_independent_concurrent_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let hub = ConfigHub::from_auth_path(&path);
+        hub.add_auth_provider(auth_provider("provider")).unwrap();
+
+        let cache_hub = hub.clone();
+        let cache = std::thread::spawn(move || {
+            cache_hub
+                .update_auth_model_cache(
+                    "provider",
+                    crate::auth_store::ModelCache {
+                        fetched_at: 10,
+                        models: vec![crate::auth_store::CachedModel {
+                            slug: "cached-model".into(),
+                            context_budget: Some(8192),
+                            thinking: true,
+                        }],
+                    },
+                )
+                .unwrap();
+        });
+        let token_hub = hub.clone();
+        let tokens = std::thread::spawn(move || {
+            token_hub
+                .update_auth_tokens(
+                    "provider",
+                    AuthTokenUpdate {
+                        access_token: "new-access".into(),
+                        refresh_token: Some("new-refresh".into()),
+                        expires_at: 99,
+                        account: None,
+                    },
+                )
+                .unwrap();
+        });
+        let enabled_hub = hub.clone();
+        let enabled = std::thread::spawn(move || {
+            enabled_hub
+                .set_auth_provider_enabled("provider", false)
+                .unwrap();
+        });
+        cache.join().unwrap();
+        tokens.join().unwrap();
+        enabled.join().unwrap();
+
+        let store = hub.load_auth().unwrap();
+        let provider = &store.providers[0];
+        assert_eq!(provider.access_token, "new-access");
+        assert_eq!(provider.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(provider.expires_at, 99);
+        assert_eq!(provider.account.as_deref(), Some("old-account"));
+        assert!(!provider.enabled);
+        assert_eq!(
+            provider.model_cache.as_ref().unwrap().models[0].slug,
+            "cached-model"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".auth.json.") && name.ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn auth_transaction_waits_for_external_file_lock() {
+        use fs2::FileExt;
+        use std::sync::mpsc::TryRecvError;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let lock_path = dir.path().join(".auth.json.lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+
+        let hub = ConfigHub::from_auth_path(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            hub.add_auth_provider(auth_provider("blocked")).unwrap();
+            tx.send(()).unwrap();
+        });
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        FileExt::unlock(&lock).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn auth_transaction_error_rolls_back_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let hub = ConfigHub::from_auth_path(&path);
+        hub.add_auth_provider(auth_provider("original")).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let result: Result<(), ConfigError> = hub.update_auth(|store| {
+            store.providers.push(auth_provider("discarded"));
+            Err(ConfigError::Invalid("reject mutation".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn auth_transaction_does_not_overwrite_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let corrupt = b"{not-json";
+        std::fs::write(&path, corrupt).unwrap();
+        let hub = ConfigHub::from_auth_path(&path);
+
+        let err = hub.add_auth_provider(auth_provider("new")).unwrap_err();
+        assert!(err.to_string().contains("parse"));
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+    }
+
+    #[test]
+    fn auth_load_defaults_when_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = ConfigHub::from_auth_path(dir.path().join("auth.json"));
+        assert!(hub.load_auth().unwrap().providers.is_empty());
     }
 
     #[test]

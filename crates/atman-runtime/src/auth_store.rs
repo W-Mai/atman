@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::config_dir;
@@ -52,40 +52,21 @@ pub struct AuthStore {
 
 impl AuthStore {
     pub fn load() -> Result<Self> {
-        let dir = config_dir().context("resolve config dir for auth.json")?;
-        let path = dir.join(AUTH_FILENAME);
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let store: Self =
-            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-        Ok(store)
+        Ok(crate::config_hub::ConfigHub::global()?.load_auth()?)
     }
 
     pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir {}", parent.display()))?;
-        }
-        let tmp = path.with_file_name(format!(".{}.tmp", AUTH_FILENAME));
-        let json = serde_json::to_vec_pretty(self).context("serialize auth store")?;
-        std::fs::write(&tmp, &json).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
+        let hub = crate::config_hub::ConfigHub::from_auth_path(path);
+        hub.update_auth(|store| {
+            *store = self.clone();
+            Ok(())
+        })?;
         Ok(())
     }
 
     pub fn save(&self) -> Result<()> {
-        let dir = config_dir().context("resolve config dir for auth.json")?;
-        std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
-        let path = dir.join(AUTH_FILENAME);
-        self.save_to(&path)
+        let dir = config_dir()?;
+        self.save_to(&dir.join(AUTH_FILENAME))
     }
 
     pub fn add(&mut self, p: StoredProvider) {
@@ -114,20 +95,19 @@ pub fn save_provider_model_cache(
     provider_id: &str,
     models: &[crate::provider::DiscoveredModel],
 ) -> Result<()> {
-    let mut store = AuthStore::load().unwrap_or_default();
     let cache = ModelCache {
         fetched_at: chrono::Utc::now().timestamp(),
         models: models
             .iter()
-            .map(|m| CachedModel {
-                slug: m.slug.clone(),
-                context_budget: m.context_budget,
-                thinking: m.thinking,
+            .map(|model| CachedModel {
+                slug: model.slug.clone(),
+                context_budget: model.context_budget,
+                thinking: model.thinking,
             })
             .collect(),
     };
-    store.update_model_cache(provider_id, cache);
-    store.save()
+    crate::config_hub::ConfigHub::global()?.update_auth_model_cache(provider_id, cache)?;
+    Ok(())
 }
 
 /// Convert cached models to discovered models for registry hydration.

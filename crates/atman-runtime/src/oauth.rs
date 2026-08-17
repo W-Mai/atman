@@ -7,7 +7,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use crate::auth_store::{AuthStore, StoredProvider};
+use crate::auth_store::StoredProvider;
+use crate::config_hub::AuthTokenUpdate;
 use crate::provider::{DiscoveredModel, Provider};
 
 pub struct Pkce {
@@ -109,15 +110,25 @@ async fn create_oauth_provider_impl<P: OAuthProvider>(
     if now + refresh_window >= stored.expires_at {
         if let Some(ref rt) = stored.refresh_token {
             let tokens = P::refresh_token(rt).await?;
+            let persisted_refresh_token = tokens.refresh_token.clone();
+            let persisted_account = tokens.account.clone();
             updated.access_token = tokens.access_token;
             updated.expires_at = tokens.expires_at;
             if tokens.refresh_token.is_some() {
                 updated.refresh_token = tokens.refresh_token;
             }
-            let mut store = AuthStore::load().unwrap_or_default();
-            store.remove(&stored.id);
-            store.add(updated.clone());
-            let _ = store.save();
+            let _ = crate::config_hub::ConfigHub::global().and_then(|hub| {
+                hub.update_auth_tokens(
+                    &stored.id,
+                    AuthTokenUpdate {
+                        access_token: updated.access_token.clone(),
+                        refresh_token: persisted_refresh_token,
+                        expires_at: updated.expires_at,
+                        account: persisted_account,
+                    },
+                )
+                .map(|_| ())
+            });
         }
     }
 

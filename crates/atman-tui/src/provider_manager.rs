@@ -376,12 +376,11 @@ impl ProviderManager {
                 ProviderSource::AuthStore { id } => {
                     let new_enabled =
                         !matches!(p.status, ProviderStatus::Active | ProviderStatus::Cached);
-                    if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
-                        if let Some(stored) = store.providers.iter_mut().find(|x| x.id == id) {
-                            stored.enabled = new_enabled;
-                            let _ = store.save();
-                            self.refresh_list();
-                        }
+                    if atman_runtime::config_hub::ConfigHub::global()
+                        .and_then(|hub| hub.set_auth_provider_enabled(&id, new_enabled))
+                        .unwrap_or(false)
+                    {
+                        self.refresh_list();
                     }
                 }
                 ProviderSource::Config => {
@@ -426,7 +425,7 @@ impl ProviderManager {
 
     fn execute_confirm(
         &mut self,
-        control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
+        _control_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         let provider_id = self.confirm_provider_id.take();
         let kind = self.confirm_kind.take();
@@ -436,13 +435,8 @@ impl ProviderManager {
 
         match kind {
             Some(ConfirmKind::Delete) | Some(ConfirmKind::Logout) => {
-                if let Some(tx) = control_tx {
-                    let _ = tx.send(crate::TuiControl::AuthLogout { id: id.clone() });
-                }
-                if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
-                    store.remove(&id);
-                    let _ = store.save();
-                }
+                let _ = atman_runtime::config_hub::ConfigHub::global()
+                    .and_then(|hub| hub.remove_auth_provider(&id));
                 self.refresh_list();
             }
             None => {}

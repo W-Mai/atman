@@ -1878,10 +1878,9 @@ async fn cmd_repl_once(
                         ),
                     },
                     atman_tui::TuiControl::AuthLogout { id } => {
-                        if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
-                            store.remove(&id);
-                            let _ = store.save();
-                        }
+                        let _ = atman_runtime::config_hub::ConfigHub::global()
+                            .and_then(|hub| hub.remove_auth_provider(&id))
+                            .map(|_| ());
                     }
                     atman_tui::TuiControl::AddConfigProvider {
                         name,
@@ -4556,10 +4555,9 @@ async fn cmd_tui_preview(scene: Option<String>) -> Result<()> {
                     }
                 }
                 atman_tui::TuiControl::AuthLogout { id } => {
-                    if let Ok(mut store) = atman_runtime::auth_store::AuthStore::load() {
-                        store.remove(&id);
-                        let _ = store.save();
-                    }
+                    let _ = atman_runtime::config_hub::ConfigHub::global()
+                        .and_then(|hub| hub.remove_auth_provider(&id))
+                        .map(|_| ());
                 }
                 atman_tui::TuiControl::CompactReviewAccept { review_id, edited } => {
                     let decision = match edited {
