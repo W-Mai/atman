@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
+
 use crate::model_registry::ModelConfigUpdate;
 
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -40,6 +42,11 @@ impl From<toml_edit::TomlError> for ConfigError {
     fn from(error: toml_edit::TomlError) -> Self {
         Self::Parse(error)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonConfig {
+    pub auth_token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +109,7 @@ pub struct ProviderConfigUpdate<'a> {
 #[derive(Debug, Clone)]
 pub struct ConfigHub {
     config_dir: PathBuf,
+    daemon_config_path: Option<PathBuf>,
 }
 
 impl ConfigHub {
@@ -114,6 +122,7 @@ impl ConfigHub {
     pub fn from_config_dir(dir: impl Into<PathBuf>) -> Self {
         Self {
             config_dir: dir.into(),
+            daemon_config_path: None,
         }
     }
 
@@ -127,6 +136,58 @@ impl ConfigHub {
 
     pub fn mcp_json_path(&self) -> PathBuf {
         self.config_dir.join("mcp_servers.json")
+    }
+
+    pub fn from_daemon_config_path(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let config_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        Self {
+            config_dir,
+            daemon_config_path: Some(path),
+        }
+    }
+
+    pub fn load_or_init_daemon_config(&self) -> Result<DaemonConfig, ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let path = self
+            .daemon_config_path
+            .as_deref()
+            .ok_or_else(|| ConfigError::Invalid("daemon config path is not configured".into()))?;
+        match std::fs::read_to_string(path) {
+            Ok(text) => toml::from_str(&text).map_err(|error| {
+                ConfigError::Invalid(format!("parse {}: {error}", path.display()))
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let config = DaemonConfig {
+                    auth_token: generate_daemon_token(),
+                };
+                self.write_daemon_config(&config)?;
+                Ok(config)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn rotate_daemon_config(&self) -> Result<DaemonConfig, ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let path = self
+            .daemon_config_path
+            .as_deref()
+            .ok_or_else(|| ConfigError::Invalid("daemon config path is not configured".into()))?;
+        if !path.exists() {
+            return Err(ConfigError::Invalid(format!(
+                "no daemon config at {} — nothing to rotate. Run `atman daemon start` once to generate one.",
+                path.display()
+            )));
+        }
+        let config = DaemonConfig {
+            auth_token: generate_daemon_token(),
+        };
+        self.write_daemon_config(&config)?;
+        Ok(config)
     }
 
     pub fn read_config_toml(&self) -> Result<String, ConfigError> {
@@ -681,6 +742,38 @@ impl ConfigHub {
         self.write_atomic("config.toml", ".config.toml.tmp", text)
     }
 
+    fn write_daemon_config(&self, config: &DaemonConfig) -> Result<(), ConfigError> {
+        let text = toml::to_string(config)
+            .map_err(|error| ConfigError::Invalid(format!("serialize daemon config: {error}")))?;
+        let path = self
+            .daemon_config_path
+            .as_deref()
+            .ok_or_else(|| ConfigError::Invalid("daemon config path is not configured".into()))?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let tmp = parent.join(format!(
+            ".{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("daemon.toml"),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        set_sensitive_file_permissions(&tmp)?;
+        use std::io::Write;
+        file.write_all(text.as_bytes())?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
     fn write_mcp(&self, configs: &[crate::mcp::McpServerConfig]) -> Result<(), ConfigError> {
         let json = crate::mcp_config::serialize(configs)
             .map_err(|error| ConfigError::Invalid(format!("serialize mcp config: {error}")))?;
@@ -699,6 +792,21 @@ impl ConfigHub {
         std::fs::rename(tmp, self.config_dir.join(filename))?;
         Ok(())
     }
+}
+
+fn generate_daemon_token() -> String {
+    let first = uuid::Uuid::new_v4().simple().to_string();
+    let second = uuid::Uuid::new_v4().simple().to_string();
+    format!("{first}{second}")
+}
+
+fn set_sensitive_file_permissions(path: &Path) -> Result<(), ConfigError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 fn insert_nonempty(table: &mut toml_edit::Table, key: &str, value: Option<&str>) {
@@ -834,6 +942,55 @@ mod tests {
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
         ));
+    }
+
+    #[test]
+    fn daemon_config_initializes_reuses_and_rotates_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.toml");
+        let hub = ConfigHub::from_daemon_config_path(&path);
+
+        let first = hub.load_or_init_daemon_config().unwrap();
+        assert_eq!(first.auth_token.len(), 64);
+        assert!(first.auth_token.chars().all(|c| c.is_ascii_hexdigit()));
+        let second = hub.load_or_init_daemon_config().unwrap();
+        assert_eq!(second, first);
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".daemon.toml.")
+        }));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let rotated = hub.rotate_daemon_config().unwrap();
+        assert_ne!(rotated.auth_token, first.auth_token);
+        assert_eq!(hub.load_or_init_daemon_config().unwrap(), rotated);
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".daemon.toml.")
+        }));
+    }
+
+    #[test]
+    fn daemon_config_rotation_requires_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.toml");
+        let err = ConfigHub::from_daemon_config_path(&path)
+            .rotate_daemon_config()
+            .unwrap_err();
+        assert!(err.to_string().contains("no daemon config"));
     }
 
     #[test]

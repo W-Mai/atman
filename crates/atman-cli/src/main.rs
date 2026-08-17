@@ -423,7 +423,8 @@ async fn async_main() -> Result<()> {
 
 async fn cmd_daemon_run(file: PathBuf, follow: bool, port: u16) -> Result<()> {
     let cfg_path = atman_daemon::config::default_config_path()?;
-    let cfg = atman_daemon::config::DaemonConfig::load_or_init(&cfg_path)?;
+    let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
+        .load_or_init_daemon_config()?;
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
 
@@ -582,7 +583,8 @@ async fn cmd_daemon_rotate_token() -> Result<()> {
         anyhow::bail!("atman-daemon is running (pid={pid}). Stop it first: `atman daemon stop`");
     }
     let cfg_path = atman_daemon::config::default_config_path()?;
-    let cfg = atman_daemon::config::DaemonConfig::rotate(&cfg_path)?;
+    let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
+        .rotate_daemon_config()?;
     println!("{}", cfg.auth_token);
     atman_runtime::notify!(
         success,
@@ -6276,7 +6278,8 @@ async fn cmd_logs_stream(
             .with_context(|| format!("no sessions found under {}", root.display()))?,
     };
     let cfg_path = atman_daemon::config::default_config_path()?;
-    let cfg = atman_daemon::config::DaemonConfig::load_or_init(&cfg_path)?;
+    let cfg = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&cfg_path)
+        .load_or_init_daemon_config()?;
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
     atman_runtime::notify!(

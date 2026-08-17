@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use atman_daemon::{
     DaemonState,
-    config::{DaemonConfig, default_config_path},
+    config::default_config_path,
     http::{HttpState, router},
     pidfile,
     unix::UnixServer,
@@ -33,7 +33,8 @@ async fn main() -> Result<()> {
     pidfile::write_pid(&pid_path, std::process::id())?;
 
     let config_path = default_config_path()?;
-    let config = DaemonConfig::load_or_init(&config_path)?;
+    let config = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&config_path)
+        .load_or_init_daemon_config()?;
     println!(
         "[atman-daemon] config loaded from {} (token 32-byte, keep it secret)",
         config_path.display()
