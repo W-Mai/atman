@@ -180,6 +180,31 @@ impl ConfigHub {
         ))
     }
 
+    pub fn compact_review_mode(&self) -> Result<Option<crate::CompactReviewMode>, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        let Some(compaction) = document.get("compaction") else {
+            return Ok(None);
+        };
+        let Some(compaction) = compaction.as_table() else {
+            return Err(ConfigError::Invalid("compaction is not a table".into()));
+        };
+        let Some(review) = compaction.get("review") else {
+            return Ok(None);
+        };
+        let Some(review) = review.as_str() else {
+            return Err(ConfigError::Invalid(
+                "compaction.review is not a string".into(),
+            ));
+        };
+        crate::CompactReviewMode::parse(review)
+            .map(Some)
+            .ok_or_else(|| ConfigError::Invalid(format!("invalid compaction.review: {review:?}")))
+    }
+
     pub fn upsert_model(&self, update: ModelConfigUpdate<'_>) -> Result<(), ConfigError> {
         self.update_config_toml(|doc| {
             validate_model_name(doc, update.old_name, update.name)?;
@@ -514,6 +539,50 @@ mod tests {
             hub.theme_preference(),
             Err(ConfigError::Invalid(message)) if message.contains("theme.mode")
         ));
+    }
+
+    #[test]
+    fn compact_review_mode_defaults_to_none_when_config_or_value_is_missing() {
+        for text in [
+            None,
+            Some("[theme]\nmode = \"dark\"\n"),
+            Some("[compaction]\n"),
+        ] {
+            let (_dir, hub) = temp_hub();
+            if let Some(text) = text {
+                write_config(&hub, text);
+            }
+
+            assert_eq!(hub.compact_review_mode().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn compact_review_mode_parses_supported_values() {
+        for (value, expected) in [
+            ("always", crate::CompactReviewMode::Always),
+            ("manual-only", crate::CompactReviewMode::ManualOnly),
+            ("manual_only", crate::CompactReviewMode::ManualOnly),
+            ("never", crate::CompactReviewMode::Never),
+        ] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[compaction]\nreview = {value:?}\n"));
+
+            assert_eq!(hub.compact_review_mode().unwrap(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn compact_review_mode_rejects_unknown_or_non_string_value() {
+        for value in ["\"sometimes\"", "true"] {
+            let (_dir, hub) = temp_hub();
+            write_config(&hub, &format!("[compaction]\nreview = {value}\n"));
+
+            assert!(matches!(
+                hub.compact_review_mode(),
+                Err(ConfigError::Invalid(message)) if message.contains("compaction.review")
+            ));
+        }
     }
 
     #[test]

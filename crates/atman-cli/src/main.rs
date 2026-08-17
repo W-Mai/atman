@@ -3891,7 +3891,11 @@ fn apply_session_config(session: &atman_runtime::Session) {
     let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
         return;
     };
-    if let Some(mode) = parse_compact_review_mode(&text) {
+    if let Some(mode) = atman_runtime::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.compact_review_mode())
+        .ok()
+        .flatten()
+    {
         session.set_compact_review_mode(mode);
     }
     let env_mode = std::env::var("ATMAN_FS_ACCESS")
@@ -3927,33 +3931,6 @@ fn select_fs_access_mode(
     config_mode: Option<atman_runtime::fs_access::FsAccessMode>,
 ) -> Option<atman_runtime::fs_access::FsAccessMode> {
     env_mode.or(config_mode)
-}
-
-fn parse_compact_review_mode(text: &str) -> Option<atman_runtime::CompactReviewMode> {
-    let mut in_section = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('[')
-            && let Some(name) = rest.strip_suffix(']')
-        {
-            in_section = name.trim() == "compaction";
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == "review" {
-            let raw = v.trim().trim_matches('"');
-            return atman_runtime::CompactReviewMode::parse(raw);
-        }
-    }
-    None
 }
 
 fn load_auto_snapshot() -> bool {
