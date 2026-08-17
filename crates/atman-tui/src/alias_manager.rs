@@ -144,8 +144,14 @@ impl AliasManager {
                 KeyAction::Char('d') => {
                     if let Some((a, _)) = self.aliases.get(self.selected) {
                         let a = a.clone();
-                        atman_runtime::model_registry::remove_alias_from_config(&a).ok();
-                        self.refresh_list();
+                        match atman_runtime::config_hub::ConfigHub::global()
+                            .and_then(|hub| hub.remove_alias(&a))
+                        {
+                            Ok(()) => self.refresh_list(),
+                            Err(error) => {
+                                atman_runtime::notify!(error, "Alias {a:?} delete failed: {error}");
+                            }
+                        }
                     }
                 }
                 KeyAction::Escape => self.close(),
@@ -232,15 +238,22 @@ impl AliasManager {
         if slug.is_empty() {
             return;
         }
-        if self.is_edit {
-            if let Some(ref old) = self.edit_original {
-                atman_runtime::model_registry::update_alias_in_config(old, &alias, &slug).ok();
+        let result = atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
+            if self.is_edit {
+                hub.update_alias(self.edit_original.as_deref(), &alias, &slug)
+            } else {
+                hub.add_alias(&alias, &slug)
             }
-        } else {
-            atman_runtime::model_registry::add_alias_to_config(&alias, &slug).ok();
+        });
+        match result {
+            Ok(()) => {
+                self.refresh_list();
+                self.show_form = false;
+            }
+            Err(error) => {
+                atman_runtime::notify!(error, "Alias {alias:?} save failed: {error}");
+            }
         }
-        self.refresh_list();
-        self.show_form = false;
     }
 }
 

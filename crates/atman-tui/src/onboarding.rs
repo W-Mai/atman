@@ -143,18 +143,7 @@ impl OnboardingState {
         let model = models
             .get(self.selected_model)
             .ok_or_else(|| anyhow::anyhow!("no model selected"))?;
-        atman_runtime::model_registry::add_alias_to_config("smart", model)?;
-        // Ensure cheap points to smart unless already set
-        let cfg = atman_runtime::model_registry::parse_config(
-            &atman_runtime::model_registry::read_config_toml_pub().unwrap_or_default(),
-        );
-        let cheap_missing = cfg
-            .as_ref()
-            .map(|c| !c.aliases.contains_key("cheap"))
-            .unwrap_or(true);
-        if cheap_missing {
-            atman_runtime::model_registry::add_alias_to_config("cheap", "smart")?;
-        }
+        atman_runtime::config_hub::ConfigHub::global()?.bind_default_model(model)?;
         Ok(())
     }
 }

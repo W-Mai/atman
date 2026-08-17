@@ -528,157 +528,34 @@ fn pick_provider_name(
 
 /// Run migration if needed. Returns true if migration was performed.
 pub fn run_migration_if_needed() -> bool {
-    let Ok(text) = read_config_toml().ok_or(()) else {
-        return false;
-    };
-    if !needs_migration(&text) {
-        return false;
+    let migrated = crate::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.migrate_model_config_if_needed())
+        .unwrap_or(false);
+    if migrated {
+        crate::notify!(
+            info,
+            "config.toml migrated to v2 format (backup at config.toml.bak)"
+        );
     }
-    let Some(migrated) = migrate_config(&text) else {
-        return false;
-    };
-    // Backup original
-    if let Ok(dir) = crate::storage::config_dir() {
-        let _ = std::fs::write(dir.join("config.toml.bak"), &text);
-    }
-    if write_config_toml(&migrated).is_err() {
-        return false;
-    }
-    crate::notify!(
-        info,
-        "config.toml migrated to v2 format (backup at config.toml.bak)"
-    );
-    true
+    migrated
 }
 
 // Alias CRUD (writes config.toml)
 
 pub fn read_config_toml_pub() -> Option<String> {
-    read_config_toml()
+    crate::config_hub::ConfigHub::global()
+        .ok()?
+        .read_config_toml()
+        .ok()
 }
 
-fn read_config_toml() -> Option<String> {
-    let path = crate::storage::config_dir().ok()?.join("config.toml");
-    std::fs::read_to_string(&path).ok()
-}
-
-fn write_config_toml(text: &str) -> anyhow::Result<()> {
-    let dir = crate::storage::config_dir().map_err(|e| anyhow::anyhow!("config dir: {e}"))?;
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("config.toml");
-    let tmp = dir.join(".config.toml.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &path)?;
+pub(crate) fn reload_from_text(text: &str) -> anyhow::Result<()> {
+    if !text.trim().is_empty() {
+        toml::from_str::<toml::Value>(text)
+            .map_err(|error| anyhow::anyhow!("parse config.toml: {error}"))?;
+    }
+    set_provider_config(parse_config(text).unwrap_or_default());
     Ok(())
-}
-
-fn reload_from_text(text: &str) {
-    let Ok(raw) = toml::from_str::<toml::Value>(text) else {
-        return;
-    };
-    let mut guard = MODEL_CONFIG.write().unwrap();
-    let mut cfg = guard.take().unwrap_or_default();
-
-    // Update aliases from config.toml — preserve all other state
-    // (discovered models, config-defined models).
-    cfg.aliases.clear();
-    if let Some(aliases) = raw.get("alias").and_then(|a| a.as_table()) {
-        for (name, entry) in aliases {
-            if let Some(model) = entry.get("model").and_then(|m| m.as_str()) {
-                cfg.aliases.insert(
-                    name.clone(),
-                    AliasEntry {
-                        model: model.to_string(),
-                    },
-                );
-            }
-        }
-    }
-
-    // Update providers from config.toml.
-    cfg.providers.clear();
-    if let Some(providers) = raw.get("providers").and_then(|p| p.as_table()) {
-        for (key, entry) in providers {
-            let name = entry
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| key.clone());
-            let kind = entry
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_default();
-            let api_key = entry
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let api_key_env = entry
-                .get("api_key_env")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let base_url = entry
-                .get("base_url")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let max_tokens = entry
-                .get("max_tokens")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as u32);
-            let enabled = entry.get("enabled").and_then(|v| v.as_bool());
-            cfg.providers.insert(
-                key.clone(),
-                ProviderEntry {
-                    name,
-                    kind,
-                    api_key,
-                    api_key_env,
-                    base_url,
-                    max_tokens,
-                    enabled,
-                },
-            );
-        }
-    }
-
-    // Update config-defined models — only update existing keys or add
-    // new ones; never remove entries that aren't in config.toml.
-    if let Some(models) = raw.get("models").and_then(|m| m.as_table()) {
-        for (name, entry) in models {
-            let provider = entry
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let context_budget = entry
-                .get("context_budget")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as u64);
-            let thinking = entry.get("thinking").and_then(|v| v.as_bool());
-            let max_tokens = entry
-                .get("max_tokens")
-                .and_then(|v| v.as_integer())
-                .map(|n| n as u32);
-            let model = entry
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            cfg.models.insert(
-                name.clone(),
-                ModelEntry {
-                    model: model.unwrap_or_default(),
-                    provider,
-                    context_budget,
-                    compact_threshold_ratio: None,
-                    thinking,
-                    max_tokens,
-                    enabled: None,
-                    discovered: false,
-                },
-            );
-        }
-    }
-
-    *guard = Some(cfg);
 }
 
 /// Unified config parser — parses `[providers.X]`, `[models.X]`, and `[alias.X]`
@@ -784,49 +661,9 @@ pub fn parse_config(text: &str) -> Option<ProviderConfig> {
 }
 
 pub fn add_alias_to_config(alias: &str, model: &str) -> anyhow::Result<()> {
-    let text = read_config_toml().unwrap_or_default();
-    let new_text = upsert_alias_comment_preserving(&text, alias, model);
-    write_config_toml(&new_text)?;
-    reload_from_text(&new_text);
-    Ok(())
-}
-
-fn upsert_alias_comment_preserving(text: &str, alias: &str, model: &str) -> String {
-    let section_start = format!("[alias.{alias}]");
-    let model_line = format!("model = {model:?}");
-    let mut lines: Vec<String> = text.lines().map(String::from).collect();
-
-    if let Some(section) = lines
-        .iter()
-        .position(|l| l.trim().starts_with(&format!("[alias.{alias}")) && l.trim().ends_with(']'))
-    {
-        let mut inserted = false;
-        for line in lines.iter_mut().skip(section + 1) {
-            let t = line.trim();
-            if (t.starts_with("[alias.") || t == "[alias]") && t.ends_with(']') {
-                break;
-            }
-            if t.starts_with("model") && t.contains('=') {
-                *line = model_line.clone();
-                inserted = true;
-                break;
-            }
-        }
-        if !inserted {
-            lines.insert(section + 1, model_line);
-        }
-    } else {
-        while lines.last().is_some_and(|l| l.trim().is_empty()) {
-            lines.pop();
-        }
-        if !lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines.push(section_start);
-        lines.push(model_line);
-    }
-
-    lines.join("\n")
+    crate::config_hub::ConfigHub::global()?
+        .add_alias(alias, model)
+        .map_err(Into::into)
 }
 
 pub fn upsert_provider_config(
@@ -838,49 +675,17 @@ pub fn upsert_provider_config(
     max_tokens: Option<u32>,
     enabled: bool,
 ) -> anyhow::Result<()> {
-    let text = read_config_toml().unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = if text.trim().is_empty() {
-        toml_edit::DocumentMut::new()
-    } else {
-        text.parse()
-            .map_err(|e| anyhow::anyhow!("parse config.toml: {e}"))?
-    };
-
-    if doc.get("providers").is_none() {
-        doc.insert("providers", toml_edit::Item::Table(toml_edit::Table::new()));
-    }
-    let providers = doc
-        .get_mut("providers")
-        .and_then(|p| p.as_table_mut())
-        .ok_or_else(|| anyhow::anyhow!("providers is not a table"))?;
-
-    let mut entry = toml_edit::Table::new();
-    entry.insert("kind", toml_edit::value(kind));
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            entry.insert("api_key", toml_edit::value(key));
-        }
-    }
-    if let Some(env) = api_key_env {
-        if !env.is_empty() {
-            entry.insert("api_key_env", toml_edit::value(env));
-        }
-    }
-    if let Some(url) = base_url {
-        if !url.is_empty() {
-            entry.insert("base_url", toml_edit::value(url));
-        }
-    }
-    if let Some(mt) = max_tokens {
-        entry.insert("max_tokens", toml_edit::value(mt as i64));
-    }
-    entry.insert("enabled", toml_edit::value(enabled));
-    providers.insert(name, toml_edit::Item::Table(entry));
-
-    let new_text = doc.to_string();
-    write_config_toml(&new_text)?;
-    reload_from_text(&new_text);
-    Ok(())
+    crate::config_hub::ConfigHub::global()?
+        .upsert_provider(crate::config_hub::ProviderConfigUpdate {
+            name,
+            kind,
+            api_key,
+            api_key_env,
+            base_url,
+            max_tokens,
+            enabled,
+        })
+        .map_err(Into::into)
 }
 
 #[derive(Debug, Clone)]
@@ -895,7 +700,7 @@ pub struct ModelConfigUpdate<'a> {
     pub enabled: bool,
 }
 
-fn apply_model_config_update(
+pub(crate) fn apply_model_config_update(
     doc: &mut toml_edit::DocumentMut,
     update: ModelConfigUpdate<'_>,
 ) -> anyhow::Result<()> {
@@ -953,31 +758,15 @@ fn apply_model_config_update(
 }
 
 pub fn upsert_model_config(update: ModelConfigUpdate<'_>) -> anyhow::Result<()> {
-    let text = read_config_toml().unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = if text.trim().is_empty() {
-        toml_edit::DocumentMut::new()
-    } else {
-        text.parse()
-            .map_err(|e| anyhow::anyhow!("parse config.toml: {e}"))?
-    };
-    apply_model_config_update(&mut doc, update)?;
-
-    let new_text = doc.to_string();
-    write_config_toml(&new_text)?;
-    reload_from_text(&new_text);
-    Ok(())
+    crate::config_hub::ConfigHub::global()?
+        .upsert_model(update)
+        .map_err(Into::into)
 }
 
 pub fn remove_alias_from_config(alias: &str) -> anyhow::Result<()> {
-    let text = read_config_toml().unwrap_or_default();
-    let mut raw: toml::Value = toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse: {e}"))?;
-    if let Some(table) = raw.get_mut("alias").and_then(|a| a.as_table_mut()) {
-        table.remove(alias);
-    }
-    let new_text = toml::to_string_pretty(&raw).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
-    write_config_toml(&new_text)?;
-    reload_from_text(&new_text);
-    Ok(())
+    crate::config_hub::ConfigHub::global()?
+        .remove_alias(alias)
+        .map_err(Into::into)
 }
 
 pub fn update_alias_in_config(
@@ -985,21 +774,9 @@ pub fn update_alias_in_config(
     new_alias: &str,
     new_model: &str,
 ) -> anyhow::Result<()> {
-    let text = read_config_toml().unwrap_or_default();
-    let mut raw: toml::Value = toml::from_str(&text).map_err(|e| anyhow::anyhow!("parse: {e}"))?;
-    if let Some(table) = raw.get_mut("alias").and_then(|a| a.as_table_mut()) {
-        table.remove(old_alias);
-        let mut entry = toml::value::Table::new();
-        entry.insert(
-            "model".to_string(),
-            toml::Value::String(new_model.to_string()),
-        );
-        table.insert(new_alias.to_string(), toml::Value::Table(entry));
-    }
-    let new_text = toml::to_string_pretty(&raw).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
-    write_config_toml(&new_text)?;
-    reload_from_text(&new_text);
-    Ok(())
+    crate::config_hub::ConfigHub::global()?
+        .update_alias(Some(old_alias), new_alias, new_model)
+        .map_err(Into::into)
 }
 
 // Provider presets + first-run detection
@@ -1348,6 +1125,41 @@ mod tests {
     }
 
     #[test]
+    fn reload_replaces_config_models_and_preserves_discovered_models() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        let mut initial = ProviderConfig::default();
+        initial.models.insert(
+            "old-config".into(),
+            ModelEntry {
+                model: "provider/old".into(),
+                discovered: false,
+                ..Default::default()
+            },
+        );
+        initial.models.insert(
+            "dynamic".into(),
+            ModelEntry {
+                model: "provider/dynamic".into(),
+                discovered: true,
+                ..Default::default()
+            },
+        );
+        set_provider_config(initial);
+
+        reload_from_text(
+            r#"
+[models.new-config]
+model = "provider/new"
+"#,
+        )
+        .unwrap();
+
+        assert!(model_entry("old-config").is_none());
+        assert!(model_entry("new-config").is_some());
+        assert!(model_entry("dynamic").is_some());
+    }
+
+    #[test]
     fn discovered_models_survive_reload_from_text_alias_crud() {
         let _lock = TEST_CFG_LOCK.lock().unwrap();
         register_discovered(
@@ -1360,27 +1172,17 @@ mod tests {
             }],
         );
 
-        // Simulate alias add → reload_from_text
         let toml = r#"
 [alias]
 smart = { model = "Codex:codex/gpt-5" }
 "#;
-        reload_from_text(toml);
+        reload_from_text(toml).unwrap();
 
         assert!(
             model_entry("Codex:codex/gpt-5").is_some(),
             "discovered models should survive alias CRUD"
         );
         assert_eq!(resolve_alias("smart"), "Codex:codex/gpt-5");
-    }
-
-    #[test]
-    fn add_alias_preserves_comments() {
-        let toml = "# top comment\n[alias]\n# smart line comment\nsmart = { model = \"claude\" }\n";
-        let out = upsert_alias_comment_preserving(toml, "smart", "claude-opus-4.7");
-        assert!(out.contains("# top comment"));
-        assert!(out.contains("# smart line comment"));
-        assert!(out.contains("model = \"claude-opus-4.7\""));
     }
 
     #[test]

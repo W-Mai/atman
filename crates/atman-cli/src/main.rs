@@ -1890,28 +1890,23 @@ async fn cmd_repl_once(
                         max_tokens,
                         enabled,
                     } => {
-                        if atman_runtime::model_registry::upsert_provider_config(
-                            &name,
-                            &provider_type,
-                            if api_key.is_empty() {
-                                None
-                            } else {
-                                Some(&api_key)
-                            },
-                            if api_key_env.is_empty() {
-                                None
-                            } else {
-                                Some(&api_key_env)
-                            },
-                            if base_url.is_empty() {
-                                None
-                            } else {
-                                Some(&base_url)
-                            },
-                            max_tokens,
-                            enabled,
-                        )
-                        .is_ok()
+                        if atman_runtime::config_hub::ConfigHub::global()
+                            .and_then(|hub| {
+                                hub.upsert_provider(
+                                    atman_runtime::config_hub::ProviderConfigUpdate {
+                                        name: &name,
+                                        kind: &provider_type,
+                                        api_key: (!api_key.is_empty()).then_some(api_key.as_str()),
+                                        api_key_env: (!api_key_env.is_empty())
+                                            .then_some(api_key_env.as_str()),
+                                        base_url: (!base_url.is_empty())
+                                            .then_some(base_url.as_str()),
+                                        max_tokens,
+                                        enabled,
+                                    },
+                                )
+                            })
+                            .is_ok()
                         {
                             if !base_url.is_empty() {
                                 atman_runtime::model_registry::register_preset_models_for(
@@ -1985,28 +1980,23 @@ async fn cmd_repl_once(
                         max_tokens,
                         enabled,
                     } => {
-                        if atman_runtime::model_registry::upsert_provider_config(
-                            &name,
-                            &provider_type,
-                            if api_key.is_empty() {
-                                None
-                            } else {
-                                Some(&api_key)
-                            },
-                            if api_key_env.is_empty() {
-                                None
-                            } else {
-                                Some(&api_key_env)
-                            },
-                            if base_url.is_empty() {
-                                None
-                            } else {
-                                Some(&base_url)
-                            },
-                            max_tokens,
-                            enabled,
-                        )
-                        .is_ok()
+                        if atman_runtime::config_hub::ConfigHub::global()
+                            .and_then(|hub| {
+                                hub.upsert_provider(
+                                    atman_runtime::config_hub::ProviderConfigUpdate {
+                                        name: &name,
+                                        kind: &provider_type,
+                                        api_key: (!api_key.is_empty()).then_some(api_key.as_str()),
+                                        api_key_env: (!api_key_env.is_empty())
+                                            .then_some(api_key_env.as_str()),
+                                        base_url: (!base_url.is_empty())
+                                            .then_some(base_url.as_str()),
+                                        max_tokens,
+                                        enabled,
+                                    },
+                                )
+                            })
+                            .is_ok()
                         {
                             // Re-register provider instance in ProviderRegistry
                             let provider_key = format!("config:{name}");
@@ -2076,8 +2066,8 @@ async fn cmd_repl_once(
                         max_tokens,
                         enabled,
                     } => {
-                        match atman_runtime::model_registry::upsert_model_config(
-                            atman_runtime::model_registry::ModelConfigUpdate {
+                        match atman_runtime::config_hub::ConfigHub::global().and_then(|hub| {
+                            hub.upsert_model(atman_runtime::model_registry::ModelConfigUpdate {
                                 old_name: old_name.as_deref(),
                                 name: &name,
                                 model: &model,
@@ -2086,8 +2076,8 @@ async fn cmd_repl_once(
                                 thinking,
                                 max_tokens,
                                 enabled,
-                            },
-                        ) {
+                            })
+                        }) {
                             Ok(()) => {
                                 let _ = cmd_tx_for_models
                                     .send(atman_tui::TuiCommand::ProviderModelsUpdated);
@@ -2115,9 +2105,9 @@ async fn cmd_repl_once(
                                 )),
                             );
                         } else {
-                            if let Err(e) = atman_runtime::model_registry::update_alias_in_config(
-                                "smart", "smart", &model,
-                            ) {
+                            if let Err(e) = atman_runtime::config_hub::ConfigHub::global()
+                                .and_then(|hub| hub.update_alias(Some("smart"), "smart", &model))
+                            {
                                 eprintln!("failed to switch model: {e}");
                             }
                             load_model_config_from_disk();
@@ -3923,111 +3913,16 @@ fn apply_session_config(session: &atman_runtime::Session) {
 }
 
 pub fn load_model_config_from_disk() {
-    let Ok(cfg) = config_dir() else {
+    let Ok(hub) = atman_runtime::config_hub::ConfigHub::global() else {
         return;
     };
-    let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
-        return;
-    };
-    // Migrate v1 → v2 if needed
-    let text = if atman_runtime::model_registry::needs_migration(&text) {
-        if let Some(migrated) = atman_runtime::model_registry::migrate_config(&text) {
-            let _ = std::fs::write(cfg.join("config.toml.bak"), &text);
-            let _ = std::fs::write(cfg.join("config.toml"), &migrated);
-            atman_runtime::notify!(
-                info,
-                "config.toml migrated to v2 format (backup at config.toml.bak)"
-            );
-            migrated
-        } else {
-            text
-        }
-    } else {
-        text
-    };
-    if let Some(mc) = atman_runtime::model_registry::parse_config(&text) {
-        atman_runtime::model_registry::set_model_config(mc);
-    }
-}
-
-// ── Alias CRUD helpers ──
-
-fn read_config_toml() -> Result<String> {
-    let path = config_dir()?.join("config.toml");
-    if path.exists() {
-        Ok(std::fs::read_to_string(&path)?)
-    } else {
-        Ok(String::new())
-    }
-}
-
-fn write_config_toml(text: &str) -> Result<()> {
-    let dir = config_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("config.toml");
-    let tmp = dir.join(".config.toml.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
-}
-
-fn reload_model_config(text: &str) {
-    if let Some(mc) = atman_runtime::model_registry::parse_config(text) {
-        atman_runtime::model_registry::set_model_config(mc);
-    }
-}
-
-pub fn add_alias_to_config(alias: &str, model: &str) -> Result<()> {
-    let text = read_config_toml().unwrap_or_default();
-    let mut raw: toml::Value = if text.trim().is_empty() {
-        toml::Value::Table(toml::value::Table::new())
-    } else {
-        toml::from_str(&text).context("parse config.toml")?
-    };
-    let aliases = raw
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config.toml is not a table"))?
-        .entry("alias")
-        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-    if let Some(table) = aliases.as_table_mut() {
-        let mut entry = toml::value::Table::new();
-        entry.insert("model".to_string(), toml::Value::String(model.to_string()));
-        table.insert(alias.to_string(), toml::Value::Table(entry));
-    }
-    let new_text = toml::to_string_pretty(&raw).context("serialize config.toml")?;
-    write_config_toml(&new_text)?;
-    reload_model_config(&new_text);
-    Ok(())
-}
-
-pub fn remove_alias_from_config(alias: &str) -> Result<()> {
-    let text = read_config_toml()?;
-    let mut raw: toml::Value = toml::from_str(&text).context("parse config.toml")?;
-    if let Some(table) = raw.get_mut("alias").and_then(|a| a.as_table_mut()) {
-        table.remove(alias);
-    }
-    let new_text = toml::to_string_pretty(&raw).context("serialize config.toml")?;
-    write_config_toml(&new_text)?;
-    reload_model_config(&new_text);
-    Ok(())
-}
-
-pub fn update_alias_in_config(old_alias: &str, new_alias: &str, new_model: &str) -> Result<()> {
-    let text = read_config_toml()?;
-    let mut raw: toml::Value = toml::from_str(&text).context("parse config.toml")?;
-    if let Some(table) = raw.get_mut("alias").and_then(|a| a.as_table_mut()) {
-        table.remove(old_alias);
-        let mut entry = toml::value::Table::new();
-        entry.insert(
-            "model".to_string(),
-            toml::Value::String(new_model.to_string()),
+    if hub.migrate_model_config_if_needed().unwrap_or(false) {
+        atman_runtime::notify!(
+            info,
+            "config.toml migrated to v2 format (backup at config.toml.bak)"
         );
-        table.insert(new_alias.to_string(), toml::Value::Table(entry));
     }
-    let new_text = toml::to_string_pretty(&raw).context("serialize config.toml")?;
-    write_config_toml(&new_text)?;
-    reload_model_config(&new_text);
-    Ok(())
+    let _ = hub.reload();
 }
 
 // Reads [fs_access] mode = "..." out of the same config.toml we already
