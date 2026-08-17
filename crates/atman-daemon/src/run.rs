@@ -42,13 +42,7 @@ impl RunLauncher {
         let path = PathBuf::from(flow_path);
         std::fs::metadata(&path).with_context(|| format!("stat flow {}", path.display()))?;
 
-        if let Some(dir) = &self.config_dir {
-            if let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) {
-                if let Some(mc) = atman_runtime::model_registry::parse_config(&text) {
-                    atman_runtime::model_registry::set_model_config(mc);
-                }
-            }
-        }
+        reload_model_config(self.config_dir.as_deref());
 
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
         let project_index =
@@ -262,6 +256,13 @@ async fn run_flow_inner(
     Ok(())
 }
 
+fn reload_model_config(config_dir: Option<&Path>) {
+    let Some(dir) = config_dir else {
+        return;
+    };
+    let _ = atman_runtime::config_hub::ConfigHub::from_config_dir(dir).reload();
+}
+
 fn path_is_managed_agent_at(path: &Path, config_dir: Option<&Path>) -> bool {
     let Some(dir) = config_dir else {
         return false;
@@ -286,5 +287,36 @@ fn same_path(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static MODEL_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn reload_model_config_refreshes_registry_and_ignores_invalid_toml() {
+        let _lock = MODEL_CONFIG_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[models.daemon-reload]\nmodel = \"provider/reloaded\"\ncontext_budget = 4242\n",
+        )
+        .unwrap();
+
+        reload_model_config(Some(dir.path()));
+        let configured = atman_runtime::model_registry::model_info("daemon-reload");
+        assert_eq!(configured.name, "daemon-reload");
+        assert_eq!(configured.context_budget, 4242);
+
+        std::fs::write(&config_path, "[models\n").unwrap();
+        reload_model_config(Some(dir.path()));
+        let preserved = atman_runtime::model_registry::model_info("daemon-reload");
+        assert_eq!(preserved.name, "daemon-reload");
+        assert_eq!(preserved.context_budget, 4242);
     }
 }
