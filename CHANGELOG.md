@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Fixes
+
+- **MCP configuration persistence** — MCP reads and mutations use the configured atman directory consistently, and JSON updates are written atomically through the shared configuration API.
+
 ## [1.8.0] — 2026-08-15
 
 Provider/model management, LLM execution reliability, workflow visualization, context compaction, DSL control flow, and CLI self-upgrade improvements.

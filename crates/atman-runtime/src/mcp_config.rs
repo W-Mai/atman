@@ -11,60 +11,58 @@
 use std::path::{Path, PathBuf};
 
 use crate::mcp::{McpServerConfig, TransportKind};
-use crate::storage;
 use crate::tool::Tier;
 
 pub fn json_path() -> Result<PathBuf, String> {
-    let dir = storage::config_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join("mcp_servers.json"))
+    crate::config_hub::ConfigHub::global()
+        .map(|hub| hub.mcp_json_path())
+        .map_err(|error| error.to_string())
 }
 
 pub fn json_path_in(config_dir: &Path) -> PathBuf {
-    config_dir.join("mcp_servers.json")
+    crate::config_hub::ConfigHub::from_config_dir(config_dir).mcp_json_path()
 }
 
 fn toml_path_in(config_dir: &Path) -> PathBuf {
-    config_dir.join("config.toml")
+    crate::config_hub::ConfigHub::from_config_dir(config_dir).config_toml_path()
 }
 
 /// Load all MCP server configs from all sources: `config.toml` [[mcp]]
 /// blocks, `mcp_servers.json`, and Claude Desktop's config (read-only).
 /// Later entries override earlier ones by name.
 pub fn load(config_dir: Option<&Path>) -> Vec<McpServerConfig> {
-    let mut configs = load_in(config_dir.unwrap_or(Path::new("")));
-
-    // Claude Desktop auto-discover (read-only, macOS only)
-    if let Ok(home) = std::env::var("HOME") {
-        let claude_path = PathBuf::from(home)
-            .join("Library/Application Support/Claude/claude_desktop_config.json");
-        if claude_path.exists() {
-            if let Ok(text) = std::fs::read_to_string(&claude_path) {
-                configs.extend(parse_mcp_json(&text));
-            }
-        }
-    }
-
-    dedup_keep_last(configs)
+    let hub = match config_dir {
+        Some(dir) => crate::config_hub::ConfigHub::from_config_dir(dir),
+        None => match crate::config_hub::ConfigHub::global() {
+            Ok(hub) => hub,
+            Err(_) => return Vec::new(),
+        },
+    };
+    hub.load_mcp()
 }
 
 /// Load from a specific config directory only (no Claude Desktop discovery).
 pub fn load_in(config_dir: &Path) -> Vec<McpServerConfig> {
+    crate::config_hub::ConfigHub::from_config_dir(config_dir).load_local_mcp()
+}
+
+pub(crate) fn load_from_dir(config_dir: &Path, discover_claude: bool) -> Vec<McpServerConfig> {
     let mut configs = Vec::new();
-
-    let toml_path = toml_path_in(config_dir);
-    if toml_path.exists() {
-        if let Ok(text) = std::fs::read_to_string(&toml_path) {
-            configs.extend(parse_mcp_toml(&text));
-        }
+    if let Ok(text) = std::fs::read_to_string(toml_path_in(config_dir)) {
+        configs.extend(parse_mcp_toml(&text));
     }
-
-    let json_path = json_path_in(config_dir);
-    if json_path.exists() {
-        if let Ok(text) = std::fs::read_to_string(&json_path) {
-            configs.extend(parse_mcp_json(&text));
-        }
+    if let Ok(text) = std::fs::read_to_string(json_path_in(config_dir)) {
+        configs.extend(parse_mcp_json(&text));
     }
-
+    if discover_claude
+        && let Ok(home) = std::env::var("HOME")
+        && let Ok(text) = std::fs::read_to_string(
+            PathBuf::from(home)
+                .join("Library/Application Support/Claude/claude_desktop_config.json"),
+        )
+    {
+        configs.extend(parse_mcp_json(&text));
+    }
     dedup_keep_last(configs)
 }
 
@@ -237,20 +235,20 @@ fn tier_to_str(t: Tier) -> &'static str {
 
 /// Save configs to `mcp_servers.json`. Overwrites the file entirely.
 pub fn save(configs: &[McpServerConfig]) -> Result<(), String> {
-    let dir = storage::config_dir().map_err(|e| e.to_string())?;
-    save_in(&dir, configs)
+    crate::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.save_mcp(configs))
+        .map_err(|error| error.to_string())
 }
 
 /// Save configs to `mcp_servers.json` in an explicit config directory.
 pub fn save_in(config_dir: &Path, configs: &[McpServerConfig]) -> Result<(), String> {
-    let path = json_path_in(config_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let root = configs_to_json(configs);
-    let json = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json + "\n").map_err(|e| e.to_string())?;
-    Ok(())
+    crate::config_hub::ConfigHub::from_config_dir(config_dir)
+        .save_mcp(configs)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn serialize(configs: &[McpServerConfig]) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&configs_to_json(configs)).map(|json| json + "\n")
 }
 
 fn configs_to_json(configs: &[McpServerConfig]) -> serde_json::Value {
@@ -319,38 +317,30 @@ fn config_to_json_value(cfg: &McpServerConfig) -> serde_json::Value {
 
 /// Toggle the `disabled` flag on a server. Returns the new disabled value.
 pub fn toggle_disabled(name: &str) -> Result<bool, String> {
-    let dir = storage::config_dir().map_err(|e| e.to_string())?;
-    toggle_disabled_in(&dir, name)
+    crate::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.toggle_mcp(name))
+        .map_err(|error| error.to_string())
 }
 
 /// Toggle `disabled` in an explicit config directory.
 pub fn toggle_disabled_in(config_dir: &Path, name: &str) -> Result<bool, String> {
-    let mut configs = load_in(config_dir);
-    let cfg = configs
-        .iter_mut()
-        .find(|c| c.name == name)
-        .ok_or_else(|| format!("MCP server \"{name}\" not found"))?;
-    cfg.disabled = !cfg.disabled;
-    let new_val = cfg.disabled;
-    save_in(config_dir, &configs)?;
-    Ok(new_val)
+    crate::config_hub::ConfigHub::from_config_dir(config_dir)
+        .toggle_mcp(name)
+        .map_err(|error| error.to_string())
 }
 
 /// Remove a server from the config.
 pub fn remove(name: &str) -> Result<(), String> {
-    let dir = storage::config_dir().map_err(|e| e.to_string())?;
-    remove_in(&dir, name)
+    crate::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.remove_mcp(name))
+        .map_err(|error| error.to_string())
 }
 
 /// Remove a server from an explicit config directory.
 pub fn remove_in(config_dir: &Path, name: &str) -> Result<(), String> {
-    let mut configs = load_in(config_dir);
-    let before = configs.len();
-    configs.retain(|c| c.name != name);
-    if configs.len() == before {
-        return Err(format!("MCP server \"{name}\" not found"));
-    }
-    save_in(config_dir, &configs)
+    crate::config_hub::ConfigHub::from_config_dir(config_dir)
+        .remove_mcp(name)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

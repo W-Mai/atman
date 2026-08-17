@@ -2173,9 +2173,7 @@ async fn cmd_repl_once(
                         let tx = cmd_tx_for_models.clone();
                         let name = name.clone();
                         tokio::spawn(async move {
-                            let configs = atman_runtime::mcp_config::load(
-                                crate::config_dir().ok().as_deref(),
-                            );
+                            let configs = load_mcp_configs();
                             let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                                 let _ = tx.send(atman_tui::TuiCommand::McpTestResult {
                                     name,
@@ -2202,9 +2200,7 @@ async fn cmd_repl_once(
                         let tx = cmd_tx_for_models.clone();
                         let name = name.clone();
                         tokio::spawn(async move {
-                            let configs = atman_runtime::mcp_config::load(
-                                crate::config_dir().ok().as_deref(),
-                            );
+                            let configs = load_mcp_configs();
                             let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                                 let _ = tx.send(atman_tui::TuiCommand::McpResourcesResult {
                                     name,
@@ -2252,9 +2248,7 @@ async fn cmd_repl_once(
                         let tx = cmd_tx_for_models.clone();
                         let name = name.clone();
                         tokio::spawn(async move {
-                            let configs = atman_runtime::mcp_config::load(
-                                crate::config_dir().ok().as_deref(),
-                            );
+                            let configs = load_mcp_configs();
                             let Some(cfg) = configs.into_iter().find(|c| c.name == name) else {
                                 let _ = tx.send(atman_tui::TuiCommand::McpPromptsResult {
                                     name,
@@ -5769,7 +5763,9 @@ fn parse_interjection_mode(text: &str) -> Option<String> {
 }
 
 fn load_mcp_configs() -> Vec<atman_runtime::mcp::McpServerConfig> {
-    atman_runtime::mcp_config::load(config_dir().ok().as_deref())
+    atman_runtime::config_hub::ConfigHub::global()
+        .map(|hub| hub.load_mcp())
+        .unwrap_or_default()
 }
 
 async fn cmd_migrate(action: MigrateAction) -> Result<()> {
@@ -6606,22 +6602,22 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
                     env.push((key.to_string(), val.to_string()));
                 }
                 let name = tmpl.name.to_string();
-                write_mcp_json_server(
+                let mut config = atman_runtime::mcp::McpServerConfig::stdio(
                     &name,
-                    &McpJsonServer {
-                        command: Some(tmpl.command.to_string()),
-                        args,
-                        env: env.into_iter().collect(),
-                        ..Default::default()
-                    },
-                )?;
+                    tmpl.command,
+                    args,
+                    atman_runtime::Tier::Three,
+                    30_000,
+                );
+                config.env = env;
+                atman_runtime::config_hub::ConfigHub::global()?.upsert_mcp(config)?;
                 println!("✓ Added MCP server \"{}\" to mcp_servers.json", name);
             } else {
                 cmd_mcp_add_interactive()?;
             }
         }
         McpAction::Remove { name } => {
-            remove_mcp_server(&name)?;
+            atman_runtime::config_hub::ConfigHub::global()?.remove_mcp(&name)?;
             println!("✓ Removed MCP server \"{}\"", name);
         }
         McpAction::Test { name } => {
@@ -6720,11 +6716,13 @@ async fn cmd_mcp(action: McpAction) -> anyhow::Result<()> {
                 println!("No MCP servers found in {}", file.display());
                 return Ok(());
             }
-            for s in &servers {
-                write_mcp_json_server(&s.name, &McpJsonServer::from_config(s))?;
-                println!("✓ Imported \"{}\"", s.name);
+            let imported = servers.len();
+            let hub = atman_runtime::config_hub::ConfigHub::global()?;
+            for server in servers {
+                println!("✓ Imported \"{}\"", server.name);
+                hub.upsert_mcp(server)?;
             }
-            println!("Imported {} servers", servers.len());
+            println!("Imported {imported} servers");
         }
     }
     Ok(())
@@ -6763,109 +6761,6 @@ async fn connect_mcp_client(
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct McpJsonServer {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    r#type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    command: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    args: Vec<String>,
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    env: std::collections::HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "authToken")]
-    auth_token: Option<String>,
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    headers: std::collections::HashMap<String, String>,
-}
-
-impl McpJsonServer {
-    fn from_config(cfg: &atman_runtime::mcp::McpServerConfig) -> Self {
-        let r#type = match cfg.transport {
-            atman_runtime::mcp::TransportKind::Sse => Some("sse".to_string()),
-            atman_runtime::mcp::TransportKind::Http => Some("http".to_string()),
-            atman_runtime::mcp::TransportKind::Stdio => None,
-        };
-        let command = if cfg.command.is_empty() {
-            None
-        } else {
-            Some(cfg.command.clone())
-        };
-        let url = cfg.url.clone();
-        Self {
-            r#type,
-            command,
-            args: cfg.args.clone(),
-            env: cfg.env.iter().cloned().collect(),
-            url,
-            auth_token: cfg.auth_token.clone(),
-            headers: cfg.headers.iter().cloned().collect(),
-        }
-    }
-}
-
-fn mcp_servers_json_path() -> anyhow::Result<std::path::PathBuf> {
-    let dir = config_dir().context("config dir")?;
-    Ok(dir.join("mcp_servers.json"))
-}
-
-fn read_mcp_servers_json() -> serde_json::Value {
-    let path = match mcp_servers_json_path() {
-        Ok(p) => p,
-        Err(_) => return serde_json::json!({"mcpServers": {}}),
-    };
-    if !path.exists() {
-        return serde_json::json!({"mcpServers": {}});
-    }
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return serde_json::json!({"mcpServers": {}}),
-    };
-    serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({"mcpServers": {}}))
-}
-
-fn write_mcp_json_server(name: &str, server: &McpJsonServer) -> anyhow::Result<()> {
-    let path = mcp_servers_json_path()?;
-    let mut root = read_mcp_servers_json();
-    let servers = root
-        .as_object_mut()
-        .and_then(|o| o.get_mut("mcpServers"))
-        .and_then(|s| s.as_object_mut());
-    if let Some(servers) = servers {
-        let val = serde_json::to_value(server)?;
-        servers.insert(name.to_string(), val);
-    } else {
-        let mut map = serde_json::Map::new();
-        let val = serde_json::to_value(server)?;
-        map.insert(name.to_string(), val);
-        root["mcpServers"] = serde_json::Value::Object(map);
-    }
-    let json = serde_json::to_string_pretty(&root)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, json + "\n")?;
-    Ok(())
-}
-
-fn remove_mcp_server(name: &str) -> anyhow::Result<()> {
-    let path = mcp_servers_json_path()?;
-    let mut root = read_mcp_servers_json();
-    let removed = root
-        .as_object_mut()
-        .and_then(|o| o.get_mut("mcpServers"))
-        .and_then(|s| s.as_object_mut())
-        .is_some_and(|s| s.remove(name).is_some());
-    if !removed {
-        anyhow::bail!("MCP server \"{}\" not found in mcp_servers.json", name);
-    }
-    let json = serde_json::to_string_pretty(&root)?;
-    std::fs::write(&path, json + "\n")?;
-    Ok(())
-}
-
 fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
     use std::io::Write;
     print!("Server name: ");
@@ -6888,9 +6783,7 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
         transport
     };
 
-    let mut server = McpJsonServer::default();
-
-    match transport {
+    let server = match transport {
         "stdio" => {
             print!("Command: ");
             std::io::stdout().flush()?;
@@ -6900,26 +6793,30 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
             if command.is_empty() {
                 anyhow::bail!("command is required");
             }
-            server.command = Some(command);
 
             print!("Args (space-separated): ");
             std::io::stdout().flush()?;
             let mut args = String::new();
             std::io::stdin().read_line(&mut args)?;
-            server.args = args.split_whitespace().map(String::from).collect();
 
             print!("Env vars (KEY=value, comma-separated, optional): ");
             std::io::stdout().flush()?;
             let mut env_input = String::new();
             std::io::stdin().read_line(&mut env_input)?;
-            for pair in env_input.split(',') {
-                let pair = pair.trim();
-                if let Some((k, v)) = pair.split_once('=') {
-                    server
-                        .env
-                        .insert(k.trim().to_string(), v.trim().to_string());
-                }
-            }
+            let env = env_input
+                .split(',')
+                .filter_map(|pair| pair.trim().split_once('='))
+                .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+                .collect();
+            let mut config = atman_runtime::mcp::McpServerConfig::stdio(
+                &name,
+                command,
+                args.split_whitespace().map(String::from).collect(),
+                atman_runtime::Tier::Three,
+                30_000,
+            );
+            config.env = env;
+            config
         }
         "http" | "sse" => {
             print!("URL: ");
@@ -6930,22 +6827,34 @@ fn cmd_mcp_add_interactive() -> anyhow::Result<()> {
             if url.is_empty() {
                 anyhow::bail!("url is required");
             }
-            server.url = Some(url);
-            server.r#type = Some(transport.to_string());
 
             print!("Auth token (optional): ");
             std::io::stdout().flush()?;
             let mut token = String::new();
             std::io::stdin().read_line(&mut token)?;
-            let token = token.trim();
-            if !token.is_empty() {
-                server.auth_token = Some(token.to_string());
+            let token = (!token.trim().is_empty()).then(|| token.trim().to_string());
+            if transport == "http" {
+                atman_runtime::mcp::McpServerConfig::http(
+                    &name,
+                    url,
+                    token,
+                    atman_runtime::Tier::Three,
+                    30_000,
+                )
+            } else {
+                atman_runtime::mcp::McpServerConfig::sse(
+                    &name,
+                    url,
+                    token,
+                    atman_runtime::Tier::Three,
+                    30_000,
+                )
             }
         }
-        other => anyhow::bail!("unknown transport '{}'; use stdio/http/sse", other),
-    }
+        other => anyhow::bail!("unknown transport '{other}'; use stdio/http/sse"),
+    };
 
-    write_mcp_json_server(&name, &server)?;
+    atman_runtime::config_hub::ConfigHub::global()?.upsert_mcp(server)?;
     println!("✓ Added MCP server \"{}\" to mcp_servers.json", name);
     println!("  Restart atman to apply.");
     Ok(())

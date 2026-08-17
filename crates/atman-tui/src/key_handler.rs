@@ -354,10 +354,9 @@ pub(crate) fn handle_key(
             }
             KeyAction::Submit => match form.build_config() {
                 Ok(cfg) => {
-                    let mut configs = atman_runtime::mcp_config::load(None);
-                    configs.retain(|c| c.name != cfg.name);
-                    configs.push(cfg);
-                    match atman_runtime::mcp_config::save(&configs) {
+                    match atman_runtime::config_hub::ConfigHub::global()
+                        .and_then(|hub| hub.upsert_mcp(cfg))
+                    {
                         Ok(()) => {
                             reload = true;
                             close = true;
@@ -533,7 +532,9 @@ pub(crate) fn handle_key(
             KeyAction::Char('d') => {
                 if let Some(s) = app.context.mcp_servers.get(app.mcp_selected) {
                     let name = s.name.clone();
-                    match atman_runtime::mcp_config::toggle_disabled(&name) {
+                    match atman_runtime::config_hub::ConfigHub::global()
+                        .and_then(|hub| hub.toggle_mcp(&name))
+                    {
                         Ok(disabled) => {
                             let msg = if disabled {
                                 format!("disabled {name} — reloading…")
@@ -611,7 +612,9 @@ pub(crate) fn handle_key(
                 KeyAction::Submit => {
                     let name = app.mcp_remove_armed.take().unwrap();
                     app.modal_notification = None;
-                    match atman_runtime::mcp_config::remove(&name) {
+                    match atman_runtime::config_hub::ConfigHub::global()
+                        .and_then(|hub| hub.remove_mcp(&name))
+                    {
                         Ok(()) => {
                             app.push_toast(
                                 format!("removed {name} — reloading…"),

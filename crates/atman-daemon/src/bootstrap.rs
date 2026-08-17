@@ -132,7 +132,12 @@ pub fn spawn_mcp_boot(
     session: std::sync::Arc<atman_runtime::Session>,
     config_dir: Option<&std::path::Path>,
 ) -> Option<tokio::sync::oneshot::Sender<()>> {
-    let configs = atman_runtime::mcp_config::load(config_dir);
+    let configs = match config_dir {
+        Some(dir) => atman_runtime::config_hub::ConfigHub::from_config_dir(dir).load_mcp(),
+        None => atman_runtime::config_hub::ConfigHub::global()
+            .map(|hub| hub.load_mcp())
+            .unwrap_or_default(),
+    };
     if configs.is_empty() {
         return None;
     }

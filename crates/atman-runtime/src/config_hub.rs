@@ -54,7 +54,7 @@ pub struct ProviderConfigUpdate<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ConfigHub {
-    config_toml: PathBuf,
+    config_dir: PathBuf,
 }
 
 impl ConfigHub {
@@ -66,16 +66,24 @@ impl ConfigHub {
 
     pub fn from_config_dir(dir: impl Into<PathBuf>) -> Self {
         Self {
-            config_toml: dir.into().join("config.toml"),
+            config_dir: dir.into(),
         }
     }
 
-    pub fn config_toml_path(&self) -> &Path {
-        &self.config_toml
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
+    pub fn config_toml_path(&self) -> PathBuf {
+        self.config_dir.join("config.toml")
+    }
+
+    pub fn mcp_json_path(&self) -> PathBuf {
+        self.config_dir.join("mcp_servers.json")
     }
 
     pub fn read_config_toml(&self) -> Result<String, ConfigError> {
-        match std::fs::read_to_string(&self.config_toml) {
+        match std::fs::read_to_string(self.config_toml_path()) {
             Ok(text) => Ok(text),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
             Err(error) => Err(error.into()),
@@ -178,6 +186,53 @@ impl ConfigHub {
             .map_err(|error| ConfigError::Invalid(error.to_string()))
     }
 
+    pub fn load_mcp(&self) -> Vec<crate::mcp::McpServerConfig> {
+        crate::mcp_config::load_from_dir(self.config_dir(), true)
+    }
+
+    pub fn load_local_mcp(&self) -> Vec<crate::mcp::McpServerConfig> {
+        crate::mcp_config::load_from_dir(self.config_dir(), false)
+    }
+
+    pub fn save_mcp(&self, configs: &[crate::mcp::McpServerConfig]) -> Result<(), ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        self.write_mcp(configs)
+    }
+
+    pub fn upsert_mcp(&self, config: crate::mcp::McpServerConfig) -> Result<(), ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let mut configs = self.load_local_mcp();
+        configs.retain(|current| current.name != config.name);
+        configs.push(config);
+        self.write_mcp(&configs)
+    }
+
+    pub fn toggle_mcp(&self, name: &str) -> Result<bool, ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let mut configs = self.load_local_mcp();
+        let config = configs
+            .iter_mut()
+            .find(|config| config.name == name)
+            .ok_or_else(|| ConfigError::Invalid(format!("MCP server {name:?} not found")))?;
+        config.disabled = !config.disabled;
+        let disabled = config.disabled;
+        self.write_mcp(&configs)?;
+        Ok(disabled)
+    }
+
+    pub fn remove_mcp(&self, name: &str) -> Result<(), ConfigError> {
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let mut configs = self.load_local_mcp();
+        let before = configs.len();
+        configs.retain(|config| config.name != name);
+        if configs.len() == before {
+            return Err(ConfigError::Invalid(format!(
+                "MCP server {name:?} not found"
+            )));
+        }
+        self.write_mcp(&configs)
+    }
+
     pub fn migrate_model_config_if_needed(&self) -> Result<bool, ConfigError> {
         let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
         let text = self.read_config_toml()?;
@@ -186,7 +241,7 @@ impl ConfigHub {
         }
         let migrated = crate::model_registry::migrate_config(&text)
             .ok_or_else(|| ConfigError::Invalid("migrate config.toml".into()))?;
-        let backup = self.config_toml.with_file_name("config.toml.bak");
+        let backup = self.config_dir.join("config.toml.bak");
         std::fs::write(backup, text)?;
         self.write_config_toml(&migrated)?;
         crate::model_registry::reload_from_text(&migrated)
@@ -213,14 +268,25 @@ impl ConfigHub {
     }
 
     fn write_config_toml(&self, text: &str) -> Result<(), ConfigError> {
-        let dir = self
-            .config_toml
-            .parent()
-            .ok_or_else(|| ConfigError::Invalid("config.toml has no parent directory".into()))?;
-        std::fs::create_dir_all(dir)?;
-        let tmp = dir.join(".config.toml.tmp");
+        self.write_atomic("config.toml", ".config.toml.tmp", text)
+    }
+
+    fn write_mcp(&self, configs: &[crate::mcp::McpServerConfig]) -> Result<(), ConfigError> {
+        let json = crate::mcp_config::serialize(configs)
+            .map_err(|error| ConfigError::Invalid(format!("serialize mcp config: {error}")))?;
+        self.write_atomic("mcp_servers.json", ".mcp_servers.json.tmp", &json)
+    }
+
+    fn write_atomic(
+        &self,
+        filename: &str,
+        temp_filename: &str,
+        text: &str,
+    ) -> Result<(), ConfigError> {
+        std::fs::create_dir_all(&self.config_dir)?;
+        let tmp = self.config_dir.join(temp_filename);
         std::fs::write(&tmp, text)?;
-        std::fs::rename(tmp, &self.config_toml)?;
+        std::fs::rename(tmp, self.config_dir.join(filename))?;
         Ok(())
     }
 }
@@ -477,6 +543,97 @@ mod tests {
         let text = hub.read_config_toml().unwrap();
         assert!(text.contains("[models.first]"));
         assert!(text.contains("[models.second]"));
+    }
+
+    #[test]
+    fn mcp_upsert_preserves_existing_json_servers_and_overrides_toml_by_name() {
+        let (_dir, hub) = temp_hub();
+        std::fs::write(
+            hub.config_toml_path(),
+            "[[mcp]]\nname = \"shared\"\ncommand = \"from-toml\"\n",
+        )
+        .unwrap();
+        hub.save_mcp(&[crate::mcp::McpServerConfig::stdio(
+            "existing",
+            "existing-command",
+            vec![],
+            crate::tool::Tier::Two,
+            30_000,
+        )])
+        .unwrap();
+
+        hub.upsert_mcp(crate::mcp::McpServerConfig::stdio(
+            "shared",
+            "from-json",
+            vec![],
+            crate::tool::Tier::Three,
+            30_000,
+        ))
+        .unwrap();
+
+        let configs = hub.load_local_mcp();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(
+            configs
+                .iter()
+                .find(|cfg| cfg.name == "shared")
+                .unwrap()
+                .command,
+            "from-json"
+        );
+        assert!(configs.iter().any(|cfg| cfg.name == "existing"));
+        assert!(!hub.config_dir().join(".mcp_servers.json.tmp").exists());
+    }
+
+    #[test]
+    fn mcp_toggle_toml_server_persists_json_override() {
+        let (_dir, hub) = temp_hub();
+        std::fs::write(
+            hub.config_toml_path(),
+            "[[mcp]]\nname = \"exa\"\ncommand = \"exa-mcp-server\"\n",
+        )
+        .unwrap();
+
+        assert!(hub.toggle_mcp("exa").unwrap());
+
+        let configs = hub.load_local_mcp();
+        assert!(
+            configs
+                .iter()
+                .find(|cfg| cfg.name == "exa")
+                .unwrap()
+                .disabled
+        );
+        assert!(hub.mcp_json_path().exists());
+    }
+
+    #[test]
+    fn mcp_remove_updates_json_atomically() {
+        let (_dir, hub) = temp_hub();
+        hub.save_mcp(&[
+            crate::mcp::McpServerConfig::stdio(
+                "first",
+                "echo",
+                vec![],
+                crate::tool::Tier::Two,
+                30_000,
+            ),
+            crate::mcp::McpServerConfig::stdio(
+                "second",
+                "ls",
+                vec![],
+                crate::tool::Tier::Two,
+                30_000,
+            ),
+        ])
+        .unwrap();
+
+        hub.remove_mcp("first").unwrap();
+
+        let configs = hub.load_local_mcp();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "second");
+        assert!(!hub.config_dir().join(".mcp_servers.json.tmp").exists());
     }
 
     #[test]
