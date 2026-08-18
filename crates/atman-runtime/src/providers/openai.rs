@@ -346,8 +346,10 @@ impl Provider for OpenAiProvider {
                             if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                                 slot.id = id.to_string();
                             }
-                            if let Some(name) =
-                                tc.pointer("/function/name").and_then(|v| v.as_str())
+                            if let Some(name) = tc
+                                .pointer("/function/name")
+                                .and_then(|v| v.as_str())
+                                .filter(|name| !name.is_empty())
                             {
                                 slot.name = name.to_string();
                             }

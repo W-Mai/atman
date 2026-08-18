@@ -55,6 +55,56 @@ async fn openai_streaming_parses_delta_content() {
 }
 
 #[tokio::test]
+async fn openai_streaming_keeps_tool_name_when_later_delta_is_empty() {
+    const FASTAI_TOOL_STREAM: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n\
+data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_fastai\",\"type\":\"function\",\"function\":{\"name\":\"fs_list\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n\
+data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/project\\\"}\"}}]},\"finish_reason\":null}]}\n\n\
+data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"tool_calls\"}]}\n\n\
+data: [DONE]\n\n";
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(FASTAI_TOOL_STREAM, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiProvider::new("fastai", "test-key").with_base_url(server.uri());
+    let obs = provider.call_streaming(LlmRequest {
+        model: "gpt-5.6-sol".to_string(),
+        messages: vec![atman_runtime::provider::user_text_message("list files")],
+        system: None,
+        input: Value::Unit,
+        schema: None,
+        cache_prompt: false,
+        tools: vec![atman_runtime::tool::ToolSpec {
+            name: "fs.list".to_string(),
+            description: None,
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+        }],
+        thinking_enabled: false,
+        stall_timeout_secs: 0,
+    });
+
+    let message = obs.output.await.unwrap().message;
+    assert!(matches!(
+        message.parts.as_slice(),
+        [atman_runtime::message::MessagePart::ToolUse { id, name, input }]
+            if id == "call_fastai"
+                && name == "fs.list"
+                && input == &serde_json::json!({"path": "/tmp/project"})
+    ));
+}
+
+#[tokio::test]
 async fn openai_non_streaming_returns_message_content() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

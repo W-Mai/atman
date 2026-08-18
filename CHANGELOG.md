@@ -8,6 +8,7 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Streaming tool calls** — OpenAI-compatible argument deltas with an empty function name no longer overwrite the tool name parsed from the initial chunk.
 - **MCP configuration persistence** — MCP reads and mutations use the configured atman directory consistently, and JSON updates are written atomically through the shared configuration API.
 
 ## [1.8.0] — 2026-08-15
