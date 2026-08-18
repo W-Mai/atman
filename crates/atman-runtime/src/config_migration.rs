@@ -13,7 +13,6 @@ const CONFIG_FILES: &[&str] = &[
     "config.toml",
     "daemon.toml",
     "routes.at",
-    "routes.toml",
     "on_session_start.at",
     "on_session_end.at",
     "atman.toml",
@@ -156,6 +155,7 @@ mod tests {
         write(&data.path().join("config.toml"), "cfg");
         write(&data.path().join("daemon.toml"), "d");
         write(&data.path().join("routes.at"), "r");
+        write(&data.path().join("routes.toml"), "legacy");
         // Non-config file must stay put.
         write(&data.path().join("sessions").join("keep"), "s");
 
@@ -167,6 +167,8 @@ mod tests {
         assert!(cfg.path().join("config.toml").exists());
         assert!(cfg.path().join("daemon.toml").exists());
         assert!(cfg.path().join("routes.at").exists());
+        assert!(!cfg.path().join("routes.toml").exists());
+        assert!(data.path().join("routes.toml").exists());
         assert!(!data.path().join("config.toml").exists());
         // sessions/ never touched.
         assert!(data.path().join("sessions").join("keep").exists());

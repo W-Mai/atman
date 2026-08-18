@@ -329,6 +329,51 @@ flow greet(who: string) -> string {
 }
 
 #[test]
+fn repl_route_dsl_dispatches_default_route() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let cmd_dir = cfg.path().join("commands");
+    std::fs::create_dir_all(&cmd_dir).unwrap();
+    std::fs::write(
+        cmd_dir.join("fallback.at"),
+        r#"flow fallback(message: string) -> string {
+    return "default: " + message
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cfg.path().join("routes.at"),
+        "default_route { flow: fallback }\n",
+    )
+    .unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"plain question\n:exit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("default: plain question"),
+        "stdout={stdout} stderr={stderr}"
+    );
+}
+
+#[test]
 fn repl_slash_command_runs_flow_from_config_dir() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -779,47 +824,6 @@ fn repl_attach_clear_empties_pending() {
 }
 
 #[test]
-fn repl_routes_bare_input_to_command_via_routes_toml() {
-    let data = tempfile::tempdir().unwrap();
-    let cfg = tempfile::tempdir().unwrap();
-    let cmd_dir = cfg.path().join("commands");
-    std::fs::create_dir_all(&cmd_dir).unwrap();
-    std::fs::write(
-        cmd_dir.join("echo.at"),
-        r#"flow echo(msg: string) -> string {
-    return "echoed: " + msg
-}
-"#,
-    )
-    .unwrap();
-    std::fs::write(
-        cfg.path().join("routes.toml"),
-        "# route bang-prefixed lines to /echo\n\"!\" -> echo\n",
-    )
-    .unwrap();
-
-    let mut child = std::process::Command::new(atman_binary())
-        .env("ATMAN_DATA_DIR", data.path())
-        .env("ATMAN_CONFIG_DIR", cfg.path())
-        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    use std::io::Write;
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"!hello\n:exit\n")
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("echoed: hello"), "stdout: {stdout}");
-}
-
-#[test]
 fn repl_attach_command_accepts_existing_file() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -987,7 +991,7 @@ fn daemon_rotate_token_refuses_when_daemon_running() {
 }
 
 #[test]
-fn repl_unrouted_input_hints_at_routes_toml() {
+fn repl_unrouted_input_hints_at_routes_at() {
     let data = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
 
@@ -1009,5 +1013,41 @@ fn repl_unrouted_input_hints_at_routes_toml() {
         .unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("routes.toml"), "stdout: {stdout}");
+    assert!(stdout.contains("routes.at"), "stdout: {stdout}");
+    assert!(!stdout.contains("routes.toml"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_invalid_routes_at_surfaces_parse_error() {
+    let data = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    std::fs::write(cfg.path().join("routes.at"), "route invalid").unwrap();
+
+    let mut child = std::process::Command::new(atman_binary())
+        .env("ATMAN_DATA_DIR", data.path())
+        .env("ATMAN_CONFIG_DIR", cfg.path())
+        .env("ATMAN_REPL_NON_INTERACTIVE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"bare input\n:exit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("parse routes.at"),
+        "stdout: {stdout} stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("no route matched") && !stderr.contains("no route matched"),
+        "stdout: {stdout} stderr: {stderr}"
+    );
 }

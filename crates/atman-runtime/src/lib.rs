@@ -44,6 +44,7 @@ pub mod provider;
 pub mod providers;
 pub mod redact;
 pub mod rendezvous;
+pub mod routing;
 pub mod safety;
 pub mod sandbox;
 pub mod session;

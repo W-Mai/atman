@@ -1193,96 +1193,24 @@ fn count_lines(path: &std::path::Path) -> usize {
 enum RouteOutcome {
     Handled(Value),
     HandledErr(anyhow::Error),
-    Unmatched,
 }
 
 async fn route_input_in_turn(
-    line: &str,
+    route: &atman_runtime::routing::RouteMatch,
     executor: &Executor,
     session: std::sync::Arc<Session>,
     turn_id: atman_runtime::event::TurnId,
 ) -> RouteOutcome {
-    let Some(call) = resolve_route_call(line) else {
-        return RouteOutcome::Unmatched;
-    };
-    match run_slash_command_in_turn(&call, executor, session, turn_id).await {
+    match run_slash_command_in_turn(&route.slash_call(), executor, session, turn_id).await {
         Ok(v) => RouteOutcome::Handled(v),
         Err(e) => RouteOutcome::HandledErr(e),
     }
 }
 
-fn resolve_route_call(line: &str) -> Option<String> {
-    if let Some(call) = resolve_dsl_route_call(line) {
-        return Some(call);
-    }
-    resolve_toml_route_call(line)
-}
-
-fn resolve_dsl_route_call(line: &str) -> Option<String> {
-    let cfg = config_dir().ok()?;
-    let routes_at = cfg.join("routes.at");
-    if !routes_at.exists() {
-        return None;
-    }
-    let contents = std::fs::read_to_string(&routes_at).ok()?;
-    let parsed = parse_file(&contents).ok()?;
-    for r in &parsed.routes {
-        if let Some(rest) = line.strip_prefix(&r.pattern) {
-            let rest = rest.trim();
-            let cmd = format!("/{}", r.flow.name);
-            let call = if rest.is_empty() {
-                cmd
-            } else {
-                format!("{cmd} {rest}")
-            };
-            return Some(call);
-        }
-    }
-    if let Some(dr) = &parsed.default_route {
-        let cmd = format!("/{}", dr.flow.name);
-        let call = if line.trim().is_empty() {
-            cmd
-        } else {
-            format!("{cmd} {}", line.trim())
-        };
-        return Some(call);
-    }
-    None
-}
-
-fn resolve_toml_route_call(line: &str) -> Option<String> {
-    let cfg = config_dir().ok()?;
-    let routes_path = cfg.join("routes.toml");
-    if !routes_path.exists() {
-        return None;
-    }
-    let contents = std::fs::read_to_string(&routes_path).ok()?;
-    for (i, raw_line) in contents.lines().enumerate() {
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((prefix, command)) = trimmed.split_once("->") else {
-            atman_runtime::notify!(
-                warn,
-                "routes.toml:{}: expected `<prefix> -> <command>`",
-                i + 1
-            );
-            continue;
-        };
-        let prefix = prefix.trim().trim_matches('"');
-        let command = command.trim();
-        if let Some(rest) = line.strip_prefix(prefix) {
-            let rest = rest.trim();
-            let call = if rest.is_empty() {
-                command.to_string()
-            } else {
-                format!("{command} {rest}")
-            };
-            return Some(call);
-        }
-    }
-    None
+fn resolve_route(line: &str) -> Result<Option<atman_runtime::routing::RouteMatch>> {
+    let hub = atman_runtime::config_hub::ConfigHub::global()?;
+    let program = atman_runtime::routing::RouteProgram::load(&hub)?;
+    Ok(program.resolve(line))
 }
 
 async fn run_boot_flow(executor: &Executor, reporter: &Reporter) -> Result<()> {
@@ -2506,13 +2434,20 @@ async fn cmd_repl_once(
             (rest.trim().to_string(), TurnKind::Slash)
         } else {
             let trimmed = line.trim();
-            if resolve_route_call(trimmed).is_none() {
-                reporter.info(
-                    "[atman] no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`.",
-                );
-                continue;
-            }
-            (trimmed.to_string(), TurnKind::Bare)
+            let route = match resolve_route(trimmed) {
+                Ok(Some(route)) => route,
+                Ok(None) => {
+                    reporter.info(
+                        "[atman] no route matched. add a route to ~/.config/atman/routes.at, or use `/name args...`.",
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    reporter.error(format!("error: {error}"));
+                    continue;
+                }
+            };
+            (trimmed.to_string(), TurnKind::Bare(route))
         };
         run_turn_with_interjection(
             session.clone(),
@@ -2541,20 +2476,28 @@ async fn cmd_repl_once(
                     if let Some(evt) = evt {
                         let event_text = atman_runtime::watch::format_watch_event_text(&evt);
                         reporter.info(&event_text);
-                        run_turn_with_interjection(
-                            session.clone(),
-                            &executor,
-                            &lifecycles,
-                            classifier.as_ref(),
-                            &event_text,
-                            atman_runtime::message::MessageOrigin::Watcher,
-                            &mut pending,
-                            TurnKind::Bare,
-                            &mut input_rx,
-                            &mut pushback,
-                            &reporter,
-                        )
-                        .await;
+                        match resolve_route(&event_text) {
+                            Ok(Some(route)) => {
+                                run_turn_with_interjection(
+                                    session.clone(),
+                                    &executor,
+                                    &lifecycles,
+                                    classifier.as_ref(),
+                                    &event_text,
+                                    atman_runtime::message::MessageOrigin::Watcher,
+                                    &mut pending,
+                                    TurnKind::Bare(route),
+                                    &mut input_rx,
+                                    &mut pushback,
+                                    &reporter,
+                                )
+                                .await;
+                            }
+                            Ok(None) => reporter.info(
+                                "[atman] no route matched. add a route to ~/.config/atman/routes.at, or use `/name args...`.",
+                            ),
+                            Err(error) => reporter.error(format!("error: {error}")),
+                        }
                     } else {
                         break;
                     }
@@ -2965,7 +2908,7 @@ fn emit(printer: &mut Option<ExternalPrinter>, s: String) {
 
 enum TurnKind {
     Slash,
-    Bare,
+    Bare(atman_runtime::routing::RouteMatch),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3002,13 +2945,10 @@ async fn run_turn_with_interjection(
             TurnKind::Slash => {
                 run_slash_command_in_turn(&text, executor, session.clone(), turn_id).await
             }
-            TurnKind::Bare => {
-                match route_input_in_turn(&text, executor, session.clone(), turn_id).await {
+            TurnKind::Bare(route) => {
+                match route_input_in_turn(&route, executor, session.clone(), turn_id).await {
                     RouteOutcome::Handled(v) => Ok(v),
                     RouteOutcome::HandledErr(e) => Err(e),
-                    RouteOutcome::Unmatched => Err(anyhow::anyhow!(
-                        "no route matched. add `\"prefix\" -> command` to ~/.config/atman/routes.toml, or use `/name args...`."
-                    )),
                 }
             }
         }

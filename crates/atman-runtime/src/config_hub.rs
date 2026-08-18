@@ -146,6 +146,18 @@ impl ConfigHub {
         self.config_dir.join("config.toml")
     }
 
+    pub fn routes_at_path(&self) -> PathBuf {
+        self.config_dir.join("routes.at")
+    }
+
+    pub fn load_routes_source(&self) -> Result<Option<String>, ConfigError> {
+        match std::fs::read_to_string(self.routes_at_path()) {
+            Ok(source) => Ok(Some(source)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ConfigError::Io(error)),
+        }
+    }
+
     pub fn mcp_json_path(&self) -> PathBuf {
         self.config_dir.join("mcp_servers.json")
     }
