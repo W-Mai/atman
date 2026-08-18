@@ -26,14 +26,20 @@ async fn spawn_mock(status: axum::http::StatusCode) -> (u16, tokio_util::sync::C
 }
 
 fn run_doctor(env: &[(&str, &str)]) -> (String, String, i32) {
+    run_doctor_with_config(env, None)
+}
+
+fn run_doctor_with_config(env: &[(&str, &str)], config: Option<&str>) -> (String, String, i32) {
     let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join("config");
+    if let Some(config) = config {
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), config).unwrap();
+    }
     let mut cmd = Command::new(atman_bin());
     cmd.arg("doctor")
         .env("ATMAN_DATA_DIR", tmp.path().join("data").to_str().unwrap())
-        .env(
-            "ATMAN_CONFIG_DIR",
-            tmp.path().join("config").to_str().unwrap(),
-        )
+        .env("ATMAN_CONFIG_DIR", config_dir.to_str().unwrap())
         .env("HOME", tmp.path().to_str().unwrap())
         // strip host env leaking into tests
         .env_remove("ANTHROPIC_API_KEY")
@@ -77,6 +83,29 @@ fn doctor_without_keys_shows_skipped_for_every_provider() {
         !out.contains("reachable"),
         "no probe should fire without a key, got: {out}"
     );
+}
+
+#[test]
+fn doctor_lists_models_and_aliases_from_config_hub_projection() {
+    let (out, err, code) = run_doctor_with_config(
+        &[],
+        Some(
+            "[models.fast]\nmodel = \"gpt-4o-mini\"\ncontext_budget = 8192\n[alias.default]\nmodel = \"fast\"\n",
+        ),
+    );
+    assert_eq!(code, 0, "exit: stderr={err}");
+    assert!(out.contains("models:"), "stdout: {out}");
+    assert!(out.contains("fast"), "stdout: {out}");
+    assert!(out.contains("budget=8192"), "stdout: {out}");
+    assert!(out.contains("aliases:"), "stdout: {out}");
+    assert!(out.contains("default"), "stdout: {out}");
+}
+
+#[test]
+fn doctor_ignores_invalid_model_config_without_failing() {
+    let (out, err, code) = run_doctor_with_config(&[], Some("[models\n"));
+    assert_eq!(code, 0, "exit: stderr={err}");
+    assert!(!out.contains("models:"), "stdout: {out}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

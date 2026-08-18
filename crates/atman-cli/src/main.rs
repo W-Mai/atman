@@ -3886,12 +3886,6 @@ async fn handle_suggest(
 }
 
 fn apply_session_config(session: &atman_runtime::Session) {
-    let Ok(cfg) = config_dir() else {
-        return;
-    };
-    let Ok(text) = std::fs::read_to_string(cfg.join("config.toml")) else {
-        return;
-    };
     if let Some(mode) = atman_runtime::config_hub::ConfigHub::global()
         .and_then(|hub| hub.compact_review_mode())
         .ok()
@@ -3908,9 +3902,6 @@ fn apply_session_config(session: &atman_runtime::Session) {
         .flatten();
     if let Some(mode) = select_fs_access_mode(env_mode, config_mode) {
         session.set_fs_access_mode(mode);
-    }
-    if let Some(mc) = atman_runtime::model_registry::parse_config(&text) {
-        atman_runtime::model_registry::set_model_config(mc);
     }
 }
 
@@ -5409,9 +5400,11 @@ async fn cmd_doctor(fix: bool) -> Result<()> {
     }
     println!();
 
-    let cfg_text = std::fs::read_to_string(config_dir().unwrap_or_default().join("config.toml"))
-        .unwrap_or_default();
-    if let Some(mc) = atman_runtime::model_registry::parse_config(&cfg_text) {
+    let model_config = atman_runtime::config_hub::ConfigHub::global()
+        .and_then(|hub| hub.model_config())
+        .ok()
+        .flatten();
+    if let Some(mc) = model_config {
         println!("models:");
         for (name, entry) in &mc.models {
             let budget = entry
@@ -5617,8 +5610,6 @@ fn load_preview_config() -> atman_runtime::tools::preview::PreviewConfig {
 
 fn build_interjection_classifier()
 -> Option<std::sync::Arc<dyn atman_runtime::injection_classifier::InjectionClassifier>> {
-    let cfg_dir = config_dir().ok()?;
-    std::fs::read_to_string(cfg_dir.join("config.toml")).ok()?;
     let mode = atman_runtime::config_hub::ConfigHub::global()
         .and_then(|hub| hub.interjection_mode())
         .ok()

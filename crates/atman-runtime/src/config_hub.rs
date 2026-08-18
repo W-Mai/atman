@@ -778,6 +778,34 @@ impl ConfigHub {
             .map_err(|error| ConfigError::Invalid(error.to_string()))
     }
 
+    pub fn model_config(
+        &self,
+    ) -> Result<Option<crate::model_registry::ProviderConfig>, ConfigError> {
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let document = text.parse::<toml_edit::DocumentMut>()?;
+        if document.get("providers").is_none()
+            && document.get("models").is_none()
+            && document.get("alias").is_none()
+        {
+            return Ok(None);
+        }
+        let has_model_entries = ["providers", "models", "alias"].iter().any(|section| {
+            document
+                .get(section)
+                .and_then(toml_edit::Item::as_table)
+                .is_some_and(|table| !table.is_empty())
+        });
+        if !has_model_entries {
+            return Ok(None);
+        }
+        crate::model_registry::parse_config(&text)
+            .ok_or_else(|| ConfigError::Invalid("invalid model configuration".into()))
+            .map(Some)
+    }
+
     pub fn load_mcp(&self) -> Vec<crate::mcp::McpServerConfig> {
         crate::mcp_config::load_from_dir(self.config_dir(), true)
     }
@@ -1041,6 +1069,27 @@ mod tests {
 
     fn write_config(hub: &ConfigHub, text: &str) {
         std::fs::write(hub.config_toml_path(), text).unwrap();
+    }
+
+    #[test]
+    fn model_config_projection_handles_missing_valid_and_invalid_files() {
+        let (_dir, hub) = temp_hub();
+        assert!(hub.model_config().unwrap().is_none());
+
+        write_config(
+            &hub,
+            "[providers.openai]\nkind = \"openai\"\n[models.fast]\nmodel = \"gpt-4o-mini\"\n[alias.default]\nmodel = \"fast\"\n",
+        );
+        let config = hub.model_config().unwrap().unwrap();
+        assert_eq!(config.providers["openai"].kind, "openai");
+        assert_eq!(config.models["fast"].model, "gpt-4o-mini");
+        assert_eq!(config.aliases["default"].model, "fast");
+
+        write_config(&hub, "[models]\n");
+        assert!(hub.model_config().unwrap().is_none());
+
+        write_config(&hub, "[models\n");
+        assert!(hub.model_config().is_err());
     }
 
     #[test]
