@@ -218,10 +218,6 @@ pub fn recent_turns_limit() -> usize {
     DEFAULT_RECENT_TURNS
 }
 
-pub fn route_line(flow_name: &str, trigger: &str) -> String {
-    format!("route \"{trigger}\" {{ flow: {flow_name} }}\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,14 +281,6 @@ mod tests {
         let two = "flow a() { return 1 } flow b() { return 2 }";
         let err = extract_flow_name(two).unwrap_err();
         assert!(err.to_string().contains("exactly one flow"));
-    }
-
-    #[test]
-    fn route_line_format() {
-        assert_eq!(
-            route_line("summarize", "sum "),
-            "route \"sum \" { flow: summarize }\n"
-        );
     }
 
     #[tokio::test]

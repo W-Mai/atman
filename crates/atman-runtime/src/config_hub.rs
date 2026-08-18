@@ -9,6 +9,7 @@ use crate::model_registry::ModelConfigUpdate;
 
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static ROUTES_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -156,6 +157,37 @@ impl ConfigHub {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(ConfigError::Io(error)),
         }
+    }
+
+    pub fn append_dsl_route(&self, flow_name: &str, trigger: &str) -> Result<(), ConfigError> {
+        use fs2::FileExt;
+
+        let route = dsl_route_source(flow_name, trigger)?;
+        let _guard = ROUTES_WRITE_LOCK.lock().unwrap();
+        std::fs::create_dir_all(&self.config_dir)?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.config_dir.join(".routes.at.lock"))?;
+        lock.lock_exclusive()?;
+
+        let path = self.routes_at_path();
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        parse_routes_source("existing routes.at", &source)?;
+
+        let mut combined = source;
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&route);
+        parse_routes_source("updated routes.at", &combined)?;
+        write_unique_atomic(&path, combined.as_bytes())
     }
 
     pub fn mcp_json_path(&self) -> PathBuf {
@@ -939,6 +971,64 @@ impl ConfigHub {
     }
 }
 
+fn dsl_route_source(flow_name: &str, trigger: &str) -> Result<String, ConfigError> {
+    if syn_identifier(flow_name).is_none() {
+        return Err(ConfigError::Invalid(format!(
+            "route flow {flow_name:?} is not a valid DSL identifier"
+        )));
+    }
+    if trigger.is_empty() {
+        return Err(ConfigError::Invalid(
+            "route trigger must not be empty".to_string(),
+        ));
+    }
+    let trigger = format!("{trigger:?}");
+    let route = format!("route {trigger} {{ flow: {flow_name} }}\n");
+    parse_routes_source("generated route", &route)?;
+    Ok(route)
+}
+
+fn syn_identifier(value: &str) -> Option<()> {
+    let source = format!("flow {value}() {{}}\n");
+    atman_dsl::parse::parse_file(&source).ok().map(|_| ())
+}
+
+fn parse_routes_source(context: &str, source: &str) -> Result<(), ConfigError> {
+    if source.is_empty() {
+        return Ok(());
+    }
+    atman_dsl::parse::parse_file(source)
+        .map(|_| ())
+        .map_err(|error| ConfigError::Invalid(format!("parse {context}: {error}")))
+}
+
+fn write_unique_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
+    use std::io::Write;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let tmp = parent.join(format!(".{filename}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = (|| -> Result<(), ConfigError> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn load_auth_from_path(path: &Path) -> Result<crate::auth_store::AuthStore, ConfigError> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -1081,6 +1171,113 @@ mod tests {
 
     fn write_config(hub: &ConfigHub, text: &str) {
         std::fs::write(hub.config_toml_path(), text).unwrap();
+    }
+
+    #[test]
+    fn append_dsl_route_creates_missing_file_and_escapes_trigger() {
+        let (_dir, hub) = temp_hub();
+        hub.append_dsl_route("review_code", "say \"hi\"\\now\n")
+            .unwrap();
+
+        let source = std::fs::read_to_string(hub.routes_at_path()).unwrap();
+        let parsed = atman_dsl::parse::parse_file(&source).unwrap();
+        assert_eq!(parsed.routes.len(), 1);
+        assert_eq!(parsed.routes[0].pattern, "say \"hi\"\\now\n");
+        assert_eq!(parsed.routes[0].flow.name, "review_code");
+    }
+
+    #[test]
+    fn append_dsl_route_preserves_existing_source_exactly() {
+        let (_dir, hub) = temp_hub();
+        let original = "// keep this comment\nroute \"old \" { flow: old_flow }";
+        std::fs::write(hub.routes_at_path(), original).unwrap();
+
+        hub.append_dsl_route("new_flow", "new ").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(hub.routes_at_path()).unwrap(),
+            format!("{original}\nroute \"new \" {{ flow: new_flow }}\n")
+        );
+    }
+
+    #[test]
+    fn append_dsl_route_does_not_overwrite_invalid_existing_source() {
+        let (_dir, hub) = temp_hub();
+        let invalid = "route invalid";
+        std::fs::write(hub.routes_at_path(), invalid).unwrap();
+
+        let error = hub.append_dsl_route("new_flow", "new ").unwrap_err();
+
+        assert!(error.to_string().contains("parse existing routes.at"));
+        assert_eq!(
+            std::fs::read_to_string(hub.routes_at_path()).unwrap(),
+            invalid
+        );
+    }
+
+    #[test]
+    fn append_dsl_route_rejects_invalid_flow_without_writing() {
+        let (_dir, hub) = temp_hub();
+        let error = hub.append_dsl_route("bad-name", "new ").unwrap_err();
+        assert!(error.to_string().contains("valid DSL identifier"));
+        assert!(!hub.routes_at_path().exists());
+    }
+
+    #[test]
+    fn concurrent_dsl_route_appends_do_not_lose_updates() {
+        let (_dir, hub) = temp_hub();
+        let mut workers = Vec::new();
+        for index in 0..12 {
+            let hub = hub.clone();
+            workers.push(std::thread::spawn(move || {
+                hub.append_dsl_route(&format!("flow_{index}"), &format!("{index} "))
+                    .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let source = std::fs::read_to_string(hub.routes_at_path()).unwrap();
+        let parsed = atman_dsl::parse::parse_file(&source).unwrap();
+        assert_eq!(parsed.routes.len(), 12);
+        for index in 0..12 {
+            assert!(parsed.routes.iter().any(|route| {
+                route.flow.name == format!("flow_{index}") && route.pattern == format!("{index} ")
+            }));
+        }
+        assert!(!std::fs::read_dir(hub.config_dir()).unwrap().any(|entry| {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".routes.at.") && name.ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn append_dsl_route_waits_for_external_file_lock() {
+        use fs2::FileExt;
+        use std::sync::mpsc::TryRecvError;
+
+        let (_dir, hub) = temp_hub();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(hub.config_dir().join(".routes.at.lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+
+        let worker_hub = hub.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_hub.append_dsl_route("blocked", "wait ").unwrap();
+            tx.send(()).unwrap();
+        });
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        FileExt::unlock(&lock).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]

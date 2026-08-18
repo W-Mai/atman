@@ -3776,38 +3776,9 @@ async fn handle_suggest(
     }
 
     let cfg = config_dir()?;
-    let cmd_dir = cfg.join("commands");
-    std::fs::create_dir_all(&cmd_dir)?;
-    let mut final_name = flow_name.clone();
-    let mut target = cmd_dir.join(format!("{final_name}.at"));
-    if target.exists() {
-        final_name = format!("{flow_name}_v2");
-        target = cmd_dir.join(format!("{final_name}.at"));
-        reporter.info(format!(
-            "[atman] :suggest — `{flow_name}.at` exists; writing as `{final_name}.at` instead"
-        ));
-    }
-    let final_src = if final_name == flow_name {
-        dsl_src.clone()
-    } else {
-        dsl_src.replacen(
-            &format!("flow {flow_name}"),
-            &format!("flow {final_name}"),
-            1,
-        )
-    };
-    std::fs::write(&target, format!("{final_src}\n"))
-        .with_context(|| format!("write {}", target.display()))?;
-
-    let routes_at = cfg.join("routes.at");
-    let mut routes_body = std::fs::read_to_string(&routes_at).unwrap_or_default();
-    if !routes_body.ends_with('\n') && !routes_body.is_empty() {
-        routes_body.push('\n');
-    }
+    let (final_name, target) = install_suggested_flow(&cfg, &flow_name, &dsl_src)
+        .with_context(|| "install suggested flow")?;
     let trigger = format!("{final_name} ");
-    routes_body.push_str(&suggest::route_line(&final_name, &trigger));
-    std::fs::write(&routes_at, routes_body)
-        .with_context(|| format!("append route to {}", routes_at.display()))?;
 
     reporter.info(format!(
         "[atman] :suggest — accepted. wrote {} and appended route \"{}\" → {}",
@@ -3823,6 +3794,55 @@ async fn handle_suggest(
     }
 
     Ok(())
+}
+
+fn install_suggested_flow(
+    config_dir: &std::path::Path,
+    flow_name: &str,
+    dsl_src: &str,
+) -> anyhow::Result<(String, std::path::PathBuf)> {
+    use std::io::Write;
+
+    let cmd_dir = config_dir.join("commands");
+    std::fs::create_dir_all(&cmd_dir)?;
+    let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config_dir);
+    let mut suffix = 1usize;
+    loop {
+        let final_name = if suffix == 1 {
+            flow_name.to_string()
+        } else {
+            format!("{flow_name}_v{suffix}")
+        };
+        let target = cmd_dir.join(format!("{final_name}.at"));
+        let final_src = dsl_src;
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                suffix += 1;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let write_result = file
+            .write_all(format!("{final_src}\n").as_bytes())
+            .and_then(|_| file.sync_all());
+        drop(file);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&target);
+            return Err(error.into());
+        }
+
+        let trigger = format!("{final_name} ");
+        if let Err(error) = hub.append_dsl_route(&final_name, &trigger) {
+            let _ = std::fs::remove_file(&target);
+            return Err(anyhow::anyhow!(error));
+        }
+        return Ok((final_name, target));
+    }
 }
 
 fn apply_session_config(session: &atman_runtime::Session) {
@@ -6747,6 +6767,59 @@ mod tests {
         assert_eq!(select_suggest_model(Some("smart".into())), "smart");
         assert_eq!(select_suggest_model(Some(String::new())), "");
         assert_eq!(select_suggest_model(None), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn install_suggested_flow_retries_all_filename_collisions_without_overwriting() {
+        let config = tempfile::tempdir().unwrap();
+        let commands = config.path().join("commands");
+        std::fs::create_dir(&commands).unwrap();
+        for name in ["review", "review_v2", "review_v3"] {
+            std::fs::write(commands.join(format!("{name}.at")), format!("old {name}")).unwrap();
+        }
+
+        let (name, path) = install_suggested_flow(
+            config.path(),
+            "review",
+            "flow review(input: string) -> string { return input }",
+        )
+        .unwrap();
+
+        assert_eq!(name, "review_v4");
+        assert_eq!(path, commands.join("review_v4.at"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("flow review(")
+        );
+        for name in ["review", "review_v2", "review_v3"] {
+            assert_eq!(
+                std::fs::read_to_string(commands.join(format!("{name}.at"))).unwrap(),
+                format!("old {name}")
+            );
+        }
+        let routes = std::fs::read_to_string(config.path().join("routes.at")).unwrap();
+        assert!(routes.contains("route \"review_v4 \" { flow: review_v4 }"));
+    }
+
+    #[test]
+    fn install_suggested_flow_removes_new_command_when_route_append_fails() {
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("routes.at"), "route invalid").unwrap();
+
+        let error = install_suggested_flow(
+            config.path(),
+            "review",
+            "flow review(input: string) -> string { return input }",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("parse existing routes.at"));
+        assert!(!config.path().join("commands/review.at").exists());
+        assert_eq!(
+            std::fs::read_to_string(config.path().join("routes.at")).unwrap(),
+            "route invalid"
+        );
     }
 
     #[test]
