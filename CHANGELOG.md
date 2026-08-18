@@ -6,10 +6,28 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-08-18
+
+Centralized configuration ownership, transactional legacy migration, typed project storage overlays, and route-program consolidation.
+
+### ✨ Features
+
+- **Centralized configuration hub** — runtime, CLI, daemon, and TUI configuration reads and mutations now share a typed `ConfigHub` API with atomic persistence and live model reloads.
+- **Project storage scope** — project-local storage settings can overlay global configuration through a typed scope model.
+- **Route programs** — bare-input routing is represented as a DSL route program, with route resolution and persistence owned by the runtime configuration layer.
+
 ### 🐛 Fixes
 
 - **Streaming tool calls** — OpenAI-compatible argument deltas with an empty function name no longer overwrite the tool name parsed from the initial chunk.
+- **Configuration migration safety** — legacy configuration relocation is serialized across processes, preserves conflicting sources, rejects unsafe file types, secures sensitive files, and reports partial outcomes.
+- **Model migration safety** — versioned model migration preserves provider references, rejects unsupported versions, protects backups from overwrite, and reloads only after a successful transaction.
 - **MCP configuration persistence** — MCP reads and mutations use the configured atman directory consistently, and JSON updates are written atomically through the shared configuration API.
+- **Workflow rendering** — workflow tool nodes retain a correct lifecycle across streamed updates.
+
+### ♻️ Refactors
+
+- **Unified configuration ownership** — auth, daemon credentials, MCP, routes, storage, preview, sandbox, redaction, interjection, compaction, snapshots, providers, models, aliases, themes, and templates now transact through `ConfigHub` instead of independent disk paths.
+- **Test model fixtures** — integration tests use one shared model fixture path and consistent sub-agent role tool boundaries.
 
 ## [1.8.0] — 2026-08-15
 
