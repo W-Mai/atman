@@ -6,6 +6,48 @@ use atman_daemon::{DaemonState, dispatch, run::RunLauncher};
 use atman_proto::{JsonRpcRequest, methods};
 
 #[tokio::test(flavor = "multi_thread")]
+async fn launcher_uses_injected_config_and_data_dirs_for_project_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[storage]\nscope = \"global\"\n",
+    )
+    .unwrap();
+    let state = Arc::new(DaemonState::new(data_dir.clone()));
+    let launcher = RunLauncher {
+        project_root: project_root.clone(),
+        config_dir: Some(config_dir),
+        home_dir: None,
+    };
+
+    launcher
+        .spawn(
+            state,
+            repo_root().join("examples/hello.at").to_str().unwrap(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+    let scope = data_dir
+        .join("projects")
+        .join(atman_runtime::session_meta::fingerprint_from_root(
+            &project_root,
+        ));
+    assert!(
+        scope.is_dir(),
+        "expected injected scope {}",
+        scope.display()
+    );
+    assert!(!project_root.join(".atman").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn run_flow_end_to_end_writes_events_and_appears_in_list_sessions() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));

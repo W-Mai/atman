@@ -151,6 +151,18 @@ impl ConfigHub {
         self.config_dir.join("routes.at")
     }
 
+    pub fn storage_config(&self, project_root: Option<&Path>) -> crate::storage::StorageConfig {
+        let global =
+            crate::storage::StorageConfig::load_from(&self.config_toml_path()).unwrap_or_default();
+        let project = project_root
+            .map(|root| {
+                crate::storage::StorageConfig::load_from(&root.join(".atman/config.toml"))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        crate::storage::StorageConfig::merge(global, project)
+    }
+
     pub fn load_routes_source(&self) -> Result<Option<String>, ConfigError> {
         match std::fs::read_to_string(self.routes_at_path()) {
             Ok(source) => Ok(Some(source)),
@@ -1167,6 +1179,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hub = ConfigHub::from_config_dir(dir.path());
         (dir, hub)
+    }
+
+    #[test]
+    fn storage_config_merges_only_typed_storage_projection() {
+        let (dir, hub) = temp_hub();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[storage]\nscope = \"local\"\n[theme]\nmode = \"dark\"\n",
+        )
+        .unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".atman")).unwrap();
+        std::fs::write(
+            project.path().join(".atman/config.toml"),
+            "[storage]\nscope = \"global\"\n[theme]\nmode = \"light\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            hub.storage_config(Some(project.path())).scope,
+            Some(crate::storage::StorageScope::Global)
+        );
+    }
+
+    #[test]
+    fn storage_config_isolates_invalid_global_and_project_layers() {
+        let (dir, hub) = temp_hub();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".atman")).unwrap();
+        std::fs::write(dir.path().join("config.toml"), "not valid [").unwrap();
+        std::fs::write(
+            project.path().join(".atman/config.toml"),
+            "[storage]\nscope = \"local\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            hub.storage_config(Some(project.path())).scope,
+            Some(crate::storage::StorageScope::Local)
+        );
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[storage]\nscope = \"global\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join(".atman/config.toml"), "not valid [").unwrap();
+        assert_eq!(
+            hub.storage_config(Some(project.path())).scope,
+            Some(crate::storage::StorageScope::Global)
+        );
+    }
+
+    #[test]
+    fn storage_config_treats_read_errors_as_empty_layers() {
+        let (dir, hub) = temp_hub();
+        std::fs::create_dir(dir.path().join("config.toml")).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".atman")).unwrap();
+        std::fs::write(
+            project.path().join(".atman/config.toml"),
+            "[storage]\nscope = \"local\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            hub.storage_config(Some(project.path())).scope,
+            Some(crate::storage::StorageScope::Local)
+        );
     }
 
     fn write_config(hub: &ConfigHub, text: &str) {

@@ -45,24 +45,27 @@ impl RunLauncher {
         reload_model_config(self.config_dir.as_deref());
 
         let redactor = crate::bootstrap::build_redactor(self.config_dir.as_deref());
-        let project_index =
-            match atman_runtime::storage::resolve_project_scope_for(&self.project_root) {
-                Ok(scope) => match atman_runtime::index::AnchorIndex::open_project(&scope) {
-                    Ok(idx) => Some(std::sync::Arc::new(idx)),
-                    Err(e) => {
-                        atman_runtime::notify!(
-                            warn,
-                            "project index unavailable at {}: {e}",
-                            scope.display()
-                        );
-                        None
-                    }
-                },
-                Err(e) => {
-                    atman_runtime::notify!(warn, "resolve project scope failed: {e}");
-                    None
-                }
-            };
+        let hub = match &self.config_dir {
+            Some(dir) => atman_runtime::config_hub::ConfigHub::from_config_dir(dir),
+            None => atman_runtime::config_hub::ConfigHub::global()
+                .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?,
+        };
+        let scope_root = atman_runtime::storage::resolve_project_scope_with(
+            &hub,
+            &self.project_root,
+            state.data_dir(),
+        )?;
+        let project_index = match atman_runtime::index::AnchorIndex::open_project(&scope_root) {
+            Ok(idx) => Some(std::sync::Arc::new(idx)),
+            Err(e) => {
+                atman_runtime::notify!(
+                    warn,
+                    "project index unavailable at {}: {e}",
+                    scope_root.display()
+                );
+                None
+            }
+        };
         let session = std::sync::Arc::new(
             atman_runtime::Session::open_with_context(state.data_dir(), redactor, project_index)
                 .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
@@ -103,6 +106,7 @@ impl RunLauncher {
                         args,
                         run_id_runtime,
                         project_root,
+                        scope_root,
                         config_dir,
                         home_dir,
                         Some(state_for_run),
@@ -139,6 +143,7 @@ async fn run_flow_inner(
     args: Vec<(String, atman_runtime::Value)>,
     run_id: RuntimeRunId,
     project_root: PathBuf,
+    scope_root: PathBuf,
     config_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     daemon_state: Option<Arc<crate::DaemonState>>,
@@ -173,8 +178,6 @@ async fn run_flow_inner(
         None => atman_runtime::lifecycle::LifecycleRunner::new(),
     };
 
-    let scope_root = atman_runtime::storage::resolve_project_scope_for(&project_root)
-        .unwrap_or_else(|_| project_root.join(".atman"));
     let redactor = crate::bootstrap::build_redactor(config_dir.as_deref());
     crate::bootstrap::attach_memory_stores_with_redactor(
         &mut executor,

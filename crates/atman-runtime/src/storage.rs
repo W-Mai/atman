@@ -144,20 +144,25 @@ fn resolve_data_dir(env: EnvOs) -> Result<PathBuf> {
 }
 
 pub fn load_storage_config(project_root: Option<&Path>) -> StorageConfig {
-    let global = config_dir()
-        .ok()
-        .map(|d| StorageConfig::load_from(&d.join("config.toml")).unwrap_or_default())
-        .unwrap_or_default();
-    let project = project_root
-        .map(|r| StorageConfig::load_from(&r.join(".atman/config.toml")).unwrap_or_default())
-        .unwrap_or_default();
-    StorageConfig::merge(global, project)
+    crate::config_hub::ConfigHub::global()
+        .map(|hub| hub.storage_config(project_root))
+        .unwrap_or_default()
+}
+
+pub fn resolve_project_scope_with(
+    hub: &crate::config_hub::ConfigHub,
+    project_root: &Path,
+    data_dir: &Path,
+) -> Result<PathBuf> {
+    let cfg = hub.storage_config(Some(project_root));
+    resolve_project_storage_root(project_root, &cfg, data_dir)
 }
 
 pub fn resolve_project_scope_for(project_root: &Path) -> Result<PathBuf> {
-    let cfg = load_storage_config(Some(project_root));
+    let hub = crate::config_hub::ConfigHub::global()
+        .map_err(|error| anyhow::anyhow!("resolve config hub: {error}"))?;
     let data = data_dir()?;
-    resolve_project_storage_root(project_root, &cfg, &data)
+    resolve_project_scope_with(&hub, project_root, &data)
 }
 
 pub fn resolve_current_project_scope() -> Result<PathBuf> {
@@ -300,6 +305,37 @@ mod tests {
         let cfg = StorageConfig::default();
         let out = resolve_project_storage_root(project.path(), &cfg, data.path()).unwrap();
         assert!(out.starts_with(data.path().join("projects")));
+    }
+
+    #[test]
+    fn explicit_hub_and_data_dir_control_scope_resolution() {
+        let config = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        std::fs::write(
+            config.path().join("config.toml"),
+            "[storage]\nscope = \"global\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(project.path().join(".atman")).unwrap();
+        std::fs::write(
+            project.path().join(".atman/config.toml"),
+            "[storage]\nscope = \"local\"\n",
+        )
+        .unwrap();
+        let hub = crate::config_hub::ConfigHub::from_config_dir(config.path());
+
+        let local = resolve_project_scope_with(&hub, project.path(), data.path()).unwrap();
+        assert_eq!(local, project.path().join(".atman"));
+
+        std::fs::remove_file(project.path().join(".atman/config.toml")).unwrap();
+        let global = resolve_project_scope_with(&hub, project.path(), data.path()).unwrap();
+        assert_eq!(
+            global,
+            data.path()
+                .join("projects")
+                .join(fingerprint_from_root(project.path()))
+        );
     }
 
     #[test]

@@ -5515,11 +5515,10 @@ fn bootstrap_opts(
     })
 }
 
-fn open_current_project_index() -> Result<Option<std::sync::Arc<atman_runtime::index::AnchorIndex>>>
-{
-    let scope = atman_runtime::storage::resolve_current_project_scope()
-        .context("resolve project storage scope")?;
-    match atman_runtime::index::AnchorIndex::open_project(&scope) {
+fn open_project_index(
+    scope: &Path,
+) -> Result<Option<std::sync::Arc<atman_runtime::index::AnchorIndex>>> {
+    match atman_runtime::index::AnchorIndex::open_project(scope) {
         Ok(idx) => Ok(Some(std::sync::Arc::new(idx))),
         Err(e) => {
             atman_runtime::notify!(
@@ -5530,6 +5529,13 @@ fn open_current_project_index() -> Result<Option<std::sync::Arc<atman_runtime::i
             Ok(None)
         }
     }
+}
+
+fn open_current_project_index() -> Result<Option<std::sync::Arc<atman_runtime::index::AnchorIndex>>>
+{
+    let scope = atman_runtime::storage::resolve_current_project_scope()
+        .context("resolve project storage scope")?;
+    open_project_index(&scope)
 }
 
 fn attach_memory_stores(
@@ -5546,8 +5552,8 @@ fn attach_memory_stores(
         let scope = atman_runtime::storage::resolve_current_project_scope()?;
         (
             session_dir.to_path_buf(),
-            scope,
-            open_current_project_index()?,
+            scope.clone(),
+            open_project_index(&scope)?,
         )
     };
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
