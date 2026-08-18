@@ -379,41 +379,45 @@ pub fn register_all_preset_models() {
 
 // Config migration (v1 to v2)
 
-/// Detect old format: any [models.X] with api_key or base_url, or no config_version.
-pub fn needs_migration(text: &str) -> bool {
-    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
-        return false;
-    };
-    if doc.get("config_version").is_some() {
-        return false;
-    }
-    if let Some(models) = doc.get("models").and_then(|m| m.as_table()) {
-        for (_, entry) in models {
-            if entry.get("api_key").is_some() || entry.get("base_url").is_some() {
-                return true;
-            }
-            // provider field is a type string (openai/openai-compat/anthropic/codex)
-            if let Some(p) = entry.get("provider").and_then(|v| v.as_str()) {
-                if matches!(p, "openai" | "openai-compat" | "anthropic" | "codex") {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelMigrationOutcome {
+    NotNeeded,
+    Migrated { backup: std::path::PathBuf },
 }
 
-/// Migrate v1 config to v2 format. Returns migrated text or None on failure.
-///
-/// - Groups models by (provider_type, api_key, base_url) into [providers.X]
-/// - Removes api_key/base_url from [models.X]
-/// - Updates provider field to reference provider name
-/// - Adds config_version = 2
-pub fn migrate_config(text: &str) -> Option<String> {
-    let mut doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+pub fn migrate_config_if_needed(
+    text: &str,
+) -> Result<Option<String>, crate::config_hub::ConfigError> {
+    let mut doc = text.parse::<toml_edit::DocumentMut>()?;
+    let legacy = has_legacy_model_fields(&doc);
+    match doc.get("config_version") {
+        None if !legacy => return Ok(None),
+        None => {}
+        Some(version) => match version.as_integer() {
+            Some(1) if legacy => {}
+            Some(1) | Some(2) => return Ok(None),
+            Some(value) => {
+                return Err(crate::config_hub::ConfigError::Invalid(format!(
+                    "unsupported config_version {value}"
+                )));
+            }
+            None => {
+                return Err(crate::config_hub::ConfigError::Invalid(
+                    "config_version must be an integer".into(),
+                ));
+            }
+        },
+    }
 
-    // Collect models that need migration, grouped by (type, key, url)
-    let models = doc.get("models")?.as_table()?;
+    let provider_names: std::collections::HashSet<String> = doc
+        .get("providers")
+        .and_then(|item| item.as_table())
+        .map(|providers| providers.iter().map(|(name, _)| name.to_string()).collect())
+        .unwrap_or_default();
+    let models = doc
+        .get("models")
+        .and_then(|item| item.as_table())
+        .ok_or_else(|| crate::config_hub::ConfigError::Invalid("models is not a table".into()))?;
     let mut groups: std::collections::BTreeMap<(String, String, String), Vec<String>> =
         std::collections::BTreeMap::new();
 
@@ -436,10 +440,10 @@ pub fn migrate_config(text: &str) -> Option<String> {
 
         if !api_key.is_empty()
             || !base_url.is_empty()
-            || matches!(
+            || (matches!(
                 ptype.as_str(),
                 "openai" | "openai-compat" | "anthropic" | "codex"
-            )
+            ) && !provider_names.contains(&ptype))
         {
             groups
                 .entry((ptype, api_key, base_url))
@@ -449,10 +453,14 @@ pub fn migrate_config(text: &str) -> Option<String> {
     }
 
     if groups.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut used_names: std::collections::HashSet<String> = doc
+        .get("providers")
+        .and_then(|item| item.as_table())
+        .map(|providers| providers.iter().map(|(name, _)| name.to_string()).collect())
+        .unwrap_or_default();
 
     for ((ptype, api_key, base_url), model_names) in &groups {
         let provider_name = pick_provider_name(ptype, base_url, &mut used_names);
@@ -492,10 +500,35 @@ pub fn migrate_config(text: &str) -> Option<String> {
         }
     }
 
-    // Add config_version = 2 at the top level
     doc.insert("config_version", toml_edit::value(2i64));
+    let migrated = doc.to_string();
+    parse_config(&migrated).ok_or_else(|| {
+        crate::config_hub::ConfigError::Invalid("validate migrated config.toml".into())
+    })?;
+    Ok(Some(migrated))
+}
 
-    Some(doc.to_string())
+fn has_legacy_model_fields(doc: &toml_edit::DocumentMut) -> bool {
+    let provider_names: std::collections::HashSet<&str> = doc
+        .get("providers")
+        .and_then(|item| item.as_table())
+        .map(|providers| providers.iter().map(|(name, _)| name).collect())
+        .unwrap_or_default();
+    doc.get("models")
+        .and_then(|item| item.as_table())
+        .is_some_and(|models| {
+            models.iter().any(|(_, entry)| {
+                entry.get("api_key").is_some()
+                    || entry.get("base_url").is_some()
+                    || entry
+                        .get("provider")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|provider| {
+                            matches!(provider, "openai" | "openai-compat" | "anthropic" | "codex")
+                                && !provider_names.contains(provider)
+                        })
+            })
+        })
 }
 
 fn pick_provider_name(
@@ -524,20 +557,6 @@ fn pick_provider_name(
         }
     }
     unreachable!()
-}
-
-/// Run migration if needed. Returns true if migration was performed.
-pub fn run_migration_if_needed() -> bool {
-    let migrated = crate::config_hub::ConfigHub::global()
-        .and_then(|hub| hub.migrate_model_config_if_needed())
-        .unwrap_or(false);
-    if migrated {
-        crate::notify!(
-            info,
-            "config.toml migrated to v2 format (backup at config.toml.bak)"
-        );
-    }
-    migrated
 }
 
 // Alias CRUD (writes config.toml)

@@ -13,6 +13,12 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<()> {
     let data_dir = default_data_dir()?;
+    let config_path = default_config_path()?;
+    let config_dir = atman_daemon::bootstrap::default_config_dir()?;
+    let hub = atman_runtime::config_hub::ConfigHub::from_config_dir(config_dir)
+        .with_daemon_config_path(&config_path);
+    migrate_legacy_layout_for_daemon(&hub, &data_dir)?;
+    hub.migrate_and_reload_models()?;
     let state = Arc::new(DaemonState::new(data_dir.clone()));
     let launcher = std::sync::Arc::new(atman_daemon::run::RunLauncher {
         project_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -32,9 +38,7 @@ async fn main() -> Result<()> {
     }
     pidfile::write_pid(&pid_path, std::process::id())?;
 
-    let config_path = default_config_path()?;
-    let config = atman_runtime::config_hub::ConfigHub::from_daemon_config_path(&config_path)
-        .load_or_init_daemon_config()?;
+    let config = hub.load_or_init_daemon_config()?;
     println!(
         "[atman-daemon] config loaded from {} (token 32-byte, keep it secret)",
         config_path.display()
@@ -82,6 +86,47 @@ async fn main() -> Result<()> {
     serve.await?;
     let _ = unix_task.await;
     pidfile::remove_pid(&pid_path);
+    Ok(())
+}
+
+fn migrate_legacy_layout_for_daemon(
+    hub: &atman_runtime::config_hub::ConfigHub,
+    data_dir: &std::path::Path,
+) -> Result<()> {
+    let report = hub.migrate_legacy_layout(data_dir)?;
+    let Some(report) = report else {
+        return Ok(());
+    };
+    for item in report.artifacts {
+        let fatal = item.sensitive
+            && matches!(
+                item.kind,
+                atman_runtime::config_migration::ArtifactOutcomeKind::RejectedFileType
+                    | atman_runtime::config_migration::ArtifactOutcomeKind::FailedBeforePublish
+            );
+        if fatal {
+            anyhow::bail!(
+                "legacy sensitive config {} could not be migrated: {:?}{}",
+                item.path,
+                item.kind,
+                item.error
+                    .as_deref()
+                    .map(|error| format!(": {error}"))
+                    .unwrap_or_default()
+            );
+        }
+        if matches!(
+            item.kind,
+            atman_runtime::config_migration::ArtifactOutcomeKind::CommittedSourceRetained
+                | atman_runtime::config_migration::ArtifactOutcomeKind::RejectedFileType
+                | atman_runtime::config_migration::ArtifactOutcomeKind::FailedBeforePublish
+        ) {
+            eprintln!(
+                "[atman-daemon] legacy config {}: {:?}",
+                item.path, item.kind
+            );
+        }
+    }
     Ok(())
 }
 

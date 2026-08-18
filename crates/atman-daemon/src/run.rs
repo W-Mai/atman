@@ -263,7 +263,14 @@ fn reload_model_config(config_dir: Option<&Path>) {
     let Some(dir) = config_dir else {
         return;
     };
-    let _ = atman_runtime::config_hub::ConfigHub::from_config_dir(dir).reload();
+    if let Err(error) =
+        atman_runtime::config_hub::ConfigHub::from_config_dir(dir).migrate_and_reload_models()
+    {
+        atman_runtime::notify!(
+            error,
+            "config.toml migration/reload failed; disk migration may already be committed: {error}"
+        );
+    }
 }
 
 fn path_is_managed_agent_at(path: &Path, config_dir: Option<&Path>) -> bool {

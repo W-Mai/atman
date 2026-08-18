@@ -290,6 +290,25 @@ fn run_startup_config_migration() {
             for name in &rep.skipped_conflicts {
                 atman_runtime::notify!(info, "  skipped (already at destination): {name}");
             }
+            for item in &rep.artifacts {
+                if matches!(
+                    item.kind,
+                    atman_runtime::config_migration::ArtifactOutcomeKind::RejectedFileType
+                        | atman_runtime::config_migration::ArtifactOutcomeKind::FailedBeforePublish
+                        | atman_runtime::config_migration::ArtifactOutcomeKind::CommittedSourceRetained
+                ) {
+                    atman_runtime::notify!(
+                        warn,
+                        "  legacy config {}: {:?}{}",
+                        item.path,
+                        item.kind,
+                        item.error
+                            .as_deref()
+                            .map(|error| format!(": {error}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
         }
         Ok(None) => {}
         Err(e) => atman_runtime::notify!(error, "config migration skipped: {e:#}"),
@@ -3869,13 +3888,20 @@ pub fn load_model_config_from_disk() {
     let Ok(hub) = atman_runtime::config_hub::ConfigHub::global() else {
         return;
     };
-    if hub.migrate_model_config_if_needed().unwrap_or(false) {
-        atman_runtime::notify!(
-            info,
-            "config.toml migrated to v2 format (backup at config.toml.bak)"
-        );
+    match hub.migrate_and_reload_models() {
+        Ok(atman_runtime::model_registry::ModelMigrationOutcome::Migrated { backup }) => {
+            atman_runtime::notify!(
+                info,
+                "config.toml migrated to v2 format (backup at {})",
+                backup.display()
+            );
+        }
+        Ok(atman_runtime::model_registry::ModelMigrationOutcome::NotNeeded) => {}
+        Err(error) => atman_runtime::notify!(
+            error,
+            "config.toml migration/reload failed; disk migration may already be committed: {error}"
+        ),
     }
-    let _ = hub.reload();
 }
 
 fn select_fs_access_mode(

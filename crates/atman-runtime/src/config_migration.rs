@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-// Sentinel in data_dir. Presence means we already ran (or attempted) the
-// legacy sweep so we don't repeat rename syscalls on every startup.
 pub const MIGRATION_MARKER: &str = ".migrated-to-xdg-config";
 
 // Files historically written straight into data_dir but conceptually belong
@@ -20,102 +18,347 @@ const CONFIG_FILES: &[&str] = &[
 
 const CONFIG_DIRS: &[&str] = &["commands"];
 
+pub const MIGRATION_STATE: &str = ".config-migration-state.json";
+const MANIFEST_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactOutcomeKind {
+    NoSource,
+    Moved,
+    Conflict,
+    CommittedSourceRetained,
+    RejectedFileType,
+    FailedBeforePublish,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactOutcome {
+    pub path: String,
+    pub sensitive: bool,
+    pub kind: ArtifactOutcomeKind,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationReport {
     pub moved: Vec<String>,
     pub skipped_conflicts: Vec<String>,
     pub from: PathBuf,
     pub to: PathBuf,
+    pub artifacts: Vec<ArtifactOutcome>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MigrationState {
+    version: u32,
+    artifacts: Vec<ArtifactOutcome>,
 }
 
 pub fn migrate_legacy_config_if_needed(
     config_dir: &Path,
     data_dir: &Path,
 ) -> Result<Option<MigrationReport>> {
-    // User pointed both dirs at the same place — nothing to relocate.
-    if data_dir == config_dir {
-        return Ok(None);
-    }
-    if !data_dir.exists() {
-        return Ok(None);
-    }
-    let marker = data_dir.join(MIGRATION_MARKER);
-    if marker.exists() {
-        return Ok(None);
-    }
+    crate::config_hub::ConfigHub::from_config_dir(config_dir)
+        .migrate_legacy_layout(data_dir)
+        .map_err(anyhow::Error::from)
+}
 
-    let mut moved = Vec::new();
-    let mut skipped = Vec::new();
-
+pub(crate) fn relocate_legacy_layout(
+    config_dir: &Path,
+    daemon_config_path: Option<&Path>,
+    data_dir: &Path,
+) -> Result<Option<MigrationReport>> {
+    if data_dir == config_dir || !data_dir.exists() {
+        return Ok(None);
+    }
+    let previous = load_state(data_dir);
+    let mut artifacts = Vec::new();
     for name in CONFIG_FILES {
-        let src = data_dir.join(name);
-        if !src.is_file() {
-            continue;
-        }
-        let dst = config_dir.join(name);
-        if dst.exists() {
-            skipped.push((*name).to_string());
-            continue;
-        }
-        std::fs::create_dir_all(config_dir)
-            .with_context(|| format!("mkdir {}", config_dir.display()))?;
-        std::fs::rename(&src, &dst)
-            .with_context(|| format!("move {} → {}", src.display(), dst.display()))?;
-        moved.push((*name).to_string());
+        let destination = if *name == "daemon.toml" {
+            daemon_config_path
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| config_dir.join(name))
+        } else {
+            config_dir.join(name)
+        };
+        artifacts.push(relocate_file(
+            &data_dir.join(name),
+            &destination,
+            name,
+            *name == "daemon.toml",
+        ));
     }
-
     for dir in CONFIG_DIRS {
-        let src = data_dir.join(dir);
-        if !src.is_dir() {
-            continue;
-        }
-        let dst = config_dir.join(dir);
-        if dst.exists() {
-            skipped.push((*dir).to_string());
-            continue;
-        }
-        std::fs::create_dir_all(config_dir)
-            .with_context(|| format!("mkdir {}", config_dir.display()))?;
-        std::fs::rename(&src, &dst)
-            .with_context(|| format!("move {} → {}", src.display(), dst.display()))?;
-        moved.push((*dir).to_string());
+        relocate_dir(
+            &data_dir.join(dir),
+            &config_dir.join(dir),
+            dir,
+            &mut artifacts,
+        )?;
     }
 
-    // Marker always written after a successful sweep — even a pure no-op
-    // sweep counts as "done" so subsequent runs skip immediately.
-    std::fs::create_dir_all(data_dir).with_context(|| format!("mkdir {}", data_dir.display()))?;
-    std::fs::write(&marker, marker_contents(&moved, &skipped))
-        .with_context(|| format!("write {}", marker.display()))?;
+    let state = MigrationState {
+        version: MANIFEST_VERSION,
+        artifacts: artifacts.clone(),
+    };
+    write_state(data_dir, &state)?;
 
-    if moved.is_empty() && skipped.is_empty() {
+    let moved = artifacts
+        .iter()
+        .filter(|item| item.kind == ArtifactOutcomeKind::Moved)
+        .map(|item| item.path.clone())
+        .collect::<Vec<_>>();
+    let skipped_conflicts = artifacts
+        .iter()
+        .filter(|item| item.kind == ArtifactOutcomeKind::Conflict)
+        .filter(|item| {
+            previous.as_ref().is_none_or(|state| {
+                !state
+                    .artifacts
+                    .iter()
+                    .any(|old| old.path == item.path && old.kind == ArtifactOutcomeKind::Conflict)
+            })
+        })
+        .map(|item| item.path.clone())
+        .collect::<Vec<_>>();
+    let reportable = artifacts.iter().any(|item| {
+        matches!(
+            item.kind,
+            ArtifactOutcomeKind::Moved
+                | ArtifactOutcomeKind::CommittedSourceRetained
+                | ArtifactOutcomeKind::RejectedFileType
+                | ArtifactOutcomeKind::FailedBeforePublish
+        )
+    }) || !skipped_conflicts.is_empty();
+    if !reportable {
         return Ok(None);
     }
     Ok(Some(MigrationReport {
         moved,
-        skipped_conflicts: skipped,
+        skipped_conflicts,
         from: data_dir.to_path_buf(),
         to: config_dir.to_path_buf(),
+        artifacts,
     }))
 }
 
-fn marker_contents(moved: &[String], skipped: &[String]) -> String {
-    if moved.is_empty() && skipped.is_empty() {
-        return "no-op\n".into();
+fn relocate_dir(
+    src: &Path,
+    dst: &Path,
+    relative: &str,
+    outcomes: &mut Vec<ArtifactOutcome>,
+) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(src) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_dir() {
+        outcomes.push(outcome(
+            relative,
+            false,
+            ArtifactOutcomeKind::RejectedFileType,
+            None,
+        ));
+        return Ok(());
     }
-    let mut s = String::new();
-    if !moved.is_empty() {
-        s.push_str("moved:\n");
-        for m in moved {
-            s.push_str(&format!("  {m}\n"));
+    match std::fs::symlink_metadata(dst) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            outcomes.push(outcome(
+                relative,
+                false,
+                ArtifactOutcomeKind::RejectedFileType,
+                None,
+            ));
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(dst)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let child_relative = format!("{relative}/{}", name.to_string_lossy());
+        let child_src = entry.path();
+        let child_dst = dst.join(&name);
+        let child_type = std::fs::symlink_metadata(&child_src)?.file_type();
+        if child_type.is_dir() {
+            relocate_dir(&child_src, &child_dst, &child_relative, outcomes)?;
+        } else if child_type.is_file() {
+            outcomes.push(relocate_file(
+                &child_src,
+                &child_dst,
+                &child_relative,
+                false,
+            ));
+        } else {
+            outcomes.push(outcome(
+                &child_relative,
+                false,
+                ArtifactOutcomeKind::RejectedFileType,
+                None,
+            ));
         }
     }
-    if !skipped.is_empty() {
-        s.push_str("skipped (destination already existed):\n");
-        for k in skipped {
-            s.push_str(&format!("  {k}\n"));
+    let _ = std::fs::remove_dir(src);
+    Ok(())
+}
+
+fn relocate_file(src: &Path, dst: &Path, relative: &str, sensitive: bool) -> ArtifactOutcome {
+    let metadata = match std::fs::symlink_metadata(src) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return outcome(relative, sensitive, ArtifactOutcomeKind::NoSource, None);
+        }
+        Err(error) => {
+            return outcome(
+                relative,
+                sensitive,
+                ArtifactOutcomeKind::FailedBeforePublish,
+                Some(error.to_string()),
+            );
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return outcome(
+            relative,
+            sensitive,
+            ArtifactOutcomeKind::RejectedFileType,
+            None,
+        );
+    }
+    match std::fs::symlink_metadata(dst) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            return outcome(relative, sensitive, ArtifactOutcomeKind::Conflict, None);
+        }
+        Ok(_) => {
+            return outcome(
+                relative,
+                sensitive,
+                ArtifactOutcomeKind::RejectedFileType,
+                None,
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return outcome(
+                relative,
+                sensitive,
+                ArtifactOutcomeKind::FailedBeforePublish,
+                Some(error.to_string()),
+            );
         }
     }
-    s
+    match copy_publish_no_clobber(src, dst, sensitive, &metadata) {
+        Ok(()) => match std::fs::remove_file(src) {
+            Ok(()) => outcome(relative, sensitive, ArtifactOutcomeKind::Moved, None),
+            Err(error) => outcome(
+                relative,
+                sensitive,
+                ArtifactOutcomeKind::CommittedSourceRetained,
+                Some(error.to_string()),
+            ),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            outcome(relative, sensitive, ArtifactOutcomeKind::Conflict, None)
+        }
+        Err(error) => outcome(
+            relative,
+            sensitive,
+            ArtifactOutcomeKind::FailedBeforePublish,
+            Some(error.to_string()),
+        ),
+    }
+}
+
+fn copy_publish_no_clobber(
+    src: &Path,
+    dst: &Path,
+    sensitive: bool,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let filename = dst
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let tmp = parent.join(format!(".{filename}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::fs::PermissionsExt;
+            options.mode(if sensitive {
+                0o600
+            } else {
+                metadata.permissions().mode() & 0o777
+            });
+        }
+        let mut output = options.open(&tmp)?;
+        let mut input = std::fs::File::open(src)?;
+        let mut bytes = Vec::new();
+        input.read_to_end(&mut bytes)?;
+        output.write_all(&bytes)?;
+        output.sync_all()?;
+        drop(output);
+        std::fs::hard_link(&tmp, dst)?;
+        let published = std::fs::read(dst);
+        if !published.is_ok_and(|published| published == bytes) {
+            return Err(std::io::Error::other(
+                "published config verification failed",
+            ));
+        }
+        let _ = std::fs::File::open(parent).and_then(|dir| dir.sync_all());
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+fn outcome(
+    path: &str,
+    sensitive: bool,
+    kind: ArtifactOutcomeKind,
+    error: Option<String>,
+) -> ArtifactOutcome {
+    ArtifactOutcome {
+        path: path.to_string(),
+        sensitive,
+        kind,
+        error,
+    }
+}
+
+fn load_state(data_dir: &Path) -> Option<MigrationState> {
+    let bytes = std::fs::read(data_dir.join(MIGRATION_STATE)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_state(data_dir: &Path, state: &MigrationState) -> Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = data_dir.join(MIGRATION_STATE);
+    let tmp = data_dir.join(format!(
+        ".config-migration-state.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(state)?;
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -172,8 +415,7 @@ mod tests {
         assert!(!data.path().join("config.toml").exists());
         // sessions/ never touched.
         assert!(data.path().join("sessions").join("keep").exists());
-        // Marker written.
-        assert!(data.path().join(MIGRATION_MARKER).exists());
+        assert!(data.path().join(MIGRATION_STATE).exists());
     }
 
     #[test]
@@ -185,9 +427,69 @@ mod tests {
         let rep = migrate_legacy_config_if_needed(cfg.path(), data.path())
             .unwrap()
             .unwrap();
-        assert!(rep.moved.contains(&"commands".to_string()));
+        assert!(rep.moved.iter().any(|path| path == "commands/hello.at"));
         assert!(cfg.path().join("commands").join("hello.at").exists());
-        assert!(!data.path().join("commands").exists());
+        assert!(!data.path().join("commands").join("hello.at").exists());
+    }
+
+    #[test]
+    fn existing_commands_directory_merges_without_overwriting() {
+        let cfg = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        write(&cfg.path().join("commands/keep.at"), "new");
+        write(&data.path().join("commands/keep.at"), "old");
+        write(&data.path().join("commands/move.at"), "move");
+
+        let report = migrate_legacy_config_if_needed(cfg.path(), data.path())
+            .unwrap()
+            .unwrap();
+
+        assert!(report.moved.iter().any(|path| path == "commands/move.at"));
+        assert!(
+            report
+                .skipped_conflicts
+                .iter()
+                .any(|path| path == "commands/keep.at")
+        );
+        assert_eq!(
+            std::fs::read_to_string(cfg.path().join("commands/keep.at")).unwrap(),
+            "new"
+        );
+        assert!(data.path().join("commands/keep.at").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_is_rejected_and_sensitive_file_becomes_owner_only() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let cfg = TempDir::new().unwrap();
+        let data = TempDir::new().unwrap();
+        write(&data.path().join("outside"), "outside");
+        symlink(data.path().join("outside"), data.path().join("config.toml")).unwrap();
+        write(
+            &data.path().join("daemon.toml"),
+            "auth_token = \"secret\"\n",
+        );
+        std::fs::set_permissions(
+            data.path().join("daemon.toml"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        let report = migrate_legacy_config_if_needed(cfg.path(), data.path())
+            .unwrap()
+            .unwrap();
+
+        assert!(report.artifacts.iter().any(|item| {
+            item.path == "config.toml" && item.kind == ArtifactOutcomeKind::RejectedFileType
+        }));
+        assert!(data.path().join("config.toml").exists());
+        let mode = std::fs::metadata(cfg.path().join("daemon.toml"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
@@ -213,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn marker_short_circuits_second_run() {
+    fn versioned_state_does_not_hide_new_legacy_artifacts() {
         let cfg = TempDir::new().unwrap();
         let data = TempDir::new().unwrap();
         write(&data.path().join("config.toml"), "first");
@@ -223,16 +525,17 @@ mod tests {
             .unwrap();
         assert_eq!(first.moved, vec!["config.toml".to_string()]);
 
-        // Drop a fresh legacy file — marker should still block a rerun.
         write(&data.path().join("daemon.toml"), "later");
-        let second = migrate_legacy_config_if_needed(cfg.path(), data.path()).unwrap();
-        assert!(second.is_none());
-        assert!(data.path().join("daemon.toml").exists());
-        assert!(!cfg.path().join("daemon.toml").exists());
+        let second = migrate_legacy_config_if_needed(cfg.path(), data.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.moved, vec!["daemon.toml".to_string()]);
+        assert!(!data.path().join("daemon.toml").exists());
+        assert!(cfg.path().join("daemon.toml").exists());
     }
 
     #[test]
-    fn noop_sweep_still_writes_marker_but_returns_none() {
+    fn noop_sweep_writes_versioned_state_but_returns_none() {
         let cfg = TempDir::new().unwrap();
         let data = TempDir::new().unwrap();
         // data_dir exists but contains only non-config artifacts.
@@ -240,7 +543,7 @@ mod tests {
 
         let out = migrate_legacy_config_if_needed(cfg.path(), data.path()).unwrap();
         assert!(out.is_none());
-        assert!(data.path().join(MIGRATION_MARKER).exists());
+        assert!(data.path().join(MIGRATION_STATE).exists());
         assert!(data.path().join("index.db").exists());
     }
 }

@@ -10,6 +10,7 @@ use crate::model_registry::ModelConfigUpdate;
 static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static AUTH_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static ROUTES_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static LAYOUT_MIGRATION_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -151,6 +152,38 @@ impl ConfigHub {
         self.config_dir.join("routes.at")
     }
 
+    pub fn migrate_legacy_layout(
+        &self,
+        legacy_data_dir: &Path,
+    ) -> Result<Option<crate::config_migration::MigrationReport>, ConfigError> {
+        use fs2::FileExt;
+        let _guard = LAYOUT_MIGRATION_LOCK.lock().unwrap();
+        if legacy_data_dir == self.config_dir || !legacy_data_dir.exists() {
+            return Ok(None);
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(legacy_data_dir.join(".config-migration.lock"))?;
+        lock.lock_exclusive()?;
+        let _config_file_lock = lock_file(&self.config_dir.join(".config.toml.lock"))?;
+        let daemon_lock_path = self
+            .daemon_config_path
+            .as_deref()
+            .map(lock_path_for)
+            .unwrap_or_else(|| self.config_dir.join(".daemon.toml.lock"));
+        let _daemon_file_lock = lock_file(&daemon_lock_path)?;
+        let _routes_file_lock = lock_file(&self.config_dir.join(".routes.at.lock"))?;
+        crate::config_migration::relocate_legacy_layout(
+            &self.config_dir,
+            self.daemon_config_path.as_deref(),
+            legacy_data_dir,
+        )
+        .map_err(|error| ConfigError::Invalid(error.to_string()))
+    }
+
     pub fn storage_config(&self, project_root: Option<&Path>) -> crate::storage::StorageConfig {
         let global =
             crate::storage::StorageConfig::load_from(&self.config_toml_path()).unwrap_or_default();
@@ -212,11 +245,12 @@ impl ConfigHub {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        Self {
-            auth_path: config_dir.join("auth.json"),
-            config_dir,
-            daemon_config_path: Some(path),
-        }
+        Self::from_config_dir(config_dir).with_daemon_config_path(path)
+    }
+
+    pub fn with_daemon_config_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.daemon_config_path = Some(path.into());
+        self
     }
 
     pub fn from_auth_path(path: impl Into<PathBuf>) -> Self {
@@ -333,6 +367,7 @@ impl ConfigHub {
             .daemon_config_path
             .as_deref()
             .ok_or_else(|| ConfigError::Invalid("daemon config path is not configured".into()))?;
+        let _file_lock = lock_file(&lock_path_for(path))?;
         match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|error| {
                 ConfigError::Invalid(format!("parse {}: {error}", path.display()))
@@ -354,6 +389,7 @@ impl ConfigHub {
             .daemon_config_path
             .as_deref()
             .ok_or_else(|| ConfigError::Invalid("daemon config path is not configured".into()))?;
+        let _file_lock = lock_file(&lock_path_for(path))?;
         if !path.exists() {
             return Err(ConfigError::Invalid(format!(
                 "no daemon config at {} — nothing to rotate. Run `atman daemon start` once to generate one.",
@@ -909,20 +945,31 @@ impl ConfigHub {
         self.write_mcp(&configs)
     }
 
-    pub fn migrate_model_config_if_needed(&self) -> Result<bool, ConfigError> {
+    pub fn migrate_and_reload_models(
+        &self,
+    ) -> Result<crate::model_registry::ModelMigrationOutcome, ConfigError> {
+        let outcome = self.migrate_model_config_if_needed()?;
+        self.reload()?;
+        Ok(outcome)
+    }
+
+    pub fn migrate_model_config_if_needed(
+        &self,
+    ) -> Result<crate::model_registry::ModelMigrationOutcome, ConfigError> {
         let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let _file_lock = self.lock_config_file()?;
         let text = self.read_config_toml()?;
-        if !crate::model_registry::needs_migration(&text) {
-            return Ok(false);
-        }
-        let migrated = crate::model_registry::migrate_config(&text)
-            .ok_or_else(|| ConfigError::Invalid("migrate config.toml".into()))?;
+        let Some(migrated) = crate::model_registry::migrate_config_if_needed(&text)? else {
+            return Ok(crate::model_registry::ModelMigrationOutcome::NotNeeded);
+        };
         let backup = self.config_dir.join("config.toml.bak");
-        std::fs::write(backup, text)?;
+        write_sensitive_create_new_or_same(&backup, text.as_bytes())?;
         self.write_config_toml(&migrated)?;
-        crate::model_registry::reload_from_text(&migrated)
-            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        Ok(true)
+        Ok(crate::model_registry::ModelMigrationOutcome::Migrated { backup })
+    }
+
+    fn lock_config_file(&self) -> Result<std::fs::File, ConfigError> {
+        lock_file(&self.config_dir.join(".config.toml.lock"))
     }
 
     fn update_config_toml(
@@ -930,6 +977,7 @@ impl ConfigHub {
         mutate: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), ConfigError>,
     ) -> Result<(), ConfigError> {
         let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let _file_lock = self.lock_config_file()?;
         let text = self.read_config_toml()?;
         let mut doc = if text.trim().is_empty() {
             toml_edit::DocumentMut::new()
@@ -944,7 +992,7 @@ impl ConfigHub {
     }
 
     fn write_config_toml(&self, text: &str) -> Result<(), ConfigError> {
-        self.write_atomic("config.toml", ".config.toml.tmp", text)
+        write_unique_atomic(&self.config_toml_path(), text.as_bytes())
     }
 
     fn write_daemon_config(&self, config: &DaemonConfig) -> Result<(), ConfigError> {
@@ -1014,6 +1062,28 @@ fn parse_routes_source(context: &str, source: &str) -> Result<(), ConfigError> {
         .map_err(|error| ConfigError::Invalid(format!("parse {context}: {error}")))
 }
 
+fn lock_path_for(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    parent.join(format!(".{name}.lock"))
+}
+
+fn lock_file(path: &Path) -> Result<std::fs::File, ConfigError> {
+    use fs2::FileExt;
+    std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
 fn write_unique_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
     use std::io::Write;
 
@@ -1050,6 +1120,38 @@ fn load_auth_from_path(path: &Path) -> Result<crate::auth_store::AuthStore, Conf
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn write_sensitive_create_new_or_same(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
+    match std::fs::read(path) {
+        Ok(existing) if existing == contents => return Ok(()),
+        Ok(_) => {
+            return Err(ConfigError::Invalid(format!(
+                "backup conflict at {}",
+                path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    let mut file = options.open(path)?;
+    set_sensitive_file_permissions(path)?;
+    if let Err(error) = file.write_all(contents).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 fn write_sensitive_atomic(path: &Path, contents: &[u8]) -> Result<(), ConfigError> {
@@ -1586,11 +1688,9 @@ mod tests {
         let second = hub.load_or_init_daemon_config().unwrap();
         assert_eq!(second, first);
         assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".daemon.toml.")
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".daemon.toml.") && name.ends_with(".tmp")
         }));
         #[cfg(unix)]
         {
@@ -1605,12 +1705,66 @@ mod tests {
         assert_ne!(rotated.auth_token, first.auth_token);
         assert_eq!(hub.load_or_init_daemon_config().unwrap(), rotated);
         assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".daemon.toml.")
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".daemon.toml.") && name.ends_with(".tmp")
         }));
+    }
+
+    #[test]
+    fn daemon_config_waits_for_external_file_lock() {
+        use std::sync::mpsc::TryRecvError;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom-daemon.toml");
+        let lock = lock_file(&lock_path_for(&path)).unwrap();
+        let hub = ConfigHub::from_daemon_config_path(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(hub.load_or_init_daemon_config()).unwrap();
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        lock.unlock().unwrap();
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        worker.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_daemon_config_uses_custom_path_and_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let daemon_path = config.path().join("daemon/custom.toml");
+        std::fs::write(data.path().join("daemon.toml"), "auth_token = \"legacy\"\n").unwrap();
+
+        let report = ConfigHub::from_config_dir(config.path())
+            .with_daemon_config_path(&daemon_path)
+            .migrate_legacy_layout(data.path())
+            .unwrap()
+            .unwrap();
+
+        assert!(report.moved.iter().any(|path| path == "daemon.toml"));
+        assert_eq!(
+            std::fs::read_to_string(&daemon_path).unwrap(),
+            "auth_token = \"legacy\"\n"
+        );
+        assert!(!config.path().join("daemon.toml").exists());
+        assert_eq!(
+            std::fs::metadata(&daemon_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -2155,6 +2309,102 @@ custom_patterns = [{ kind = "ticket", regex = "T-[0-9]+" }]
             max_tokens: None,
             enabled: true,
         }
+    }
+
+    #[test]
+    fn model_migration_preserves_existing_provider_name() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            r#"[providers.openai]
+kind = "openai"
+api_key = "existing"
+
+[models.legacy]
+model = "gpt"
+provider = "openai"
+api_key = "legacy"
+"#,
+        );
+
+        let outcome = hub.migrate_model_config_if_needed().unwrap();
+        assert!(matches!(
+            outcome,
+            crate::model_registry::ModelMigrationOutcome::Migrated { .. }
+        ));
+        let text = hub.read_config_toml().unwrap();
+        assert!(text.contains("[providers.openai]"));
+        assert!(text.contains("api_key = \"existing\""));
+        assert!(text.contains("[providers.openai-2]"));
+        assert!(text.contains("provider = \"openai-2\""));
+    }
+
+    #[test]
+    fn model_migration_preserves_unversioned_provider_reference() {
+        let (dir, hub) = temp_hub();
+        let text = r#"[providers.openai]
+kind = "openai"
+api_key = "existing"
+
+[models.current]
+model = "gpt"
+provider = "openai"
+"#;
+        write_config(&hub, text);
+
+        assert_eq!(
+            hub.migrate_model_config_if_needed().unwrap(),
+            crate::model_registry::ModelMigrationOutcome::NotNeeded
+        );
+        assert_eq!(hub.read_config_toml().unwrap(), text);
+        assert!(!dir.path().join("config.toml.bak").exists());
+    }
+
+    #[test]
+    fn model_migration_rejects_invalid_and_future_versions() {
+        for version in ["\"2\"", "3"] {
+            let (_dir, hub) = temp_hub();
+            let text = format!(
+                "config_version = {version}\n[models.legacy]\nmodel = \"gpt\"\nprovider = \"openai\"\n"
+            );
+            write_config(&hub, &text);
+            assert!(hub.migrate_model_config_if_needed().is_err());
+            assert_eq!(hub.read_config_toml().unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn model_migration_backup_conflict_preserves_source() {
+        let (dir, hub) = temp_hub();
+        let text = "[models.legacy]\nmodel = \"gpt\"\nprovider = \"openai\"\n";
+        write_config(&hub, text);
+        std::fs::write(dir.path().join("config.toml.bak"), "older backup").unwrap();
+
+        assert!(matches!(
+            hub.migrate_model_config_if_needed(),
+            Err(ConfigError::Invalid(message)) if message.contains("backup conflict")
+        ));
+        assert_eq!(hub.read_config_toml().unwrap(), text);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_migration_backup_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            "[models.legacy]\nmodel = \"gpt\"\nprovider = \"openai\"\napi_key = \"secret\"\n",
+        );
+
+        hub.migrate_model_config_if_needed().unwrap();
+
+        let mode = std::fs::metadata(dir.path().join("config.toml.bak"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
