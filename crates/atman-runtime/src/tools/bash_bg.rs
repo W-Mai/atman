@@ -520,6 +520,85 @@ impl BgRegistry {
         ]))
     }
 
+    pub fn output_for_llm(
+        &self,
+        handle_str: &str,
+        session_id: &str,
+        session_dir: Option<&std::path::Path>,
+        cursor: usize,
+        limit: usize,
+        output_store: Option<&crate::tools::tool_output::OutputStore>,
+    ) -> Result<Value, RuntimeError> {
+        let persisted = || {
+            let dir = session_dir.ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "bash.output: complete persisted output is unavailable; output is truncated and cannot be continued".into(),
+                )
+            })?;
+            let log_path = dir.join(format!("bg_{handle_str}.log"));
+            std::fs::read_to_string(log_path).map_err(|_| {
+                RuntimeError::ToolFailed(
+                    "bash.output: complete persisted output is unavailable; output is truncated and cannot be continued".into(),
+                )
+            })
+        };
+        let full = if let Ok(entry) = self.lookup(handle_str, session_id) {
+            let out = entry.output.lock().unwrap();
+            if out.buffer_start == 0 && !out.truncated {
+                String::from_utf8(out.combined.clone()).map_err(|_| {
+                    RuntimeError::ToolFailed(
+                        "bash.output: current output is not valid UTF-8; output is truncated and cannot be continued".into(),
+                    )
+                })?
+            } else {
+                drop(out);
+                persisted()?
+            }
+        } else {
+            persisted()?
+        };
+        if full.len() <= limit {
+            return self.output(handle_str, session_id, session_dir, cursor, limit);
+        }
+        let store = output_store.ok_or_else(|| {
+            RuntimeError::ToolFailed(
+                "bash.output: session output store unavailable; oversized output cannot be continued".into(),
+            )
+        })?;
+        let output_id = store.register(handle_str, &full).ok_or_else(|| {
+            RuntimeError::ToolFailed(
+                "bash.output: complete output could not be persisted; output is truncated and cannot be continued".into(),
+            )
+        })?;
+        let offset = cursor.min(full.len());
+        if !full.is_char_boundary(offset) {
+            return Err(RuntimeError::ToolFailed(
+                "bash.output: cursor is not a valid UTF-8 byte boundary".into(),
+            ));
+        }
+        let (chunk, next, eof) = page_bytes(full.as_bytes(), offset, limit);
+        Ok(Value::Struct(vec![
+            (
+                "content".into(),
+                Value::Str(String::from_utf8(chunk).map_err(|_| {
+                    RuntimeError::ToolFailed(
+                        "bash.output: persisted output is not valid UTF-8".into(),
+                    )
+                })?),
+            ),
+            ("output_id".into(), Value::Str(output_id)),
+            ("total_bytes".into(), Value::Int(full.len() as i64)),
+            (
+                "next".into(),
+                Value::Struct(vec![
+                    ("mode".into(), Value::Str("bytes".into())),
+                    ("offset".into(), Value::Int(next as i64)),
+                    ("has_more".into(), Value::Bool(!eof)),
+                ]),
+            ),
+        ]))
+    }
+
     pub fn kill(&self, handle_str: &str, session_id: &str) -> Result<Value, RuntimeError> {
         let entry = self.lookup(handle_str, session_id)?;
         let _ = entry.control_tx.try_send(BgControl::Kill);
@@ -1103,12 +1182,13 @@ impl Tool for BashOutput {
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.output: registry not available".into())
             })?;
-            registry.output(
+            registry.output_for_llm(
                 &handle,
                 &session_id,
                 ctx.session_dir.as_deref(),
                 cursor,
                 limit,
+                ctx.output_store.as_deref(),
             )
         })
     }
@@ -1374,6 +1454,103 @@ mod tests {
             cursor.iter().find(|(name, _)| name == "next_byte"),
             Some((_, Value::Int(6)))
         ));
+    }
+
+    #[test]
+    fn oversized_output_registers_and_reassembles_through_output_store() {
+        let registry = BgRegistry::new();
+        let dir = TempDir::new().unwrap();
+        let full = format!("{}{}", "前缀🚀".repeat(104_857), "前缀");
+        assert_eq!(full.len(), 1_048_576);
+        std::fs::write(dir.path().join("bg_missing.log"), full.as_bytes()).unwrap();
+        let store = crate::tools::tool_output::OutputStore::at(dir.path());
+
+        let value = registry
+            .output_for_llm(
+                "missing",
+                "test-session",
+                Some(dir.path()),
+                0,
+                1024,
+                Some(&store),
+            )
+            .unwrap();
+        let Value::Struct(fields) = value else {
+            panic!("expected output fields");
+        };
+        let output_id = fields
+            .iter()
+            .find_map(|(name, value)| (name == "output_id").then_some(value))
+            .and_then(|value| match value {
+                Value::Str(id) => Some(id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let initial_content = fields
+            .iter()
+            .find_map(|(name, value)| (name == "content").then_some(value))
+            .and_then(|value| match value {
+                Value::Str(content) => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let total_bytes = fields
+            .iter()
+            .find_map(|(name, value)| (name == "total_bytes").then_some(value))
+            .and_then(|value| match value {
+                Value::Int(total_bytes) => Some(*total_bytes as usize),
+                _ => None,
+            })
+            .unwrap();
+        let Value::Struct(next_fields) = fields
+            .iter()
+            .find_map(|(name, value)| (name == "next").then_some(value))
+            .unwrap()
+        else {
+            panic!("expected next fields");
+        };
+        let next_offset = next_fields
+            .iter()
+            .find_map(|(name, value)| (name == "offset").then_some(value))
+            .and_then(|value| match value {
+                Value::Int(offset) => Some(*offset as usize),
+                _ => None,
+            })
+            .unwrap();
+        let has_more = next_fields
+            .iter()
+            .find_map(|(name, value)| (name == "has_more").then_some(value))
+            .and_then(|value| match value {
+                Value::Bool(has_more) => Some(*has_more),
+                _ => None,
+            })
+            .unwrap();
+        assert!(output_id.starts_with("out_"));
+        assert_eq!(total_bytes, 1_048_576);
+        assert_eq!(next_offset, initial_content.len());
+        assert!(next_offset <= 1_024);
+        assert!(full.is_char_boundary(next_offset));
+        assert!(has_more);
+        assert!(!fields.iter().any(|(name, _)| name == "continuation"));
+
+        let budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: usize::MAX,
+            max_bytes: 1024,
+            max_line_bytes: usize::MAX,
+        };
+        let mut offset = next_offset;
+        let mut assembled = initial_content;
+        assert!(has_more);
+        loop {
+            let page = store.read_bytes(&output_id, offset, 1024, budget).unwrap();
+            assembled.push_str(&page.content);
+            if !page.has_more {
+                break;
+            }
+            offset = page.next_offset;
+        }
+        assert_eq!(assembled.len(), total_bytes);
+        assert_eq!(assembled, full);
     }
 
     #[test]

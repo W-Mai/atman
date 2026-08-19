@@ -123,6 +123,7 @@ pub struct Session {
     injection_tx: broadcast::Sender<Injection>,
     last_image_user_msg: Mutex<Option<LastImageUserMsg>>,
     read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
+    output_store: std::sync::Arc<crate::tools::tool_output::OutputStore>,
     fs_access_mode: Mutex<Option<crate::fs_access::FsAccessMode>>,
     project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
 }
@@ -642,6 +643,7 @@ impl Session {
         let (todos_watch, todos_rx) = watch::channel(Vec::new());
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
         let events_handle = sink.events_handle();
+        let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
         Ok(Self {
             id,
             dir,
@@ -649,6 +651,7 @@ impl Session {
             sink,
             message_stream: crate::message_stream::MessageStream::new(events_handle),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            output_store: output_store.clone(),
             turn: TurnState::new(),
             watch: WatchHub {
                 stream_tx,
@@ -741,6 +744,7 @@ impl Session {
         let (todos_watch, todos_rx) = watch::channel(Vec::new());
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
         let events_handle = sink.events_handle();
+        let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
         Ok(Self {
             id,
             dir,
@@ -752,6 +756,7 @@ impl Session {
                 all_msgs,
             ),
             messages: std::sync::Arc::new(std::sync::Mutex::new(messages)),
+            output_store: output_store.clone(),
             turn: TurnState::new(),
             watch: WatchHub {
                 stream_tx,
@@ -797,6 +802,7 @@ impl Session {
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
         let sink = EventSink::new();
         let events_handle = sink.events_handle();
+        let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::default());
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -804,6 +810,7 @@ impl Session {
             sink,
             message_stream: crate::message_stream::MessageStream::new(events_handle),
             messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            output_store: output_store.clone(),
             turn: TurnState::new(),
             watch: WatchHub {
                 stream_tx,
@@ -866,6 +873,10 @@ impl Session {
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> {
         self.read_files.clone()
+    }
+
+    pub fn output_store(&self) -> std::sync::Arc<crate::tools::tool_output::OutputStore> {
+        self.output_store.clone()
     }
 
     pub fn mark_file_read(&self, path: &std::path::Path) {
@@ -1685,8 +1696,10 @@ pub struct AppendMessageCommand {
 impl AppendMessageCommand {
     pub fn execute(&self, session: &Session) -> u64 {
         let flow_run_id_str = self.flow_run_id.as_ref().map(|r| r.0.to_string());
-        let msg =
-            crate::tools::tool_output::maybe_truncate_tool_message(&self.msg, Some(&session.dir));
+        let msg = crate::tools::tool_output::maybe_truncate_tool_message(
+            &self.msg,
+            Some(&session.output_store),
+        );
         let is_internal = msg.origin == crate::message::MessageOrigin::Internal;
         let event =
             match msg.role {

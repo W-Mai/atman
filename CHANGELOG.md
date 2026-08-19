@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Fixes
+
+- **Oversized tool output pagination** — `fs.read`, `bash.output`, and terminal text captures preserve complete UTF-8 output behind session-scoped opaque IDs, avoid double truncation, and expose consistent byte or line continuation metadata without leaking internal paths.
+
 ## [1.8.1] — 2026-08-18
 
 Centralized configuration ownership, transactional legacy migration, typed project storage overlays, and route-program consolidation.

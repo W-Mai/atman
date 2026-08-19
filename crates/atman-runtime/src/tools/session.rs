@@ -72,7 +72,7 @@ impl Tool for SessionPush {
             for msg in msgs {
                 let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
                     &msg,
-                    ctx.session_dir.as_deref(),
+                    ctx.output_store.as_deref(),
                     ctx.tool_output_budget,
                 );
                 emit_message_event(ctx, &msg);

@@ -1250,7 +1250,7 @@ fn missing_required_fields(schema: &serde_json::Value, named: &[(String, Value)]
 fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) -> crate::message::Message {
     let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
         msg,
-        ctx.session_dir.as_deref(),
+        ctx.output_store.as_deref(),
         ctx.tool_output_budget,
     );
     if let Some(tx) = &ctx.stream_tx {
@@ -1502,6 +1502,68 @@ mod tests {
             let output = self.output.clone();
             Box::pin(async move { Ok(Value::Str(output)) })
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_preserves_fs_read_pagination_for_full_utf8_reassembly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.txt");
+        let expected = "界".repeat(349_525) + "a";
+        assert_eq!(expected.len(), 1_048_576);
+        tokio::fs::write(&path, &expected).await.unwrap();
+
+        let registry = crate::tool::ToolRegistry::new();
+        crate::tools::register_tier_zero(&registry);
+        let ctx = ToolCtx::new()
+            .with_registry(std::sync::Arc::new(registry))
+            .with_session_dir(dir.path().to_path_buf());
+        let uses = Value::List(vec![Value::Struct(vec![
+            ("id".into(), Value::Str("read_id".into())),
+            ("name".into(), Value::Str("fs.read".into())),
+            (
+                "input".into(),
+                Value::Struct(vec![("path".into(), Value::Path(path))]),
+            ),
+        ])]);
+        let Value::List(results) = DispatchAll
+            .call(
+                ToolArgs {
+                    positional: vec![uses],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("dispatch result list");
+        };
+        let Value::Message(message) = &results[0] else {
+            panic!("tool result message");
+        };
+        let crate::message::MessagePart::ToolResult { content, .. } = &message.parts[0] else {
+            panic!("tool result part");
+        };
+        let envelope: serde_json::Value = serde_json::from_str(content).unwrap();
+        let output_id = envelope["output_id"].as_str().unwrap();
+        let mut reconstructed = envelope["content"].as_str().unwrap().to_string();
+        let mut offset = envelope["next"]["offset"].as_u64().unwrap() as usize;
+        while envelope["next"]["has_more"].as_bool().unwrap() || offset < expected.len() {
+            let page = ctx
+                .output_store
+                .as_ref()
+                .unwrap()
+                .read_bytes(output_id, offset, usize::MAX, ctx.tool_output_budget)
+                .unwrap();
+            reconstructed.push_str(&page.content);
+            if !page.has_more {
+                break;
+            }
+            assert!(page.next_offset > offset);
+            offset = page.next_offset;
+        }
+        assert_eq!(reconstructed.len(), 1_048_576);
+        assert_eq!(reconstructed, expected);
     }
 
     #[tokio::test]

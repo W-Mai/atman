@@ -91,6 +91,7 @@ pub struct ToolCtx {
     pub forms: Option<std::sync::Arc<crate::session::FormRegistry>>,
     pub providers: Option<std::sync::Arc<crate::provider::ProviderRegistry>>,
     pub session_dir: Option<std::path::PathBuf>,
+    pub output_store: Option<std::sync::Arc<crate::tools::tool_output::OutputStore>>,
     pub data_root: Option<std::path::PathBuf>,
     pub project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
     pub fs_access: crate::fs_access::FsAccessPolicy,
@@ -204,7 +205,18 @@ impl ToolCtx {
     }
 
     pub fn with_session_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.output_store = Some(std::sync::Arc::new(
+            crate::tools::tool_output::OutputStore::at(dir.clone()),
+        ));
         self.session_dir = Some(dir);
+        self
+    }
+
+    pub fn with_output_store(
+        mut self,
+        store: std::sync::Arc<crate::tools::tool_output::OutputStore>,
+    ) -> Self {
+        self.output_store = Some(store);
         self
     }
 

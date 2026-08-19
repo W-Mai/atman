@@ -35,6 +35,7 @@ pub fn register_tier_zero(reg: &ToolRegistry) {
 
 pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stubs::RuleFetch) {
     reg.register(Arc::new(fs::FsRead));
+    reg.register(Arc::new(tool_output::OutputRead));
     reg.register(Arc::new(fs::FsList));
     reg.register(Arc::new(fs::FsWrite));
     reg.register(Arc::new(fs::FsEdit));

@@ -1266,9 +1266,10 @@ impl Tool for TermCapture {
             let start_row = extract_optional_int(&args, "start_row")
                 .unwrap_or(0)
                 .clamp(0, screen.rows as i64) as u16;
-            let end_row = extract_optional_int(&args, "end_row")
+            let requested_end_row = extract_optional_int(&args, "end_row")
                 .unwrap_or(screen.rows as i64)
-                .clamp(start_row as i64, screen.rows as i64) as u16;
+                .clamp(start_row as i64, screen.rows as i64)
+                as u16;
             let start_col = extract_optional_int(&args, "start_col")
                 .unwrap_or(0)
                 .clamp(0, screen.cols as i64) as u16;
@@ -1286,14 +1287,20 @@ impl Tool for TermCapture {
                 .max_lines
                 .min(max_rows_by_bytes.max(1))
                 .min(u16::MAX as usize) as u16;
-            let end_row = end_row.min(start_row.saturating_add(max_rows));
+            let end_row = if format == "screen" {
+                requested_end_row.min(start_row.saturating_add(max_rows))
+            } else {
+                requested_end_row
+            };
             let state = entry.current_state();
             let mut fields = vec![
                 ("handle".into(), Value::Str(handle.clone())),
                 ("state".into(), state_to_value(&state)),
                 ("rows".into(), Value::Int((end_row - start_row) as i64)),
                 ("cols".into(), Value::Int((end_col - start_col) as i64)),
-                (
+            ];
+            if format == "screen" {
+                fields.push((
                     "continuation".into(),
                     Value::Struct(vec![
                         ("type".into(), Value::Str("TerminalArea".into())),
@@ -1302,9 +1309,7 @@ impl Tool for TermCapture {
                         ("end_col".into(), Value::Int(end_col as i64)),
                         ("has_more".into(), Value::Bool(end_row < screen.rows)),
                     ]),
-                ),
-            ];
-            if format == "screen" {
+                ));
                 let sub_rows = end_row - start_row;
                 let sub_cols = end_col - start_col;
                 let sub_cells: Vec<TerminalCell> = (start_row..end_row)
@@ -1345,7 +1350,34 @@ impl Tool for TermCapture {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                fields.push(("text".into(), Value::Str(text)));
+                let cut =
+                    crate::tools::tool_output::bounded_text_prefix(&text, ctx.tool_output_budget);
+                if cut == text.len() {
+                    fields.push(("text".into(), Value::Str(text)));
+                } else {
+                    let output_id = ctx
+                        .output_store
+                        .as_deref()
+                        .and_then(|store| store.register("term_capture", &text))
+                        .ok_or_else(|| {
+                            RuntimeError::ToolFailed(
+                                "term.capture: output exceeded budget, but no output_id is available for output.read".into(),
+                            )
+                        })?;
+                    let total_lines = text.split_inclusive('\n').count();
+                    fields.push(("content".into(), Value::Str(text[..cut].to_string())));
+                    fields.push(("output_id".into(), Value::Str(output_id)));
+                    fields.push(("total_lines".into(), Value::Int(total_lines as i64)));
+                    fields.push(("total_bytes".into(), Value::Int(text.len() as i64)));
+                    fields.push((
+                        "next".into(),
+                        Value::Struct(vec![
+                            ("mode".into(), Value::Str("bytes".into())),
+                            ("offset".into(), Value::Int(cut as i64)),
+                            ("has_more".into(), Value::Bool(cut < text.len())),
+                        ]),
+                    ));
+                }
             }
             Ok(Value::Struct(fields))
         })
@@ -1855,17 +1887,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_pages_rows_before_advancing_continuation() {
+    async fn capture_spills_text_to_output_store_with_byte_continuation() {
+        const ROWS: u16 = 4096;
+        const COLS: u16 = 256;
+        const CONTENT_COLS: usize = 255;
+        const EXPECTED_TEXT_BYTES: usize = ROWS as usize * CONTENT_COLS + (ROWS as usize - 1);
+
         let registry = Arc::new(TermRegistry::new());
         let handle = registry.next_handle("session_a");
-        let mut parser = vt100::Parser::new(4, 5, 0);
-        parser.process(b"aaaaa\r\nbbbbb\r\nccccc\r\nddddd");
+        let row = "a".repeat(CONTENT_COLS);
+        let expected_text = vec![row.as_str(); ROWS as usize].join("\n");
+        assert_eq!(expected_text.len(), EXPECTED_TEXT_BYTES);
+        assert_eq!(EXPECTED_TEXT_BYTES, 1_048_575);
+        let terminal_input = expected_text.replace('\n', "\r\n");
+        let mut parser = vt100::Parser::new(ROWS, COLS, 0);
+        parser.process(terminal_input.as_bytes());
         let entry = Arc::new(TermEntry {
             handle: handle.clone(),
             session_id: "session_a".into(),
             pty_size: portable_pty::PtySize {
-                rows: 4,
-                cols: 5,
+                rows: ROWS,
+                cols: COLS,
                 pixel_width: 0,
                 pixel_height: 0,
             },
@@ -1884,12 +1926,15 @@ mod tests {
             task_id: Mutex::new(None),
         });
         registry.insert(entry);
-        let mut ctx = crate::tool::ToolCtx::new().with_term_registry(registry);
+        let output_dir = tempfile::tempdir().unwrap();
+        let mut ctx = crate::tool::ToolCtx::new()
+            .with_term_registry(registry)
+            .with_session_dir(output_dir.path().to_path_buf());
         ctx.session_id = Some("session_a".into());
         ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
-            max_lines: 2,
-            max_bytes: 100,
-            max_line_bytes: 100,
+            max_lines: 32,
+            max_bytes: 64 * 1024,
+            max_line_bytes: 64 * 1024,
         };
 
         let first = TermCapture
@@ -1907,49 +1952,127 @@ mod tests {
         };
         assert!(matches!(
             fields.iter().find(|(name, _)| name == "rows"),
-            Some((_, Value::Int(2)))
+            Some((_, Value::Int(rows))) if *rows == i64::from(ROWS)
         ));
         assert!(matches!(
-            fields.iter().find(|(name, _)| name == "text"),
-            Some((_, Value::Str(text))) if text == "aaaaa\nbbbbb"
+            fields.iter().find(|(name, _)| name == "total_lines"),
+            Some((_, Value::Int(lines))) if *lines == i64::from(ROWS)
         ));
-        let Value::Struct(cursor) = fields
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "total_bytes"),
+            Some((_, Value::Int(bytes))) if *bytes == EXPECTED_TEXT_BYTES as i64
+        ));
+        assert!(!fields.iter().any(|(name, _)| name == "continuation"));
+        assert!(!fields.iter().any(|(name, _)| name == "TerminalArea"));
+        assert!(!fields.iter().any(|(name, _)| name == "next_row"));
+        assert!(!fields.iter().any(|(name, _)| name == "next_col"));
+        assert!(!fields.iter().any(|(name, _)| name == "text"));
+        let content = fields.iter().find_map(|(name, value)| {
+            (name == "content").then(|| match value {
+                Value::Str(text) => text.as_str(),
+                _ => panic!("expected content string"),
+            })
+        });
+        let Value::Str(output_id) = fields
             .iter()
-            .find(|(name, _)| name == "continuation")
+            .find(|(name, _)| name == "output_id")
             .map(|(_, value)| value)
             .unwrap()
         else {
-            panic!("expected continuation");
+            panic!("expected output_id");
         };
+        let Value::Struct(next) = fields
+            .iter()
+            .find(|(name, _)| name == "next")
+            .map(|(_, value)| value)
+            .unwrap()
+        else {
+            panic!("expected byte continuation");
+        };
+        let offset = next
+            .iter()
+            .find_map(|(name, value)| (name == "offset").then_some(value))
+            .and_then(|value| match value {
+                Value::Int(offset) => Some(*offset as usize),
+                _ => None,
+            })
+            .unwrap();
         assert!(matches!(
-            cursor.iter().find(|(name, _)| name == "next_row"),
-            Some((_, Value::Int(2)))
+            next.iter().find(|(name, _)| name == "mode"),
+            Some((_, Value::Str(mode))) if mode == "bytes"
         ));
-        assert!(matches!(
-            cursor.iter().find(|(name, _)| name == "has_more"),
-            Some((_, Value::Bool(true)))
-        ));
+        let store = ctx.output_store.as_deref().unwrap();
+        let mut reconstructed = content.unwrap().to_string();
+        let mut page_offset = offset;
+        loop {
+            let page = store
+                .read_bytes(output_id, page_offset, usize::MAX, ctx.tool_output_budget)
+                .unwrap();
+            assert_eq!(page.offset, page_offset);
+            reconstructed.push_str(&page.content);
+            if !page.has_more {
+                break;
+            }
+            assert!(page.next_offset > page_offset);
+            page_offset = page.next_offset;
+        }
+        assert_eq!(reconstructed.len(), EXPECTED_TEXT_BYTES);
+        assert_eq!(reconstructed, expected_text);
 
-        let second = TermCapture
+        let untruncated = TermCapture
             .call(
                 crate::tool::ToolArgs {
                     positional: Vec::new(),
                     named: vec![
                         ("handle".into(), Value::Str(handle.to_string())),
-                        ("start_row".into(), Value::Int(2)),
+                        ("end_row".into(), Value::Int(1)),
                     ],
                 },
                 &ctx,
             )
             .await
             .unwrap();
-        let Value::Struct(fields) = second else {
+        let Value::Struct(fields) = untruncated else {
             panic!("expected capture fields");
         };
         assert!(matches!(
             fields.iter().find(|(name, _)| name == "text"),
-            Some((_, Value::Str(text))) if text == "ccccc\nddddd"
+            Some((_, Value::Str(text))) if text == &row
         ));
+        assert!(!fields.iter().any(|(name, _)| name == "continuation"));
+        assert!(!fields.iter().any(|(name, _)| name == "output_id"));
+        assert!(!fields.iter().any(|(name, _)| name == "next"));
+
+        let screen_capture = TermCapture
+            .call(
+                crate::tool::ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        ("handle".into(), Value::Str(handle.to_string())),
+                        ("format".into(), Value::Str("screen".into())),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = screen_capture else {
+            panic!("expected capture fields");
+        };
+        let Value::Struct(continuation) = fields
+            .iter()
+            .find(|(name, _)| name == "continuation")
+            .map(|(_, value)| value)
+            .unwrap()
+        else {
+            panic!("expected screen continuation");
+        };
+        assert!(matches!(
+            continuation.iter().find(|(name, _)| name == "type"),
+            Some((_, Value::Str(kind))) if kind == "TerminalArea"
+        ));
+        assert!(continuation.iter().any(|(name, _)| name == "next_row"));
+        assert!(fields.iter().any(|(name, _)| name == "screen"));
     }
 
     #[test]

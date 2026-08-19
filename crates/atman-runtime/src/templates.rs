@@ -227,7 +227,7 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             retry: 12,
             stall_timeout: 600,
             tools: [
-                "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
+                "fs.read", "output.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
                 "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
                 "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list",
                 "term.find",
@@ -320,7 +320,7 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
             cache: true,
             retry: 12,
             tools: [
-                "fs.read", "fs.list", "fs.grep",
+                "fs.read", "output.read", "fs.list", "fs.grep",
                 "bash.spawn", "bash.status", "bash.output", "bash.kill",
                 "web.fetch", "web.search",
                 "git.diff", "git.show", "git.log", "git.status",
@@ -373,7 +373,7 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
             cache: true,
             retry: 12,
             tools: [
-                "fs.read", "fs.list", "fs.grep",
+                "fs.read", "output.read", "fs.list", "fs.grep",
                 "bash.spawn", "bash.status", "bash.output", "bash.kill",
                 "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list", "term.find",
                 "web.fetch", "web.search",
@@ -428,7 +428,7 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
             cache: true,
             retry: 12,
             tools: [
-                "fs.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
+                "fs.read", "output.read", "fs.write", "fs.edit", "fs.list", "fs.grep",
                 "bash.spawn", "bash.status", "bash.output", "bash.kill", "bash.list",
                 "term.spawn", "term.input", "term.capture", "term.resize", "term.kill", "term.list", "term.find",
                 "test.run",
@@ -483,7 +483,7 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
             cache: true,
             retry: 12,
             tools: [
-                "fs.read", "fs.list", "fs.grep",
+                "fs.read", "output.read", "fs.list", "fs.grep",
                 "git.diff", "git.show", "git.log", "git.status",
                 "memory.fetch_confessions",
                 "rule.fetch",
