@@ -1275,12 +1275,34 @@ impl Tool for TermCapture {
             let end_col = extract_optional_int(&args, "end_col")
                 .unwrap_or(screen.cols as i64)
                 .clamp(start_col as i64, screen.cols as i64) as u16;
+            let width = usize::from(end_col.saturating_sub(start_col));
+            let max_rows_by_bytes = ctx
+                .tool_output_budget
+                .max_bytes
+                .checked_div(width)
+                .unwrap_or(ctx.tool_output_budget.max_lines);
+            let max_rows = ctx
+                .tool_output_budget
+                .max_lines
+                .min(max_rows_by_bytes.max(1))
+                .min(u16::MAX as usize) as u16;
+            let end_row = end_row.min(start_row.saturating_add(max_rows));
             let state = entry.current_state();
             let mut fields = vec![
                 ("handle".into(), Value::Str(handle.clone())),
                 ("state".into(), state_to_value(&state)),
                 ("rows".into(), Value::Int((end_row - start_row) as i64)),
                 ("cols".into(), Value::Int((end_col - start_col) as i64)),
+                (
+                    "continuation".into(),
+                    Value::Struct(vec![
+                        ("type".into(), Value::Str("TerminalArea".into())),
+                        ("next_row".into(), Value::Int(end_row as i64)),
+                        ("start_col".into(), Value::Int(start_col as i64)),
+                        ("end_col".into(), Value::Int(end_col as i64)),
+                        ("has_more".into(), Value::Bool(end_row < screen.rows)),
+                    ]),
+                ),
             ];
             if format == "screen" {
                 let sub_rows = end_row - start_row;
@@ -1830,6 +1852,104 @@ mod tests {
         assert_eq!(screen.cells.len(), 15);
         assert_eq!(screen.cells[0].chars, "h");
         assert_eq!(screen.cells[4].chars, "o");
+    }
+
+    #[tokio::test]
+    async fn capture_pages_rows_before_advancing_continuation() {
+        let registry = Arc::new(TermRegistry::new());
+        let handle = registry.next_handle("session_a");
+        let mut parser = vt100::Parser::new(4, 5, 0);
+        parser.process(b"aaaaa\r\nbbbbb\r\nccccc\r\nddddd");
+        let entry = Arc::new(TermEntry {
+            handle: handle.clone(),
+            session_id: "session_a".into(),
+            pty_size: portable_pty::PtySize {
+                rows: 4,
+                cols: 5,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            parser: Arc::new(Mutex::new(parser)),
+            writer: Mutex::new(Box::new(std::io::sink())),
+            state: Arc::new(Mutex::new(TermState::Running {
+                pid: 0,
+                started_at: 0,
+            })),
+            stream_tx: broadcast::channel(STREAM_CHANNEL_CAPACITY).0,
+            log_path: std::env::temp_dir().join("term_capture_budget.log"),
+            reader_task: Mutex::new(None),
+            child: Mutex::new(None),
+            master: Mutex::new(None),
+            started_at: Instant::now(),
+            task_id: Mutex::new(None),
+        });
+        registry.insert(entry);
+        let mut ctx = crate::tool::ToolCtx::new().with_term_registry(registry);
+        ctx.session_id = Some("session_a".into());
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 2,
+            max_bytes: 100,
+            max_line_bytes: 100,
+        };
+
+        let first = TermCapture
+            .call(
+                crate::tool::ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![("handle".into(), Value::Str(handle.to_string()))],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = first else {
+            panic!("expected capture fields");
+        };
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "rows"),
+            Some((_, Value::Int(2)))
+        ));
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "text"),
+            Some((_, Value::Str(text))) if text == "aaaaa\nbbbbb"
+        ));
+        let Value::Struct(cursor) = fields
+            .iter()
+            .find(|(name, _)| name == "continuation")
+            .map(|(_, value)| value)
+            .unwrap()
+        else {
+            panic!("expected continuation");
+        };
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "next_row"),
+            Some((_, Value::Int(2)))
+        ));
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "has_more"),
+            Some((_, Value::Bool(true)))
+        ));
+
+        let second = TermCapture
+            .call(
+                crate::tool::ToolArgs {
+                    positional: Vec::new(),
+                    named: vec![
+                        ("handle".into(), Value::Str(handle.to_string())),
+                        ("start_row".into(), Value::Int(2)),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = second else {
+            panic!("expected capture fields");
+        };
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "text"),
+            Some((_, Value::Str(text))) if text == "ccccc\nddddd"
+        ));
     }
 
     #[test]

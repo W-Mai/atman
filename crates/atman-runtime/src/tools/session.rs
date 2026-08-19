@@ -70,9 +70,10 @@ impl Tool for SessionPush {
                 None => None,
             };
             for msg in msgs {
-                let msg = crate::tools::tool_output::maybe_truncate_tool_message(
+                let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
                     &msg,
                     ctx.session_dir.as_deref(),
+                    ctx.tool_output_budget,
                 );
                 emit_message_event(ctx, &msg);
                 let flow_run_id = match msg.role {
@@ -105,8 +106,6 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
     let Some(sink) = &ctx.events else {
         return;
     };
-    let msg =
-        crate::tools::tool_output::maybe_truncate_tool_message(msg, ctx.session_dir.as_deref());
     let turn_id = ctx.turn_id.clone().unwrap_or_else(TurnId::now);
     let flow_run_id = if ctx.session_runtime.is_some() {
         None

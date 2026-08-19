@@ -110,6 +110,7 @@ pub struct ToolCtx {
     pub on_memory_recent: Option<std::sync::Arc<dyn Fn(u16) + Send + Sync>>,
     pub history_store: Option<std::sync::Arc<dyn crate::history_store::HistoryStore>>,
     pub agent_entry: Option<std::sync::Arc<crate::tools::agent_ctrl::FlowEntry>>,
+    pub tool_output_budget: crate::tools::tool_output::ToolOutputBudget,
 }
 
 impl ToolCtx {

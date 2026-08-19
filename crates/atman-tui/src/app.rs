@@ -3038,6 +3038,7 @@ mod terminal_stream_tests {
         app.apply_stream_frame(StreamFrame::BashExited {
             handle: "bg_s_0".into(),
             exit_code: Some(0),
+            error: None,
             run_id: Some("child_run".into()),
         });
         app.apply_stream_frame(StreamFrame::DiffPreview {
@@ -3244,6 +3245,7 @@ mod terminal_e2e_tests {
         app.apply_stream_frame(StreamFrame::BashExited {
             handle: "bg_s_0".into(),
             exit_code: Some(0),
+            error: None,
             run_id: None,
         });
         app.apply_task_event(atman_runtime::TaskEvent::Registered(

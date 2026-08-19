@@ -111,7 +111,7 @@ impl Tool for MemoryRecentTurns {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "n": {"type": "integer", "description": "Max message count to return (default 10)"}
+                "n": {"type": "integer", "description": "Max complete turns to return (default 10)"}
             }
         })
     }
@@ -134,19 +134,20 @@ impl Tool for MemoryRecentTurns {
                 }
                 return Ok(Value::Struct(vec![
                     ("total_message_count".into(), Value::Int(0)),
+                    ("total_turn_count".into(), Value::Int(0)),
                     ("items".into(), Value::List(Vec::new())),
                 ]));
             }
             // Sub-agent path: session_messages has the child's local message list.
             if let Some(msgs) = ctx.session_messages.as_ref() {
-                let total = msgs.len() as u64;
-                let start = msgs.len().saturating_sub(n);
-                let out: Vec<Value> = msgs[start..].iter().cloned().map(Value::Message).collect();
+                let (total, recent) = crate::history_store::recent_turn_messages(msgs, n);
+                let out: Vec<Value> = recent.into_iter().map(Value::Message).collect();
                 if let Some(cb) = &ctx.on_memory_recent {
                     cb(out.len() as u16);
                 }
                 return Ok(Value::Struct(vec![
-                    ("total_message_count".into(), Value::Int(total as i64)),
+                    ("total_message_count".into(), Value::Int(msgs.len() as i64)),
+                    ("total_turn_count".into(), Value::Int(total as i64)),
                     ("items".into(), Value::List(out)),
                 ]));
             }
@@ -156,15 +157,20 @@ impl Tool for MemoryRecentTurns {
                     "memory.recent_turns: no history store on context".into(),
                 ));
             };
-            let (total, msgs) = tokio::task::spawn_blocking(move || store.recent(n))
-                .await
-                .map_err(|e| RuntimeError::ToolFailed(format!("recent_turns: {e}")))??;
+            let (message_count, turn_count, msgs) =
+                tokio::task::spawn_blocking(move || store.recent(n))
+                    .await
+                    .map_err(|e| RuntimeError::ToolFailed(format!("recent_turns: {e}")))??;
             if let Some(cb) = &ctx.on_memory_recent {
                 cb(msgs.len() as u16);
             }
             let items: Vec<Value> = msgs.into_iter().map(Value::Message).collect();
             Ok(Value::Struct(vec![
-                ("total_message_count".into(), Value::Int(total as i64)),
+                (
+                    "total_message_count".into(),
+                    Value::Int(message_count as i64),
+                ),
+                ("total_turn_count".into(), Value::Int(turn_count as i64)),
                 ("items".into(), Value::List(items)),
             ]))
         })

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs::File;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -111,6 +112,13 @@ impl BgStatus {
     fn is_finished(&self) -> bool {
         !matches!(self, Self::Running { .. })
     }
+
+    fn error(&self) -> Option<&str> {
+        match self {
+            Self::Failed { error, .. } => Some(error),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -118,10 +126,11 @@ pub struct BgOutput {
     pub combined: Vec<u8>,
     pub total_bytes: u64,
     pub truncated: bool,
+    buffer_start: usize,
 }
 
 impl BgOutput {
-    fn push(&mut self, kind: StreamKind, data: &[u8], max: u64) {
+    fn push(&mut self, kind: StreamKind, data: &[u8], max: u64) -> Vec<u8> {
         let prefix: &[u8] = match kind {
             StreamKind::Stdout => b"[out] ",
             StreamKind::Stderr => b"[err] ",
@@ -134,33 +143,57 @@ impl BgOutput {
             new_total = max;
             self.truncated = true;
         }
+        let mut frame = Vec::new();
         if !to_write.is_empty() {
-            self.combined.extend_from_slice(prefix);
-            self.combined.extend_from_slice(to_write);
+            frame.extend_from_slice(prefix);
+            frame.extend_from_slice(to_write);
             if !to_write.ends_with(b"\n") {
-                self.combined.push(b'\n');
+                frame.push(b'\n');
             }
+            self.combined.extend_from_slice(&frame);
         }
         self.total_bytes = new_total;
         let max_ring = RING_BUFFER_BYTES;
         if self.combined.len() > max_ring {
             let drop = self.combined.len() - max_ring;
             self.combined.drain(..drop);
+            self.buffer_start += drop;
         }
+        frame
     }
 
-    fn read_from(&self, cursor: usize, limit: usize) -> (Vec<u8>, usize, bool) {
-        let data = &self.combined;
-        if cursor >= data.len() {
-            return (Vec::new(), data.len(), true);
-        }
-        let remaining = &data[cursor..];
-        let take = remaining.len().min(limit);
-        let chunk = remaining[..take].to_vec();
-        let next = cursor + take;
-        let eof = next >= data.len();
-        (chunk, next, eof)
+    fn read_from(&self, cursor: usize, limit: usize) -> (Vec<u8>, usize, usize, bool, bool) {
+        let end = self.buffer_start + self.combined.len();
+        let start = cursor.max(self.buffer_start).min(end);
+        let local_cursor = start - self.buffer_start;
+        let (chunk, local_next, eof) = page_bytes(&self.combined, local_cursor, limit);
+        (
+            chunk,
+            start,
+            self.buffer_start + local_next,
+            eof,
+            cursor < self.buffer_start,
+        )
     }
+}
+
+fn page_bytes(data: &[u8], cursor: usize, limit: usize) -> (Vec<u8>, usize, bool) {
+    if cursor >= data.len() {
+        return (Vec::new(), data.len(), true);
+    }
+    let remaining = &data[cursor..];
+    let mut take = remaining.len().min(limit);
+    if take < remaining.len()
+        && let Err(error) = std::str::from_utf8(&remaining[..take])
+        && error.error_len().is_none()
+        && error.valid_up_to() > 0
+    {
+        take = error.valid_up_to();
+    }
+    let chunk = remaining[..take].to_vec();
+    let next = cursor + take;
+    let eof = next >= data.len();
+    (chunk, next, eof)
 }
 
 #[derive(Clone, Copy)]
@@ -263,6 +296,8 @@ impl BgRegistry {
             RuntimeError::ToolFailed(format!("bash.spawn: create session_dir: {e}"))
         })?;
         let log_path = dir.join(format!("bg_{}.log", handle_str));
+        let log_file = open_log_file(&log_path)
+            .map_err(|error| RuntimeError::ToolFailed(format!("bash.spawn: {error}")))?;
 
         let timeout = match timeout_ms {
             Some(0) => None,
@@ -317,7 +352,7 @@ impl BgRegistry {
                 cmd,
                 timeout,
                 max_output_bytes,
-                log_path,
+                log_file,
                 status_for_task,
                 output,
                 control_rx,
@@ -386,6 +421,9 @@ impl BgRegistry {
         if let Some(ended) = st.ended_at() {
             fields.push(("ended_at".into(), Value::Int(ended)));
         }
+        if let Some(error) = st.error() {
+            fields.push(("error".into(), Value::Str(error.into())));
+        }
         fields.push(("bytes_total".into(), Value::Int(out.total_bytes as i64)));
         fields.push(("output_truncated".into(), Value::Bool(out.truncated)));
         Ok(Value::Struct(fields))
@@ -402,7 +440,7 @@ impl BgRegistry {
         if let Ok(entry) = self.lookup(handle_str, session_id) {
             let st = entry.status.lock().unwrap().clone();
             let out = entry.output.lock().unwrap();
-            let (chunk, next, eof) = out.read_from(cursor, limit);
+            let (chunk, actual_cursor, next, eof, fell_behind) = out.read_from(cursor, limit);
             return Ok(Value::Struct(vec![
                 ("handle".into(), Value::Str(handle_str.into())),
                 ("status".into(), Value::Str(st.kind().into())),
@@ -410,10 +448,21 @@ impl BgRegistry {
                     "chunk".into(),
                     Value::Str(String::from_utf8_lossy(&chunk).into_owned()),
                 ),
-                ("cursor".into(), Value::Int(cursor as i64)),
+                ("cursor".into(), Value::Int(actual_cursor as i64)),
                 ("next_cursor".into(), Value::Int(next as i64)),
+                (
+                    "continuation".into(),
+                    Value::Struct(vec![
+                        ("type".into(), Value::Str("ByteCursor".into())),
+                        ("next_byte".into(), Value::Int(next as i64)),
+                        ("has_more".into(), Value::Bool(!eof)),
+                    ]),
+                ),
                 ("eof".into(), Value::Bool(eof)),
-                ("truncated".into(), Value::Bool(out.truncated)),
+                (
+                    "truncated".into(),
+                    Value::Bool(out.truncated || fell_behind),
+                ),
                 ("live".into(), Value::Bool(true)),
             ]));
         }
@@ -432,17 +481,22 @@ impl BgRegistry {
                 ("handle".into(), Value::Str(handle_str.into())),
                 ("status".into(), Value::Str("exited".into())),
                 ("chunk".into(), Value::Str(String::new())),
-                ("cursor".into(), Value::Int(cursor as i64)),
+                ("cursor".into(), Value::Int(data.len() as i64)),
                 ("next_cursor".into(), Value::Int(data.len() as i64)),
+                (
+                    "continuation".into(),
+                    Value::Struct(vec![
+                        ("type".into(), Value::Str("ByteCursor".into())),
+                        ("next_byte".into(), Value::Int(data.len() as i64)),
+                        ("has_more".into(), Value::Bool(false)),
+                    ]),
+                ),
                 ("eof".into(), Value::Bool(true)),
                 ("truncated".into(), Value::Bool(false)),
                 ("live".into(), Value::Bool(false)),
             ]));
         }
-        let take = (data.len() - cursor).min(limit);
-        let chunk = data[cursor..cursor + take].to_vec();
-        let next = cursor + take;
-        let eof = next >= data.len();
+        let (chunk, next, eof) = page_bytes(&data, cursor, limit);
         Ok(Value::Struct(vec![
             ("handle".into(), Value::Str(handle_str.into())),
             ("status".into(), Value::Str("exited".into())),
@@ -452,6 +506,14 @@ impl BgRegistry {
             ),
             ("cursor".into(), Value::Int(cursor as i64)),
             ("next_cursor".into(), Value::Int(next as i64)),
+            (
+                "continuation".into(),
+                Value::Struct(vec![
+                    ("type".into(), Value::Str("ByteCursor".into())),
+                    ("next_byte".into(), Value::Int(next as i64)),
+                    ("has_more".into(), Value::Bool(!eof)),
+                ]),
+            ),
             ("eof".into(), Value::Bool(eof)),
             ("truncated".into(), Value::Bool(false)),
             ("live".into(), Value::Bool(false)),
@@ -559,7 +621,7 @@ async fn run_bg_process(
     cmd: String,
     timeout: Option<Duration>,
     max_output_bytes: u64,
-    log_path: std::path::PathBuf,
+    log_file: File,
     status: Arc<Mutex<BgStatus>>,
     output: Arc<Mutex<BgOutput>>,
     mut control_rx: mpsc::Receiver<BgControl>,
@@ -599,11 +661,13 @@ async fn run_bg_process(
 
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
+    let (log_tx, log_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let log_writer = tokio::spawn(write_log(log_file, log_rx));
 
     let stdout_reader = stdout.map(|s| {
         let ctx = ReadStreamCtx {
             output: output.clone(),
-            log_path: log_path.clone(),
+            log_tx: log_tx.clone(),
             kind: StreamKind::Stdout,
             max_output_bytes,
             stream_tx: stream_tx.clone(),
@@ -615,7 +679,7 @@ async fn run_bg_process(
     let stderr_reader = stderr.map(|s| {
         let ctx = ReadStreamCtx {
             output: output.clone(),
-            log_path: log_path.clone(),
+            log_tx: log_tx.clone(),
             kind: StreamKind::Stderr,
             max_output_bytes,
             stream_tx: stream_tx.clone(),
@@ -645,7 +709,7 @@ async fn run_bg_process(
     };
 
     let ended_at = now_ms();
-    let final_status = match &exit_reason {
+    let mut final_status = match &exit_reason {
         ExitReason::Exited(Ok(s)) => BgStatus::Exited {
             exit_code: s.code().unwrap_or(-1),
             started_at,
@@ -693,11 +757,41 @@ async fn run_bg_process(
         }
     };
 
-    if let Some(r) = stdout_reader {
-        let _ = tokio::time::timeout(IO_DRAIN_TIMEOUT, r).await;
+    if let Some(mut r) = stdout_reader {
+        if tokio::time::timeout(IO_DRAIN_TIMEOUT, &mut r)
+            .await
+            .is_err()
+        {
+            r.abort();
+            let _ = r.await;
+        }
     }
-    if let Some(r) = stderr_reader {
-        let _ = tokio::time::timeout(IO_DRAIN_TIMEOUT, r).await;
+    if let Some(mut r) = stderr_reader {
+        if tokio::time::timeout(IO_DRAIN_TIMEOUT, &mut r)
+            .await
+            .is_err()
+        {
+            r.abort();
+            let _ = r.await;
+        }
+    }
+    drop(log_tx);
+    let mut log_writer = log_writer;
+    let log_result = match tokio::time::timeout(IO_DRAIN_TIMEOUT, &mut log_writer).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_error)) => Err(format!("log writer task failed: {join_error}")),
+        Err(_) => {
+            log_writer.abort();
+            let _ = log_writer.await;
+            Err("log writer timed out".into())
+        }
+    };
+    if let Err(error) = log_result {
+        final_status = BgStatus::Failed {
+            error,
+            started_at,
+            ended_at: now_ms(),
+        };
     }
 
     let exit_code = match &final_status {
@@ -710,6 +804,7 @@ async fn run_bg_process(
         let _ = tx.send(crate::stream::StreamFrame::BashExited {
             handle: handle_for_stream,
             exit_code,
+            error: final_status.error().map(str::to_owned),
             run_id: flow_run_id,
         });
     }
@@ -724,9 +819,28 @@ async fn run_bg_process(
     }
 }
 
+fn open_log_file(log_path: &std::path::Path) -> Result<File, String> {
+    File::options()
+        .write(true)
+        .create_new(true)
+        .open(log_path)
+        .map_err(|e| format!("open log: {e}"))
+}
+
+async fn write_log(file: File, mut log_rx: mpsc::UnboundedReceiver<Vec<u8>>) -> Result<(), String> {
+    let mut file = tokio::fs::File::from_std(file);
+    while let Some(frame) = log_rx.recv().await {
+        file.write_all(&frame)
+            .await
+            .map_err(|e| format!("write log: {e}"))?;
+    }
+    file.flush().await.map_err(|e| format!("flush log: {e}"))?;
+    Ok(())
+}
+
 struct ReadStreamCtx {
     output: Arc<Mutex<BgOutput>>,
-    log_path: std::path::PathBuf,
+    log_tx: mpsc::UnboundedSender<Vec<u8>>,
     kind: StreamKind,
     max_output_bytes: u64,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
@@ -735,21 +849,11 @@ struct ReadStreamCtx {
 }
 
 async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, ctx: ReadStreamCtx) {
-    let prefix: &[u8] = match ctx.kind {
-        StreamKind::Stdout => b"[out] ",
-        StreamKind::Stderr => b"[err] ",
-    };
     let kind_str = match ctx.kind {
         StreamKind::Stdout => "stdout",
         StreamKind::Stderr => "stderr",
     };
     let mut buf = String::new();
-    let mut log_file = tokio::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&ctx.log_path)
-        .await
-        .ok();
     loop {
         buf.clear();
         match reader.read_line(&mut buf).await {
@@ -758,13 +862,9 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, ctx: Rea
                 let data = buf.as_bytes();
                 {
                     let mut out = ctx.output.lock().unwrap();
-                    out.push(ctx.kind, data, ctx.max_output_bytes);
-                }
-                if let Some(file) = log_file.as_mut() {
-                    let _ = file.write_all(prefix).await;
-                    let _ = file.write_all(data).await;
-                    if !data.ends_with(b"\n") {
-                        let _ = file.write_all(b"\n").await;
+                    let frame = out.push(ctx.kind, data, ctx.max_output_bytes);
+                    if !frame.is_empty() {
+                        let _ = ctx.log_tx.send(frame);
                     }
                 }
                 if let Some(tx) = &ctx.stream_tx {
@@ -915,6 +1015,12 @@ instead, or use the sleep tool to pause the workflow.",
                         .map(|c| Value::Int(c as i64))
                         .unwrap_or(Value::Unit),
                 ),
+                (
+                    "error".into(),
+                    st.error()
+                        .map(|e| Value::Str(e.into()))
+                        .unwrap_or(Value::Unit),
+                ),
                 ("output".into(), Value::Str(combined)),
                 ("bytes_total".into(), Value::Int(out.total_bytes as i64)),
                 ("log_path".into(), Value::Str(log_path)),
@@ -989,9 +1095,10 @@ impl Tool for BashOutput {
         Box::pin(async move {
             let handle = extract_string(&args, "handle", 0)?;
             let cursor = extract_optional_int(&args, "cursor").unwrap_or(0).max(0) as usize;
-            let limit = extract_optional_int(&args, "limit_bytes")
+            let limit = (extract_optional_int(&args, "limit_bytes")
                 .unwrap_or(DEFAULT_OUTPUT_LIMIT as i64)
-                .max(1) as usize;
+                .max(1) as usize)
+                .min(ctx.tool_output_budget.max_bytes);
             let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.output: registry not available".into())
@@ -1131,6 +1238,167 @@ mod tests {
     }
 
     #[test]
+    fn pushed_frame_matches_live_output_after_budget_truncation() {
+        let mut output = BgOutput::default();
+        let first = output.push(StreamKind::Stdout, b"first\n", 6);
+        let second = output.push(StreamKind::Stderr, b"second\n", 6);
+
+        assert_eq!(first, b"[out] first\n");
+        assert!(second.is_empty());
+        assert_eq!(output.combined, first);
+        assert_eq!(output.total_bytes, 6);
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn ring_buffer_cursors_remain_absolute_after_eviction() {
+        let first_data = vec![b'a'; 40_000];
+        let second_data = vec![b'b'; 40_000];
+        let mut full = Vec::new();
+        full.extend_from_slice(b"[out] ");
+        full.extend_from_slice(&first_data);
+        full.push(b'\n');
+        full.extend_from_slice(b"[out] ");
+        full.extend_from_slice(&second_data);
+        full.push(b'\n');
+
+        let mut output = BgOutput::default();
+        output.push(StreamKind::Stdout, &first_data, u64::MAX);
+        let (_, _, cursor, _, fell_behind) = output.read_from(0, 32_000);
+        assert_eq!(cursor, 32_000);
+        assert!(!fell_behind);
+
+        output.push(StreamKind::Stdout, &second_data, u64::MAX);
+        assert!(output.buffer_start > 0);
+        let (chunk, actual_cursor, next, _, fell_behind) = output.read_from(cursor, 32_000);
+        assert_eq!(actual_cursor, cursor);
+        assert_eq!(chunk, full[cursor..next]);
+        assert!(!fell_behind);
+
+        let (chunk, actual_cursor, next, _, fell_behind) = output.read_from(0, 32);
+        assert_eq!(actual_cursor, output.buffer_start);
+        assert_eq!(chunk, full[actual_cursor..next]);
+        assert!(fell_behind);
+
+        let (chunk, actual_cursor, next, eof, fell_behind) = output.read_from(usize::MAX, 32);
+        assert!(chunk.is_empty());
+        assert_eq!(actual_cursor, full.len());
+        assert_eq!(next, full.len());
+        assert!(eof);
+        assert!(!fell_behind);
+    }
+
+    #[test]
+    fn page_bytes_preserves_utf8_across_pages() {
+        let data = "你好世界".as_bytes();
+        let (first, next, eof) = page_bytes(data, 0, 4);
+        assert_eq!(first, "你".as_bytes());
+        assert_eq!(next, 3);
+        assert!(!eof);
+        let (second, next, eof) = page_bytes(data, next, 4);
+        assert_eq!(second, "好".as_bytes());
+        assert_eq!(next, 6);
+        assert!(!eof);
+    }
+
+    #[test]
+    fn persisted_output_pages_utf8_and_returns_continuation() {
+        let registry = BgRegistry::new();
+        let dir = TempDir::new().unwrap();
+        let handle = "missing";
+        std::fs::write(dir.path().join("bg_missing.log"), "你好").unwrap();
+
+        let first = registry
+            .output(handle, "test-session", Some(dir.path()), 0, 4)
+            .unwrap();
+        let Value::Struct(fields) = first else {
+            panic!("expected output fields");
+        };
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "chunk"),
+            Some((_, Value::Str(chunk))) if chunk == "你"
+        ));
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "next_cursor"),
+            Some((_, Value::Int(3)))
+        ));
+
+        let second = registry
+            .output(handle, "test-session", Some(dir.path()), 3, 4)
+            .unwrap();
+        let Value::Struct(fields) = second else {
+            panic!("expected output fields");
+        };
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "chunk"),
+            Some((_, Value::Str(chunk))) if chunk == "好"
+        ));
+        let Value::Struct(cursor) = fields
+            .iter()
+            .find_map(|(name, value)| (name == "continuation").then_some(value))
+            .unwrap()
+        else {
+            panic!("expected continuation");
+        };
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "next_byte"),
+            Some((_, Value::Int(6)))
+        ));
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "has_more"),
+            Some((_, Value::Bool(false)))
+        ));
+
+        let beyond_eof = registry
+            .output(handle, "test-session", Some(dir.path()), 99, 4)
+            .unwrap();
+        let Value::Struct(fields) = beyond_eof else {
+            panic!("expected output fields");
+        };
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "cursor"),
+            Some((_, Value::Int(6)))
+        ));
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "next_cursor"),
+            Some((_, Value::Int(6)))
+        ));
+        let Value::Struct(cursor) = fields
+            .iter()
+            .find_map(|(name, value)| (name == "continuation").then_some(value))
+            .unwrap()
+        else {
+            panic!("expected continuation");
+        };
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "next_byte"),
+            Some((_, Value::Int(6)))
+        ));
+    }
+
+    #[test]
+    fn page_bytes_always_advances_for_incomplete_utf8() {
+        let data = [0xf0, 0x9f, 0x9a, 0x80];
+        let (chunk, next, eof) = page_bytes(&data, 0, 1);
+        assert_eq!(chunk, vec![0xf0]);
+        assert_eq!(next, 1);
+        assert!(!eof);
+    }
+
+    #[test]
+    fn failed_status_preserves_error_reason() {
+        let status = BgStatus::Failed {
+            error: "open log: permission denied".into(),
+            started_at: 1,
+            ended_at: 2,
+        };
+        assert_eq!(status.kind(), "failed");
+        assert_eq!(status.error(), Some("open log: permission denied"));
+        assert_eq!(status.exit_code(), None);
+        assert!(status.is_finished());
+    }
+
+    #[test]
     fn handle_parse_roundtrip() {
         let h = BgHandle {
             session_id: "abc".into(),
@@ -1147,6 +1415,16 @@ mod tests {
         assert!(BgHandle::parse("not_bg").is_none());
         assert!(BgHandle::parse("bg_nosuffix").is_none());
         assert!(BgHandle::parse("bg_x_notnum").is_none());
+    }
+
+    #[test]
+    fn log_file_reports_open_failure_before_spawn() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("log");
+        std::fs::create_dir(&log_path).unwrap();
+
+        let error = open_log_file(&log_path).unwrap_err();
+        assert!(error.contains("open log"));
     }
 
     #[tokio::test]
@@ -1242,6 +1520,17 @@ mod tests {
                 }
             })
             .unwrap();
+        let log_path = fields
+            .iter()
+            .find(|(k, _)| k == "log_path")
+            .and_then(|(_, v)| {
+                if let Value::Str(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -1255,6 +1544,7 @@ mod tests {
         if let Value::Str(s) = &chunk.1 {
             assert!(s.contains("line1"), "chunk should contain line1: {s}");
             assert!(s.contains("line2"), "chunk should contain line2: {s}");
+            assert_eq!(std::fs::read_to_string(log_path).unwrap(), *s);
         } else {
             panic!("chunk not str");
         }

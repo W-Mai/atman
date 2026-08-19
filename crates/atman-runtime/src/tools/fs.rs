@@ -33,7 +33,8 @@ impl Tool for FsRead {
                 "offset": {"type": "integer", "description": "1-indexed start line."},
                 "limit": {"type": "integer", "description": "Maximum lines to return."},
                 "anchor": {"type": "string", "description": "Literal substring; when set, defaults offset to the matched line."},
-                "context": {"type": "integer", "description": "Lines around the anchor (default 5)."}
+                "context": {"type": "integer", "description": "Lines around the anchor (default 5)."},
+                "start_byte_in_line": {"type": "integer", "description": "UTF-8 byte offset within the starting line for continuation."}
             },
             "required": ["path"]
         })
@@ -44,6 +45,15 @@ impl Tool for FsRead {
             let path = extract_path(&args, "path", 0)?;
             let mut offset = extract_optional_int(&args, "offset")?;
             let mut limit = extract_optional_int(&args, "limit")?;
+            let start_byte_in_line = extract_optional_int(&args, "start_byte_in_line")?
+                .map(|value| {
+                    usize::try_from(value).map_err(|_| {
+                        RuntimeError::ToolFailed(
+                            "fs.read: start_byte_in_line must be non-negative".into(),
+                        )
+                    })
+                })
+                .transpose()?;
             let anchor = match args.named("anchor") {
                 Some(Value::Str(s)) if !s.is_empty() => Some(s.clone()),
                 Some(Value::Unit) | None => None,
@@ -91,13 +101,141 @@ impl Tool for FsRead {
                     limit = Some((context * 2 + 1) as i64);
                 }
             }
-            if offset.is_none() && limit.is_none() {
-                return Ok(Value::Str(content));
+            if offset.is_none() && limit.is_none() && start_byte_in_line.is_none() {
+                let budget = ctx.tool_output_budget;
+                let bounded = crate::tools::tool_output::bounded_text_prefix(&content, budget);
+                if bounded == content.len() {
+                    return Ok(Value::Str(content));
+                }
+                return Ok(Value::Struct(vec![
+                    ("content".into(), Value::Str(content[..bounded].to_string())),
+                    ("truncated".into(), Value::Bool(true)),
+                    (
+                        "continuation".into(),
+                        Value::Struct(vec![
+                            ("type".into(), Value::Str("TextLine".into())),
+                            (
+                                "next_line".into(),
+                                Value::Int(line_number_at(&content, bounded) as i64),
+                            ),
+                            (
+                                "next_byte_in_line".into(),
+                                Value::Int(byte_in_line_at(&content, bounded) as i64),
+                            ),
+                            ("has_more".into(), Value::Bool(true)),
+                        ]),
+                    ),
+                ]));
             }
+            if let Some(start_byte_in_line) = start_byte_in_line {
+                let start_line = offset.unwrap_or(1).max(1) as usize;
+                let (body, next_line, next_byte, has_more) = slice_from_position(
+                    &content,
+                    start_line,
+                    start_byte_in_line,
+                    limit,
+                    ctx.tool_output_budget,
+                )?;
+                return Ok(Value::Struct(vec![
+                    ("content".into(), Value::Str(body)),
+                    ("truncated".into(), Value::Bool(has_more)),
+                    (
+                        "continuation".into(),
+                        Value::Struct(vec![
+                            ("type".into(), Value::Str("TextLine".into())),
+                            ("next_line".into(), Value::Int(next_line as i64)),
+                            ("next_byte_in_line".into(), Value::Int(next_byte as i64)),
+                            ("has_more".into(), Value::Bool(has_more)),
+                        ]),
+                    ),
+                ]));
+            }
+            let start_line = offset.unwrap_or(1).max(1) as usize;
+            let total_lines = content.split_inclusive('\n').count();
             let out = slice_lines(&content, offset, limit, &path);
-            Ok(Value::Str(out))
+            if start_line.saturating_sub(1) >= total_lines {
+                return Ok(Value::Str(out));
+            }
+            let bounded =
+                crate::tools::tool_output::bounded_text_prefix(&out, ctx.tool_output_budget);
+            if bounded == out.len() {
+                return Ok(Value::Str(out));
+            }
+            let body_start = out.find('\n').map_or(0, |index| index + 1);
+            let body_bytes = bounded.saturating_sub(body_start);
+            let absolute_start = content
+                .split_inclusive('\n')
+                .take(start_line.saturating_sub(1))
+                .map(str::len)
+                .sum::<usize>();
+            let absolute_end = absolute_start + body_bytes;
+            Ok(Value::Struct(vec![
+                ("content".into(), Value::Str(out[..bounded].to_string())),
+                ("truncated".into(), Value::Bool(true)),
+                (
+                    "continuation".into(),
+                    Value::Struct(vec![
+                        ("type".into(), Value::Str("TextLine".into())),
+                        (
+                            "next_line".into(),
+                            Value::Int(line_number_at(&content, absolute_end) as i64),
+                        ),
+                        (
+                            "next_byte_in_line".into(),
+                            Value::Int(byte_in_line_at(&content, absolute_end) as i64),
+                        ),
+                        ("has_more".into(), Value::Bool(true)),
+                    ]),
+                ),
+            ]))
         })
     }
+}
+
+fn slice_from_position(
+    content: &str,
+    start_line: usize,
+    start_byte: usize,
+    limit: Option<i64>,
+    mut budget: crate::tools::tool_output::ToolOutputBudget,
+) -> Result<(String, usize, usize, bool), RuntimeError> {
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let index = start_line.saturating_sub(1).min(lines.len());
+    if index >= lines.len() {
+        return Ok((String::new(), start_line, start_byte, false));
+    }
+    let line = lines[index].trim_end_matches('\n');
+    if start_byte > line.len() || !line.is_char_boundary(start_byte) {
+        return Err(RuntimeError::ToolFailed(format!(
+            "fs.read: start_byte_in_line={start_byte} is not a valid UTF-8 boundary in line {start_line}"
+        )));
+    }
+    let absolute = lines[..index].iter().map(|line| line.len()).sum::<usize>() + start_byte;
+    if let Some(limit) = limit.filter(|limit| *limit > 0) {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        budget.max_lines = budget.max_lines.min(limit);
+    }
+    let next = crate::tools::tool_output::bounded_text_prefix(&content[absolute..], budget);
+    let body = content[absolute..absolute + next].to_string();
+    let end = absolute + next;
+    let has_more = end < content.len();
+    Ok((
+        body,
+        line_number_at(content, end),
+        byte_in_line_at(content, end),
+        has_more,
+    ))
+}
+
+fn line_number_at(content: &str, byte: usize) -> usize {
+    content[..byte].bytes().filter(|b| *b == b'\n').count() + 1
+}
+
+fn byte_in_line_at(content: &str, byte: usize) -> usize {
+    content[..byte]
+        .rsplit_once('\n')
+        .map(|(_, line)| line.len())
+        .unwrap_or(byte)
 }
 
 fn canonicalize_or_owned(path: &std::path::Path) -> std::path::PathBuf {
@@ -795,6 +933,459 @@ mod tests {
         };
         let v = FsRead.call(args, &ctx).await.unwrap();
         assert!(matches!(v, Value::Str(s) if s == "hi from atman"));
+    }
+
+    #[tokio::test]
+    async fn fs_read_continuation_reassembles_long_utf8_line() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("long.txt");
+        let original = "你好世界🚀".repeat(100);
+        tokio::fs::write(&path, &original).await.unwrap();
+        let mut ctx = ToolCtx::new();
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 4,
+            max_bytes: 40,
+            max_line_bytes: 20,
+        };
+        let first = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path.clone())],
+                    named: vec![],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(first_fields) = first else {
+            panic!("expected bounded fs.read struct");
+        };
+        let first_text = first_fields
+            .iter()
+            .find(|(name, _)| name == "content")
+            .and_then(|(_, value)| match value {
+                Value::Str(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap()
+            .to_string();
+        let Value::Struct(cursor) = first_fields
+            .iter()
+            .find(|(name, _)| name == "continuation")
+            .map(|(_, value)| value)
+            .unwrap()
+        else {
+            panic!("expected continuation");
+        };
+        let next_line = cursor
+            .iter()
+            .find(|(name, _)| name == "next_line")
+            .and_then(|(_, value)| match value {
+                Value::Int(number) => Some(*number),
+                _ => None,
+            })
+            .unwrap();
+        let next_byte = cursor
+            .iter()
+            .find(|(name, _)| name == "next_byte_in_line")
+            .and_then(|(_, value)| match value {
+                Value::Int(number) => Some(*number),
+                _ => None,
+            })
+            .unwrap();
+        let second = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path)],
+                    named: vec![
+                        ("offset".into(), Value::Int(next_line)),
+                        ("start_byte_in_line".into(), Value::Int(next_byte)),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(second_fields) = second else {
+            panic!("expected second bounded fs.read struct");
+        };
+        let second_text = second_fields
+            .iter()
+            .find(|(name, _)| name == "content")
+            .and_then(|(_, value)| match value {
+                Value::Str(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        let combined = first_text + second_text;
+        assert!(combined.len() >= 38);
+        assert!(original.starts_with(&combined));
+        assert!(next_byte > 0);
+    }
+
+    #[tokio::test]
+    async fn fs_read_continuation_reassembles_complete_utf8_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("complete.txt");
+        let original = format!("first\n{}\nlast", "你好🚀".repeat(40));
+        tokio::fs::write(&path, &original).await.unwrap();
+        let mut ctx = ToolCtx::new();
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 2,
+            max_bytes: 31,
+            max_line_bytes: 17,
+        };
+
+        let mut result = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path.clone())],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let mut assembled = String::new();
+        for _ in 0..1000 {
+            let Value::Struct(fields) = result else {
+                panic!("expected paged fs.read result");
+            };
+            let text = fields
+                .iter()
+                .find_map(|(name, value)| (name == "content").then_some(value))
+                .and_then(|value| match value {
+                    Value::Str(text) => Some(text),
+                    _ => None,
+                })
+                .unwrap();
+            assembled.push_str(text);
+            let Value::Struct(cursor) = fields
+                .iter()
+                .find_map(|(name, value)| (name == "continuation").then_some(value))
+                .unwrap()
+            else {
+                panic!("expected continuation");
+            };
+            let has_more = cursor
+                .iter()
+                .find_map(|(name, value)| (name == "has_more").then_some(value))
+                .and_then(|value| match value {
+                    Value::Bool(value) => Some(*value),
+                    _ => None,
+                })
+                .unwrap();
+            if !has_more {
+                assert_eq!(assembled, original);
+                return;
+            }
+            let next_line = cursor
+                .iter()
+                .find_map(|(name, value)| (name == "next_line").then_some(value))
+                .and_then(|value| match value {
+                    Value::Int(value) => Some(*value),
+                    _ => None,
+                })
+                .unwrap();
+            let next_byte = cursor
+                .iter()
+                .find_map(|(name, value)| (name == "next_byte_in_line").then_some(value))
+                .and_then(|value| match value {
+                    Value::Int(value) => Some(*value),
+                    _ => None,
+                })
+                .unwrap();
+            result = FsRead
+                .call(
+                    ToolArgs {
+                        positional: vec![Value::Path(path.clone())],
+                        named: vec![
+                            ("offset".into(), Value::Int(next_line)),
+                            ("start_byte_in_line".into(), Value::Int(next_byte)),
+                        ],
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap();
+        }
+        panic!("fs.read continuation did not terminate");
+    }
+
+    #[tokio::test]
+    async fn fs_read_continuation_advances_past_line_budget_boundary() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("lines.txt");
+        tokio::fs::write(&path, "first\nsecond\n").await.unwrap();
+        let mut ctx = ToolCtx::new();
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 1,
+            max_bytes: 64,
+            max_line_bytes: 64,
+        };
+
+        let first = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path.clone())],
+                    named: vec![],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = first else {
+            panic!("expected bounded fs.read struct");
+        };
+        let Value::Struct(cursor) = fields
+            .iter()
+            .find(|(name, _)| name == "continuation")
+            .map(|(_, value)| value)
+            .unwrap()
+        else {
+            panic!("expected continuation");
+        };
+        let next_line = cursor
+            .iter()
+            .find_map(|(name, value)| (name == "next_line").then_some(value))
+            .and_then(|value| match value {
+                Value::Int(value) => Some(*value),
+                _ => None,
+            })
+            .unwrap();
+        let next_byte = cursor
+            .iter()
+            .find_map(|(name, value)| (name == "next_byte_in_line").then_some(value))
+            .and_then(|value| match value {
+                Value::Int(value) => Some(*value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((next_line, next_byte), (2, 0));
+
+        let second = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path)],
+                    named: vec![
+                        ("offset".into(), Value::Int(next_line)),
+                        ("start_byte_in_line".into(), Value::Int(next_byte)),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = second else {
+            panic!("expected bounded fs.read struct");
+        };
+        assert!(
+            matches!(fields.iter().find(|(name, _)| name == "content"), Some((_, Value::Str(text))) if text == "second\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_read_continuation_honors_explicit_line_limit() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("continuation-limit.txt");
+        tokio::fs::write(&path, "first\nsecond\nthird\n")
+            .await
+            .unwrap();
+        let mut ctx = ToolCtx::new();
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 10,
+            max_bytes: 4096,
+            max_line_bytes: 4096,
+        };
+
+        let result = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path)],
+                    named: vec![
+                        ("offset".into(), Value::Int(2)),
+                        ("start_byte_in_line".into(), Value::Int(3)),
+                        ("limit".into(), Value::Int(1)),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = result else {
+            panic!("expected continuation fs.read struct");
+        };
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "content"),
+            Some((_, Value::Str(text))) if text == "ond\n"
+        ));
+        let Value::Struct(cursor) = fields
+            .iter()
+            .find(|(name, _)| name == "continuation")
+            .map(|(_, value)| value)
+            .unwrap()
+        else {
+            panic!("expected continuation");
+        };
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "next_line"),
+            Some((_, Value::Int(3)))
+        ));
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "has_more"),
+            Some((_, Value::Bool(true)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fs_read_offset_past_end_keeps_diagnostic_under_tiny_budget() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("short.txt");
+        tokio::fs::write(&path, "one\n").await.unwrap();
+        let mut ctx = ToolCtx::new();
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 1,
+            max_bytes: 1,
+            max_line_bytes: 1,
+        };
+
+        let result = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path)],
+                    named: vec![("offset".into(), Value::Int(20))],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            Value::Str(message) if message.contains("offset=20 exceeds file length 1")
+        ));
+    }
+
+    #[tokio::test]
+    async fn fs_read_explicit_slice_counts_header_against_byte_budget() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("header.txt");
+        tokio::fs::write(&path, "one\ntwo\n").await.unwrap();
+        let mut ctx = ToolCtx::new();
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 10,
+            max_bytes: 12,
+            max_line_bytes: 12,
+        };
+
+        let result = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path)],
+                    named: vec![
+                        ("offset".into(), Value::Int(2)),
+                        ("limit".into(), Value::Int(10)),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = result else {
+            panic!("expected bounded fs.read struct");
+        };
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "content"),
+            Some((_, Value::Str(text))) if text.len() <= 12
+        ));
+        let Value::Struct(cursor) = fields
+            .iter()
+            .find(|(name, _)| name == "continuation")
+            .map(|(_, value)| value)
+            .unwrap()
+        else {
+            panic!("expected continuation");
+        };
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "next_line"),
+            Some((_, Value::Int(2)))
+        ));
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "next_byte_in_line"),
+            Some((_, Value::Int(0)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fs_read_explicit_limit_cannot_exceed_output_budget() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("limited.txt");
+        tokio::fs::write(&path, "one\ntwo\nthree\n").await.unwrap();
+        let mut ctx = ToolCtx::new();
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 2,
+            max_bytes: 4096,
+            max_line_bytes: 4096,
+        };
+
+        let result = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path)],
+                    named: vec![
+                        ("offset".into(), Value::Int(1)),
+                        ("limit".into(), Value::Int(100)),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = result else {
+            panic!("expected bounded fs.read struct");
+        };
+        assert!(matches!(
+            fields.iter().find(|(name, _)| name == "content"),
+            Some((_, Value::Str(text))) if text.ends_with("one\n") && !text.contains("two\n")
+        ));
+        let Value::Struct(cursor) = fields
+            .iter()
+            .find(|(name, _)| name == "continuation")
+            .map(|(_, value)| value)
+            .unwrap()
+        else {
+            panic!("expected continuation");
+        };
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "next_line"),
+            Some((_, Value::Int(2)))
+        ));
+        assert!(matches!(
+            cursor.iter().find(|(name, _)| name == "next_byte_in_line"),
+            Some((_, Value::Int(0)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fs_read_rejects_invalid_utf8_continuation_offset() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("utf8.txt");
+        tokio::fs::write(&path, "你好\n").await.unwrap();
+        let err = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path)],
+                    named: vec![
+                        ("offset".into(), Value::Int(1)),
+                        ("start_byte_in_line".into(), Value::Int(1)),
+                    ],
+                },
+                &ToolCtx::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::ToolFailed(message) if message.contains("not a valid UTF-8 boundary"))
+        );
     }
 
     #[tokio::test]

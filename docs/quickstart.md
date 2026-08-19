@@ -77,6 +77,17 @@ export OPENAI_API_KEY="sk-..."
 
 Optionally point at a compat gateway with `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`.
 
+Optional tool output payload limits can be set in `~/.config/atman/config.toml`:
+
+```toml
+[tool_output]
+max_lines = 32
+max_bytes = 1024
+max_line_bytes = 384
+```
+
+`fs.read` exposes `start_byte_in_line` for continuing a long UTF-8 line; `bash.output` continues with `next_cursor`, and `term.capture` continues with its returned terminal-area coordinates.
+
 ## 4. Sanity check
 
 ```bash

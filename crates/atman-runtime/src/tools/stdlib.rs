@@ -1012,8 +1012,7 @@ async fn partition_and_gate(
     for entry in prepared {
         match entry {
             PreparedEntry::Failed { index, msg } => {
-                emit_tool_result(ctx, &msg);
-                out_slots[index] = Some(Value::Message(msg));
+                out_slots[index] = Some(Value::Message(emit_tool_result(ctx, &msg)));
             }
             PreparedEntry::Ready {
                 index,
@@ -1070,8 +1069,7 @@ async fn partition_and_gate(
                     &r.id,
                     &format!("tool `{}` denied by user: {reason}", r.name),
                 );
-                emit_tool_result(ctx, &msg);
-                out_slots[r.index] = Some(Value::Message(msg));
+                out_slots[r.index] = Some(Value::Message(emit_tool_result(ctx, &msg)));
             }
         }
     }
@@ -1121,8 +1119,7 @@ fn finish_dispatch(ctx: &ToolCtx, id: &str, name: &str, result: ToolResult) -> V
             .unwrap_or_else(crate::event::TurnId::now),
         origin: crate::message::MessageOrigin::User,
     };
-    emit_tool_result(ctx, &msg);
-    Value::Message(msg)
+    Value::Message(emit_tool_result(ctx, &msg))
 }
 
 type DiffPreviewData = (String, Option<String>, Option<String>, Option<String>);
@@ -1250,21 +1247,25 @@ fn missing_required_fields(schema: &serde_json::Value, named: &[(String, Value)]
         .collect()
 }
 
-fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) {
-    let msg =
-        crate::tools::tool_output::maybe_truncate_tool_message(msg, ctx.session_dir.as_deref());
+fn emit_tool_result(ctx: &ToolCtx, msg: &crate::message::Message) -> crate::message::Message {
+    let msg = crate::tools::tool_output::maybe_truncate_tool_message_with_budget(
+        msg,
+        ctx.session_dir.as_deref(),
+        ctx.tool_output_budget,
+    );
     if let Some(tx) = &ctx.stream_tx {
         let _ = tx.send(crate::stream::StreamFrame::ToolResultMsg {
             flow_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
-            message: msg,
+            message: msg.clone(),
         });
     } else if let Some(sink) = &ctx.events {
         sink.emit(crate::event::Event::ToolResultMsg {
             turn_id: msg.turn_id.clone(),
             flow_run_id: ctx.flow_run_id.clone(),
-            message: msg,
+            message: msg.clone(),
         });
     }
+    msg
 }
 
 fn render_tool_result_text(v: &Value) -> String {
@@ -1481,6 +1482,230 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec!["slow_id", "fast_id"]);
+    }
+
+    struct TextTool {
+        name: &'static str,
+        output: String,
+    }
+
+    impl Tool for TextTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            let output = self.output.clone();
+            Box::pin(async move { Ok(Value::Str(output)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_returns_the_same_truncated_message_it_emits() {
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(TextTool {
+            name: "text",
+            output: "0123456789".repeat(20),
+        }));
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let mut ctx = ToolCtx::new()
+            .with_registry(std::sync::Arc::new(registry))
+            .with_stream_tx(stream_tx);
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 32,
+            max_bytes: 24,
+            max_line_bytes: 24,
+        };
+        let uses = Value::List(vec![Value::Struct(vec![
+            ("id".into(), Value::Str("text_id".into())),
+            ("name".into(), Value::Str("text".into())),
+            ("input".into(), Value::Struct(Vec::new())),
+        ])]);
+        let Value::List(results) = DispatchAll
+            .call(
+                ToolArgs {
+                    positional: vec![uses],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("dispatch result list");
+        };
+        let Value::Message(returned) = &results[0] else {
+            panic!("tool result message");
+        };
+        let crate::stream::StreamFrame::ToolResultMsg {
+            message: emitted, ..
+        } = stream_rx.try_recv().unwrap()
+        else {
+            panic!("tool result stream frame");
+        };
+        assert_eq!(returned, &emitted);
+        assert!(matches!(
+            &returned.parts[0],
+            crate::message::MessagePart::ToolResult { content, .. }
+                if content.contains("Output truncated")
+        ));
+    }
+
+    #[test]
+    fn finish_dispatch_returns_the_budgeted_message_it_emits() {
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let mut ctx = ToolCtx::new().with_stream_tx(stream_tx);
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 32,
+            max_bytes: 24,
+            max_line_bytes: 24,
+        };
+        let Value::Message(returned) = finish_dispatch(
+            &ctx,
+            "text_id",
+            "text",
+            Ok(Value::Str("0123456789".repeat(20))),
+        ) else {
+            panic!("tool result message");
+        };
+        let crate::stream::StreamFrame::ToolResultMsg {
+            message: emitted, ..
+        } = stream_rx.try_recv().unwrap()
+        else {
+            panic!("tool result stream frame");
+        };
+
+        assert_eq!(returned, emitted);
+        assert!(matches!(
+            &returned.parts[0],
+            crate::message::MessagePart::ToolResult { content, .. }
+                if content.contains("Output truncated")
+        ));
+    }
+
+    #[test]
+    fn finish_dispatch_preserves_error_flag_and_message_consistency() {
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let ctx = ToolCtx::new().with_stream_tx(stream_tx);
+        let Value::Message(returned) = finish_dispatch(
+            &ctx,
+            "error_id",
+            "failing",
+            Err(RuntimeError::ToolFailed("expected failure".into())),
+        ) else {
+            panic!("tool result message");
+        };
+        let crate::stream::StreamFrame::ToolResultMsg {
+            message: emitted, ..
+        } = stream_rx.try_recv().unwrap()
+        else {
+            panic!("tool result stream frame");
+        };
+
+        assert_eq!(returned, emitted);
+        assert!(matches!(
+            &returned.parts[0],
+            crate::message::MessagePart::ToolResult {
+                content,
+                is_error: true,
+                ..
+            } if content.contains("expected failure")
+        ));
+    }
+
+    #[test]
+    fn finish_dispatch_emits_full_diff_preview_before_result_truncation() {
+        let events = crate::event::EventSink::new();
+        let mut ctx = ToolCtx::new().with_events(events.clone());
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 1,
+            max_bytes: 16,
+            max_line_bytes: 16,
+        };
+        let diff = "-old\n+new\n".repeat(20);
+        let Value::Message(returned) = finish_dispatch(
+            &ctx,
+            "edit_id",
+            "fs.edit",
+            Ok(Value::Struct(vec![
+                (
+                    "summary".into(),
+                    Value::Str("[fs.edit(example.txt): updated]".into()),
+                ),
+                ("diff".into(), Value::Str(diff.clone())),
+            ])),
+        ) else {
+            panic!("tool result message");
+        };
+
+        assert!(matches!(
+            &returned.parts[0],
+            crate::message::MessagePart::ToolResult { content, .. }
+                if content.contains("Output truncated")
+        ));
+        assert!(events.snapshot().iter().any(|event| matches!(
+            event,
+            crate::event::Event::DiffPreview {
+                unified_diff: Some(preview),
+                ..
+            } if preview == &diff
+        )));
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_returns_the_same_truncated_preflight_error_it_emits() {
+        let registry = crate::tool::ToolRegistry::new();
+        let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(8);
+        let mut ctx = ToolCtx::new()
+            .with_registry(std::sync::Arc::new(registry))
+            .with_stream_tx(stream_tx);
+        ctx.tool_output_budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: 32,
+            max_bytes: 32,
+            max_line_bytes: 32,
+        };
+        let uses = Value::List(vec![Value::Struct(vec![
+            ("id".into(), Value::Str("unknown_id".into())),
+            ("name".into(), Value::Str("missing".repeat(40))),
+            ("input".into(), Value::Struct(Vec::new())),
+        ])]);
+
+        let Value::List(results) = DispatchAll
+            .call(
+                ToolArgs {
+                    positional: vec![uses],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("dispatch result list");
+        };
+        let Value::Message(returned) = &results[0] else {
+            panic!("tool result message");
+        };
+        let crate::stream::StreamFrame::ToolResultMsg {
+            message: emitted, ..
+        } = stream_rx.try_recv().unwrap()
+        else {
+            panic!("tool result stream frame");
+        };
+
+        assert_eq!(returned, &emitted);
+        assert!(matches!(
+            &returned.parts[0],
+            crate::message::MessagePart::ToolResult {
+                content,
+                is_error: true,
+                ..
+            } if content.contains("Output truncated")
+        ));
     }
 
     #[tokio::test]

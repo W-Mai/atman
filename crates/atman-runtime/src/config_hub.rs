@@ -567,6 +567,46 @@ impl ConfigHub {
         }))
     }
 
+    pub fn tool_output_budget(
+        &self,
+    ) -> Result<crate::tools::tool_output::ToolOutputBudget, ConfigError> {
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawToolOutput {
+            #[serde(default)]
+            max_lines: Option<usize>,
+            #[serde(default)]
+            max_bytes: Option<usize>,
+            #[serde(default)]
+            max_line_bytes: Option<usize>,
+        }
+        #[derive(Debug, serde::Deserialize, Default)]
+        struct RawFile {
+            #[serde(default)]
+            tool_output: RawToolOutput,
+        }
+        let text = self.read_config_toml()?;
+        if text.trim().is_empty() {
+            return Ok(Default::default());
+        }
+        let raw: RawFile = toml::from_str(&text)
+            .map_err(|error| ConfigError::Invalid(format!("tool_output config: {error}")))?;
+        let defaults = crate::tools::tool_output::ToolOutputBudget::default();
+        let budget = crate::tools::tool_output::ToolOutputBudget {
+            max_lines: raw.tool_output.max_lines.unwrap_or(defaults.max_lines),
+            max_bytes: raw.tool_output.max_bytes.unwrap_or(defaults.max_bytes),
+            max_line_bytes: raw
+                .tool_output
+                .max_line_bytes
+                .unwrap_or(defaults.max_line_bytes),
+        };
+        if budget.max_lines == 0 || budget.max_bytes == 0 || budget.max_line_bytes == 0 {
+            return Err(ConfigError::Invalid(
+                "tool_output budgets must be positive".into(),
+            ));
+        }
+        Ok(budget)
+    }
+
     pub fn web_fetch_config(&self) -> Result<crate::tools::web::WebConfig, ConfigError> {
         #[derive(Debug, serde::Deserialize, Default)]
         struct RawWeb {
@@ -1281,6 +1321,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hub = ConfigHub::from_config_dir(dir.path());
         (dir, hub)
+    }
+
+    #[test]
+    fn tool_output_budget_uses_defaults_and_reads_overrides() {
+        let (dir, hub) = temp_hub();
+        assert_eq!(
+            hub.tool_output_budget().unwrap(),
+            crate::tools::tool_output::ToolOutputBudget::default()
+        );
+        write_config(
+            &hub,
+            "[tool_output]\nmax_lines = 7\nmax_bytes = 777\nmax_line_bytes = 111\n",
+        );
+        assert_eq!(
+            hub.tool_output_budget().unwrap(),
+            crate::tools::tool_output::ToolOutputBudget {
+                max_lines: 7,
+                max_bytes: 777,
+                max_line_bytes: 111,
+            }
+        );
+        let _ = dir;
+    }
+
+    #[test]
+    fn tool_output_budget_rejects_zero_values() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[tool_output]\nmax_bytes = 0\n");
+        assert!(hub.tool_output_budget().is_err());
     }
 
     #[test]

@@ -170,6 +170,8 @@ pub enum StreamFrame {
         handle: String,
         exit_code: Option<i32>,
         #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
         run_id: Option<String>,
     },
     DiffPreview {
@@ -349,6 +351,31 @@ mod tests {
                     crate::tools::term::TermStateSnapshot::Running
                 ));
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn bash_exited_error_round_trips_and_legacy_payload_loads() {
+        let frame = StreamFrame::BashExited {
+            handle: "bg_s_1".into(),
+            exit_code: None,
+            error: Some("open log: permission denied".into()),
+            run_id: None,
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        let back: StreamFrame = serde_json::from_str(&json).unwrap();
+        match back {
+            StreamFrame::BashExited { error, .. } => {
+                assert_eq!(error.as_deref(), Some("open log: permission denied"));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let legacy = r#"{"BashExited":{"handle":"bg_s_1","exit_code":null,"run_id":null}}"#;
+        let back: StreamFrame = serde_json::from_str(legacy).unwrap();
+        match back {
+            StreamFrame::BashExited { error, .. } => assert!(error.is_none()),
             _ => panic!("wrong variant"),
         }
     }

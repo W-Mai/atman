@@ -275,6 +275,12 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         atman_runtime::tools::task_ops::TaskKill,
     ));
     let trust_config = load_trust_config(opts.config_dir.as_deref());
+    let tool_output_budget = opts
+        .config_dir
+        .as_deref()
+        .map(atman_runtime::config_hub::ConfigHub::from_config_dir)
+        .and_then(|hub| hub.tool_output_budget().ok())
+        .unwrap_or_default();
     let sandbox_enabled = trust_config.mode.sandbox_enabled();
     let sandbox_trust = trust_config.clone();
     executor.tool_ctx = executor
@@ -284,6 +290,7 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         .with_term_registry(term_registry)
         .with_task_registry(task_registry)
         .with_trust(trust_config);
+    executor.tool_ctx.tool_output_budget = tool_output_budget;
     tools::register_preview(
         &executor.tools,
         load_preview_config(opts.config_dir.as_deref()),
@@ -606,6 +613,37 @@ pub fn default_data_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn build_executor_injects_tool_output_budget() {
+        let config = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            config.path().join("config.toml"),
+            "[trust]\nmode = \"eager\"\n[tool_output]\nmax_lines = 7\nmax_bytes = 777\nmax_line_bytes = 111\n",
+        )
+        .unwrap();
+
+        let outcome = build_executor(BootstrapOptions {
+            events: EventSink::new(),
+            mock: true,
+            config_dir: Some(config.path().to_path_buf()),
+            project_root: project.path().to_path_buf(),
+            home_dir: Some(home.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.executor.tool_ctx.tool_output_budget,
+            atman_runtime::tools::tool_output::ToolOutputBudget {
+                max_lines: 7,
+                max_bytes: 777,
+                max_line_bytes: 111,
+            }
+        );
+    }
 
     #[test]
     fn load_web_config_preserves_subdomain_error_isolation() {

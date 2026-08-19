@@ -57,7 +57,7 @@ pub trait HistoryStore: Send + Sync {
         scope: SearchScope,
         limit: usize,
     ) -> Result<SearchResult, RuntimeError>;
-    fn recent(&self, n: usize) -> Result<(u64, Vec<Message>), RuntimeError>;
+    fn recent(&self, n: usize) -> Result<(u64, u64, Vec<Message>), RuntimeError>;
 }
 
 pub struct HistoryStoreImpl {
@@ -326,33 +326,49 @@ impl HistoryStore for HistoryStoreImpl {
         ))
     }
 
-    fn recent(&self, n: usize) -> Result<(u64, Vec<Message>), RuntimeError> {
-        if let Some(session) = &self.session {
-            let msgs = session.messages_full();
-            let total = msgs.len() as u64;
-            if n == 0 {
-                return Ok((total, Vec::new()));
-            }
-            let start = msgs.len().saturating_sub(n);
-            let items = msgs[start..].to_vec();
-            return Ok((total, items));
-        }
-
-        if let Some(session_id) = &self.current_session_id {
-            let msgs = self.replay_from_jsonl(session_id, None)?;
-            let total = msgs.len() as u64;
-            if n == 0 {
-                return Ok((total, Vec::new()));
-            }
-            let start = msgs.len().saturating_sub(n);
-            let items = msgs[start..].to_vec();
-            return Ok((total, items));
-        }
-
-        Err(RuntimeError::ToolFailed(
-            "memory.recent_turns: no session available".into(),
-        ))
+    fn recent(&self, n: usize) -> Result<(u64, u64, Vec<Message>), RuntimeError> {
+        let msgs = if let Some(session) = &self.session {
+            session.messages_full().to_vec()
+        } else if let Some(session_id) = &self.current_session_id {
+            self.replay_from_jsonl(session_id, None)?
+        } else {
+            return Err(RuntimeError::ToolFailed(
+                "memory.recent_turns: no session available".into(),
+            ));
+        };
+        let (turn_count, items) = recent_turn_messages(&msgs, n);
+        Ok((msgs.len() as u64, turn_count, items))
     }
+}
+
+pub(crate) fn recent_turn_messages(messages: &[Message], n: usize) -> (u64, Vec<Message>) {
+    if messages.is_empty() || n == 0 {
+        let mut turn_ids = Vec::new();
+        for message in messages {
+            if !turn_ids.contains(&message.turn_id) {
+                turn_ids.push(message.turn_id.clone());
+            }
+        }
+        let total = turn_ids.len() as u64;
+        return (total, Vec::new());
+    }
+    let mut turns: Vec<(crate::event::TurnId, Vec<Message>)> = Vec::new();
+    for message in messages {
+        if let Some((turn_id, items)) = turns.last_mut()
+            && *turn_id == message.turn_id
+        {
+            items.push(message.clone());
+        } else {
+            turns.push((message.turn_id.clone(), vec![message.clone()]));
+        }
+    }
+    let total = turns.len() as u64;
+    let start = turns.len().saturating_sub(n);
+    let items = turns[start..]
+        .iter()
+        .flat_map(|(_, items)| items.iter().cloned())
+        .collect();
+    (total, items)
 }
 
 impl From<SessionOpenError> for RuntimeError {
@@ -413,6 +429,37 @@ mod tests {
             payload_json: &payload.to_string(),
         })
         .unwrap();
+    }
+
+    #[test]
+    fn recent_groups_messages_by_turn() {
+        let turn_a = crate::event::TurnId::now();
+        let turn_b = crate::event::TurnId::now();
+        let messages = vec![
+            Message {
+                turn_id: turn_a.clone(),
+                ..user_msg("request")
+            },
+            Message {
+                turn_id: turn_a.clone(),
+                ..assistant_msg("answer")
+            },
+            Message {
+                turn_id: turn_a,
+                role: MessageRole::Tool,
+                ..user_msg("tool output")
+            },
+            Message {
+                turn_id: turn_b,
+                ..user_msg("next request")
+            },
+        ];
+        let (turns, recent) = recent_turn_messages(&messages, 1);
+        assert_eq!(turns, 2);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text_concat(), "next request");
+        let (_, recent) = recent_turn_messages(&messages, 2);
+        assert_eq!(recent.len(), 4);
     }
 
     #[test]

@@ -190,7 +190,6 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
     contract {
         capabilities { shell: true }
     }
-    session.push(message.user(user_prompt))
     rules_index = rule.fetch()
     confessions = memory.fetch_confessions()
     recent = memory.recent_turns(n: 5)
@@ -258,7 +257,11 @@ pub const AGENT_AT: &str = r#"flow agent(user_prompt: string) -> string {
             recent = memory.recent_turns(n: 5)
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(recent),
+                prompt: @"../prompts/judge-stall.md"
+                    + "\n\nCurrent user prompt:\n"
+                    + user_prompt
+                    + "\n\nRecent turns:\n"
+                    + to_json_string(recent),
                 categories: ["waiting_for_user", "lazy", "forgot_tools", "done"],
                 retry: 2,
             )
@@ -331,7 +334,11 @@ flow research_loop(goal: string, model: string, max_iter: int) -> string {
         when is_empty(tool_uses) {
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(memory.recent_turns(n: 5)),
+                prompt: @"../prompts/judge-stall.md"
+                    + "\n\nCurrent task:\n"
+                    + goal
+                    + "\n\nRecent turns:\n"
+                    + to_json_string(memory.recent_turns(n: 5)),
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
@@ -382,7 +389,11 @@ flow verify_loop(goal: string, model: string, max_iter: int) -> string {
         when is_empty(tool_uses) {
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(memory.recent_turns(n: 5)),
+                prompt: @"../prompts/judge-stall.md"
+                    + "\n\nCurrent task:\n"
+                    + goal
+                    + "\n\nRecent turns:\n"
+                    + to_json_string(memory.recent_turns(n: 5)),
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
@@ -433,7 +444,11 @@ flow implement_loop(goal: string, model: string, max_iter: int) -> string {
         when is_empty(tool_uses) {
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(memory.recent_turns(n: 5)),
+                prompt: @"../prompts/judge-stall.md"
+                    + "\n\nCurrent task:\n"
+                    + goal
+                    + "\n\nRecent turns:\n"
+                    + to_json_string(memory.recent_turns(n: 5)),
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
@@ -479,7 +494,11 @@ flow review_loop(goal: string, model: string, max_iter: int) -> string {
         when is_empty(tool_uses) {
             intent = llm.classify(
                 model: "cheap",
-                prompt: @"../prompts/judge-stall.md" + to_json_string(memory.recent_turns(n: 5)),
+                prompt: @"../prompts/judge-stall.md"
+                    + "\n\nCurrent task:\n"
+                    + goal
+                    + "\n\nRecent turns:\n"
+                    + to_json_string(memory.recent_turns(n: 5)),
                 categories: ["forgot_tools", "lazy", "done"],
                 retry: 2,
             )
