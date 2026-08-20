@@ -158,6 +158,7 @@ pub mod methods {
     pub const RUN_FLOW: &str = "run_flow";
     pub const CANCEL_RUN: &str = "cancel_run";
     pub const LIST_SESSIONS: &str = "list_sessions";
+    pub const RENAME_SESSION: &str = "rename_session";
     pub const GET_EVENTS: &str = "get_events";
     pub const RESOLVE_PROMPT: &str = "resolve_prompt";
     pub const PING: &str = "ping";
@@ -188,6 +189,20 @@ pub struct SessionSummary {
     pub event_count: usize,
     pub first_ts: Option<chrono::DateTime<chrono::Utc>>,
     pub status: SessionStatus,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub project_root: Option<String>,
+    #[serde(default)]
+    pub name_source: NameSource,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NameSource {
+    #[default]
+    Auto,
+    User,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

@@ -42,6 +42,31 @@ pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcRe
             },
             Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),
         },
+        methods::RENAME_SESSION => {
+            let params = req.params.unwrap_or(json!({}));
+            let sid = params
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok());
+            let title = params
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            match sid {
+                Some(uuid) if !title.trim().is_empty() => match state
+                    .rename_session(&atman_proto::SessionId(uuid), title)
+                {
+                    Ok(summary) => {
+                        JsonRpcResponse::ok(id, serde_json::to_value(summary).unwrap_or(json!({})))
+                    }
+                    Err(e) => JsonRpcResponse::err(id, JsonRpcError::application(e.to_string())),
+                },
+                _ => JsonRpcResponse::err(
+                    id,
+                    JsonRpcError::invalid_params("session_id and non-empty title are required"),
+                ),
+            }
+        }
         methods::CANCEL_RUN => {
             let params = req.params.unwrap_or(json!({}));
             let parsed: Result<CancelRunRequest, _> = serde_json::from_value(params);

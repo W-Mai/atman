@@ -148,6 +148,11 @@ impl ConfigHub {
         self.config_dir.join("config.toml")
     }
 
+    pub fn validate_setting_mutation(&self, key: &str, value: &str) -> Result<(), ConfigError> {
+        crate::settings_catalog::validate_mutation(key, value)
+            .map_err(|error| ConfigError::Invalid(error.to_string()))
+    }
+
     pub fn routes_at_path(&self) -> PathBuf {
         self.config_dir.join("routes.at")
     }
@@ -1321,6 +1326,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hub = ConfigHub::from_config_dir(dir.path());
         (dir, hub)
+    }
+
+    #[test]
+    fn settings_mutation_validation_is_centralized() {
+        let (_dir, hub) = temp_hub();
+        assert!(hub.validate_setting_mutation("trust.mode", "allow").is_ok());
+        assert!(hub.validate_setting_mutation("trust.mode", " ").is_err());
+        assert!(hub.validate_setting_mutation("missing", "x").is_err());
     }
 
     #[test]

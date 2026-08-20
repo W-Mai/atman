@@ -135,6 +135,16 @@ impl DaemonState {
         false
     }
 
+    pub fn rename_session(&self, sid: &SessionId, title: &str) -> Result<SessionSummary> {
+        let path = self.sessions_root().join(sid.0.to_string());
+        atman_runtime::session_meta::SessionMeta::rename(&path, title)
+            .with_context(|| format!("rename session {sid}"))?;
+        self.list_sessions()?
+            .into_iter()
+            .find(|summary| &summary.id == sid)
+            .ok_or_else(|| anyhow::anyhow!("session not found: {sid}"))
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let live_ids: HashMap<SessionId, chrono::DateTime<chrono::Utc>> = {
             let live = self.live.lock().unwrap();
@@ -167,11 +177,25 @@ impl DaemonState {
                 } else {
                     SessionStatus::Finished
                 };
+                let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
                 out.push(SessionSummary {
                     id: sid.clone(),
                     event_count,
                     first_ts,
                     status,
+                    title: meta
+                        .as_ref()
+                        .and_then(|m| m.title.clone())
+                        .unwrap_or_else(|| "Untitled session".into()),
+                    project_root: meta
+                        .as_ref()
+                        .and_then(|m| m.project_root.as_ref())
+                        .map(|p| p.display().to_string()),
+                    name_source: if meta.as_ref().and_then(|m| m.title.as_ref()).is_some() {
+                        atman_proto::NameSource::User
+                    } else {
+                        atman_proto::NameSource::Auto
+                    },
                 });
                 seen.insert(sid);
             }
@@ -183,6 +207,9 @@ impl DaemonState {
                     event_count: 0,
                     first_ts: Some(*started_at),
                     status: SessionStatus::Running,
+                    title: "Untitled session".into(),
+                    project_root: None,
+                    name_source: atman_proto::NameSource::Auto,
                 });
             }
         }

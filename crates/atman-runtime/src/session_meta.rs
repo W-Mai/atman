@@ -5,6 +5,21 @@ use serde::{Deserialize, Serialize};
 
 const META_FILENAME: &str = "meta.json";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScope<'a> {
+    CurrentProject(&'a Path),
+    AllProjects,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub title: String,
+    pub project_root: Option<PathBuf>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub event_count: usize,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,6 +48,61 @@ impl SessionMeta {
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&path, bytes)
+    }
+
+    pub fn rename(session_dir: &Path, title: impl Into<String>) -> std::io::Result<Self> {
+        let title = title.into().trim().to_owned();
+        if title.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "title cannot be empty",
+            ));
+        }
+        let mut meta = Self::load(session_dir).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session metadata not found")
+        })?;
+        meta.title = Some(title);
+        meta.save(session_dir)?;
+        Ok(meta)
+    }
+
+    pub fn discover(root: &Path, scope: SessionScope<'_>) -> std::io::Result<Vec<SessionSummary>> {
+        let sessions = root.join("sessions");
+        let mut summaries = Vec::new();
+        if !sessions.exists() {
+            return Ok(summaries);
+        }
+        for entry in std::fs::read_dir(sessions)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(meta) = Self::load(&path) else {
+                continue;
+            };
+            if let SessionScope::CurrentProject(project) = scope
+                && meta.project_root.as_deref() != Some(project)
+            {
+                continue;
+            }
+            let event_count = std::fs::read_to_string(path.join("events.jsonl"))
+                .map(|s| s.lines().filter(|line| !line.trim().is_empty()).count())
+                .unwrap_or(0);
+            summaries.push(SessionSummary {
+                id: entry.file_name().to_string_lossy().into_owned(),
+                title: meta.title.unwrap_or_else(|| "Untitled session".into()),
+                project_root: meta.project_root,
+                created_at: meta.created_at,
+                event_count,
+            });
+        }
+        summaries.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(summaries)
     }
 
     pub fn from_cwd() -> Self {
@@ -170,6 +240,56 @@ mod tests {
         assert_eq!(back.project_root, meta.project_root);
         assert_eq!(back.start_path, meta.start_path);
         assert_eq!(back.project_fingerprint, meta.project_fingerprint);
+    }
+
+    #[test]
+    fn discovery_filters_and_renames_sessions() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let first = tmp.path().join("sessions/first");
+        let second = tmp.path().join("sessions/second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        SessionMeta {
+            project_root: Some(project.clone()),
+            created_at: Some(Utc::now()),
+            ..SessionMeta::default()
+        }
+        .save(&first)
+        .unwrap();
+        SessionMeta {
+            project_root: Some(tmp.path().join("other")),
+            created_at: Some(Utc::now()),
+            ..SessionMeta::default()
+        }
+        .save(&second)
+        .unwrap();
+        std::fs::write(first.join("events.jsonl"), "{}\n{}\n").unwrap();
+        assert_eq!(
+            SessionMeta::discover(tmp.path(), SessionScope::CurrentProject(&project))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            SessionMeta::discover(tmp.path(), SessionScope::AllProjects)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            SessionMeta::rename(&first, "  Login fix  ")
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Login fix")
+        );
+        assert!(SessionMeta::rename(&first, " ").is_err());
+        assert_eq!(
+            SessionMeta::discover(tmp.path(), SessionScope::CurrentProject(&project)).unwrap()[0]
+                .event_count,
+            2
+        );
     }
 
     #[test]

@@ -70,4 +70,27 @@ async fn list_sessions_includes_live_only_entry_as_running() {
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["status"], "running");
     assert_eq!(arr[0]["id"], serde_json::to_value(sid).unwrap());
+    assert_eq!(arr[0]["title"], "Untitled session");
+}
+
+#[tokio::test]
+async fn rename_session_updates_metadata_and_list_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let sid = SessionId(Uuid::now_v7());
+    let dir = tmp.path().join("sessions").join(sid.0.to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    atman_runtime::session_meta::SessionMeta::default()
+        .save(&dir)
+        .unwrap();
+
+    let req = JsonRpcRequest::new(
+        1,
+        methods::RENAME_SESSION,
+        serde_json::json!({"session_id": sid, "title": "Login fix"}),
+    );
+    let resp = dispatch(state, req).await;
+    let summary = resp.result.expect("rename returns summary");
+    assert_eq!(summary["title"], "Login fix");
+    assert_eq!(summary["name_source"], "user");
 }

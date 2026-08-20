@@ -47,6 +47,8 @@ impl ModelManager {
     }
 
     pub fn refresh(&mut self) {
+        let selected_provider = self.current_provider().to_string();
+        let selected_model = self.current_model().map(|model| model.slug.clone());
         let enabled_providers: std::collections::HashSet<String> =
             atman_runtime::model_registry::all_provider_entries()
                 .into_iter()
@@ -57,9 +59,20 @@ impl ModelManager {
             .into_iter()
             .filter(|g| enabled_providers.contains(&g.provider_name))
             .collect();
+        self.provider_idx = self
+            .groups
+            .iter()
+            .position(|group| group.provider_name == selected_provider)
+            .unwrap_or(0);
         self.model_idx = vec![0; self.groups.len()];
-        if self.provider_idx >= self.groups.len() {
-            self.provider_idx = 0;
+        if let (Some(group), Some(selected_model)) =
+            (self.groups.get(self.provider_idx), selected_model)
+        {
+            self.model_idx[self.provider_idx] = group
+                .models
+                .iter()
+                .position(|model| model.slug == selected_model)
+                .unwrap_or(0);
         }
     }
 
@@ -178,6 +191,20 @@ impl ModelManager {
         }
     }
 
+    pub fn paste(&mut self, text: &str) {
+        if !self.show_form || self.form_field == 2 || self.form_field == 4 {
+            return;
+        }
+        let editor = match self.form_field {
+            0 => &mut self.name_editor,
+            1 => &mut self.model_editor,
+            3 => &mut self.context_budget_editor,
+            5 => &mut self.max_tokens_editor,
+            _ => return,
+        };
+        editor.insert_str(text);
+    }
+
     fn handle_form_key(
         &mut self,
         action: &KeyAction,
@@ -197,13 +224,38 @@ impl ModelManager {
                     self.form_field - 1
                 };
             }
-            KeyAction::CursorLeft | KeyAction::CursorRight if self.form_field == 4 => {
-                let new = if self.thinking_editor.buf().trim() == "true" {
-                    "false"
-                } else {
-                    "true"
+            KeyAction::CursorLeft | KeyAction::CursorRight if matches!(self.form_field, 2 | 4) => {
+                let Some(direction) =
+                    crate::directional_selector::SelectorDirection::from_key(action)
+                else {
+                    return;
                 };
-                self.thinking_editor.replace_with(new);
+                if self.form_field == 2 {
+                    if self.locked_provider.is_some() {
+                        return;
+                    }
+                    let providers: Vec<&str> = self
+                        .groups
+                        .iter()
+                        .map(|group| group.provider_name.as_str())
+                        .collect();
+                    let mut selected = providers
+                        .iter()
+                        .position(|provider| *provider == self.selected_provider)
+                        .unwrap_or(0);
+                    if crate::directional_selector::move_wrapped(
+                        &mut selected,
+                        providers.len(),
+                        direction,
+                    ) {
+                        self.selected_provider = providers[selected].to_string();
+                    }
+                } else {
+                    let mut selected = usize::from(self.thinking_editor.buf().trim() == "true");
+                    crate::directional_selector::move_wrapped(&mut selected, 2, direction);
+                    self.thinking_editor
+                        .replace_with(if selected == 0 { "false" } else { "true" });
+                }
             }
             KeyAction::CursorLeft
             | KeyAction::CursorRight
@@ -312,6 +364,12 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         };
 
         let mut lines: Vec<Line> = vec![];
+        if self.groups.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " No enabled providers or models",
+                Style::default().fg(t.meta_fg.into()),
+            )));
+        }
         for (pi, g) in self.groups.iter().enumerate() {
             let provider_active = pi == self.provider_idx;
             let p_style = if provider_active {
@@ -415,7 +473,7 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         );
 
         let footer = Paragraph::new(Line::from(Span::styled(
-            "n:add  a:alias  Enter:edit  Esc:close",
+            crate::directional_selector::footer_help("n:add  a:alias  Enter:edit", "Esc:close"),
             Style::default().fg(t.meta_fg.into()),
         )))
         .alignment(ratatui::layout::Alignment::Right);
@@ -489,7 +547,9 @@ impl ModelManager {
                 break;
             }
             let active = i == self.form_field;
-            let val_style = if active {
+            let val_style = if matches!(i, 2 | 4) {
+                crate::directional_selector::value_style(t, active)
+            } else if active {
                 Style::default().fg(t.accent.into())
             } else {
                 Style::default()
@@ -517,9 +577,17 @@ impl ModelManager {
         }
         y += 1;
         if y < inner.bottom() {
+            let help = if matches!(self.form_field, 2 | 4) {
+                crate::directional_selector::footer_help(
+                    " Tab: next field",
+                    "Enter: save  Esc: cancel",
+                )
+            } else {
+                " Tab: next field  Enter: save  Esc: cancel".to_string()
+            };
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    " Tab: next field  Enter: save  Esc: cancel  \u{2190}/\u{2192}: toggle thinking",
+                    help,
                     Style::default().fg(t.meta_fg.into()),
                 ))),
                 Rect { y, ..inner },
@@ -527,6 +595,61 @@ impl ModelManager {
         }
         if let Some((x, y)) = cursor_pos {
             f.set_cursor_position((x, y));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_inserts_into_current_text_field() {
+        let mut manager = ModelManager::default();
+        manager.open_form();
+
+        manager.paste("model-name");
+        assert_eq!(manager.name_editor.buf(), "model-name");
+
+        manager.form_field = 3;
+        manager.paste("128000");
+        assert_eq!(manager.context_budget_editor.buf(), "128000");
+    }
+
+    #[test]
+    fn empty_catalog_navigation_is_safe() {
+        let mut manager = ModelManager::default();
+
+        manager.handle_key(&KeyAction::HistoryUp, None);
+        manager.handle_key(&KeyAction::HistoryDown, None);
+        manager.handle_key(&KeyAction::Submit, None);
+
+        assert!(manager.current_model().is_none());
+    }
+
+    #[test]
+    fn form_directional_selectors_switch_provider_and_thinking() {
+        let mut manager = ModelManager {
+            groups: vec![provider_group("alpha"), provider_group("beta")],
+            show_form: true,
+            selected_provider: "alpha".to_string(),
+            ..Default::default()
+        };
+
+        manager.form_field = 2;
+        manager.handle_key(&KeyAction::CursorLeft, None);
+        assert_eq!(manager.selected_provider, "beta");
+
+        manager.form_field = 4;
+        manager.thinking_editor.replace_with("false");
+        manager.handle_key(&KeyAction::CursorRight, None);
+        assert_eq!(manager.thinking_editor.buf(), "true");
+    }
+
+    fn provider_group(name: &str) -> atman_runtime::model_registry::ProviderGroup {
+        atman_runtime::model_registry::ProviderGroup {
+            provider_name: name.to_string(),
+            models: Vec::new(),
         }
     }
 }

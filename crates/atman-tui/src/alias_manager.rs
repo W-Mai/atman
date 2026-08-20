@@ -216,6 +216,18 @@ impl AliasManager {
                         self.model_idx[self.provider_idx] = 0;
                     }
                 }
+                KeyAction::CursorLeft | KeyAction::CursorRight => {
+                    let Some(direction) =
+                        crate::directional_selector::SelectorDirection::from_key(action)
+                    else {
+                        return;
+                    };
+                    crate::directional_selector::move_wrapped(
+                        &mut self.provider_idx,
+                        self.groups.len(),
+                        direction,
+                    );
+                }
                 KeyAction::Submit => self.commit_alias(control_tx),
                 _ => {}
             },
@@ -285,13 +297,7 @@ fn render_tree_panel(
 
     for (pi, grp) in mgr.groups.iter().enumerate() {
         let is_active = mgr.focus == Focus::Tree && mgr.provider_idx == pi;
-        let hdr_style = if is_active {
-            Style::default()
-                .fg(theme.heading.into())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.heading.into())
-        };
+        let hdr_style = crate::directional_selector::value_style(theme, is_active);
         lines.push(Line::from(Span::styled(
             format!("▸ {}", grp.provider_name),
             hdr_style,
@@ -467,8 +473,11 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
         render_tree_panel(f, cols[0], self, t);
         render_preview_panel(f, cols[1], self, t);
         let help = match self.focus {
-            Focus::NameInput => "Tab:model tree  Enter:save  Esc:cancel",
-            Focus::Tree => "Tab:name input  ↑↓/jk:navigate  Enter:save  Esc:cancel",
+            Focus::NameInput => "Tab:model tree  Enter:save  Esc:cancel".to_string(),
+            Focus::Tree => crate::directional_selector::footer_help(
+                "Tab:name input  ↑↓/jk:navigate",
+                "Enter:save  Esc:cancel",
+            ),
         };
         let footer = Paragraph::new(Line::from(Span::styled(
             help,
@@ -507,5 +516,33 @@ impl crate::wm::modal::ModalOverlay for AliasManager {
 
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
         t.accent.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_directional_selector_wraps_providers() {
+        let mut manager = AliasManager {
+            show_form: true,
+            focus: Focus::Tree,
+            groups: vec![provider_group("alpha"), provider_group("beta")],
+            model_idx: vec![0, 0],
+            ..Default::default()
+        };
+
+        manager.handle_key(&KeyAction::CursorLeft, None);
+        assert_eq!(manager.provider_idx, 1);
+        manager.handle_key(&KeyAction::CursorRight, None);
+        assert_eq!(manager.provider_idx, 0);
+    }
+
+    fn provider_group(name: &str) -> atman_runtime::model_registry::ProviderGroup {
+        atman_runtime::model_registry::ProviderGroup {
+            provider_name: name.to_string(),
+            models: Vec::new(),
+        }
     }
 }
