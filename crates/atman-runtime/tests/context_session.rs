@@ -173,7 +173,8 @@ async fn context_session_feeds_session_history_into_llm_call() {
         }],
     ]));
 
-    let session = std::sync::Arc::new(Session::open_ephemeral());
+    let session = std::sync::Arc::new(Session::open(dir.path()).unwrap());
+    let session_id = session.id().to_string();
     let ex = Executor::with_events(session.sink().clone());
     tools::register_tier_zero(&ex.tools);
     ex.providers.register(provider.clone());
@@ -255,19 +256,57 @@ async fn context_session_feeds_session_history_into_llm_call() {
     );
 
     let final_session = session.messages();
-    assert!(
-        final_session.iter().any(|m| {
+    let durable_tool_results = final_session
+        .iter()
+        .filter(|m| {
             m.role == MessageRole::Tool
                 && m.parts.iter().any(|p| {
-                    if let MessagePart::ToolResult { content, .. } = p {
-                        content.contains("hello from file")
-                    } else {
-                        false
-                    }
+                    matches!(
+                        p,
+                        MessagePart::ToolResult { content, .. }
+                            if content.contains("hello from file")
+                    )
                 })
-        }),
-        "session should contain the tool_result with file content"
+        })
+        .count();
+    assert_eq!(
+        durable_tool_results, 1,
+        "explicit session.push should persist exactly one tool result"
     );
+    assert!(
+        final_session
+            .iter()
+            .all(|m| !m.text_concat().contains("done: read the file")),
+        "automatic assistant output must not enter durable session history"
+    );
+
+    session.shutdown().await;
+    let reopened = Session::open_existing(dir.path(), &session_id).unwrap();
+    let reopened_messages = reopened.messages();
+    assert_eq!(
+        reopened_messages
+            .iter()
+            .filter(|m| {
+                m.role == MessageRole::Tool
+                    && m.parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            MessagePart::ToolResult { content, .. }
+                                if content.contains("hello from file")
+                        )
+                    })
+            })
+            .count(),
+        1,
+        "reopen must preserve only the explicitly pushed tool result"
+    );
+    assert!(
+        reopened_messages
+            .iter()
+            .all(|m| !m.text_concat().contains("done: read the file")),
+        "reopen must not promote automatic assistant output into durable history"
+    );
+    reopened.shutdown().await;
 }
 
 const SINGLE_SESSION_CALL: &str = r#"
@@ -278,7 +317,7 @@ flow one_shot() -> string {
 "#;
 
 #[tokio::test(flavor = "current_thread")]
-async fn reopened_session_context_normalizes_root_and_preserves_spawned_ownership() {
+async fn reopened_session_context_only_restores_explicit_durable_messages() {
     let _registry = common::ModelRegistryGuard::acquire(common::config([
         common::model_for_provider("recording", "recording", 200_000, None),
         common::model_for_provider("recording-full-window", "recording", 200_000, None),
@@ -304,12 +343,16 @@ async fn reopened_session_context_normalizes_root_and_preserves_spawned_ownershi
             spawned: true,
         });
         session.append_message(
-            Message::user_text(TurnId::now(), "historical root message"),
+            Message::user_text(TurnId::now(), "ambiguous execution-owned root message"),
             Some(root.clone()),
         );
         session.append_message(
             Message::user_text(TurnId::now(), "isolated spawned child message"),
             Some(spawned.clone()),
+        );
+        session.append_message(
+            Message::user_text(TurnId::now(), "explicit durable root message"),
+            None,
         );
         let sid = session.id().to_string();
         session.shutdown().await;
@@ -340,7 +383,16 @@ async fn reopened_session_context_normalizes_root_and_preserves_spawned_ownershi
         .iter()
         .map(Message::text_concat)
         .collect::<Vec<_>>();
-    assert!(texts.iter().any(|text| text == "historical root message"));
+    assert!(
+        texts
+            .iter()
+            .any(|text| text == "explicit durable root message")
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text == "ambiguous execution-owned root message")
+    );
     assert!(
         !texts
             .iter()

@@ -99,86 +99,14 @@ pub fn replay_messages_from(path: &Path) -> Result<Vec<Message>, SessionOpenErro
         .collect())
 }
 
-fn flow_ownership_sets(
-    envelopes: &[crate::event::EventEnvelope],
-) -> (
-    std::collections::HashSet<crate::event::FlowRunId>,
-    std::collections::HashSet<crate::event::FlowRunId>,
-) {
-    let mut parents = std::collections::HashMap::new();
-    let mut spawned = std::collections::HashSet::new();
-    for env in envelopes {
-        if let crate::event::Event::FlowStart {
-            run_id,
-            parent_run_id,
-            spawned: is_spawned,
-            ..
-        } = &env.event
-        {
-            parents.insert(run_id.clone(), parent_run_id.clone());
-            if *is_spawned {
-                spawned.insert(run_id.clone());
-            }
-        }
-    }
-    loop {
-        let descendants: Vec<_> = parents
-            .iter()
-            .filter_map(|(run_id, parent)| {
-                (!spawned.contains(run_id)
-                    && parent
-                        .as_ref()
-                        .is_some_and(|parent| spawned.contains(parent)))
-                .then_some(run_id.clone())
-            })
-            .collect();
-        if descendants.is_empty() {
-            break;
-        }
-        spawned.extend(descendants);
-    }
-    let known = parents.into_keys().collect();
-    (known, spawned)
-}
-
-fn normalize_root_message_flow_ids(
-    mut env: crate::event::EventEnvelope,
-    known_flow_ids: &std::collections::HashSet<crate::event::FlowRunId>,
-    spawned_flow_ids: &std::collections::HashSet<crate::event::FlowRunId>,
-) -> crate::event::EventEnvelope {
-    match &mut env.event {
-        crate::event::Event::UserMsg { flow_run_id, .. }
-        | crate::event::Event::AssistantMsg { flow_run_id, .. }
-        | crate::event::Event::ToolResultMsg { flow_run_id, .. }
-            if flow_run_id.as_ref().is_some_and(|run_id| {
-                known_flow_ids.contains(run_id) && !spawned_flow_ids.contains(run_id)
-            }) =>
-        {
-            *flow_run_id = None;
-        }
-        _ => {}
-    }
-    env
-}
-
 pub fn replay_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, SessionOpenError> {
     let envelopes = read_event_envelopes(path)?;
-    let (known_flow_ids, spawned_flow_ids) = flow_ownership_sets(&envelopes);
-    let normalized: Vec<_> = envelopes
-        .into_iter()
-        .map(|env| normalize_root_message_flow_ids(env, &known_flow_ids, &spawned_flow_ids))
-        .collect();
-    Ok(normalized.as_slice().to_messages_with_seq())
+    Ok(envelopes.as_slice().to_messages_with_seq())
 }
 
 pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, SessionOpenError> {
     let envelopes = read_event_envelopes(path)?;
-    let (known_flow_ids, spawned_flow_ids) = flow_ownership_sets(&envelopes);
-    let normalized: Vec<_> = envelopes
-        .into_iter()
-        .map(|env| normalize_root_message_flow_ids(env, &known_flow_ids, &spawned_flow_ids))
-        .collect();
-    Ok(normalized
+    Ok(envelopes
         .iter()
         .filter_map(|env| match &env.event {
             crate::event::Event::UserMsg {
@@ -678,7 +606,6 @@ pub(crate) fn apply_envelope_to_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::event::{Event, EventEnvelope, FlowRunId, TurnId};
     use crate::message::{Message, MessageOrigin, MessagePart, MessageRole};
     use uuid::Uuid;
@@ -705,35 +632,6 @@ mod tests {
     }
 
     #[test]
-    fn replay_keeps_root_messages_with_historical_flow_id() {
-        let root = FlowRunId(Uuid::now_v7());
-        let envelopes = vec![
-            EventEnvelope::new(1, flow_start(root.clone(), None, false)),
-            EventEnvelope::new(
-                2,
-                Event::AssistantMsg {
-                    turn_id: TurnId::now(),
-                    flow_run_id: Some(root),
-                    message: message(MessageRole::Assistant, "root"),
-                },
-            ),
-        ];
-        let (known_flow_ids, spawned_flow_ids) = flow_ownership_sets(&envelopes);
-        let normalized = normalize_root_message_flow_ids(
-            envelopes[1].clone(),
-            &known_flow_ids,
-            &spawned_flow_ids,
-        );
-        assert!(matches!(
-            normalized.event,
-            Event::AssistantMsg {
-                flow_run_id: None,
-                ..
-            }
-        ));
-    }
-
-    #[test]
     fn replay_excludes_subagent_messages() {
         let root = FlowRunId(Uuid::now_v7());
         let child = FlowRunId(Uuid::now_v7());
@@ -749,23 +647,11 @@ mod tests {
                 },
             ),
         ];
-        let (known_flow_ids, spawned_flow_ids) = flow_ownership_sets(&envelopes);
-        let normalized = normalize_root_message_flow_ids(
-            envelopes[2].clone(),
-            &known_flow_ids,
-            &spawned_flow_ids,
-        );
-        assert!(matches!(
-            normalized.event,
-            Event::AssistantMsg {
-                flow_run_id: Some(_),
-                ..
-            }
-        ));
+        assert!(super::MessageProjection::to_messages(envelopes.as_slice()).is_empty());
     }
 
     #[test]
-    fn replay_keeps_ordinary_subflow_in_root_history() {
+    fn replay_excludes_ordinary_subflow_execution_messages() {
         let root = FlowRunId(Uuid::now_v7());
         let child = FlowRunId(Uuid::now_v7());
         let envelopes = vec![
@@ -780,19 +666,7 @@ mod tests {
                 },
             ),
         ];
-        let (known_flow_ids, spawned_flow_ids) = flow_ownership_sets(&envelopes);
-        let normalized = normalize_root_message_flow_ids(
-            envelopes[2].clone(),
-            &known_flow_ids,
-            &spawned_flow_ids,
-        );
-        assert!(matches!(
-            normalized.event,
-            Event::AssistantMsg {
-                flow_run_id: None,
-                ..
-            }
-        ));
+        assert!(super::MessageProjection::to_messages(envelopes.as_slice()).is_empty());
     }
 
     #[test]
@@ -813,41 +687,20 @@ mod tests {
                 },
             ),
         ];
-        let (known_flow_ids, spawned_flow_ids) = flow_ownership_sets(&envelopes);
-        let normalized = normalize_root_message_flow_ids(
-            envelopes[3].clone(),
-            &known_flow_ids,
-            &spawned_flow_ids,
-        );
-        assert!(matches!(
-            normalized.event,
-            Event::AssistantMsg {
-                flow_run_id: Some(_),
-                ..
-            }
-        ));
+        assert!(super::MessageProjection::to_messages(envelopes.as_slice()).is_empty());
     }
 
     #[test]
-    fn replay_preserves_unknown_orphan_flow_id() {
+    fn replay_excludes_unknown_orphan_execution_message() {
         let orphan = FlowRunId(Uuid::now_v7());
-        let envelope = EventEnvelope::new(
+        let envelopes = vec![EventEnvelope::new(
             1,
             Event::AssistantMsg {
                 turn_id: TurnId::now(),
                 flow_run_id: Some(orphan),
                 message: message(MessageRole::Assistant, "orphan"),
             },
-        );
-        let (known_flow_ids, spawned_flow_ids) = flow_ownership_sets(&[]);
-        let normalized =
-            normalize_root_message_flow_ids(envelope, &known_flow_ids, &spawned_flow_ids);
-        assert!(matches!(
-            normalized.event,
-            Event::AssistantMsg {
-                flow_run_id: Some(_),
-                ..
-            }
-        ));
+        )];
+        assert!(super::MessageProjection::to_messages(envelopes.as_slice()).is_empty());
     }
 }
