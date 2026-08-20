@@ -599,6 +599,55 @@ mod output_store_tests {
     }
 
     #[test]
+    fn continuous_line_and_byte_reads_reconstruct_full_output() {
+        let dir = TempDir::new().unwrap();
+        let long_line = "前缀🚀".repeat(4096);
+        let full = format!("第一行\n{long_line}\n最后一行\n");
+        let store = OutputStore::at(dir.path());
+        let output_id = store.register("continuous", &full).unwrap();
+
+        let first = store
+            .read_lines(&output_id, 0, 1, ToolOutputBudget::default())
+            .unwrap();
+        assert_eq!(first.content, "第一行\n");
+        let long_line_error = store.read_lines(
+            &output_id,
+            first.next_offset,
+            1,
+            ToolOutputBudget {
+                max_lines: 1,
+                max_bytes: 8192,
+                max_line_bytes: 8192,
+            },
+        );
+        assert!(long_line_error.is_err());
+
+        let mut byte_offset = 0;
+        let mut bytes = String::new();
+        loop {
+            let page = store
+                .read_bytes(
+                    &output_id,
+                    byte_offset,
+                    257,
+                    ToolOutputBudget {
+                        max_lines: 100,
+                        max_bytes: 257,
+                        max_line_bytes: 257,
+                    },
+                )
+                .unwrap();
+            assert!(page.next_offset > byte_offset || !page.has_more);
+            bytes.push_str(&page.content);
+            byte_offset = page.next_offset;
+            if !page.has_more {
+                break;
+            }
+        }
+        assert_eq!(bytes, full);
+    }
+
+    #[test]
     fn ids_are_session_scoped_and_ranges_are_exact() {
         let left = TempDir::new().unwrap();
         let right = TempDir::new().unwrap();

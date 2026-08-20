@@ -129,12 +129,22 @@ pub struct BgOutput {
     buffer_start: usize,
 }
 
+fn framed_output(kind: StreamKind, data: &[u8]) -> Vec<u8> {
+    let prefix: &[u8] = match kind {
+        StreamKind::Stdout => b"[out] ",
+        StreamKind::Stderr => b"[err] ",
+    };
+    let mut frame = Vec::with_capacity(prefix.len() + data.len() + 1);
+    frame.extend_from_slice(prefix);
+    frame.extend_from_slice(data);
+    if !data.ends_with(b"\n") {
+        frame.push(b'\n');
+    }
+    frame
+}
+
 impl BgOutput {
     fn push(&mut self, kind: StreamKind, data: &[u8], max: u64) -> Vec<u8> {
-        let prefix: &[u8] = match kind {
-            StreamKind::Stdout => b"[out] ",
-            StreamKind::Stderr => b"[err] ",
-        };
         let mut new_total = self.total_bytes + data.len() as u64;
         let mut to_write = data;
         if new_total > max {
@@ -143,15 +153,12 @@ impl BgOutput {
             new_total = max;
             self.truncated = true;
         }
-        let mut frame = Vec::new();
-        if !to_write.is_empty() {
-            frame.extend_from_slice(prefix);
-            frame.extend_from_slice(to_write);
-            if !to_write.ends_with(b"\n") {
-                frame.push(b'\n');
-            }
-            self.combined.extend_from_slice(&frame);
-        }
+        let frame = if to_write.is_empty() {
+            Vec::new()
+        } else {
+            framed_output(kind, to_write)
+        };
+        self.combined.extend_from_slice(&frame);
         self.total_bytes = new_total;
         let max_ring = RING_BUFFER_BYTES;
         if self.combined.len() > max_ring {
@@ -941,10 +948,8 @@ async fn read_stream<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, ctx: Rea
                 let data = buf.as_bytes();
                 {
                     let mut out = ctx.output.lock().unwrap();
-                    let frame = out.push(ctx.kind, data, ctx.max_output_bytes);
-                    if !frame.is_empty() {
-                        let _ = ctx.log_tx.send(frame);
-                    }
+                    let _ = ctx.log_tx.send(framed_output(ctx.kind, data));
+                    let _ = out.push(ctx.kind, data, ctx.max_output_bytes);
                 }
                 if let Some(tx) = &ctx.stream_tx {
                     let _ = tx.send(crate::stream::StreamFrame::BashChunk {
@@ -1807,5 +1812,36 @@ mod tests {
         };
         let err = BashStatus.call(status_args, &ctx_b).await.err().unwrap();
         assert!(format!("{err}").contains("does not belong to session"));
+    }
+
+    #[tokio::test]
+    async fn read_stream_keeps_complete_log_after_memory_budget_is_exhausted() {
+        let output = Arc::new(Mutex::new(BgOutput::default()));
+        let (log_tx, mut log_rx) = mpsc::unbounded_channel();
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let input = b"first line\nsecond line\n";
+        let write_task = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(input).await.unwrap();
+        });
+
+        read_stream(
+            BufReader::new(reader),
+            ReadStreamCtx {
+                output: Arc::clone(&output),
+                log_tx,
+                kind: StreamKind::Stdout,
+                max_output_bytes: 5,
+                stream_tx: None,
+                handle: "test".into(),
+                flow_run_id: None,
+            },
+        )
+        .await;
+        write_task.await.unwrap();
+
+        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| log_rx.try_recv().ok()).collect();
+        assert_eq!(frames.concat(), b"[out] first line\n[out] second line\n");
+        assert!(output.lock().unwrap().truncated);
     }
 }
