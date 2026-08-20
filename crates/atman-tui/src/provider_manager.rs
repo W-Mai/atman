@@ -609,23 +609,21 @@ impl ProviderManager {
                         self.form_field - 1
                     };
                 }
-                KeyAction::CursorLeft if self.form_field == 1 => {
-                    let current = self.provider_type_editor.buf().trim();
+                KeyAction::CursorLeft | KeyAction::CursorRight if self.form_field == 1 => {
+                    let direction =
+                        crate::directional_selector::SelectorDirection::from_key(action)?;
                     let types = provider_types();
-                    let idx = types.iter().position(|t| *t == current).unwrap_or(0);
-                    let new_idx = if idx == 0 { types.len() - 1 } else { idx - 1 };
-                    let mut ed = InputEditor::default();
-                    ed.insert_str(types[new_idx]);
-                    self.provider_type_editor = ed;
-                }
-                KeyAction::CursorRight if self.form_field == 1 => {
-                    let current = self.provider_type_editor.buf().trim();
-                    let types = provider_types();
-                    let idx = types.iter().position(|t| *t == current).unwrap_or(0);
-                    let new_idx = (idx + 1) % types.len();
-                    let mut ed = InputEditor::default();
-                    ed.insert_str(types[new_idx]);
-                    self.provider_type_editor = ed;
+                    let mut selected = types
+                        .iter()
+                        .position(|kind| *kind == self.provider_type_editor.buf().trim())
+                        .unwrap_or(0);
+                    crate::directional_selector::move_wrapped(
+                        &mut selected,
+                        types.len(),
+                        direction,
+                    );
+                    self.provider_type_editor.replace_with(types[selected]);
+                    self.kind_selected = selected;
                 }
                 KeyAction::Backspace if self.form_field == 1 => {}
                 KeyAction::Char(_) if self.form_field == 1 => {}
@@ -1157,7 +1155,10 @@ fn render_add_dialog(
         }
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "Tab/Shift+Tab cycle · Enter:save/test · Esc:cancel",
+                crate::directional_selector::footer_help(
+                    "Tab/Shift+Tab cycle · Enter:save/test",
+                    "Esc:cancel",
+                ),
                 Style::default().fg(theme.subtle_fg.into()),
             ))),
             Rect {
@@ -1378,13 +1379,21 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
         if !self.in_form {
             return;
         }
+        if self.form_field == 1 {
+            let value = text.trim();
+            if let Some(index) = provider_types().iter().position(|kind| *kind == value) {
+                self.kind_selected = index;
+                self.provider_type_editor.replace_with(value);
+            }
+            return;
+        }
         let editor = match self.form_field {
             0 => &mut self.name_editor,
-            1 => &mut self.provider_type_editor,
             2 => &mut self.api_key_editor,
             3 => &mut self.api_key_env_editor,
             4 => &mut self.base_url_editor,
-            _ => &mut self.enabled_editor,
+            5 => &mut self.enabled_editor,
+            _ => return,
         };
         editor.insert_str(text);
     }
@@ -1399,5 +1408,53 @@ impl crate::wm::modal::ModalOverlay for ProviderManager {
 
     fn accent(&self, t: &crate::theme::Theme) -> ratatui::style::Color {
         t.accent.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_accepts_only_known_provider_type() {
+        let mut manager = ProviderManager::default();
+        manager.open_custom_form();
+        manager.form_field = 1;
+        let first = provider_types()[0];
+        <ProviderManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, first);
+        assert_eq!(manager.provider_type_editor.buf(), first);
+        <ProviderManager as crate::wm::modal::ModalOverlay>::handle_paste(
+            &mut manager,
+            "not-a-provider-type",
+        );
+        assert_eq!(manager.provider_type_editor.buf(), first);
+    }
+
+    #[test]
+    fn provider_type_selector_wraps_with_directional_keys() {
+        let mut manager = ProviderManager::default();
+        manager.open_custom_form();
+        manager.show_add = true;
+        manager.form_field = 1;
+        let types = provider_types();
+        if types.len() < 2 {
+            return;
+        }
+        let current = manager.provider_type_editor.buf().trim().to_owned();
+        let current_idx = types.iter().position(|kind| *kind == current).unwrap();
+        let expected_next = types[(current_idx + 1) % types.len()];
+        manager.handle_key(&KeyAction::CursorRight, None);
+        assert_eq!(manager.provider_type_editor.buf(), expected_next);
+        manager.handle_key(&KeyAction::CursorLeft, None);
+        assert_eq!(manager.provider_type_editor.buf(), current);
+    }
+
+    #[test]
+    fn paste_inserts_text_fields() {
+        let mut manager = ProviderManager::default();
+        manager.open_custom_form();
+        manager.form_field = 0;
+        <ProviderManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, "provider");
+        assert_eq!(manager.name_editor.buf(), "provider");
     }
 }

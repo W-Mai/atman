@@ -55,7 +55,7 @@ impl ModelManager {
                 .filter(|(_, e)| e.enabled.unwrap_or(true))
                 .map(|(n, _)| n)
                 .collect();
-        self.groups = atman_runtime::model_registry::all_provider_groups()
+        self.groups = atman_runtime::model_registry::all_provider_groups_with_empty()
             .into_iter()
             .filter(|g| enabled_providers.contains(&g.provider_name))
             .collect();
@@ -493,6 +493,10 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
         Some(ModalAction::Consumed)
     }
 
+    fn handle_paste(&mut self, text: &str) {
+        self.paste(text);
+    }
+
     fn cursor_position(&self) -> Option<(u16, u16)> {
         None
     }
@@ -625,6 +629,14 @@ mod tests {
         manager.handle_key(&KeyAction::Submit, None);
 
         assert!(manager.current_model().is_none());
+    }
+
+    #[test]
+    fn modal_overlay_paste_routes_to_model_editor() {
+        let mut manager = ModelManager::default();
+        manager.open_form();
+        <ModelManager as crate::wm::modal::ModalOverlay>::handle_paste(&mut manager, "pasted");
+        assert_eq!(manager.name_editor.buf(), "pasted");
     }
 
     #[test]

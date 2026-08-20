@@ -189,7 +189,13 @@ atman flow test ~/.config/atman/commands/hello.at
 
 First run writes `hello.at.snap.json`. Subsequent runs compare the current output to the snapshot; mismatches print one line per drift case and exit non-zero. Re-run with `--bless` when the change is intended.
 
-## 8. Where to go from here
+## 8. Session discovery and spec state
+
+Session listings default to the current project. Use `atman session list --all` for every project or `--project <path>` for an explicit project root. Session metadata retains a title and project root; manual rename is persistent, while automatic naming cannot overwrite a user title. Daemon clients can pass `project_root`, `search`, and `limit` to `list_sessions`.
+
+`memory.spec.*` stores runtime state in JSONL. `memory.spec.materialize` writes a reviewable `IMPLEMENTATION.md` atomically and returns a revision; passing a stale `expected_revision` rejects the write instead of overwriting edits.
+
+## 9. Where to go from here
 
 - **`atman monitor`** starts an HTTP UI at `http://localhost:65098/` showing every session's event stream with FTS5 search.
 - **`atman logs stream <session>`** tails a running daemon's SSE feed in the terminal.

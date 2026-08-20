@@ -35,13 +35,22 @@ pub async fn dispatch(state: Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcRe
             id,
             json!({"pong": true, "version": env!("CARGO_PKG_VERSION")}),
         ),
-        methods::LIST_SESSIONS => match state.list_sessions() {
-            Ok(summaries) => match serde_json::to_value(&summaries) {
-                Ok(v) => JsonRpcResponse::ok(id, v),
+        methods::LIST_SESSIONS => {
+            let params = req.params.unwrap_or(json!({}));
+            let project_root = params.get("project_root").and_then(|value| value.as_str());
+            let search = params.get("search").and_then(|value| value.as_str());
+            let limit = params
+                .get("limit")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize);
+            match state.list_sessions_query(project_root, search, limit) {
+                Ok(summaries) => match serde_json::to_value(&summaries) {
+                    Ok(v) => JsonRpcResponse::ok(id, v),
+                    Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),
+                },
                 Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),
-            },
-            Err(e) => JsonRpcResponse::err(id, JsonRpcError::internal(e.to_string())),
-        },
+            }
+        }
         methods::RENAME_SESSION => {
             let params = req.params.unwrap_or(json!({}));
             let sid = params

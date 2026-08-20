@@ -145,6 +145,40 @@ impl DaemonState {
             .ok_or_else(|| anyhow::anyhow!("session not found: {sid}"))
     }
 
+    pub fn list_sessions_query(
+        &self,
+        project_root: Option<&str>,
+        search: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<SessionSummary>> {
+        let mut summaries = self.list_sessions()?;
+        if let Some(project_root) = project_root {
+            let query = atman_runtime::session_meta::SessionDiscoveryQuery::current_project(
+                std::path::Path::new(project_root),
+            );
+            let sessions_root = self.sessions_root();
+            summaries.retain(|summary| {
+                let path = sessions_root.join(summary.id.to_string());
+                query.matches_meta(atman_runtime::session_meta::SessionMeta::load(&path).as_ref())
+            });
+        }
+        if let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) {
+            let needle = search.to_lowercase();
+            summaries.retain(|summary| {
+                summary.id.to_string().to_lowercase().contains(&needle)
+                    || summary.title.to_lowercase().contains(&needle)
+                    || summary
+                        .project_root
+                        .as_ref()
+                        .is_some_and(|root| root.to_lowercase().contains(&needle))
+            });
+        }
+        if let Some(limit) = limit {
+            summaries.truncate(limit);
+        }
+        Ok(summaries)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let live_ids: HashMap<SessionId, chrono::DateTime<chrono::Utc>> = {
             let live = self.live.lock().unwrap();
@@ -191,10 +225,17 @@ impl DaemonState {
                         .as_ref()
                         .and_then(|m| m.project_root.as_ref())
                         .map(|p| p.display().to_string()),
-                    name_source: if meta.as_ref().and_then(|m| m.title.as_ref()).is_some() {
-                        atman_proto::NameSource::User
-                    } else {
-                        atman_proto::NameSource::Auto
+                    name_source: match meta
+                        .as_ref()
+                        .map(|metadata| metadata.name_source)
+                        .unwrap_or_default()
+                    {
+                        atman_runtime::session_meta::NameSource::Auto => {
+                            atman_proto::NameSource::Auto
+                        }
+                        atman_runtime::session_meta::NameSource::User => {
+                            atman_proto::NameSource::User
+                        }
                     },
                 });
                 seen.insert(sid);

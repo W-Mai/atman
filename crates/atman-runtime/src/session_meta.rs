@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 const META_FILENAME: &str = "meta.json";
 
+fn is_auto_name(source: &NameSource) -> bool {
+    matches!(source, NameSource::Auto)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionScope<'a> {
     CurrentProject(&'a Path),
@@ -12,9 +16,83 @@ pub enum SessionScope<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryScope {
+    CurrentProject {
+        project_root: PathBuf,
+        project_fingerprint: String,
+    },
+    AllProjects,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionDiscoveryQuery {
+    pub scope: DiscoveryScope,
+    pub include_legacy: bool,
+    pub text: Option<String>,
+    pub limit: Option<usize>,
+}
+
+impl SessionDiscoveryQuery {
+    pub fn all_projects() -> Self {
+        Self {
+            scope: DiscoveryScope::AllProjects,
+            include_legacy: true,
+            text: None,
+            limit: None,
+        }
+    }
+
+    pub fn current_project(project_root: &Path) -> Self {
+        Self {
+            scope: DiscoveryScope::CurrentProject {
+                project_root: canonical_root(project_root),
+                project_fingerprint: fingerprint_from_root(project_root),
+            },
+            include_legacy: true,
+            text: None,
+            limit: None,
+        }
+    }
+
+    pub fn with_legacy(mut self, include_legacy: bool) -> Self {
+        self.include_legacy = include_legacy;
+        self
+    }
+
+    pub fn matches_meta(&self, meta: Option<&SessionMeta>) -> bool {
+        let Some(meta) = meta else {
+            return self.include_legacy;
+        };
+        match &self.scope {
+            DiscoveryScope::AllProjects => true,
+            DiscoveryScope::CurrentProject {
+                project_root,
+                project_fingerprint,
+            } => {
+                if meta.project_fingerprint.is_none() {
+                    return self.include_legacy;
+                }
+                meta.project_fingerprint.as_deref() == Some(project_fingerprint)
+                    || meta.project_root.as_deref().map(canonical_root).as_ref()
+                        == Some(project_root)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NameSource {
+    #[default]
+    Auto,
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
+    pub name_source: NameSource,
     pub project_root: Option<PathBuf>,
     pub created_at: Option<DateTime<Utc>>,
     pub event_count: usize,
@@ -32,6 +110,8 @@ pub struct SessionMeta {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "is_auto_name")]
+    pub name_source: NameSource,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 }
@@ -50,6 +130,29 @@ impl SessionMeta {
         std::fs::write(&path, bytes)
     }
 
+    pub fn set_auto_title_if_unclaimed(
+        session_dir: &Path,
+        title: impl Into<String>,
+    ) -> std::io::Result<Option<Self>> {
+        let title = title.into().trim().to_owned();
+        if title.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "title cannot be empty",
+            ));
+        }
+        let mut meta = Self::load(session_dir).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session metadata not found")
+        })?;
+        if matches!(meta.name_source, NameSource::User) {
+            return Ok(None);
+        }
+        meta.title = Some(title);
+        meta.name_source = NameSource::Auto;
+        meta.save(session_dir)?;
+        Ok(Some(meta))
+    }
+
     pub fn rename(session_dir: &Path, title: impl Into<String>) -> std::io::Result<Self> {
         let title = title.into().trim().to_owned();
         if title.is_empty() {
@@ -62,6 +165,7 @@ impl SessionMeta {
             std::io::Error::new(std::io::ErrorKind::NotFound, "session metadata not found")
         })?;
         meta.title = Some(title);
+        meta.name_source = NameSource::User;
         meta.save(session_dir)?;
         Ok(meta)
     }
@@ -92,6 +196,7 @@ impl SessionMeta {
             summaries.push(SessionSummary {
                 id: entry.file_name().to_string_lossy().into_owned(),
                 title: meta.title.unwrap_or_else(|| "Untitled session".into()),
+                name_source: meta.name_source,
                 project_root: meta.project_root,
                 created_at: meta.created_at,
                 event_count,
@@ -119,6 +224,7 @@ impl SessionMeta {
             project_fingerprint,
             created_at: Some(Utc::now()),
             title: None,
+            name_source: NameSource::Auto,
             tags: Vec::new(),
         }
     }
@@ -187,6 +293,26 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn discovery_query_matches_project_identity_and_legacy_policy() {
+        let root = PathBuf::from("/tmp/project");
+        let query = SessionDiscoveryQuery::current_project(&root).with_legacy(false);
+        let matching = SessionMeta {
+            project_root: Some(root.clone()),
+            project_fingerprint: Some(fingerprint_from_root(&root)),
+            ..SessionMeta::default()
+        };
+        let other = SessionMeta {
+            project_root: Some(PathBuf::from("/tmp/other")),
+            project_fingerprint: Some(fingerprint_from_root(Path::new("/tmp/other"))),
+            ..SessionMeta::default()
+        };
+        assert!(query.matches_meta(Some(&matching)));
+        assert!(!query.matches_meta(Some(&other)));
+        assert!(!query.matches_meta(Some(&SessionMeta::default())));
+        assert!(SessionDiscoveryQuery::all_projects().matches_meta(None));
+    }
+
+    #[test]
     fn fingerprint_is_stable_16_hex_chars() {
         let tmp = TempDir::new().unwrap();
         let fp = fingerprint_from_root(tmp.path());
@@ -233,6 +359,7 @@ mod tests {
             project_fingerprint: Some("deadbeef".repeat(2)),
             created_at: Some(Utc::now()),
             title: Some("nice title".into()),
+            name_source: NameSource::User,
             tags: vec!["x".into()],
         };
         meta.save(tmp.path()).unwrap();
@@ -240,6 +367,26 @@ mod tests {
         assert_eq!(back.project_root, meta.project_root);
         assert_eq!(back.start_path, meta.start_path);
         assert_eq!(back.project_fingerprint, meta.project_fingerprint);
+    }
+
+    #[test]
+    fn auto_title_does_not_overwrite_manual_rename() {
+        let tmp = TempDir::new().unwrap();
+        SessionMeta::default().save(tmp.path()).unwrap();
+        let auto = SessionMeta::set_auto_title_if_unclaimed(tmp.path(), "Generated title")
+            .unwrap()
+            .unwrap();
+        assert_eq!(auto.name_source, NameSource::Auto);
+        let manual = SessionMeta::rename(tmp.path(), "Manual title").unwrap();
+        assert_eq!(manual.name_source, NameSource::User);
+        assert!(
+            SessionMeta::set_auto_title_if_unclaimed(tmp.path(), "Late generated title")
+                .unwrap()
+                .is_none()
+        );
+        let loaded = SessionMeta::load(tmp.path()).unwrap();
+        assert_eq!(loaded.title.as_deref(), Some("Manual title"));
+        assert_eq!(loaded.name_source, NameSource::User);
     }
 
     #[test]
@@ -305,6 +452,7 @@ mod tests {
             project_fingerprint: Some("0000000000000000".into()),
             created_at: None,
             title: None,
+            name_source: NameSource::Auto,
             tags: vec![],
         };
         meta.rebase(&sub);

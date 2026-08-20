@@ -178,6 +178,15 @@ pub struct ProviderGroup {
 /// Single canonical source for UI — no manual union of all_model_entries +
 /// discovered_models + aliases.
 pub fn all_provider_groups() -> Vec<ProviderGroup> {
+    provider_groups(false)
+}
+
+/// Return enabled configured providers even when no model has been registered yet.
+pub fn all_provider_groups_with_empty() -> Vec<ProviderGroup> {
+    provider_groups(true)
+}
+
+fn provider_groups(include_empty: bool) -> Vec<ProviderGroup> {
     let entries = all_model_entries();
     let mut groups: std::collections::BTreeMap<String, Vec<ModelRow>> =
         std::collections::BTreeMap::new();
@@ -192,6 +201,13 @@ pub fn all_provider_groups() -> Vec<ProviderGroup> {
             thinking: info.thinking_enabled(),
         };
         groups.entry(provider).or_default().push(row);
+    }
+    if include_empty {
+        for (provider, entry) in all_provider_entries() {
+            if entry.enabled.unwrap_or(true) {
+                groups.entry(provider).or_default();
+            }
+        }
     }
     groups
         .into_iter()

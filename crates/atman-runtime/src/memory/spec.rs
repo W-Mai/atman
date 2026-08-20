@@ -221,6 +221,97 @@ pub struct SpecStatus {
     pub deviation_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecMaterializeResult {
+    pub path: PathBuf,
+    pub revision: String,
+    pub changed: bool,
+}
+
+impl SpecStore {
+    pub async fn materialize(
+        &self,
+        feature: &str,
+        expected_revision: Option<&str>,
+    ) -> Result<SpecMaterializeResult, RuntimeError> {
+        let entries: Vec<SpecEntry> = super::read_jsonl(&self.entries_path(feature)).await?;
+        let deviations: Vec<SpecDeviation> =
+            super::read_jsonl(&self.deviations_path(feature)).await?;
+        let markdown = render_materialized_markdown(feature, &entries, &deviations);
+        let revision = revision_for(&markdown);
+        let path = self.feature_dir(feature).join("IMPLEMENTATION.md");
+        let existing = tokio::fs::read_to_string(&path).await.ok();
+        if let Some(expected) = expected_revision
+            && existing
+                .as_deref()
+                .is_some_and(|text| revision_for(text) != expected)
+        {
+            return Err(RuntimeError::ToolFailed(format!(
+                "spec.materialize: revision conflict (expected {expected})"
+            )));
+        }
+        if existing.as_deref() == Some(markdown.as_str()) {
+            return Ok(SpecMaterializeResult {
+                path,
+                revision,
+                changed: false,
+            });
+        }
+        tokio::fs::create_dir_all(self.feature_dir(feature))
+            .await
+            .map_err(|e| {
+                RuntimeError::ToolFailed(format!("spec.materialize: create feature dir: {e}"))
+            })?;
+        let tmp = path.with_extension("md.tmp");
+        tokio::fs::write(&tmp, markdown.as_bytes())
+            .await
+            .map_err(|e| {
+                RuntimeError::ToolFailed(format!("spec.materialize: write temp file: {e}"))
+            })?;
+        tokio::fs::rename(&tmp, &path).await.map_err(|e| {
+            RuntimeError::ToolFailed(format!("spec.materialize: replace file: {e}"))
+        })?;
+        Ok(SpecMaterializeResult {
+            path,
+            revision,
+            changed: true,
+        })
+    }
+}
+
+fn revision_for(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn render_materialized_markdown(
+    feature: &str,
+    entries: &[SpecEntry],
+    deviations: &[SpecDeviation],
+) -> String {
+    let mut out = format!("# Implementation — {feature}\n\n");
+    for entry in entries {
+        out.push_str(&format!(
+            "## {} — {}\n\n{}\n\n",
+            entry.phase, entry.id.0, entry.content
+        ));
+    }
+    if !deviations.is_empty() {
+        out.push_str("## Deviations\n\n");
+        for deviation in deviations {
+            out.push_str(&format!(
+                "- **{}**: {} — {}\n",
+                deviation.section, deviation.delta, deviation.reason
+            ));
+        }
+    }
+    out
+}
+
 fn latest_phase(entries: &[SpecEntry]) -> String {
     let mut best = 0usize;
     for e in entries {
@@ -275,6 +366,27 @@ mod tests {
         let st = s.status("x").await.unwrap();
         assert_eq!(st.phase, "not_started");
         assert_eq!(st.entry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn materialize_is_idempotent_and_detects_revision_conflicts() {
+        let (s, dir) = store().await;
+        s.update("x", "research", "notes".into()).await.unwrap();
+        let first = s.materialize("x", None).await.unwrap();
+        assert!(first.changed);
+        assert!(first.path.exists());
+        let second = s.materialize("x", Some(&first.revision)).await.unwrap();
+        assert!(!second.changed);
+        assert_eq!(first.revision, second.revision);
+        tokio::fs::write(&first.path, "user edit\n").await.unwrap();
+        let error = s.materialize("x", Some(&first.revision)).await.unwrap_err();
+        assert!(error.to_string().contains("revision conflict"));
+        assert_eq!(
+            tokio::fs::read_to_string(dir.path().join("x/IMPLEMENTATION.md"))
+                .await
+                .unwrap(),
+            "user edit\n"
+        );
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ pub mod todo;
 pub use confession::{Confession, ConfessionStore};
 pub use goal::GoalStore;
 pub use plan::{Plan, PlanStep, PlanStore};
-pub use spec::{SpecDeviation, SpecEntry, SpecStatus, SpecStore};
+pub use spec::{SpecDeviation, SpecEntry, SpecMaterializeResult, SpecStatus, SpecStore};
 pub use todo::{Todo, TodoStatus, TodoStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

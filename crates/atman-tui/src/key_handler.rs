@@ -90,8 +90,17 @@ pub(crate) fn enumerate_session_rows(
     let Some(sessions_root) = session_dir.parent() else {
         return Vec::new();
     };
-    let current_fp = session.meta().and_then(|m| m.project_fingerprint);
-    let restrict_to_project = matches!(scope, crate::session_switcher::SessionScope::Project);
+    let current_meta = session.meta();
+    let query = match scope {
+        crate::session_switcher::SessionScope::All => {
+            atman_runtime::session_meta::SessionDiscoveryQuery::all_projects()
+        }
+        crate::session_switcher::SessionScope::Project => current_meta
+            .as_ref()
+            .and_then(|meta| meta.project_root.as_deref())
+            .map(atman_runtime::session_meta::SessionDiscoveryQuery::current_project)
+            .unwrap_or_else(atman_runtime::session_meta::SessionDiscoveryQuery::all_projects),
+    };
     let mut rows = Vec::new();
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
@@ -105,13 +114,11 @@ pub(crate) fn enumerate_session_rows(
             continue;
         }
         let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
-        let peer_fp = meta.as_ref().and_then(|m| m.project_fingerprint.clone());
-        let is_legacy = peer_fp.is_none();
-        if restrict_to_project
-            && let Some(current_fp) = current_fp.as_ref()
-            && !is_legacy
-            && peer_fp.as_deref() != Some(current_fp.as_str())
-        {
+        let is_legacy = meta
+            .as_ref()
+            .and_then(|metadata| metadata.project_fingerprint.as_ref())
+            .is_none();
+        if !query.matches_meta(meta.as_ref()) {
             continue;
         }
         let project = if is_legacy {

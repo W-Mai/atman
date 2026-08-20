@@ -743,6 +743,15 @@ async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
     let filter = resolve_session_list_filter(all, project.as_deref())?;
+    let query = match &filter {
+        SessionListFilter::All => {
+            atman_runtime::session_meta::SessionDiscoveryQuery::all_projects()
+        }
+        SessionListFilter::Project { canonical_root, .. } => {
+            atman_runtime::session_meta::SessionDiscoveryQuery::current_project(canonical_root)
+                .with_legacy(false)
+        }
+    };
     let mut rows: Vec<(std::time::SystemTime, String, u64, usize, String)> = Vec::new();
     for entry in std::fs::read_dir(&sessions)? {
         let entry = entry?;
@@ -751,21 +760,8 @@ async fn cmd_session_list(all: bool, project: Option<PathBuf>) -> Result<()> {
         }
         let sid = entry.file_name().to_string_lossy().to_string();
         let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
-        if let SessionListFilter::Project {
-            ref fingerprint,
-            ref canonical_root,
-        } = filter
-        {
-            let stored_fp = meta.as_ref().and_then(|m| m.project_fingerprint.as_deref());
-            let stored_root = meta
-                .as_ref()
-                .and_then(|m| m.project_root.as_deref())
-                .map(atman_runtime::session_meta::canonical_root);
-            let fp_match = stored_fp == Some(fingerprint.as_str());
-            let path_match = stored_root.as_deref() == Some(canonical_root.as_path());
-            if !fp_match && !path_match {
-                continue;
-            }
+        if !query.matches_meta(meta.as_ref()) {
+            continue;
         }
         let where_label = meta
             .as_ref()

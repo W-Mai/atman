@@ -35,6 +35,20 @@ async fn cancel_run_hits_matching_live_session() {
 }
 
 #[tokio::test]
+async fn list_sessions_accepts_search_and_limit_query() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));
+    let req = JsonRpcRequest::new(
+        1,
+        methods::LIST_SESSIONS,
+        serde_json::json!({"search": "missing", "limit": 1}),
+    );
+    let resp = dispatch(state, req).await;
+    assert!(resp.error.is_none());
+    assert_eq!(resp.result.unwrap(), serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn cancel_run_missing_returns_false() {
     let tmp = tempfile::tempdir().unwrap();
     let state = Arc::new(DaemonState::new(tmp.path().to_path_buf()));

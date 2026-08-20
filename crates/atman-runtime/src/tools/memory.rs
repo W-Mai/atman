@@ -594,6 +594,51 @@ impl Tool for MemorySpecStatus {
     }
 }
 
+pub struct MemorySpecMaterialize {
+    pub store: Arc<SpecStore>,
+}
+
+impl Tool for MemorySpecMaterialize {
+    fn name(&self) -> &str {
+        "memory.spec.materialize"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::One
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Materialize runtime JSONL spec state to Markdown with revision conflict protection.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "feature": {"type": "string"},
+                "expected_revision": {"type": "string"}
+            },
+            "required": ["feature"]
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let feature = required_string(&args, "feature")?;
+            let expected = match args.named("expected_revision") {
+                Some(Value::Str(value)) => Some(value.as_str()),
+                _ => None,
+            };
+            let result = self.store.materialize(&feature, expected).await?;
+            Ok(Value::Struct(vec![
+                ("path".into(), Value::Str(result.path.display().to_string())),
+                ("revision".into(), Value::Str(result.revision)),
+                ("changed".into(), Value::Bool(result.changed)),
+            ]))
+        })
+    }
+}
+
 pub struct MemorySpecUpdate {
     pub store: Arc<SpecStore>,
 }
