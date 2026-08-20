@@ -228,7 +228,7 @@ async fn run_flow_inner(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text);
+    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text.clone());
     {
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);
@@ -236,7 +236,7 @@ async fn run_flow_inner(
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnStart)
         .await;
-    let _result = executor
+    let result = executor
         .run_in_turn_with_run_id(
             &parsed,
             &flow_name,
@@ -253,6 +253,12 @@ async fn run_flow_inner(
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
         .await;
     session.end_turn();
+    if result.is_ok() {
+        let _ = atman_runtime::session_naming::maybe_generate_session_name(
+            &executor, &session, &user_text,
+        )
+        .await;
+    }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)
         .await;

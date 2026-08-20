@@ -109,6 +109,7 @@ fn session_list_prints_rows_sorted_by_mtime() {
 
     for _ in 0..2 {
         Command::new(atman_binary())
+            .current_dir(flow_dir.path())
             .env("ATMAN_DATA_DIR", data.path())
             .arg("run")
             .arg(&flow_path)
@@ -117,6 +118,7 @@ fn session_list_prints_rows_sorted_by_mtime() {
     }
 
     let out = Command::new(atman_binary())
+        .current_dir(flow_dir.path())
         .env("ATMAN_DATA_DIR", data.path())
         .args(["session", "list"])
         .output()

@@ -221,6 +221,9 @@ impl DaemonState {
                         .as_ref()
                         .and_then(|m| m.title.clone())
                         .unwrap_or_else(|| "Untitled session".into()),
+                    goal: atman_runtime::memory::goal::GoalStore::at(entry.path())
+                        .get()
+                        .ok(),
                     project_root: meta
                         .as_ref()
                         .and_then(|m| m.project_root.as_ref())
@@ -249,6 +252,7 @@ impl DaemonState {
                     first_ts: Some(*started_at),
                     status: SessionStatus::Running,
                     title: "Untitled session".into(),
+                    goal: None,
                     project_root: None,
                     name_source: atman_proto::NameSource::Auto,
                 });

@@ -200,6 +200,7 @@ pub enum TuiControl {
 #[derive(Debug, Clone)]
 pub struct SessionPickerRow {
     pub id: String,
+    pub name: Option<String>,
     pub project: Option<String>,
     pub message_count: usize,
     pub updated_at: String,

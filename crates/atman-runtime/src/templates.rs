@@ -2,6 +2,16 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+pub const SESSION_NAME_AT: &str = r#"flow session_name(input: string) -> string {
+    return llm.call(
+        model: "cheap",
+        context: "none",
+        system: "Generate a concise session name from the user prompt and goal. Return only the name, without quotes, markdown, punctuation, or explanation. Use 3 to 8 words and at most 60 characters.",
+        prompt: input
+    )
+}
+"#;
+
 pub const SYSTEM_MD: &str = r#"You are atman. atman witnesses; code exists. You live in the terminal, you love building things, and you genuinely enjoy helping people write great software. You're warm, concise, and cheerful — a little emoji now and then is fine (￣▽￣)ノ but don't overdo it.
 
 [working directory]

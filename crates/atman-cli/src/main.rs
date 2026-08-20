@@ -704,7 +704,7 @@ async fn cmd_run(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text);
+    let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text.clone());
     session
         .approval()
         .set_auto_ceiling(atman_runtime::tool::ApprovalLevel::Dangerous);
@@ -722,6 +722,12 @@ async fn cmd_run(
         )
         .await;
     session.end_turn();
+    if outcome.is_ok() {
+        let _ = atman_runtime::session_naming::maybe_generate_session_name(
+            &executor, &session, &user_text,
+        )
+        .await;
+    }
     session.shutdown().await;
 
     match outcome {
@@ -821,20 +827,10 @@ fn resolve_session_list_filter(all: bool, project: Option<&Path>) -> Result<Sess
         });
     }
     let cwd = std::env::current_dir().context("reading cwd")?;
-    match atman_runtime::session_meta::find_project_root(&cwd) {
-        Some(root) => Ok(SessionListFilter::Project {
-            fingerprint: atman_runtime::session_meta::fingerprint_from_root(&root),
-            canonical_root: atman_runtime::session_meta::canonical_root(&root),
-        }),
-        None => {
-            atman_runtime::notify!(
-                warn,
-                "cwd is not inside any project (no .atman/ or .git/ found). \
-                 Showing all sessions. Use --project PATH to filter."
-            );
-            Ok(SessionListFilter::All)
-        }
-    }
+    Ok(SessionListFilter::Project {
+        fingerprint: atman_runtime::session_meta::fingerprint_from_root(&cwd),
+        canonical_root: atman_runtime::session_meta::canonical_root(&cwd),
+    })
 }
 
 fn short_project_path(path: &Path) -> String {

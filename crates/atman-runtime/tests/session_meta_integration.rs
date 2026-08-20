@@ -34,10 +34,10 @@ async fn meta_records_project_root_when_launched_inside_project() {
         .expect("project_root must be Some inside a project");
     assert_eq!(
         recorded.canonicalize().unwrap(),
-        project.canonicalize().unwrap()
+        subdir.canonicalize().unwrap()
     );
     let fp = meta.project_fingerprint.expect("fingerprint present");
-    assert_eq!(fp, fingerprint_from_root(&project));
+    assert_eq!(fp, fingerprint_from_root(&subdir));
 }
 
 #[test]

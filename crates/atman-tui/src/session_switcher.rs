@@ -256,6 +256,11 @@ fn row_matches_filter(row: &SessionPickerRow, needle: &str) -> bool {
     if row.id.to_lowercase().contains(needle) {
         return true;
     }
+    if let Some(name) = row.name.as_deref()
+        && name.to_lowercase().contains(needle)
+    {
+        return true;
+    }
     if let Some(g) = row.goal.as_deref()
         && g.to_lowercase().contains(needle)
     {
@@ -324,37 +329,38 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             .iter()
             .map(|row| {
                 let sid_short: String = row.id.chars().take(8).collect();
+                let name = row.name.as_deref().unwrap_or("Untitled session");
                 let goal_snippet: String = row
                     .goal
                     .as_deref()
-                    .unwrap_or("-")
+                    .unwrap_or("No goal")
                     .chars()
-                    .take(50)
+                    .take(80)
                     .collect();
                 let project_label = row.project.clone().unwrap_or_else(|| "-".into());
                 let updated: String = row.updated_at.chars().take(19).collect();
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("{sid_short:<10}"),
-                        Style::default()
-                            .fg(t.warn.into())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{:>5} msgs  ", row.message_count),
-                        Style::default().fg(t.subtle_fg.into()),
-                    ),
-                    Span::styled(
-                        format!("{updated:<19}  "),
-                        Style::default().fg(t.accent.into()),
-                    ),
-                    Span::styled(project_label, Style::default().fg(t.success.into())),
-                    Span::styled(
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(
+                            name.to_string(),
+                            Style::default()
+                                .fg(t.heading.into())
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {sid_short} · {} msgs · {updated}", row.message_count),
+                            Style::default().fg(t.subtle_fg.into()),
+                        ),
+                        Span::styled(
+                            format!("  {project_label}"),
+                            Style::default().fg(t.success.into()),
+                        ),
+                    ]),
+                    Line::from(Span::styled(
                         format!("  {goal_snippet}"),
                         Style::default().fg(t.tinted_fg.into()),
-                    ),
-                ]);
-                ListItem::new(line)
+                    )),
+                ])
             })
             .collect();
         let list = List::new(items)
@@ -518,6 +524,7 @@ mod tests {
     fn row(id: &str, msgs: usize) -> SessionPickerRow {
         SessionPickerRow {
             id: id.into(),
+            name: None,
             project: None,
             message_count: msgs,
             updated_at: "2026-07-08T00:00:00Z".into(),
@@ -528,6 +535,7 @@ mod tests {
     fn row_with(id: &str, msgs: usize, updated: &str, goal: Option<&str>) -> SessionPickerRow {
         SessionPickerRow {
             id: id.into(),
+            name: None,
             project: None,
             message_count: msgs,
             updated_at: updated.into(),
@@ -611,6 +619,19 @@ mod tests {
         s.close();
         assert!(!s.open);
         assert!(s.rows.is_empty());
+    }
+
+    #[test]
+    fn filter_matches_session_name() {
+        let mut named = row("aaa11111", 1);
+        named.name = Some("Fix authentication flow".into());
+        let mut s = SessionSwitcher::default();
+        s.open_with(vec![named, row("bbb22222", 2)], SessionScope::Project);
+        for ch in "authentication".chars() {
+            s.filter_push(ch);
+        }
+        assert_eq!(s.rows.len(), 1);
+        assert_eq!(s.rows[0].id, "aaa11111");
     }
 
     #[test]

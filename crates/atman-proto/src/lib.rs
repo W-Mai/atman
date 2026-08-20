@@ -192,6 +192,8 @@ pub struct SessionSummary {
     #[serde(default)]
     pub title: String,
     #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
     pub project_root: Option<String>,
     #[serde(default)]
     pub name_source: NameSource,

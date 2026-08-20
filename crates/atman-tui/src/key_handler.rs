@@ -95,11 +95,15 @@ pub(crate) fn enumerate_session_rows(
         crate::session_switcher::SessionScope::All => {
             atman_runtime::session_meta::SessionDiscoveryQuery::all_projects()
         }
-        crate::session_switcher::SessionScope::Project => current_meta
-            .as_ref()
-            .and_then(|meta| meta.project_root.as_deref())
-            .map(atman_runtime::session_meta::SessionDiscoveryQuery::current_project)
-            .unwrap_or_else(atman_runtime::session_meta::SessionDiscoveryQuery::all_projects),
+        crate::session_switcher::SessionScope::Project => {
+            let Some(project_root) = current_meta
+                .as_ref()
+                .and_then(|meta| meta.project_root.as_deref())
+            else {
+                return Vec::new();
+            };
+            atman_runtime::session_meta::SessionDiscoveryQuery::current_project(project_root)
+        }
     };
     let mut rows = Vec::new();
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
@@ -114,20 +118,19 @@ pub(crate) fn enumerate_session_rows(
             continue;
         }
         let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
-        let is_legacy = meta
-            .as_ref()
-            .and_then(|metadata| metadata.project_fingerprint.as_ref())
-            .is_none();
         if !query.matches_meta(meta.as_ref()) {
             continue;
         }
-        let project = if is_legacy {
-            Some("(legacy)".into())
-        } else {
-            meta.as_ref()
-                .and_then(|m| m.project_root.as_ref())
-                .map(|p| p.display().to_string())
+        let Some(metadata) = meta.as_ref() else {
+            continue;
         };
+        if metadata.project_root.is_none() || metadata.project_fingerprint.is_none() {
+            continue;
+        }
+        let project = metadata
+            .project_root
+            .as_ref()
+            .map(|p| p.display().to_string());
         let events_path = entry.path().join("events.jsonl");
         let updated_at = std::fs::metadata(&events_path)
             .and_then(|m| m.modified())
@@ -142,12 +145,16 @@ pub(crate) fn enumerate_session_rows(
         if user_count == 0 {
             continue;
         }
+        let goal = atman_runtime::memory::goal::GoalStore::at(entry.path())
+            .get()
+            .ok();
         rows.push(crate::SessionPickerRow {
             id: sid,
+            name: metadata.title.clone(),
             project,
             message_count: total_count,
             updated_at,
-            goal: meta.as_ref().and_then(|m| m.title.clone()),
+            goal,
         });
     }
     rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));

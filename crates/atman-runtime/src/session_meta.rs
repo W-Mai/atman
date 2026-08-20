@@ -36,7 +36,7 @@ impl SessionDiscoveryQuery {
     pub fn all_projects() -> Self {
         Self {
             scope: DiscoveryScope::AllProjects,
-            include_legacy: true,
+            include_legacy: false,
             text: None,
             limit: None,
         }
@@ -48,7 +48,7 @@ impl SessionDiscoveryQuery {
                 project_root: canonical_root(project_root),
                 project_fingerprint: fingerprint_from_root(project_root),
             },
-            include_legacy: true,
+            include_legacy: false,
             text: None,
             limit: None,
         }
@@ -64,7 +64,9 @@ impl SessionDiscoveryQuery {
             return self.include_legacy;
         };
         match &self.scope {
-            DiscoveryScope::AllProjects => true,
+            DiscoveryScope::AllProjects => {
+                self.include_legacy || meta.project_fingerprint.is_some()
+            }
             DiscoveryScope::CurrentProject {
                 project_root,
                 project_fingerprint,
@@ -216,11 +218,11 @@ impl SessionMeta {
     }
 
     pub fn from_start_path(start: Option<&Path>) -> Self {
-        let project_root = start.and_then(find_project_root);
+        let project_root = start.map(canonical_root);
         let project_fingerprint = project_root.as_deref().map(fingerprint_from_root);
         Self {
+            start_path: project_root.clone(),
             project_root,
-            start_path: start.map(|p| p.to_path_buf()),
             project_fingerprint,
             created_at: Some(Utc::now()),
             title: None,
@@ -229,18 +231,36 @@ impl SessionMeta {
         }
     }
 
-    /// Recompute `project_root`, `project_fingerprint`, and `start_path`
-    /// from a new working directory.
     pub fn rebase(&mut self, new_cwd: &Path) {
-        self.start_path = Some(new_cwd.to_path_buf());
-        self.project_root = find_project_root(new_cwd);
-        self.project_fingerprint = self.project_root.as_deref().map(fingerprint_from_root);
+        let project_root = canonical_root(new_cwd);
+        self.start_path = Some(project_root.clone());
+        self.project_fingerprint = Some(fingerprint_from_root(&project_root));
+        self.project_root = Some(project_root);
     }
 
     pub fn set_title(session_dir: &Path, title: Option<String>) -> std::io::Result<()> {
         let mut meta = Self::load(session_dir).unwrap_or_default();
         meta.title = title;
+        meta.name_source = NameSource::User;
         meta.save(session_dir)
+    }
+
+    pub fn set_auto_title(session_dir: &Path, title: impl Into<String>) -> std::io::Result<bool> {
+        let mut meta = Self::load(session_dir).unwrap_or_default();
+        if meta.name_source == NameSource::User
+            || meta.title.as_deref().is_some_and(|t| !t.is_empty())
+        {
+            return Ok(false);
+        }
+        let title = title.into().trim().replace(['\n', '\r'], " ");
+        let title: String = title.chars().take(60).collect();
+        if title.is_empty() {
+            return Ok(false);
+        }
+        meta.title = Some(title);
+        meta.name_source = NameSource::Auto;
+        meta.save(session_dir)?;
+        Ok(true)
     }
 }
 
@@ -309,7 +329,12 @@ mod tests {
         assert!(query.matches_meta(Some(&matching)));
         assert!(!query.matches_meta(Some(&other)));
         assert!(!query.matches_meta(Some(&SessionMeta::default())));
-        assert!(SessionDiscoveryQuery::all_projects().matches_meta(None));
+        assert!(!SessionDiscoveryQuery::all_projects().matches_meta(None));
+        assert!(
+            SessionDiscoveryQuery::all_projects()
+                .with_legacy(true)
+                .matches_meta(None)
+        );
     }
 
     #[test]
@@ -348,6 +373,42 @@ mod tests {
     fn find_project_root_returns_none_when_nothing_matches() {
         let tmp = TempDir::new().unwrap();
         assert!(find_project_root(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn start_path_is_the_project_without_repository_markers() {
+        let tmp = TempDir::new().unwrap();
+        let nested = tmp.path().join("plain").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let meta = SessionMeta::from_start_path(Some(&nested));
+        let canonical = nested.canonicalize().unwrap();
+        assert_eq!(meta.project_root.as_deref(), Some(canonical.as_path()));
+        assert_eq!(meta.start_path.as_deref(), Some(canonical.as_path()));
+        let fingerprint = fingerprint_from_root(&canonical);
+        assert_eq!(
+            meta.project_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
+        );
+    }
+
+    #[test]
+    fn auto_title_does_not_overwrite_user_title() {
+        let tmp = TempDir::new().unwrap();
+        SessionMeta::from_start_path(Some(tmp.path()))
+            .save(tmp.path())
+            .unwrap();
+        assert!(SessionMeta::set_auto_title(tmp.path(), "Generated name").unwrap());
+        SessionMeta::set_title(tmp.path(), Some("User name".into())).unwrap();
+        assert!(!SessionMeta::set_auto_title(tmp.path(), "Replacement").unwrap());
+        let meta = SessionMeta::load(tmp.path()).unwrap();
+        assert_eq!(meta.title.as_deref(), Some("User name"));
+        assert_eq!(meta.name_source, NameSource::User);
+    }
+
+    #[test]
+    fn built_in_session_name_flow_parses() {
+        let parsed = atman_dsl::parse::parse_file(crate::templates::SESSION_NAME_AT).unwrap();
+        assert_eq!(parsed.flows[0].name.name, "session_name");
     }
 
     #[test]
@@ -456,12 +517,10 @@ mod tests {
             tags: vec![],
         };
         meta.rebase(&sub);
-        assert_eq!(meta.start_path, Some(sub.clone()));
-        assert_eq!(
-            meta.project_root.unwrap().canonicalize().unwrap(),
-            tmp.path().canonicalize().unwrap()
-        );
-        let expected_fp = fingerprint_from_root(tmp.path());
+        let canonical = sub.canonicalize().unwrap();
+        assert_eq!(meta.start_path.as_deref(), Some(canonical.as_path()));
+        assert_eq!(meta.project_root.as_deref(), Some(canonical.as_path()));
+        let expected_fp = fingerprint_from_root(&canonical);
         assert_eq!(meta.project_fingerprint, Some(expected_fp));
     }
 
