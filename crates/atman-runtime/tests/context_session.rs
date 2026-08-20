@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::error::RuntimeError;
-use atman_runtime::event::{NodeEvent, Observable, TurnId};
+use atman_runtime::event::{Event, FlowRunId, NodeEvent, Observable, TurnId};
 use atman_runtime::message::{Message, MessageOrigin, MessagePart, MessageRole};
 use atman_runtime::provider::{AssistantMessage, LlmRequest, Provider, StopReason, TokenUsage};
 use atman_runtime::session::Session;
@@ -276,6 +276,78 @@ flow one_shot() -> string {
     return text_concat(reply)
 }
 "#;
+
+#[tokio::test(flavor = "current_thread")]
+async fn reopened_session_context_normalizes_root_and_preserves_spawned_ownership() {
+    let _registry = common::ModelRegistryGuard::acquire(common::config([
+        common::model_for_provider("recording", "recording", 200_000, None),
+        common::model_for_provider("recording-full-window", "recording", 200_000, None),
+    ]))
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let sid = {
+        let session = Session::open(tmp.path()).unwrap();
+        let root = FlowRunId::now();
+        let spawned = FlowRunId::now();
+        session.sink().emit(Event::FlowStart {
+            run_id: root.clone(),
+            flow_name: "root".into(),
+            parent_run_id: None,
+            parent_node_id: None,
+            spawned: false,
+        });
+        session.sink().emit(Event::FlowStart {
+            run_id: spawned.clone(),
+            flow_name: "worker".into(),
+            parent_run_id: Some(root.clone()),
+            parent_node_id: None,
+            spawned: true,
+        });
+        session.append_message(
+            Message::user_text(TurnId::now(), "historical root message"),
+            Some(root.clone()),
+        );
+        session.append_message(
+            Message::user_text(TurnId::now(), "isolated spawned child message"),
+            Some(spawned.clone()),
+        );
+        let sid = session.id().to_string();
+        session.shutdown().await;
+        sid
+    };
+    let session = Arc::new(Session::open_existing(tmp.path(), &sid).unwrap());
+    let provider = Arc::new(RecordingProvider::new(vec![vec![MessagePart::Text {
+        text: "ok".into(),
+    }]]));
+    let ex = Executor::with_events(session.sink().clone());
+    tools::register_tier_zero(&ex.tools);
+    ex.providers.register(provider.clone());
+    let file = parse_file(SINGLE_SESSION_CALL).unwrap();
+
+    ex.run_in_turn(
+        &file,
+        "one_shot",
+        vec![],
+        Some(TurnId::now()),
+        Some(session.clone()),
+    )
+    .await
+    .unwrap();
+
+    let captured = provider.captured();
+    assert_eq!(captured.len(), 1);
+    let texts = captured[0]
+        .iter()
+        .map(Message::text_concat)
+        .collect::<Vec<_>>();
+    assert!(texts.iter().any(|text| text == "historical root message"));
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text == "isolated spawned child message")
+    );
+    session.shutdown().await;
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn context_session_sends_the_full_live_window_without_request_projection() {

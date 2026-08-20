@@ -348,7 +348,7 @@ pub async fn dispatch_llm(mut args: LlmNodeArgs, ctx: &ToolCtx) -> Value {
                             drop(compact_guard.take());
                         }
                         let _append_compact_guard = session.acquire_compact_lock().await;
-                        session.append_message(am.message.clone(), ctx.flow_run_id.clone());
+                        session.append_message(am.message.clone(), ctx.message_flow_run_id());
                         drop(_append_compact_guard);
                         crate::compaction::start_auto_compact_with_budget(
                             session.clone(),

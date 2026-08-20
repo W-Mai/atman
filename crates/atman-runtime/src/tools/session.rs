@@ -107,11 +107,7 @@ fn emit_message_event(ctx: &ToolCtx, msg: &Message) {
         return;
     };
     let turn_id = ctx.turn_id.clone().unwrap_or_else(TurnId::now);
-    let flow_run_id = if ctx.session_runtime.is_some() {
-        None
-    } else {
-        ctx.flow_run_id.clone()
-    };
+    let flow_run_id = ctx.message_flow_run_id();
     let event = match msg.role {
         MessageRole::User => Event::UserMsg {
             turn_id,

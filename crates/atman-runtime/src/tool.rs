@@ -67,11 +67,19 @@ impl ToolArgs {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistorySegment {
+    #[default]
+    Root,
+    Spawned,
+}
+
 #[derive(Clone, Default)]
 pub struct ToolCtx {
     pub cancel: CancellationToken,
     pub turn_id: Option<crate::event::TurnId>,
     pub flow_run_id: Option<crate::event::FlowRunId>,
+    pub history_segment: HistorySegment,
     pub event_seq: Option<u64>,
     pub prompt_resolver: Option<std::sync::Arc<dyn crate::rendezvous::PromptResolver>>,
     pub registry: Option<std::sync::Arc<ToolRegistry>>,
@@ -129,6 +137,18 @@ impl ToolCtx {
         self.flow_run_id = flow_run_id;
         self.event_seq = event_seq;
         self
+    }
+
+    pub fn with_history_segment(mut self, segment: HistorySegment) -> Self {
+        self.history_segment = segment;
+        self
+    }
+
+    pub fn message_flow_run_id(&self) -> Option<crate::event::FlowRunId> {
+        match self.history_segment {
+            HistorySegment::Root => None,
+            HistorySegment::Spawned => self.flow_run_id.clone(),
+        }
     }
 
     pub fn with_registry(mut self, registry: std::sync::Arc<ToolRegistry>) -> Self {
