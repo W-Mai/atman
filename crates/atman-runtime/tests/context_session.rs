@@ -276,8 +276,8 @@ async fn context_session_feeds_session_history_into_llm_call() {
     assert!(
         final_session
             .iter()
-            .all(|m| !m.text_concat().contains("done: read the file")),
-        "automatic assistant output must not enter durable session history"
+            .any(|m| m.text_concat().contains("done: read the file")),
+        "root assistant output must enter durable session history"
     );
 
     session.shutdown().await;
@@ -303,8 +303,8 @@ async fn context_session_feeds_session_history_into_llm_call() {
     assert!(
         reopened_messages
             .iter()
-            .all(|m| !m.text_concat().contains("done: read the file")),
-        "reopen must not promote automatic assistant output into durable history"
+            .any(|m| m.text_concat().contains("done: read the file")),
+        "reopen must preserve root assistant output"
     );
     reopened.shutdown().await;
 }
@@ -389,7 +389,7 @@ async fn reopened_session_context_only_restores_explicit_durable_messages() {
             .any(|text| text == "explicit durable root message")
     );
     assert!(
-        !texts
+        texts
             .iter()
             .any(|text| text == "ambiguous execution-owned root message")
     );

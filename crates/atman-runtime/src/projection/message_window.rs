@@ -106,25 +106,28 @@ pub fn replay_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, Sess
 
 pub fn replay_all_messages_with_seq(path: &Path) -> Result<Vec<(u64, Message)>, SessionOpenError> {
     let envelopes = read_event_envelopes(path)?;
+    let spawned_flow_ids = spawned_flow_ids(&envelopes);
     Ok(envelopes
         .iter()
         .filter_map(|env| match &env.event {
             crate::event::Event::UserMsg {
                 message,
-                flow_run_id: None,
+                flow_run_id,
                 ..
             }
             | crate::event::Event::AssistantMsg {
                 message,
-                flow_run_id: None,
+                flow_run_id,
                 ..
             }
             | crate::event::Event::ToolResultMsg {
                 message,
-                flow_run_id: None,
+                flow_run_id,
                 ..
+            } if message_belongs_to_root(flow_run_id.as_ref(), &spawned_flow_ids) => {
+                Some((env.seq, message.clone()))
             }
-            | crate::event::Event::SystemMsg { message, .. } => Some((env.seq, message.clone())),
+            crate::event::Event::SystemMsg { message, .. } => Some((env.seq, message.clone())),
             _ => None,
         })
         .collect())
@@ -497,35 +500,84 @@ impl MessageProjection for [crate::event::EventEnvelope] {
     }
 
     fn to_messages_with_seq(&self) -> Vec<(u64, Message)> {
+        let spawned_flow_ids = spawned_flow_ids(self);
         let mut acc: Vec<(u64, Message)> = Vec::new();
         for env in self {
-            apply_envelope_to_messages(env, &mut acc);
+            apply_envelope_to_messages(env, &spawned_flow_ids, &mut acc);
         }
         acc
     }
 }
 
+pub(crate) fn spawned_flow_ids(
+    envelopes: &[crate::event::EventEnvelope],
+) -> std::collections::HashSet<crate::event::FlowRunId> {
+    let mut parents = std::collections::HashMap::new();
+    let mut spawned = std::collections::HashSet::new();
+    for env in envelopes {
+        if let crate::event::Event::FlowStart {
+            run_id,
+            parent_run_id,
+            spawned: is_spawned,
+            ..
+        } = &env.event
+        {
+            parents.insert(run_id.clone(), parent_run_id.clone());
+            if *is_spawned {
+                spawned.insert(run_id.clone());
+            }
+        }
+    }
+    loop {
+        let descendants: Vec<_> = parents
+            .iter()
+            .filter_map(|(run_id, parent)| {
+                (!spawned.contains(run_id)
+                    && parent
+                        .as_ref()
+                        .is_some_and(|parent| spawned.contains(parent)))
+                .then_some(run_id.clone())
+            })
+            .collect();
+        if descendants.is_empty() {
+            break;
+        }
+        spawned.extend(descendants);
+    }
+    spawned
+}
+
+pub(crate) fn message_belongs_to_root(
+    flow_run_id: Option<&crate::event::FlowRunId>,
+    spawned_flow_ids: &std::collections::HashSet<crate::event::FlowRunId>,
+) -> bool {
+    flow_run_id.is_none_or(|run_id| !spawned_flow_ids.contains(run_id))
+}
+
 pub(crate) fn apply_envelope_to_messages(
     env: &crate::event::EventEnvelope,
+    spawned_flow_ids: &std::collections::HashSet<crate::event::FlowRunId>,
     acc: &mut Vec<(u64, Message)>,
 ) {
     match &env.event {
         crate::event::Event::UserMsg {
             message,
-            flow_run_id: None,
+            flow_run_id,
             ..
         }
         | crate::event::Event::AssistantMsg {
             message,
-            flow_run_id: None,
+            flow_run_id,
             ..
         }
         | crate::event::Event::ToolResultMsg {
             message,
-            flow_run_id: None,
+            flow_run_id,
             ..
+        } if message_belongs_to_root(flow_run_id.as_ref(), spawned_flow_ids) => {
+            acc.push((env.seq, message.clone()));
         }
-        | crate::event::Event::SystemMsg { message, .. } => {
+        crate::event::Event::SystemMsg { message, .. } => {
             acc.push((env.seq, message.clone()));
         }
         crate::event::Event::ContextCompact {
@@ -666,7 +718,9 @@ mod tests {
                 },
             ),
         ];
-        assert!(super::MessageProjection::to_messages(envelopes.as_slice()).is_empty());
+        let messages = super::MessageProjection::to_messages(envelopes.as_slice());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text_concat(), "ordinary child");
     }
 
     #[test]
@@ -691,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_excludes_unknown_orphan_execution_message() {
+    fn replay_keeps_unknown_nonspawned_message() {
         let orphan = FlowRunId(Uuid::now_v7());
         let envelopes = vec![EventEnvelope::new(
             1,
@@ -701,6 +755,8 @@ mod tests {
                 message: message(MessageRole::Assistant, "orphan"),
             },
         )];
-        assert!(super::MessageProjection::to_messages(envelopes.as_slice()).is_empty());
+        let messages = super::MessageProjection::to_messages(envelopes.as_slice());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text_concat(), "orphan");
     }
 }

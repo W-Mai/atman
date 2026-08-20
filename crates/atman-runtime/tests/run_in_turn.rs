@@ -50,12 +50,10 @@ async fn run_in_turn_appends_assistant_message_to_session() {
     assert!(matches!(&out, Value::Message(message) if message.text_concat() == "hello world"));
 
     let msgs = session.messages();
-    assert_eq!(
-        msgs.len(),
-        1,
-        "flow-scoped assistant stays out of main transcript"
-    );
+    assert_eq!(msgs.len(), 2, "root assistant must stay in session context");
     assert_eq!(msgs[0].role, MessageRole::User);
+    assert_eq!(msgs[1].role, MessageRole::Assistant);
+    assert_eq!(msgs[1].text_concat(), "hello world");
 
     let has_correlated_assistant = session.sink().snapshot().iter().any(|event| {
         matches!(

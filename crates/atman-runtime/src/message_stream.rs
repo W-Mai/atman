@@ -120,25 +120,36 @@ impl MessageStream {
         if acc.replayed >= events.len() {
             return;
         }
+        let spawned_flow_ids = crate::projection::message_window::spawned_flow_ids(events);
         for ev in &events[acc.replayed..] {
-            crate::projection::message_window::apply_envelope_to_messages(ev, &mut acc.compacted);
+            crate::projection::message_window::apply_envelope_to_messages(
+                ev,
+                &spawned_flow_ids,
+                &mut acc.compacted,
+            );
             match &ev.event {
                 crate::event::Event::UserMsg {
                     message,
-                    flow_run_id: None,
+                    flow_run_id,
                     ..
                 }
                 | crate::event::Event::AssistantMsg {
                     message,
-                    flow_run_id: None,
+                    flow_run_id,
                     ..
                 }
                 | crate::event::Event::ToolResultMsg {
                     message,
-                    flow_run_id: None,
+                    flow_run_id,
                     ..
+                } if crate::projection::message_window::message_belongs_to_root(
+                    flow_run_id.as_ref(),
+                    &spawned_flow_ids,
+                ) =>
+                {
+                    acc.full_raw.push((ev.seq, message.clone()));
                 }
-                | crate::event::Event::SystemMsg { message, .. } => {
+                crate::event::Event::SystemMsg { message, .. } => {
                     acc.full_raw.push((ev.seq, message.clone()));
                 }
                 _ => {}
@@ -631,5 +642,85 @@ mod tests {
             "full must contain pre-compact 'old assistant', got: {:?}",
             texts
         );
+    }
+
+    #[test]
+    fn live_window_keeps_root_tree_once_and_excludes_spawned_tree() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stream = MessageStream::new(Arc::clone(&events));
+        let root = crate::event::FlowRunId::now();
+        let ordinary = crate::event::FlowRunId::now();
+        let spawned = crate::event::FlowRunId::now();
+        let descendant = crate::event::FlowRunId::now();
+        let flow_start = |run_id, parent_run_id, spawned| Event::FlowStart {
+            run_id,
+            flow_name: "test".into(),
+            spawned,
+            parent_run_id,
+            parent_node_id: None,
+        };
+
+        events.lock().unwrap().extend([
+            EventEnvelope::new(1, flow_start(root.clone(), None, false)),
+            EventEnvelope::new(2, flow_start(ordinary.clone(), Some(root.clone()), false)),
+            EventEnvelope::new(3, flow_start(spawned.clone(), Some(root.clone()), true)),
+            EventEnvelope::new(
+                4,
+                flow_start(descendant.clone(), Some(spawned.clone()), false),
+            ),
+            EventEnvelope::new(
+                5,
+                Event::AssistantMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(root.clone()),
+                    message: assistant("root one"),
+                },
+            ),
+        ]);
+        assert_eq!(stream.window().len(), 1);
+
+        events.lock().unwrap().extend([
+            EventEnvelope::new(
+                6,
+                Event::AssistantMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(ordinary),
+                    message: assistant("ordinary one"),
+                },
+            ),
+            EventEnvelope::new(
+                7,
+                Event::AssistantMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(spawned),
+                    message: assistant("spawned one"),
+                },
+            ),
+            EventEnvelope::new(
+                8,
+                Event::AssistantMsg {
+                    turn_id: TurnId::now(),
+                    flow_run_id: Some(descendant),
+                    message: assistant("spawned descendant one"),
+                },
+            ),
+        ]);
+        let second = stream.window();
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].text_concat(), "root one");
+        assert_eq!(second[1].text_concat(), "ordinary one");
+
+        events.lock().unwrap().push(EventEnvelope::new(
+            9,
+            Event::AssistantMsg {
+                turn_id: TurnId::now(),
+                flow_run_id: None,
+                message: assistant("durable root"),
+            },
+        ));
+        let third = stream.window();
+        assert_eq!(third.len(), 3);
+        assert_eq!(third[2].text_concat(), "durable root");
+        assert_eq!(stream.window().len(), 3);
     }
 }
