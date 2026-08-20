@@ -739,26 +739,6 @@ impl WindowManager {
             PaletteEntryId::SetTrustMode => {
                 self.modals.trust_mode_picker_open = true;
             }
-            PaletteEntryId::SettingsCenter => {
-                let items = atman_runtime::settings_catalog::catalog();
-                let immediate = items
-                    .iter()
-                    .filter(|item| {
-                        matches!(
-                            item.activation,
-                            atman_runtime::settings_catalog::Activation::Immediate
-                        )
-                    })
-                    .count();
-                app.push_note(
-                    format!(
-                        "settings: {} entries ({} immediate, source/activation shown in catalog)",
-                        items.len(),
-                        immediate
-                    ),
-                    crate::app::NoteLevel::Info,
-                );
-            }
             PaletteEntryId::SetModeTheme => {
                 self.modals.theme_picker_open = true;
             }

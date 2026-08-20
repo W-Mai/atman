@@ -26,7 +26,6 @@ pub enum PaletteEntryId {
     ManageMcp,
     SetTrustMode,
     SetModeTheme,
-    SettingsCenter,
     ShowHelp,
 }
 
@@ -162,13 +161,6 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Set Mode Theme",
         hint: "Switch display theme (default/wuxia/animal/weather/drink)",
         keyword: "theme mode-theme appearance skin display wuxia animal weather drink",
-    },
-    PaletteEntry {
-        id: PaletteEntryId::SettingsCenter,
-        group: "UI",
-        label: "Settings Center",
-        hint: "Browse setting values, sources, and activation timing",
-        keyword: "settings config source scope activation",
     },
     PaletteEntry {
         id: PaletteEntryId::ShowHelp,
