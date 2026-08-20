@@ -133,6 +133,15 @@ pub(crate) async fn run_frames(
     loop {
         app.app.tick_toasts();
         terminal.draw(|f| render_frame(f, &mut app, &editor))?;
+        if let Some(kind) = app.wm.top_kind() {
+            if app.wm.modals.cursor_visible(kind) {
+                terminal.show_cursor()?;
+            } else {
+                terminal.hide_cursor()?;
+            }
+        } else {
+            terminal.show_cursor()?;
+        }
         app.app.tick = app.app.tick.wrapping_add(1);
 
         if app.app.should_quit {

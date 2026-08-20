@@ -37,6 +37,18 @@ pub struct ModalManager {
 }
 
 impl ModalManager {
+    pub fn cursor_visible(&self, kind: ModalKind) -> bool {
+        match kind {
+            ModalKind::ProviderManager => self.provider_manager.in_form,
+            ModalKind::ModelManager => self.model_manager.has_text_focus(),
+            ModalKind::Palette
+            | ModalKind::HistorySearch
+            | ModalKind::Form
+            | ModalKind::AliasManager => true,
+            _ => false,
+        }
+    }
+
     pub fn any_open(&self) -> bool {
         self.palette.open
             || self.form_modal.open

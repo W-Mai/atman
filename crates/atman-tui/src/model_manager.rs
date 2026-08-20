@@ -46,6 +46,10 @@ impl ModelManager {
         self.show_form = false;
     }
 
+    pub fn has_text_focus(&self) -> bool {
+        self.show_form
+    }
+
     pub fn refresh(&mut self) {
         let selected_provider = self.current_provider().to_string();
         let selected_model = self.current_model().map(|model| model.slug.clone());
