@@ -12,6 +12,31 @@ use atman_runtime::{Executor, Value, tools};
 use tempfile::TempDir;
 
 #[tokio::test]
+async fn spec_tools_execute_status_update_deviate_and_materialize() {
+    let dir = TempDir::new().unwrap();
+    let spec = Arc::new(SpecStore::new(dir.path().to_path_buf()));
+    let ex = Executor::new();
+    tools::register_tier_zero(&ex.tools);
+    tools::register_spec_memory(&ex.tools, spec);
+
+    let src = r#"flow t() -> String {
+    before = memory.spec.status(feature: "demo")
+    memory.spec.update(feature: "demo", phase: "research", content: "notes")
+    memory.spec.deviate(feature: "demo", section: "scope", delta: "changed", reason: "needed")
+    after = memory.spec.status(feature: "demo")
+    materialized = memory.spec.materialize(feature: "demo")
+    return after.entry_count + after.deviation_count
+}
+"#;
+    let file = parse_file(src).unwrap();
+    let value = ex.run(&file, "t", vec![]).await.expect("spec flow ok");
+    match value {
+        Value::Int(value) => assert_eq!(value, 2),
+        other => panic!("unexpected spec result: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn confess_three_and_fetch_returns_three_via_flow() {
     let dir = TempDir::new().unwrap();
     let confession = Arc::new(ConfessionStore::at(dir.path()));
