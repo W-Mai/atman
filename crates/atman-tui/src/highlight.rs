@@ -106,8 +106,22 @@ pub fn highlight_ansi(body: &str) -> Vec<Line<'static>> {
     out
 }
 
+fn normalize_tex_compat(tex: &str) -> String {
+    tex.replace(r"\begin{vmatrix}", r"|\begin{matrix}")
+        .replace(r"\end{vmatrix}", r"\end{matrix}|")
+        .replace(r"\begin{aligned}", r"\begin{matrix}")
+        .replace(r"\end{aligned}", r"\end{matrix}")
+        .replace(r"\operatorname{Re}", "Re")
+        .replace(r"\qquad", " ")
+        .replace(r"\quad", " ")
+        .replace(r"\,", "")
+        .replace(r"\;", "")
+        .replace(r"\!", "")
+}
+
 pub fn render_math(tex: &str) -> Vec<Line<'static>> {
-    match txm::render(tex) {
+    let normalized = normalize_tex_compat(tex);
+    match txm::render(&normalized).or_else(|_| txm::render(tex)) {
         Ok(ansi_string) => {
             let lines = highlight_ansi(&ansi_string);
             if lines.is_empty() {
@@ -123,6 +137,37 @@ pub fn render_math(tex: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gamma_integral_normalizes_unregistered_text_commands() {
+        let source =
+            r"\Gamma(z) = \int_{0}^{\infty} t^{z-1}e^{-t}\,dt, \qquad \operatorname{Re}(z)>0";
+        let text: String = render_math(source)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!text.contains("operatorname"));
+        assert!(!text.contains("qquad"));
+        assert!(!text.contains('\\'));
+        assert!(text.contains("Re"));
+    }
+
+    #[test]
+    fn common_matrix_environments_render_without_raw_tex_fallback() {
+        for source in [
+            r"\begin{vmatrix} a & b \\ c & d \end{vmatrix}",
+            r"\begin{aligned} x &= y \\ y &= z \end{aligned}",
+        ] {
+            let text: String = render_math(source)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert!(!text.contains(r"\begin"), "raw TeX leaked for {source:?}");
+            assert!(text.contains('a') || text.contains('x'));
+        }
+    }
 
     #[test]
     fn known_language_produces_multiple_colors() {

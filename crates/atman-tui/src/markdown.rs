@@ -7,17 +7,76 @@ pub fn render_markdown(md: &str) -> Vec<Line<'static>> {
 }
 
 pub fn render_markdown_with_width(md: &str, rule_width: u16) -> Vec<Line<'static>> {
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    opts.insert(Options::ENABLE_TASKLISTS);
-    opts.insert(Options::ENABLE_MATH);
-    let parser = Parser::new_ext(md, opts);
     let mut renderer = Renderer::with_rule_width(rule_width);
-    for ev in parser {
-        renderer.consume(ev);
+    for segment in split_display_math_segments(md) {
+        match segment {
+            MarkdownSegment::Text(text) => {
+                let mut opts = Options::empty();
+                opts.insert(Options::ENABLE_TABLES);
+                opts.insert(Options::ENABLE_STRIKETHROUGH);
+                opts.insert(Options::ENABLE_TASKLISTS);
+                opts.insert(Options::ENABLE_MATH);
+                for ev in Parser::new_ext(&text, opts) {
+                    renderer.consume(ev);
+                }
+            }
+            MarkdownSegment::DisplayMath(tex) => renderer.render_display_math(&tex),
+        }
     }
     renderer.finish()
+}
+
+enum MarkdownSegment {
+    Text(String),
+    DisplayMath(String),
+}
+
+fn split_display_math_segments(md: &str) -> Vec<MarkdownSegment> {
+    let lines: Vec<&str> = md.split_inclusive('\n').collect();
+    let mut segments = Vec::new();
+    let mut text = String::new();
+    let mut in_code_fence = false;
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+        }
+
+        if !in_code_fence && trimmed == "$$" {
+            let Some(close_offset) = lines[index + 1..]
+                .iter()
+                .position(|candidate| candidate.trim() == "$$")
+            else {
+                text.push_str(line);
+                index += 1;
+                continue;
+            };
+            let close = index + 1 + close_offset;
+            if !text.is_empty() {
+                segments.push(MarkdownSegment::Text(std::mem::take(&mut text)));
+            }
+            let tex = lines[index + 1..close]
+                .iter()
+                .map(|line| line.trim())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            segments.push(MarkdownSegment::DisplayMath(tex));
+            index = close + 1;
+            continue;
+        }
+
+        text.push_str(line);
+        index += 1;
+    }
+
+    if !text.is_empty() {
+        segments.push(MarkdownSegment::Text(text));
+    }
+    segments
 }
 
 #[derive(Default)]
@@ -292,29 +351,32 @@ impl Renderer {
                 self.current_width += crate::width::width(mark);
                 self.fresh_line = false;
             }
-            Event::InlineMath(tex) | Event::DisplayMath(tex) => {
-                self.end_line();
-                self.blank_line();
-                let math_lines = crate::highlight::render_math(&tex);
-                let target = self.rule_width as usize;
-                let math_style = Style::default().fg(t.tinted_fg.into());
-                for ml in &math_lines {
-                    let w = crate::width::spans_width(&ml.spans);
-                    let pad = target.saturating_sub(w) / 2;
-                    let mut spans: Vec<Span<'static>> = Vec::new();
-                    if pad > 0 {
-                        spans.push(Span::raw(" ".repeat(pad)));
-                    }
-                    for s in &ml.spans {
-                        spans.push(Span::styled(s.content.clone(), s.style.patch(math_style)));
-                    }
-                    self.lines.push(Line::from(spans));
-                }
-                self.blank_line();
-                self.fresh_line = true;
-            }
+            Event::InlineMath(tex) | Event::DisplayMath(tex) => self.render_display_math(&tex),
             _ => {}
         }
+    }
+
+    fn render_display_math(&mut self, tex: &str) {
+        let t = crate::theme::theme();
+        self.end_line();
+        self.blank_line();
+        let math_lines = crate::highlight::render_math(tex);
+        let target = self.rule_width as usize;
+        let math_style = Style::default().fg(t.tinted_fg.into());
+        for ml in &math_lines {
+            let w = crate::width::spans_width(&ml.spans);
+            let pad = target.saturating_sub(w) / 2;
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if pad > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            for s in &ml.spans {
+                spans.push(Span::styled(s.content.clone(), s.style.patch(math_style)));
+            }
+            self.lines.push(Line::from(spans));
+        }
+        self.blank_line();
+        self.fresh_line = true;
     }
 
     fn enter(&mut self, tag: Tag<'_>) {
@@ -979,6 +1041,43 @@ mod tests {
             "want crossed_out: {:?}",
             old_span.style
         );
+    }
+
+    #[test]
+    fn multiline_display_math_is_split_before_markdown_parsing() {
+        let segments = split_display_math_segments("before\n$$\nx = y\n=\nz\n$$\nafter\n");
+        assert!(matches!(segments[0], MarkdownSegment::Text(ref text) if text == "before\n"));
+        assert!(matches!(segments[1], MarkdownSegment::DisplayMath(ref tex) if tex == "x = y = z"));
+        assert!(matches!(segments[2], MarkdownSegment::Text(ref text) if text == "after\n"));
+    }
+
+    #[test]
+    fn multiline_display_math_keeps_code_fence_text_in_markdown_segment() {
+        let segments = split_display_math_segments("```text\n$$\nx = y\n$$\n```\n");
+        assert!(
+            matches!(segments.as_slice(), [MarkdownSegment::Text(text)] if text == "```text\n$$\nx = y\n$$\n```\n")
+        );
+    }
+
+    #[test]
+    fn multiline_display_math_renders_through_document_lines() {
+        let lines = render_markdown_with_width("before\n$$\nx = y\n=\nz\n$$\nafter", 80);
+        let text = plain(&lines).join("\n");
+        assert!(text.contains("before"));
+        assert!(text.contains("after"));
+        assert!(!text.contains("$$"));
+        assert!(!text.contains('╌'));
+        assert!(!text.contains("\\frac"));
+    }
+
+    #[test]
+    fn multiline_display_math_preserves_list_items_around_it() {
+        let lines = render_markdown_with_width("- before\n\n$$\nx = y\n=\nz\n$$\n\n- after", 80);
+        let text = plain(&lines).join("\n");
+        assert!(text.contains("before"));
+        assert!(text.contains("after"));
+        assert!(!text.contains("$$"));
+        assert!(!text.contains('╌'));
     }
 
     #[test]
