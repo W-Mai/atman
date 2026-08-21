@@ -125,3 +125,51 @@ async fn fs_edit_ambiguous_match_returns_actionable_error_through_registry() {
     assert!(msg.contains("matches 2 times"), "msg: {msg}");
     assert!(msg.contains("replace_all=true"));
 }
+
+#[tokio::test]
+async fn fs_edit_start_line_selects_the_matching_occurrence() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("repeat.txt");
+    tokio::fs::write(&path, b"same\nfirst\nsame\nsecond\n")
+        .await
+        .unwrap();
+
+    let registry = atman_runtime::tool::ToolRegistry::new();
+    register_tier_zero(&registry);
+    let tracker = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let ctx = ToolCtx::new().with_read_files(tracker);
+    registry
+        .get("fs.read")
+        .unwrap()
+        .call(
+            ToolArgs {
+                positional: vec![Value::Path(path.clone())],
+                named: vec![],
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+    registry
+        .get("fs.edit")
+        .unwrap()
+        .call(
+            ToolArgs {
+                positional: vec![],
+                named: vec![
+                    ("path".into(), Value::Path(path.clone())),
+                    ("old_string".into(), Value::Str("same".into())),
+                    ("new_string".into(), Value::Str("changed".into())),
+                    ("start_line".into(), Value::Int(3)),
+                ],
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        tokio::fs::read_to_string(path).await.unwrap(),
+        "same\nfirst\nchanged\nsecond\n"
+    );
+}

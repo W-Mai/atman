@@ -22,6 +22,21 @@ pub struct OutputPage {
     pub has_more: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputSearchHit {
+    pub line: usize,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputSearchResult {
+    pub query: String,
+    pub total_matches: usize,
+    pub hits: Vec<OutputSearchHit>,
+    pub has_more: bool,
+    pub next_match: usize,
+}
+
 impl OutputStore {
     pub fn at(session_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -46,16 +61,23 @@ impl OutputStore {
         let content = self.read_registered(output_id)?;
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
         let start = offset.min(lines.len());
-        let end = start
+        let requested_end = start
             .saturating_add(limit.min(budget.max_lines))
             .min(lines.len());
-        let requested = lines[start..end].concat();
-        let cut = bounded_prefix_len(&requested, budget);
-        if cut < requested.len() {
+        let mut end = requested_end;
+        while end > start {
+            let candidate = lines[start..end].concat();
+            if bounded_prefix_len(&candidate, budget) == candidate.len() {
+                break;
+            }
+            end -= 1;
+        }
+        if end == start && start < lines.len() {
             return Err(RuntimeError::ToolFailed(
-                "output.read: selected line range exceeds the output budget; use byte_offset + byte_limit".into(),
+                "output.read: the next line exceeds the output budget; use byte_offset + byte_limit".into(),
             ));
         }
+        let requested = lines[start..end].concat();
         Ok(OutputPage {
             content: requested,
             mode: "lines",
@@ -64,6 +86,40 @@ impl OutputStore {
             total_lines: lines.len(),
             total_bytes: content.len(),
             has_more: end < lines.len(),
+        })
+    }
+
+    pub fn search(
+        &self,
+        output_id: &str,
+        query: &str,
+        match_index: usize,
+        match_limit: usize,
+    ) -> Result<OutputSearchResult, RuntimeError> {
+        if query.is_empty() {
+            return Err(RuntimeError::ToolFailed(
+                "output.read: query must not be empty".into(),
+            ));
+        }
+        let content = self.read_registered(output_id)?;
+        let lines: Vec<&str> = content.lines().collect();
+        let matches: Vec<OutputSearchHit> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(query))
+            .map(|(index, line)| OutputSearchHit {
+                line: index + 1,
+                snippet: line.chars().take(240).collect(),
+            })
+            .collect();
+        let start = match_index.min(matches.len());
+        let end = start.saturating_add(match_limit).min(matches.len());
+        Ok(OutputSearchResult {
+            query: query.to_string(),
+            total_matches: matches.len(),
+            hits: matches[start..end].to_vec(),
+            has_more: end < matches.len(),
+            next_match: end,
         })
     }
 
@@ -160,7 +216,7 @@ impl Tool for OutputRead {
 
     fn description(&self) -> Option<&str> {
         Some(
-            "Read a registered oversized tool output from the current session. Paginate by either line_offset + line_limit or byte_offset + byte_limit; output_id cannot address arbitrary paths.",
+            "Read a registered oversized tool output from the current session. Use line_offset + line_limit for page-by-line continuation, byte_offset + byte_limit for byte continuation, or query + match_index + match_limit to search matching lines. The returned next_offset/next_match fields are ready for the next call; output_id cannot address arbitrary paths.",
         )
     }
 
@@ -169,6 +225,9 @@ impl Tool for OutputRead {
             "type": "object",
             "properties": {
                 "output_id": {"type": "string", "description": "Opaque ID returned by a truncated tool result."},
+                "query": {"type": "string", "description": "Literal text to search for. Returns matching 1-based line numbers and snippets."},
+                "match_index": {"type": "integer", "minimum": 0, "description": "Zero-based matching-line offset for search pagination."},
+                "match_limit": {"type": "integer", "minimum": 1, "description": "Maximum matching lines to return."},
                 "line_offset": {"type": "integer", "minimum": 0, "description": "Zero-based line offset."},
                 "line_limit": {"type": "integer", "minimum": 1, "description": "Maximum lines to return."},
                 "byte_offset": {"type": "integer", "minimum": 0, "description": "Zero-based UTF-8 byte offset."},
@@ -184,16 +243,33 @@ impl Tool for OutputRead {
             let store = ctx.output_store.as_ref().ok_or_else(|| {
                 RuntimeError::ToolFailed("output.read: no session output store available".into())
             })?;
+            let query = optional_string(&args, "query")?;
+            let match_index = optional_usize(&args, "match_index")?.unwrap_or(0);
+            let match_limit = optional_positive_usize(&args, "match_limit")?
+                .unwrap_or(ctx.tool_output_budget.max_lines);
             let line_offset = optional_usize(&args, "line_offset")?;
             let line_limit = optional_positive_usize(&args, "line_limit")?;
             let byte_offset = optional_usize(&args, "byte_offset")?;
             let byte_limit = optional_positive_usize(&args, "byte_limit")?;
             let uses_lines = line_offset.is_some() || line_limit.is_some();
             let uses_bytes = byte_offset.is_some() || byte_limit.is_some();
+            if query.is_some() && (uses_lines || uses_bytes) {
+                return Err(RuntimeError::ToolFailed(
+                    "output.read: choose search, line pagination, or byte pagination".into(),
+                ));
+            }
             if uses_lines && uses_bytes {
                 return Err(RuntimeError::ToolFailed(
                     "output.read: choose line pagination or byte pagination, not both".into(),
                 ));
+            }
+            if let Some(query) = query {
+                return Ok(output_search_value(store.search(
+                    &output_id,
+                    &query,
+                    match_index,
+                    match_limit,
+                )?));
             }
             let page = if uses_bytes {
                 store.read_bytes(
@@ -212,6 +288,17 @@ impl Tool for OutputRead {
             };
             Ok(output_page_value(page))
         })
+    }
+}
+
+fn optional_string(args: &ToolArgs, name: &str) -> Result<Option<String>, RuntimeError> {
+    match args.named(name) {
+        Some(Value::Str(value)) => Ok(Some(value.clone())),
+        Some(Value::Unit) | None => Ok(None),
+        Some(value) => Err(RuntimeError::TypeMismatch {
+            expected: format!("string {name}"),
+            actual: value.kind_name().into(),
+        }),
     }
 }
 
@@ -246,6 +333,33 @@ fn optional_positive_usize(args: &ToolArgs, name: &str) -> Result<Option<usize>,
             actual: value.kind_name().into(),
         }),
     }
+}
+
+fn output_search_value(result: OutputSearchResult) -> Value {
+    Value::Struct(vec![
+        ("query".into(), Value::Str(result.query)),
+        (
+            "total_matches".into(),
+            Value::Int(result.total_matches as i64),
+        ),
+        (
+            "hits".into(),
+            Value::List(
+                result
+                    .hits
+                    .into_iter()
+                    .map(|hit| {
+                        Value::Struct(vec![
+                            ("line".into(), Value::Int(hit.line as i64)),
+                            ("snippet".into(), Value::Str(hit.snippet)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("has_more".into(), Value::Bool(result.has_more)),
+        ("next_match".into(), Value::Int(result.next_match as i64)),
+    ])
 }
 
 fn output_page_value(page: OutputPage) -> Value {
@@ -319,10 +433,8 @@ pub fn truncate_tool_result_content_with_budget(
 
     match output_id {
         Some(output_id) => format!(
-            "{head}\n\n[Output truncated at configured budget: max_lines={max_lines}, max_bytes={max_bytes}, max_line_bytes={max_line_bytes}, total_bytes={total}. output_id={output_id}. Continue with output.read(output_id: {output_id}, line_offset: 0, line_limit: 100) or byte_offset/byte_limit.]",
-            max_lines = budget.max_lines,
+            "{head}\n\n[Output truncated: total_bytes={total}, output_id={output_id}. Continue with exactly: output.read(output_id: {output_id}, line_offset: 0, line_limit: 100). For targeted lookup use: output.read(output_id: {output_id}, query: \"text\", match_limit: 20). For byte paging use: output.read(output_id: {output_id}, byte_offset: 0, byte_limit: {max_bytes}).]",
             max_bytes = budget.max_bytes,
-            max_line_bytes = budget.max_line_bytes,
             total = total,
         ),
         None => format!(
@@ -339,23 +451,32 @@ fn is_live_pagination_notice(content: &str, output_store: Option<&OutputStore>) 
     let Some(store) = output_store else {
         return false;
     };
-    let Some((_, notice)) = content.rsplit_once("\n\n[Output truncated at configured budget:")
-    else {
+    let notice = content
+        .rsplit_once("\n\n[Output truncated at configured budget:")
+        .map(|(_, notice)| notice)
+        .or_else(|| {
+            content
+                .rsplit_once("\n\n[Output truncated:")
+                .map(|(_, notice)| notice)
+        });
+    let Some(notice) = notice else {
         return false;
     };
-    if !notice.ends_with("or byte_offset/byte_limit.]") {
+    if !notice.ends_with("]") {
         return false;
     }
     let Some(total_bytes) = notice
         .split_once("total_bytes=")
-        .and_then(|(_, value)| value.split_once('.').map(|(value, _)| value))
-        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(|(_, value)| value.split([',', '.']).next())
+        .and_then(|value| value.trim().parse::<usize>().ok())
     else {
         return false;
     };
     let Some(output_id) = notice
         .split_once("output_id=")
-        .and_then(|(_, value)| value.split_once('.').map(|(value, _)| value))
+        .and_then(|(_, value)| value.split([',', '.']).next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     else {
         return false;
     };
@@ -703,6 +824,9 @@ mod output_store_tests {
         let original = "x".repeat(100);
         let first =
             truncate_tool_result_content_with_budget(&original, "x", Some(&store), budget());
+        assert!(first.contains("output_id=out_"));
+        assert!(first.contains("output.read(output_id:"));
+        assert!(first.contains("query:"));
         let second = truncate_tool_result_content_with_budget(&first, "x", Some(&store), budget());
         assert_eq!(first, second);
         assert_eq!(std::fs::read_dir(spill_dir(dir.path())).unwrap().count(), 1);
@@ -712,6 +836,27 @@ mod output_store_tests {
             truncate_tool_result_content_with_budget(&forged, "x", Some(&store), budget());
         assert_ne!(retruncated, forged);
         assert_eq!(std::fs::read_dir(spill_dir(dir.path())).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn search_returns_paginated_one_based_hits() {
+        let dir = TempDir::new().unwrap();
+        let store = OutputStore::at(dir.path());
+        let output_id = store
+            .register("x", "zero\nneedle one\nneedle two\nend")
+            .unwrap();
+
+        let first = store.search(&output_id, "needle", 0, 1).unwrap();
+        assert_eq!(first.total_matches, 2);
+        assert_eq!(first.hits[0].line, 2);
+        assert!(first.has_more);
+        assert_eq!(first.next_match, 1);
+
+        let second = store
+            .search(&output_id, "needle", first.next_match, 1)
+            .unwrap();
+        assert_eq!(second.hits[0].line, 3);
+        assert!(!second.has_more);
     }
 
     fn field<'a>(fields: &'a [(String, Value)], name: &str) -> &'a Value {
@@ -821,6 +966,40 @@ mod output_store_tests {
             error,
             RuntimeError::ToolFailed(message) if message.contains("not both")
         ));
+    }
+
+    #[tokio::test]
+    async fn output_read_tool_search_returns_line_hits() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(OutputStore::at(dir.path()));
+        let output_id = store.register("x", "zero\nneedle\nend").unwrap();
+        let ctx = ToolCtx::new().with_output_store(store);
+
+        let result = OutputRead
+            .call(
+                ToolArgs {
+                    positional: vec![],
+                    named: vec![
+                        ("output_id".into(), Value::Str(output_id)),
+                        ("query".into(), Value::Str("needle".into())),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let Value::Struct(fields) = result else {
+            panic!("expected search result");
+        };
+        assert!(matches!(field(&fields, "total_matches"), Value::Int(1)));
+        assert!(matches!(field(&fields, "next_match"), Value::Int(1)));
+        let Value::List(hits) = field(&fields, "hits") else {
+            panic!("expected hits");
+        };
+        let Value::Struct(hit) = &hits[0] else {
+            panic!("expected hit");
+        };
+        assert!(matches!(field(hit, "line"), Value::Int(2)));
     }
 
     #[test]

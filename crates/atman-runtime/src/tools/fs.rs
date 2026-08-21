@@ -204,6 +204,24 @@ fn extract_optional_int(args: &ToolArgs, name: &str) -> Result<Option<i64>, Runt
     }
 }
 
+fn extract_optional_positive_usize(
+    args: &ToolArgs,
+    name: &str,
+) -> Result<Option<usize>, RuntimeError> {
+    match args.named(name) {
+        None | Some(Value::Unit) => Ok(None),
+        Some(Value::Int(n)) if *n > 0 => Ok(Some(*n as usize)),
+        Some(Value::Int(_)) => Err(RuntimeError::TypeMismatch {
+            expected: format!("positive integer {name}"),
+            actual: "non-positive integer".into(),
+        }),
+        Some(other) => Err(RuntimeError::TypeMismatch {
+            expected: format!("positive integer {name}"),
+            actual: other.kind_name().into(),
+        }),
+    }
+}
+
 pub struct FsWrite;
 
 impl Tool for FsWrite {
@@ -336,7 +354,8 @@ impl Tool for FsEdit {
             "Replace an exact text snippet in a file. Preferred over fs.write for changing part of \
              an existing file. `old_string` must match VERBATIM (whitespace + newlines) and, by \
              default, appear exactly once — if it matches multiple times the error tells you how \
-             to disambiguate. Use `replace_all: true` to change every occurrence. \
+             to disambiguate. Use `start_line` (1-based) to require the match to start on a \
+             specific line. Use `replace_all: true` to change every occurrence. \
              Example: {\"path\":\"a.rs\",\"old_string\":\"fn foo() {}\",\"new_string\":\"fn foo() { println!(\\\"hi\\\"); }\"}",
         )
     }
@@ -348,6 +367,7 @@ impl Tool for FsEdit {
                 "path": {"type": "string", "description": "Target file path."},
                 "old_string": {"type": "string", "description": "Exact text to find. Match is literal, not regex."},
                 "new_string": {"type": "string", "description": "Replacement text. May be empty to delete."},
+                "start_line": {"type": "integer", "minimum": 1, "description": "Require old_string to start on this 1-based line."},
                 "replace_all": {"type": "boolean", "description": "Replace every occurrence. Default false (unique match required)."}
             },
             "required": ["path", "old_string", "new_string"]
@@ -363,12 +383,31 @@ impl Tool for FsEdit {
             let path = extract_path(args, "path", 0).ok()?;
             let old_string = extract_string(args, "old_string", 1).ok()?;
             let new_string = extract_string(args, "new_string", 2).ok()?;
+            let start_line = extract_optional_positive_usize(args, "start_line").ok()?;
             let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
             let content = tokio::fs::read_to_string(&path).await.ok()?;
-            let updated = if replace_all {
-                content.replace(&old_string, &new_string)
+            let match_lines = find_match_lines(&content, &old_string);
+            let selected = match_lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| start_line.is_none_or(|start| **line == start))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let updated = if let Some(&first) = selected.first() {
+                let mut result = content.clone();
+                if replace_all {
+                    for index in selected.into_iter().rev() {
+                        let start = content.match_indices(&old_string).nth(index)?.0;
+                        result.replace_range(start..start + old_string.len(), &new_string);
+                    }
+                    result
+                } else {
+                    let start = content.match_indices(&old_string).nth(first)?.0;
+                    result.replace_range(start..start + old_string.len(), &new_string);
+                    result
+                }
             } else {
-                content.replacen(&old_string, &new_string, 1)
+                content.clone()
             };
             if updated == content {
                 return None;
@@ -386,6 +425,7 @@ impl Tool for FsEdit {
             let path = extract_path(&args, "path", 0)?;
             let old_string = extract_string(&args, "old_string", 1)?;
             let new_string = extract_string(&args, "new_string", 2)?;
+            let start_line = extract_optional_positive_usize(&args, "start_line")?;
             let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
             let mut approved = false;
             if let Err(e) = ctx.fs_access.check_write(&path) {
@@ -429,6 +469,10 @@ impl Tool for FsEdit {
                 RuntimeError::ToolFailed(format!("fs.edit({}): {e}", path.display()))
             })?;
             let match_lines = find_match_lines(&content, &old_string);
+            let match_lines: Vec<usize> = match_lines
+                .into_iter()
+                .filter(|line| start_line.is_none_or(|start| *line == start))
+                .collect();
             if match_lines.is_empty() {
                 let similar = similar_line_hint(&content, &old_string);
                 let snippet: String = old_string.chars().take(60).collect();
@@ -450,11 +494,21 @@ impl Tool for FsEdit {
                     sample.join(", ")
                 )));
             }
-            let updated = if replace_all {
-                content.replace(&old_string, &new_string)
+            let match_offsets = find_match_offsets(&content, &old_string)
+                .into_iter()
+                .zip(find_match_lines(&content, &old_string))
+                .filter(|(_, line)| start_line.is_none_or(|start| *line == start))
+                .map(|(offset, _)| offset)
+                .collect::<Vec<_>>();
+            let mut updated = content.clone();
+            let offsets = if replace_all {
+                match_offsets
             } else {
-                content.replacen(&old_string, &new_string, 1)
+                match_offsets.into_iter().take(1).collect()
             };
+            for offset in offsets.into_iter().rev() {
+                updated.replace_range(offset..offset + old_string.len(), &new_string);
+            }
             tokio::fs::write(&path, updated.as_bytes())
                 .await
                 .map_err(|e| {
@@ -530,6 +584,13 @@ pub(crate) fn unified_diff_preview(path: &str, before: &str, after: &str) -> Str
     } else {
         out
     }
+}
+
+fn find_match_offsets(content: &str, needle: &str) -> Vec<usize> {
+    content
+        .match_indices(needle)
+        .map(|(offset, _)| offset)
+        .collect()
 }
 
 fn find_match_lines(content: &str, needle: &str) -> Vec<usize> {
