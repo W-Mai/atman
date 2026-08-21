@@ -4,6 +4,7 @@ use ratatui::widgets::Paragraph;
 
 pub struct StatusInputs<'a> {
     pub session_id: &'a str,
+    pub session_name: Option<&'a str>,
     pub goal: Option<&'a str>,
     pub streaming: bool,
     pub waiting_for_llm: bool,
@@ -26,7 +27,7 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
     let t = crate::theme::theme();
     let mut spans = vec![
         Span::styled(
-            " atman ",
+            " ∴ atman ",
             Style::default()
                 .fg(t.code_bg.into())
                 .bg(t.accent.into())
@@ -38,6 +39,15 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
             Style::default().fg(t.subtle_fg.into()),
         ),
     ];
+    if let Some(name) = inputs.session_name {
+        spans.push(Span::raw("  · "));
+        spans.push(Span::styled(
+            crate::width::truncate(name, 36),
+            Style::default()
+                .fg(t.heading.into())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(g) = inputs.goal {
         spans.push(Span::raw("  · goal "));
         spans.push(Span::styled(

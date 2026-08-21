@@ -255,6 +255,7 @@ fn render(
     f.render_widget(
         crate::status::render_bar(crate::status::StatusInputs {
             session_id: "········",
+            session_name: None,
             goal: None,
             streaming: false,
             waiting_for_llm: false,

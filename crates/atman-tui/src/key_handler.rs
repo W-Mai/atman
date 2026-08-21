@@ -114,9 +114,7 @@ pub(crate) fn enumerate_session_rows(
             continue;
         }
         let sid = entry.file_name().to_string_lossy().to_string();
-        if sid == session.id().to_string() {
-            continue;
-        }
+        let is_current = sid == session.id().to_string();
         let meta = atman_runtime::session_meta::SessionMeta::load(&entry.path());
         if !query.matches_meta(meta.as_ref()) {
             continue;
@@ -150,6 +148,7 @@ pub(crate) fn enumerate_session_rows(
             .ok();
         rows.push(crate::SessionPickerRow {
             id: sid,
+            is_current,
             name: metadata.title.clone(),
             project,
             message_count: total_count,

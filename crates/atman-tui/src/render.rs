@@ -215,6 +215,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     f.render_widget(
         status::render_bar(status::StatusInputs {
             session_id: &app.session_id,
+            session_name: app.session_name.as_deref(),
             goal: app.goal.as_deref(),
             streaming: app.streaming,
             waiting_for_llm: app.waiting_for_llm,

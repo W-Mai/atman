@@ -279,9 +279,64 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         &mut self,
         f: &mut ratatui::Frame,
         area: Rect,
-        _app: &crate::app::AppState,
+        app: &crate::app::AppState,
         t: &crate::theme::Theme,
     ) {
+        if area.height == 0 {
+            return;
+        }
+        let identity_height = area.height.min(3);
+        let name = crate::width::truncate(
+            app.session_name.as_deref().unwrap_or("Untitled session"),
+            area.width.saturating_sub(12) as usize,
+        );
+        let goal = crate::width::truncate(
+            app.goal.as_deref().unwrap_or("No goal"),
+            area.width.saturating_sub(8) as usize,
+        );
+        let project = crate::width::truncate(
+            app.project_root.as_deref().unwrap_or("-"),
+            area.width.saturating_sub(11) as usize,
+        );
+        let identity = vec![
+            Line::from(vec![
+                Span::styled(
+                    "∴ ATMAN",
+                    Style::default()
+                        .fg(t.accent.into())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {name}"),
+                    Style::default()
+                        .fg(t.heading.into())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!("  Goal: {goal}"),
+                Style::default().fg(t.tinted_fg.into()),
+            )),
+            Line::from(Span::styled(
+                format!("  Project: {project}"),
+                Style::default().fg(t.success.into()),
+            )),
+        ];
+        f.render_widget(
+            Paragraph::new(identity),
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: identity_height,
+            },
+        );
+        let area = Rect {
+            x: area.x,
+            y: area.y.saturating_add(identity_height),
+            width: area.width,
+            height: area.height.saturating_sub(identity_height),
+        };
         if area.height == 0 {
             return;
         }
@@ -294,7 +349,7 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 height: 1,
             };
             let footer = Line::from(Span::styled(
-                " s:sort  f:filter  r:rename  Enter:open  d:delete  Tab:scope  Esc:close ",
+                " s:sort  f:filter  r:rename  a:auto name  Enter:open  d:delete  Tab:scope  Esc:close ",
                 Style::default().fg(t.subtle_fg.into()),
             ));
             f.render_widget(Paragraph::new(footer), footer_rect);
@@ -329,20 +384,25 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             .iter()
             .map(|row| {
                 let sid_short: String = row.id.chars().take(8).collect();
-                let name = row.name.as_deref().unwrap_or("Untitled session");
-                let goal_snippet: String = row
-                    .goal
-                    .as_deref()
-                    .unwrap_or("No goal")
-                    .chars()
-                    .take(80)
-                    .collect();
-                let project_label = row.project.clone().unwrap_or_else(|| "-".into());
+                let current = if row.is_current { "  [current]" } else { "" };
+                let available = area.width.saturating_sub(42) as usize;
+                let name_budget = available / 3;
+                let project_budget = available.saturating_sub(name_budget);
+                let name = crate::width::truncate(
+                    row.name.as_deref().unwrap_or("Untitled session"),
+                    name_budget.saturating_sub(crate::width::width(current)),
+                );
+                let goal_snippet = crate::width::truncate(
+                    row.goal.as_deref().unwrap_or("No goal"),
+                    area.width.saturating_sub(4) as usize,
+                );
+                let project_label =
+                    crate::width::truncate(row.project.as_deref().unwrap_or("-"), project_budget);
                 let updated: String = row.updated_at.chars().take(19).collect();
                 ListItem::new(vec![
                     Line::from(vec![
                         Span::styled(
-                            name.to_string(),
+                            format!("{name}{current}"),
                             Style::default()
                                 .fg(t.heading.into())
                                 .add_modifier(Modifier::BOLD),
@@ -397,6 +457,9 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 }
                 KeyAction::Submit => {
                     if let Some((sid, title)) = self.commit_rename() {
+                        if sid == app.session_id {
+                            app.session_name = title.clone();
+                        }
                         if let Some(tx) = tx {
                             let _ = tx.send(TuiControl::RenameSession {
                                 session_id: sid.clone(),
@@ -462,6 +525,13 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
             self.enter_filter_mode();
             return Some(ModalAction::Consumed);
         }
+        if let KeyAction::Char('a') | KeyAction::Char('A') = action {
+            if let Some(tx) = tx {
+                let _ = tx.send(TuiControl::AutoNameSession);
+                app.push_note("generating session name…", crate::app::NoteLevel::Info);
+            }
+            return Some(ModalAction::Consumed);
+        }
         if let KeyAction::Char('r') | KeyAction::Char('R') = action {
             if self.begin_rename().is_none() {
                 app.push_note("no session selected", crate::app::NoteLevel::Warn);
@@ -479,9 +549,13 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 self.set_rows(rows);
             }
             KeyAction::Submit => {
-                if let Some(sid) = self.selected_id() {
+                if let Some(row) = self.rows.get(self.selected) {
+                    let sid = row.id.clone();
+                    let is_current = row.is_current;
                     self.close();
-                    request_session_switch(app, tx, sid.clone());
+                    if !is_current {
+                        request_session_switch(app, tx, sid);
+                    }
                 }
             }
             _ => {}
@@ -520,10 +594,12 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wm::modal::ModalOverlay;
 
     fn row(id: &str, msgs: usize) -> SessionPickerRow {
         SessionPickerRow {
             id: id.into(),
+            is_current: false,
             name: None,
             project: None,
             message_count: msgs,
@@ -535,6 +611,7 @@ mod tests {
     fn row_with(id: &str, msgs: usize, updated: &str, goal: Option<&str>) -> SessionPickerRow {
         SessionPickerRow {
             id: id.into(),
+            is_current: false,
             name: None,
             project: None,
             message_count: msgs,
@@ -610,6 +687,38 @@ mod tests {
         s.move_down();
         assert_eq!(s.selected, 1);
         assert_eq!(s.selected_id().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn current_session_supports_manual_and_auto_naming_without_switching() {
+        let mut current = row("current", 1);
+        current.is_current = true;
+        current.name = Some("Old name".into());
+        let mut switcher = SessionSwitcher::default();
+        switcher.open_with(vec![current], SessionScope::Project);
+        let mut app = crate::app::AppState::new("current".into(), None);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        switcher.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        assert!(rx.try_recv().is_err());
+
+        let mut current = row("current", 1);
+        current.is_current = true;
+        current.name = Some("Old name".into());
+        switcher.open_with(vec![current], SessionScope::Project);
+        switcher.handle_key(&KeyAction::Char('a'), &mut app, Some(&tx));
+        assert!(matches!(rx.try_recv(), Ok(TuiControl::AutoNameSession)));
+
+        switcher.handle_key(&KeyAction::Char('r'), &mut app, Some(&tx));
+        assert!(switcher.rename_mode);
+        switcher.rename_buf = "New name".into();
+        switcher.handle_key(&KeyAction::Submit, &mut app, Some(&tx));
+        assert_eq!(app.session_name.as_deref(), Some("New name"));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(TuiControl::RenameSession { session_id, title })
+                if session_id == "current" && title.as_deref() == Some("New name")
+        ));
     }
 
     #[test]

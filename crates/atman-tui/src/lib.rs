@@ -201,6 +201,7 @@ pub enum TuiControl {
 #[derive(Debug, Clone)]
 pub struct SessionPickerRow {
     pub id: String,
+    pub is_current: bool,
     pub name: Option<String>,
     pub project: Option<String>,
     pub message_count: usize,
@@ -223,6 +224,7 @@ pub enum TuiCommand {
         ok: bool,
     },
     McpReloaded,
+    SessionNameUpdated(String),
     McpResourcesResult {
         name: String,
         resources: Vec<atman_runtime::mcp::McpResource>,
@@ -236,6 +238,8 @@ pub enum TuiCommand {
 pub struct TuiHandle {
     pub session_id: String,
     pub session_dir: String,
+    pub session_name: Option<String>,
+    pub project_root: Option<String>,
     pub goal: Option<String>,
     pub stream_rx: broadcast::Receiver<StreamFrame>,
     pub task_event_rx: Option<tokio::sync::broadcast::Receiver<atman_runtime::TaskEvent>>,
@@ -271,6 +275,11 @@ impl TuiHandle {
         Self {
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
+            session_name: atman_runtime::session_meta::SessionMeta::load(session.dir())
+                .and_then(|meta| meta.title),
+            project_root: atman_runtime::session_meta::SessionMeta::load(session.dir())
+                .and_then(|meta| meta.project_root)
+                .map(|path| path.display().to_string()),
             goal: session.goal(),
             stream_rx: session.stream_subscribe(),
             task_event_rx: None,

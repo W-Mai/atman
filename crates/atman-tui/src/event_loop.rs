@@ -28,6 +28,7 @@ pub(crate) async fn run_frames(
     let mut app = AppState::new(handle.session_id.clone(), handle.goal.clone())
         .with_initial_items(std::mem::take(&mut handle.initial_items))
         .with_session_dir(handle.session_dir.clone())
+        .with_session_identity(handle.session_name.clone(), handle.project_root.clone())
         .with_flow_names(std::mem::take(&mut handle.flow_names))
         .with_session(handle.session.clone())
         .with_trust(handle.trust.clone());
@@ -1355,6 +1356,14 @@ pub(crate) async fn run_frames(
                             let scope = crate::session_switcher::SessionScope::Project;
                             let rows = key_handler::enumerate_session_rows(&app, scope);
                             app.wm.modals.session_switcher.open_with(rows, scope);
+                        }
+                        TuiCommand::SessionNameUpdated(name) => {
+                            app.app.session_name = Some(name);
+                            if app.wm.modals.session_switcher.open {
+                                let scope = app.wm.modals.session_switcher.scope;
+                                let rows = key_handler::enumerate_session_rows(&app, scope);
+                                app.wm.modals.session_switcher.set_rows(rows);
+                            }
                         }
                         TuiCommand::OpenTrustModePicker => {
                             app.wm.modals.trust_mode_picker_open = true;

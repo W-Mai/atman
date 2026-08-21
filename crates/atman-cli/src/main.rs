@@ -1688,7 +1688,17 @@ async fn cmd_repl_once(
                         )
                         .await
                         {
-                            Ok(true) => atman_runtime::notify!(success, "session name generated"),
+                            Ok(true) => {
+                                if let Some(name) = atman_runtime::session_meta::SessionMeta::load(
+                                    session_for_ctrl.dir(),
+                                )
+                                .and_then(|meta| meta.title)
+                                {
+                                    let _ = cmd_tx_for_models
+                                        .send(atman_tui::TuiCommand::SessionNameUpdated(name));
+                                }
+                                atman_runtime::notify!(success, "session name generated");
+                            }
                             Ok(false) => {
                                 atman_runtime::notify!(warn, "session name was not changed")
                             }
@@ -1786,10 +1796,21 @@ async fn cmd_repl_once(
                     }
                     atman_tui::TuiControl::RenameSession { session_id, title } => {
                         let dir = data_root_for_ctrl.join("sessions").join(&session_id);
-                        if let Err(e) =
-                            atman_runtime::session_meta::SessionMeta::set_title(&dir, title)
-                        {
-                            atman_runtime::notify!(error, "rename {session_id} failed: {e}");
+                        match atman_runtime::session_meta::SessionMeta::set_title(
+                            &dir,
+                            title.clone(),
+                        ) {
+                            Ok(()) => {
+                                if session_id == session_for_ctrl.id().to_string()
+                                    && let Some(name) = title
+                                {
+                                    let _ = cmd_tx_for_models
+                                        .send(atman_tui::TuiCommand::SessionNameUpdated(name));
+                                }
+                            }
+                            Err(e) => {
+                                atman_runtime::notify!(error, "rename {session_id} failed: {e}")
+                            }
                         }
                     }
                     atman_tui::TuiControl::FormSubmit { form_id, answer } => {
@@ -2262,9 +2283,15 @@ async fn cmd_repl_once(
                 }
             }
         });
+        let session_meta =
+            atman_runtime::session_meta::SessionMeta::load(session.dir()).unwrap_or_default();
         let handle = atman_tui::TuiHandle {
             session_id: session.id().to_string(),
             session_dir: session.dir().to_string_lossy().to_string(),
+            session_name: session_meta.title,
+            project_root: session_meta
+                .project_root
+                .map(|path| path.display().to_string()),
             goal: session.goal(),
             stream_rx: session.stream_subscribe(),
             task_event_rx: executor
@@ -2561,6 +2588,9 @@ async fn cmd_repl_once(
     }
     let user_msg_count = session.user_message_count();
     let goal = session.goal();
+    let meta = atman_runtime::session_meta::SessionMeta::load(session.dir()).unwrap_or_default();
+    let session_name = meta.title;
+    let project_root = meta.project_root.map(|path| path.display().to_string());
     let todos: Vec<atman_runtime::memory::todo::Todo> = {
         let store = atman_runtime::memory::todo::TodoStore::at(session.dir());
         store.list().await.unwrap_or_default()
@@ -2583,6 +2613,8 @@ async fn cmd_repl_once(
         *cell.borrow_mut() = Some(SessionSummary {
             sid: session_id,
             msg_count: user_msg_count,
+            name: session_name,
+            project_root,
             goal,
             todos,
             plans,
@@ -2598,6 +2630,8 @@ thread_local! {
 
 struct SessionSummary {
     sid: String,
+    name: Option<String>,
+    project_root: Option<String>,
     msg_count: usize,
     goal: Option<String>,
     todos: Vec<atman_runtime::memory::todo::Todo>,
@@ -2607,13 +2641,23 @@ struct SessionSummary {
 pub fn flush_pending_summary() {
     SUMMARY_PENDING.with(|cell| {
         if let Some(s) = cell.borrow_mut().take() {
-            print_session_summary(&s.sid, s.msg_count, s.goal.as_deref(), &s.todos, &s.plans);
+            print_session_summary(
+                &s.sid,
+                s.name.as_deref(),
+                s.project_root.as_deref(),
+                s.msg_count,
+                s.goal.as_deref(),
+                &s.todos,
+                &s.plans,
+            );
         }
     });
 }
 
 fn print_session_summary(
     sid: &str,
+    name: Option<&str>,
+    project_root: Option<&str>,
     msg_count: usize,
     goal: Option<&str>,
     todos: &[atman_runtime::memory::todo::Todo],
@@ -2639,6 +2683,15 @@ fn print_session_summary(
         .unwrap_or_else(|| "(none)".to_string());
 
     let lines = vec![
+        " ∴ ATMAN".to_string(),
+        format!(
+            " name      {}",
+            truncate_str(name.unwrap_or("Untitled session"), 60)
+        ),
+        format!(
+            " project   {}",
+            truncate_str(project_root.unwrap_or("-"), 80)
+        ),
         format!(" session   {sid_short}"),
         format!(" messages  {msg_count}"),
         format!(" goal      {}", truncate_str(goal_line, 50)),

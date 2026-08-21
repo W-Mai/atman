@@ -181,6 +181,8 @@ pub struct AppState {
     pub goal: Option<String>,
     pub session_id: String,
     pub session_dir: String,
+    pub session_name: Option<String>,
+    pub project_root: Option<String>,
     pub latest_release: Option<String>,
     pub attach_count: usize,
     pub context: atman_runtime::ContextSnapshot,
@@ -396,6 +398,16 @@ impl AppState {
 
     pub fn with_session_dir(mut self, dir: String) -> Self {
         self.session_dir = dir;
+        self
+    }
+
+    pub fn with_session_identity(
+        mut self,
+        name: Option<String>,
+        project_root: Option<String>,
+    ) -> Self {
+        self.session_name = name;
+        self.project_root = project_root;
         self
     }
 
