@@ -8,6 +8,8 @@ All notable changes to atman are documented in this file.
 
 ### 🐛 Fixes
 
+- **Shadow rendering at wide-glyph boundaries** — floating-panel shadows no longer darken CJK cells outside the geometric shadow ring, clear adjacent characters incorrectly, or darken corners more than once.
+
 - **Oversized tool output pagination** — `fs.read`, `bash.output`, and terminal text captures preserve complete UTF-8 output behind session-scoped opaque IDs, avoid double truncation, and expose consistent byte or line continuation metadata without leaking internal paths.
 
 ## [1.8.1] — 2026-08-18

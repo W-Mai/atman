@@ -29,9 +29,9 @@ pub fn render_shell(
     let buf_area = f.buffer_mut().area;
     let sanitize_rect = Rect {
         x: panel.rect.x.saturating_sub(2),
-        y: panel.rect.y.saturating_sub(1),
+        y: panel.rect.y.saturating_add(1),
         width: panel.rect.width + 4,
-        height: panel.rect.height + 2,
+        height: panel.rect.height.saturating_sub(2),
     }
     .intersection(buf_area);
     crate::sanitize_widget_edges(f, sanitize_rect);
@@ -236,9 +236,9 @@ pub fn render_overlay_shell(
 
     let sanitize_rect = Rect {
         x: rect.x.saturating_sub(2),
-        y: rect.y.saturating_sub(1),
+        y: rect.y.saturating_add(1),
         width: rect.width.saturating_add(4),
-        height: rect.height.saturating_add(2),
+        height: rect.height.saturating_sub(2),
     };
     crate::sanitize_widget_edges(f, sanitize_rect);
     crate::wm::shadow::render_shadow(f, rect, t);

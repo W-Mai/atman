@@ -1,25 +1,64 @@
+use std::collections::HashSet;
+
 use ratatui::Frame;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
-    use ratatui::buffer::CellDiffOption;
-    let buf = f.buffer_mut();
-    let area = *buf.area();
-
-    let sanitize = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
-        if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
+fn sanitize_shadow_cell(buf: &mut Buffer, area: Rect, x: u16, y: u16) {
+    if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
+        return;
+    }
+    let clear = |cell: &mut ratatui::buffer::Cell| {
+        cell.set_symbol(" ");
+        cell.set_diff_option(CellDiffOption::None);
+    };
+    let symbol = buf[(x, y)].symbol().to_string();
+    if crate::width::width(&symbol) > 1 {
+        let bg = buf[(x, y)].bg;
+        clear(&mut buf[(x, y)]);
+        if x + 1 < area.x + area.width {
+            if matches!(buf[(x + 1, y)].bg, Color::Reset) {
+                buf[(x + 1, y)].bg = bg;
+            }
+            clear(&mut buf[(x + 1, y)]);
+        }
+    } else if crate::width::width(&symbol) == 1 && symbol.trim().is_empty() && x > area.x {
+        let first = x - 1;
+        if crate::width::width(buf[(first, y)].symbol()) <= 1 {
             return;
         }
-        let cell = &mut buf[(x, y)];
-        if crate::width::width(cell.symbol()) > 1 || cell.symbol().is_empty() {
-            cell.set_symbol(" ");
-            cell.set_diff_option(CellDiffOption::None);
+        let bg = buf[(first, y)].bg;
+        if matches!(buf[(x, y)].bg, Color::Reset) {
+            buf[(x, y)].bg = bg;
         }
-    };
+        clear(&mut buf[(x, y)]);
+        clear(&mut buf[(first, y)]);
+    }
+}
 
-    let shadow = t.shadow.into();
-    let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, 0.6);
+fn shadow_ring_cells(rect: Rect, area: Rect) -> HashSet<(u16, u16)> {
+    let max_x = area.x.saturating_add(area.width).saturating_sub(1);
+    let max_y = area.y.saturating_add(area.height).saturating_sub(1);
+    let top_y = rect.y.saturating_sub(1);
+    let bot_y = (rect.y + rect.height).min(max_y);
+    let lx0 = rect.x.saturating_sub(2);
+    let lx1 = rect.x.saturating_sub(1);
+    let rx0 = (rect.x + rect.width).min(max_x);
+    let rx1 = (rect.x + rect.width + 1).min(max_x);
+    let mut cells = HashSet::new();
+    for y in top_y..=bot_y {
+        for x in lx0..=rx1 {
+            if y == top_y || y == bot_y || x == lx0 || x == lx1 || x == rx0 || x == rx1 {
+                cells.insert((x, y));
+            }
+        }
+    }
+    cells
+}
+
+fn render_shadow_to_buffer(buf: &mut Buffer, rect: Rect, factor: Color) {
+    let area = *buf.area();
     let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
         if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
             return;
@@ -31,43 +70,27 @@ pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
         cell.bg = multiply_color(cell.bg, factor);
     };
 
-    let max_x = area.x.saturating_add(area.width).saturating_sub(1);
-    let max_y = area.y.saturating_add(area.height).saturating_sub(1);
-
+    let ring = shadow_ring_cells(rect, area);
     let top_y = rect.y.saturating_sub(1);
-    let bot_y = (rect.y + rect.height).min(max_y);
-    let lx0 = rect.x.saturating_sub(2);
+    let bot_y = (rect.y + rect.height).min(area.y + area.height - 1);
     let lx1 = rect.x.saturating_sub(1);
-    let rx0 = (rect.x + rect.width).min(max_x);
-    let rx1 = (rect.x + rect.width + 1).min(max_x);
+    let rx0 = (rect.x + rect.width).min(area.x + area.width - 1);
+    for &(x, y) in &ring {
+        let horizontal = y == top_y || y == bot_y;
+        let side_segment = x <= lx1 || x >= rx0;
+        if !horizontal || side_segment {
+            sanitize_shadow_cell(buf, area, x, y);
+        }
+    }
+    for (x, y) in ring {
+        darken(buf, x, y);
+    }
+}
 
-    // sanitize wide glyphs in shadow ring
-    for x in lx0..=rx1 {
-        sanitize(buf, x, top_y);
-        sanitize(buf, x, bot_y);
-    }
-    for y in top_y..=bot_y {
-        sanitize(buf, lx0, y);
-        sanitize(buf, lx1, y);
-        sanitize(buf, rx0, y);
-        sanitize(buf, rx1, y);
-    }
-
-    // spiral shadow: top row, bottom row, right 2 cols, left 2 cols (offset to avoid corner overlap)
-    for x in lx0..=rx1 {
-        darken(buf, x, top_y);
-    }
-    for x in lx0..=rx1 {
-        darken(buf, x, bot_y);
-    }
-    for y in top_y..=bot_y {
-        darken(buf, rx0, y);
-        darken(buf, rx1, y);
-    }
-    for y in top_y.saturating_add(1)..=bot_y {
-        darken(buf, lx0, y);
-        darken(buf, lx1, y);
-    }
+pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
+    let shadow = t.shadow.into();
+    let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, 0.6);
+    render_shadow_to_buffer(f.buffer_mut(), rect, factor);
 }
 
 pub fn render_backdrop(f: &mut Frame, t: &crate::theme::Theme) {
@@ -259,5 +282,78 @@ pub fn render_input_shadow(f: &mut Frame, rect: Rect) {
                 darken_cell(buf, area, x, y, ratio);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::{Color, Style};
+
+    #[test]
+    fn shadow_ring_does_not_duplicate_corners() {
+        let cells = shadow_ring_cells(Rect::new(4, 4, 8, 5), Rect::new(0, 0, 30, 30));
+        assert_eq!(cells.len(), 44);
+        assert!(cells.contains(&(2, 3)));
+        assert!(cells.contains(&(13, 3)));
+        assert!(cells.contains(&(2, 8)));
+        assert!(cells.contains(&(13, 8)));
+    }
+
+    #[test]
+    fn continuation_boundary_does_not_expand_shadow_to_wide_glyph_start() {
+        let area = Rect::new(0, 0, 10, 6);
+        let mut buf = Buffer::empty(area);
+        let original = Color::Rgb(120, 120, 120);
+        let factor = Color::Rgb(128, 128, 128);
+        buf.set_string(2, 2, "回", Style::default().bg(original));
+        buf[(3, 2)].bg = Color::Reset;
+        buf[(4, 2)].bg = original;
+
+        render_shadow_to_buffer(&mut buf, Rect::new(5, 1, 3, 3), factor);
+
+        assert_eq!(buf[(2, 2)].bg, original);
+        assert_eq!(buf[(3, 2)].bg, multiply_color(original, factor));
+        assert_eq!(buf[(4, 2)].bg, multiply_color(original, factor));
+    }
+
+    #[test]
+    fn left_boundary_continuation_clears_only_its_wide_pair() {
+        let area = Rect::new(0, 0, 8, 1);
+        let mut buf = Buffer::empty(area);
+        buf.set_string(2, 0, "回", Style::default().bg(Color::Rgb(28, 32, 40)));
+        buf.set_string(4, 0, "X", Style::default().bg(Color::Rgb(60, 64, 72)));
+        sanitize_shadow_cell(&mut buf, area, 3, 0);
+        assert_eq!(buf[(2, 0)].symbol(), " ");
+        assert_eq!(buf[(3, 0)].symbol(), " ");
+        assert_eq!(buf[(4, 0)].symbol(), "X");
+    }
+
+    #[test]
+    fn empty_cell_after_plain_text_is_not_treated_as_continuation() {
+        let area = Rect::new(0, 0, 8, 1);
+        let mut buf = Buffer::empty(area);
+        buf.set_string(2, 0, "ab", Style::default().bg(Color::Rgb(28, 32, 40)));
+        buf[(3, 0)].set_symbol(" ");
+
+        sanitize_shadow_cell(&mut buf, area, 3, 0);
+        assert_eq!(buf[(2, 0)].symbol(), "a");
+        assert_eq!(buf[(3, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn sanitizing_wide_glyph_copies_background_to_continuation() {
+        let area = Rect::new(0, 0, 8, 1);
+        let mut buf = Buffer::empty(area);
+        let source_bg = Color::Rgb(28, 32, 40);
+        buf.set_string(2, 0, "回", Style::default().bg(source_bg));
+        buf[(3, 0)].bg = Color::Reset;
+
+        sanitize_shadow_cell(&mut buf, area, 2, 0);
+
+        assert_eq!(buf[(2, 0)].symbol(), " ");
+        assert_eq!(buf[(3, 0)].symbol(), " ");
+        assert_eq!(buf[(2, 0)].bg, source_bg);
+        assert_eq!(buf[(3, 0)].bg, source_bg);
     }
 }

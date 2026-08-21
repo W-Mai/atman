@@ -86,33 +86,47 @@ pub(crate) fn sanitize_widget_edges(f: &mut ratatui::Frame, area: ratatui::layou
         cell.set_symbol(" ");
         cell.set_diff_option(CellDiffOption::None);
     };
+    let clear_wide_at = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
+        if x < buf_area.x || x >= buf_area.x + buf_area.width {
+            return;
+        }
+        let symbol = buf[(x, y)].symbol().to_string();
+        if crate::width::width(&symbol) > 1 {
+            let bg = buf[(x, y)].bg;
+            clear_wide(&mut buf[(x, y)]);
+            if x + 1 < buf_area.x + buf_area.width {
+                if matches!(buf[(x + 1, y)].bg, ratatui::style::Color::Reset) {
+                    buf[(x + 1, y)].bg = bg;
+                }
+                clear_wide(&mut buf[(x + 1, y)]);
+            }
+        } else if crate::width::width(&symbol) == 1 && symbol.trim().is_empty() && x > buf_area.x {
+            if crate::width::width(buf[(x - 1, y)].symbol()) <= 1 {
+                return;
+            }
+            let bg = buf[(x - 1, y)].bg;
+            if matches!(buf[(x, y)].bg, ratatui::style::Color::Reset) {
+                buf[(x, y)].bg = bg;
+            }
+            clear_wide(&mut buf[(x, y)]);
+            if x > buf_area.x {
+                clear_wide(&mut buf[(x - 1, y)]);
+            }
+        }
+    };
     for y in area.y..area.y + area.height {
         if y < buf_area.y || y >= buf_area.y + buf_area.height {
             continue;
         }
         if let Some(ox) = outside_left {
-            let cell = &mut buf[(ox, y)];
-            if crate::width::width(cell.symbol()) > 1 {
-                clear_wide(cell);
-            }
+            clear_wide_at(buf, ox, y);
         }
-        {
-            let cell = &mut buf[(inside_left, y)];
-            if cell.symbol().is_empty() {
-                clear_wide(cell);
-            }
-        }
+        clear_wide_at(buf, inside_left, y);
         if inside_right != inside_left {
-            let cell = &mut buf[(inside_right, y)];
-            if crate::width::width(cell.symbol()) > 1 {
-                clear_wide(cell);
-            }
+            clear_wide_at(buf, inside_right, y);
         }
         if let Some(rx) = outside_right {
-            let cell = &mut buf[(rx, y)];
-            if cell.symbol().is_empty() {
-                clear_wide(cell);
-            }
+            clear_wide_at(buf, rx, y);
         }
     }
 }
