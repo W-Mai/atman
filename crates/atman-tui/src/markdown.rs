@@ -344,6 +344,9 @@ impl Renderer {
                 self.code_buffer.clear();
             }
             Tag::List(start) => {
+                if !self.list_stack.is_empty() && !self.fresh_line {
+                    self.end_line();
+                }
                 self.list_stack
                     .push(start.map(ListKind::Ordered).unwrap_or(ListKind::Bullet));
             }
@@ -976,6 +979,20 @@ mod tests {
             "want crossed_out: {:?}",
             old_span.style
         );
+    }
+
+    #[test]
+    fn nested_list_starts_on_its_own_indented_line() {
+        let lines = plain(&render_markdown("- parent\n  - child\n"));
+        assert_eq!(lines[0], "• parent");
+        assert_eq!(lines[1], "  • child");
+    }
+
+    #[test]
+    fn nested_ordered_list_starts_on_its_own_indented_line() {
+        let lines = plain(&render_markdown("1. parent\n   1. child\n"));
+        assert_eq!(lines[0], "1. parent");
+        assert_eq!(lines[1], "  1. child");
     }
 
     #[test]
