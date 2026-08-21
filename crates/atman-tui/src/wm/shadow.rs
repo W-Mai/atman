@@ -29,9 +29,7 @@ fn sanitize_shadow_cell(buf: &mut Buffer, area: Rect, x: u16, y: u16) {
             return;
         }
         let bg = buf[(first, y)].bg;
-        if matches!(buf[(x, y)].bg, Color::Reset) {
-            buf[(x, y)].bg = bg;
-        }
+        buf[(x, y)].bg = bg;
         clear(&mut buf[(x, y)]);
         clear(&mut buf[(first, y)]);
     }
@@ -57,20 +55,21 @@ fn shadow_ring_cells(rect: Rect, area: Rect) -> HashSet<(u16, u16)> {
     cells
 }
 
-fn render_shadow_to_buffer(buf: &mut Buffer, rect: Rect, factor: Color) {
+fn render_shadow_to_buffer(buf: &mut Buffer, rect: Rect, shadow: Color, factor: Color) {
     let area = *buf.area();
-    let darken = |buf: &mut ratatui::buffer::Buffer, x: u16, y: u16| {
-        if x < area.x || x >= area.x + area.width || y < area.y || y >= area.y + area.height {
-            return;
-        }
-        let cell = &mut buf[(x, y)];
-        if matches!(cell.bg, Color::Reset) {
-            return;
-        }
-        cell.bg = multiply_color(cell.bg, factor);
-    };
-
     let ring = shadow_ring_cells(rect, area);
+    let transparent_continuations = ring
+        .iter()
+        .copied()
+        .filter(|&(x, y)| {
+            matches!(buf[(x, y)].bg, Color::Reset)
+                && x > area.x
+                && crate::width::width(buf[(x, y)].symbol()) == 1
+                && buf[(x, y)].symbol().trim().is_empty()
+                && crate::width::width(buf[(x - 1, y)].symbol()) > 1
+                && matches!(buf[(x - 1, y)].bg, Color::Reset)
+        })
+        .collect::<HashSet<_>>();
     let top_y = rect.y.saturating_sub(1);
     let bot_y = (rect.y + rect.height).min(area.y + area.height - 1);
     let lx1 = rect.x.saturating_sub(1);
@@ -83,14 +82,19 @@ fn render_shadow_to_buffer(buf: &mut Buffer, rect: Rect, factor: Color) {
         }
     }
     for (x, y) in ring {
-        darken(buf, x, y);
+        let cell = &mut buf[(x, y)];
+        if transparent_continuations.contains(&(x, y)) || matches!(cell.bg, Color::Reset) {
+            cell.bg = shadow;
+        } else {
+            cell.bg = multiply_color(cell.bg, factor);
+        }
     }
 }
 
 pub fn render_shadow(f: &mut Frame, rect: Rect, t: &crate::theme::Theme) {
     let shadow = t.shadow.into();
     let factor = lerp_color(Color::Rgb(255, 255, 255), shadow, 0.6);
-    render_shadow_to_buffer(f.buffer_mut(), rect, factor);
+    render_shadow_to_buffer(f.buffer_mut(), rect, shadow, factor);
 }
 
 pub fn render_backdrop(f: &mut Frame, t: &crate::theme::Theme) {
@@ -290,6 +294,8 @@ mod tests {
     use super::*;
     use ratatui::style::{Color, Style};
 
+    const SHADOW: Color = Color::Rgb(48, 48, 48);
+
     #[test]
     fn shadow_ring_does_not_duplicate_corners() {
         let cells = shadow_ring_cells(Rect::new(4, 4, 8, 5), Rect::new(0, 0, 30, 30));
@@ -310,11 +316,114 @@ mod tests {
         buf[(3, 2)].bg = Color::Reset;
         buf[(4, 2)].bg = original;
 
-        render_shadow_to_buffer(&mut buf, Rect::new(5, 1, 3, 3), factor);
+        render_shadow_to_buffer(&mut buf, Rect::new(5, 1, 3, 3), SHADOW, factor);
 
         assert_eq!(buf[(2, 2)].bg, original);
         assert_eq!(buf[(3, 2)].bg, multiply_color(original, factor));
         assert_eq!(buf[(4, 2)].bg, multiply_color(original, factor));
+    }
+
+    #[test]
+    fn overlay_shell_renders_right_shadow_on_transparent_continuation() {
+        let rect = Rect::new(3, 1, 3, 3);
+        let theme = crate::theme::theme();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 6)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                frame.buffer_mut().set_string(5, 2, "回", Style::default());
+            })
+            .unwrap();
+        terminal
+            .draw(|frame| {
+                frame.buffer_mut().set_string(5, 2, "回", Style::default());
+                crate::wm::shell::render_overlay_shell(
+                    frame,
+                    rect,
+                    ratatui::text::Line::default(),
+                    "",
+                    Color::Reset,
+                    false,
+                    &theme,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(
+            terminal.backend().buffer()[(6, 2)].bg,
+            theme.shadow.into_inner()
+        );
+    }
+
+    #[test]
+    fn overlay_shell_preserves_right_shadow_continuation() {
+        let rect = Rect::new(3, 1, 3, 3);
+        let theme = crate::theme::theme();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 6)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                frame.buffer_mut().set_string(5, 2, "回", Style::default());
+                crate::wm::shell::render_overlay_shell(
+                    frame,
+                    rect,
+                    ratatui::text::Line::default(),
+                    "",
+                    Color::Reset,
+                    false,
+                    &theme,
+                );
+            })
+            .unwrap();
+
+        assert_eq!(
+            terminal.backend().buffer()[(6, 2)].bg,
+            theme.shadow.into_inner()
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(7, 2)].bg,
+            theme.shadow.into_inner()
+        );
+    }
+
+    #[test]
+    fn right_boundary_continuation_is_emitted_by_buffer_diff() {
+        let area = Rect::new(0, 0, 12, 6);
+        let original = Color::Rgb(120, 120, 120);
+        let factor = Color::Rgb(128, 128, 128);
+        let mut previous = Buffer::empty(area);
+        previous.set_string(5, 2, "回", Style::default().bg(original));
+        let mut next = previous.clone();
+        next[(6, 2)].bg = Color::Rgb(240, 240, 240);
+        next[(7, 2)].bg = original;
+
+        render_shadow_to_buffer(&mut next, Rect::new(3, 1, 3, 3), SHADOW, factor);
+
+        let diff = previous.diff(&next);
+        let (_, _, cell) = diff
+            .into_iter()
+            .find(|(x, y, _)| (*x, *y) == (6, 2))
+            .expect("right shadow start must be emitted");
+        assert_eq!(cell.bg, multiply_color(original, factor));
+    }
+
+    #[test]
+    fn right_boundary_continuation_keeps_shadow_on_ring_cells() {
+        let area = Rect::new(0, 0, 12, 6);
+        let mut buf = Buffer::empty(area);
+        let original = Color::Rgb(120, 120, 120);
+        let factor = Color::Rgb(128, 128, 128);
+        buf.set_string(5, 2, "回", Style::default().bg(original));
+        buf[(6, 2)].bg = Color::Rgb(240, 240, 240);
+        buf[(7, 2)].bg = original;
+
+        render_shadow_to_buffer(&mut buf, Rect::new(3, 1, 3, 3), SHADOW, factor);
+
+        assert_eq!(buf[(5, 2)].bg, original);
+        assert_eq!(buf[(6, 2)].bg, multiply_color(original, factor));
+        assert_eq!(buf[(7, 2)].bg, multiply_color(original, factor));
     }
 
     #[test]
