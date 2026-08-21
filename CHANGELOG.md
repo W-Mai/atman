@@ -6,11 +6,23 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-08-22
+
+### ✨ Features
+
+- **Session discovery and selection** — session switching exposes shared discovery and selection flows with clearer session identity and naming controls.
+- **Contextual session naming** — session names can be generated from session context without blocking the active interaction flow.
+- **Settings catalog** — settings entries are available from the command palette through the shared configuration flows.
+- **Output search and line targeting** — runtime output supports searching and targeting specific lines for editing.
+
 ### 🐛 Fixes
 
+- **Complete oversized tool output** — tool output remains available through bounded continuation and pagination without losing content between live execution and replay.
+- **Session history ownership** — resumed sessions preserve history ownership consistently, and execution messages stay out of the model context when they are not part of the conversation.
+- **Text layout** — multiline display math, nested list items, and inline-code separator spacing render without collapsing distinct lines or separators.
+- **Responsive panel collapse** — upper Sidebar, lower Sidebar, and Tasks panel runtime collapse states remain independent from their saved configuration states.
 - **Shadow rendering at wide-glyph boundaries** — floating-panel shadows no longer darken CJK cells outside the geometric shadow ring, clear adjacent characters incorrectly, or darken corners more than once.
-
-- **Oversized tool output pagination** — `fs.read`, `bash.output`, and terminal text captures preserve complete UTF-8 output behind session-scoped opaque IDs, avoid double truncation, and expose consistent byte or line continuation metadata without leaking internal paths.
+- **Modal cursor visibility** — stale input cursors are hidden while modal overlays are active.
 
 ## [1.8.1] — 2026-08-18
 
