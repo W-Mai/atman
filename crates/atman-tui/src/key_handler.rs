@@ -968,6 +968,9 @@ pub(crate) fn handle_key(
         }
         KeyAction::ToggleSidebar => {
             app.sidebar_collapsed = !app.sidebar_collapsed;
+            app.sidebar_upper_runtime_collapsed = false;
+            app.sidebar_lower_runtime_collapsed = false;
+            app.items_version = app.items_version.wrapping_add(1);
             app.save_ui_state();
             *interrupt_prompt = None;
         }

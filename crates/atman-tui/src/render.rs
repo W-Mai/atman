@@ -134,7 +134,15 @@ pub(crate) fn sanitize_widget_edges(f: &mut ratatui::Frame, area: ratatui::layou
 pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &InputEditor) {
     let app = &mut ui.app;
     let area = f.area();
-    app.last_full_rect = Some(area);
+    if app.last_full_rect != Some(area) {
+        let responsive_narrow = area.width
+            < layout::SIDEBAR_MIN_TOTAL_WIDTH.max(crate::task_panel::TASK_PANEL_WIDTH + 40);
+        app.sidebar_upper_runtime_collapsed = responsive_narrow;
+        app.sidebar_lower_runtime_collapsed = responsive_narrow;
+        app.task_panel_runtime_collapsed = responsive_narrow;
+        app.items_version = app.items_version.wrapping_add(1);
+        app.last_full_rect = Some(area);
+    }
     if area.width < 40 || area.height < 8 {
         let msg = Paragraph::new(Line::from("terminal too small (need 40×8)"))
             .style(Style::default().fg(crate::theme::theme().warn.into()))
@@ -156,8 +164,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
         .unwrap_or(1.0);
     let intro_active = app.startup_intro.is_some() && intro_progress < 1.0;
     let show_sidebar = !startup_active && !intro_active;
-    app.sidebar_collapse_locked = show_sidebar && area.width < layout::SIDEBAR_MIN_TOTAL_WIDTH;
-    let sidebar_effective_collapsed = app.sidebar_collapsed || app.sidebar_collapse_locked;
+    let sidebar_effective_collapsed = app.sidebar_collapsed;
     let status_height: u16 = 1;
     let pending_count = app.pending_approvals.len();
     let approvals_rows: u16 = if pending_count == 0 {
@@ -358,8 +365,8 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
                 meta_collapsed: app.meta_collapsed,
                 mcp_collapsed: app.mcp_collapsed,
                 sidebar_collapsed: sidebar_effective_collapsed,
-                upper_collapsed: app.sidebar_upper_collapsed,
-                lower_collapsed: app.sidebar_lower_collapsed,
+                upper_collapsed: app.sidebar_upper_collapsed || app.sidebar_upper_runtime_collapsed,
+                lower_collapsed: app.sidebar_lower_collapsed || app.sidebar_lower_runtime_collapsed,
                 animation_frame: app.animation_frame,
                 hovered_row: app.hovered_sidebar_row.as_deref(),
                 hovered_hamburger: app.hovered_sidebar_hamburger,
@@ -400,7 +407,7 @@ pub(crate) fn render_frame(f: &mut ratatui::Frame, ui: &mut UiState, editor: &In
     if let Some(tp_area) = crate::task_panel::compute_task_panel_rect(
         l.transcript,
         show_sidebar,
-        app.task_panel_collapsed,
+        app.task_panel_collapsed || app.task_panel_runtime_collapsed,
     ) {
         let hover = crate::task_panel::TaskPanelHover {
             hovered_task_id: app.hovered_task_id.clone(),

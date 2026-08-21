@@ -515,11 +515,25 @@ pub(crate) async fn run_frames(
                                 if let Some(r) = app.app.last_upper_title_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.app.sidebar_upper_collapsed = !app.app.sidebar_upper_collapsed;
+                                    if app.app.sidebar_upper_runtime_collapsed {
+                                        app.app.sidebar_upper_runtime_collapsed = false;
+                                        app.app.items_version =
+                                            app.app.items_version.wrapping_add(1);
+                                    } else {
+                                        app.app.sidebar_upper_collapsed =
+                                            !app.app.sidebar_upper_collapsed;
+                                    }
                                 } else if let Some(r) = app.app.last_lower_title_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
-                                    app.app.sidebar_lower_collapsed = !app.app.sidebar_lower_collapsed;
+                                    if app.app.sidebar_lower_runtime_collapsed {
+                                        app.app.sidebar_lower_runtime_collapsed = false;
+                                        app.app.items_version =
+                                            app.app.items_version.wrapping_add(1);
+                                    } else {
+                                        app.app.sidebar_lower_collapsed =
+                                            !app.app.sidebar_lower_collapsed;
+                                    }
                                 } else if let Some(r) = app.app.last_sidebar_more_rect
                                     && rect_contains(r, me.column, me.row)
                                 {
@@ -597,20 +611,30 @@ pub(crate) async fn run_frames(
                                     && rect_contains(r, me.column, me.row)
                                 {
                                     app.app.sidebar_collapsed = true;
+                                    app.app.sidebar_upper_runtime_collapsed = false;
+                                    app.app.items_version = app.app.items_version.wrapping_add(1);
                                     app.app.save_ui_state();
                                 } else if let Some(r) = app.app.last_expand_btn_rect
                                     && rect_contains(r, me.column, me.row)
-                                    && !app.app.sidebar_collapse_locked
                                 {
                                     app.app.sidebar_collapsed = false;
+                                    app.app.sidebar_upper_runtime_collapsed = false;
+                                    app.app.items_version = app.app.items_version.wrapping_add(1);
                                     app.app.save_ui_state();
                                 } else if let Some(r) = app.app.last_task_panel_rect
                                     && me.column >= r.x
                                     && me.column < r.x + 10
                                     && me.row == r.y + 1
                                 {
-                                    app.app.task_panel_collapsed = !app.app.task_panel_collapsed;
-                                    app.app.save_ui_state();
+                                    if app.app.task_panel_runtime_collapsed {
+                                        app.app.task_panel_runtime_collapsed = false;
+                                    } else {
+                                        app.app.task_panel_collapsed =
+                                            !app.app.task_panel_collapsed;
+                                        app.app.task_panel_runtime_collapsed = false;
+                                        app.app.save_ui_state();
+                                    }
+                                    app.app.items_version = app.app.items_version.wrapping_add(1);
                                 } else if let Some(r) = app.app.last_task_panel_rect
                                     && rect_contains(r, me.column, me.row)
                                 {

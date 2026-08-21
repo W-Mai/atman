@@ -38,9 +38,6 @@ pub fn compute_sidebar_rect(area: Rect, show: bool, collapsed: bool) -> Option<R
     if !show {
         return None;
     }
-    if !collapsed && area.width < SIDEBAR_MIN_TOTAL_WIDTH {
-        return None;
-    }
     let width = if collapsed {
         SIDEBAR_STRIP_WIDTH
     } else {
@@ -263,9 +260,11 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_hidden_on_narrow_terminals() {
+    fn sidebar_stays_on_screen_when_opened_on_narrow_terminals() {
         let area = Rect::new(0, 0, 60, 40);
-        assert!(compute_sidebar_rect(area, true, false).is_none());
+        let rect = compute_sidebar_rect(area, true, false).unwrap();
+        assert_eq!(rect.width, SIDEBAR_WIDTH);
+        assert!(rect.x + rect.width <= area.x + area.width);
     }
 
     #[test]
