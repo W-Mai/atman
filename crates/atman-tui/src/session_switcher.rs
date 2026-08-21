@@ -3,13 +3,15 @@ use crate::wm::modal::ModalAction;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph};
 
 use tokio::sync::mpsc;
 
 use crate::key_handler::{enumerate_session_rows, request_session_switch};
 use crate::keys::KeyAction;
 use crate::{SessionPickerRow, TuiControl};
+
+pub const SESSION_SWITCHER_WIDTH: u16 = 104;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SessionScope {
@@ -249,6 +251,17 @@ impl SessionSwitcher {
     }
 }
 
+fn format_local_timestamp(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| crate::width::truncate(raw, 11))
+}
+
 fn row_matches_filter(row: &SessionPickerRow, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
@@ -285,18 +298,16 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         if area.height == 0 {
             return;
         }
-        let identity_height = area.height.min(3);
+        let identity_height = area.height.min(4);
+        let content_width = area.width.saturating_sub(6) as usize;
         let name = crate::width::truncate(
             app.session_name.as_deref().unwrap_or("Untitled session"),
-            area.width.saturating_sub(12) as usize,
+            content_width,
         );
-        let goal = crate::width::truncate(
-            app.goal.as_deref().unwrap_or("No goal"),
-            area.width.saturating_sub(8) as usize,
-        );
-        let project = crate::width::truncate(
+        let goal = crate::width::truncate(app.goal.as_deref().unwrap_or("No goal"), content_width);
+        let project = crate::width::middle_truncate(
             app.project_root.as_deref().unwrap_or("-"),
-            area.width.saturating_sub(11) as usize,
+            content_width,
         );
         let identity = vec![
             Line::from(vec![
@@ -322,14 +333,22 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 Style::default().fg(t.success.into()),
             )),
         ];
+        let identity_rect = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: identity_height,
+        };
         f.render_widget(
-            Paragraph::new(identity),
-            Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: identity_height,
-            },
+            Paragraph::new(identity)
+                .style(Style::default().bg(t.panel_bg.into()))
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_style(Style::default().fg(t.border.into()))
+                        .padding(Padding::horizontal(1)),
+                ),
+            identity_rect,
         );
         let area = Rect {
             x: area.x,
@@ -344,22 +363,46 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
         {
             let footer_rect = Rect {
                 x: area.x,
-                y: area.y + area.height.saturating_sub(1),
+                y: area.y + area.height.saturating_sub(2),
                 width: area.width,
-                height: 1,
+                height: 2,
             };
-            let footer = Line::from(Span::styled(
-                " s:sort  f:filter  r:rename  a:auto name  Enter:open  d:delete  Tab:scope  Esc:close ",
-                Style::default().fg(t.subtle_fg.into()),
-            ));
-            f.render_widget(Paragraph::new(footer), footer_rect);
+            let key_style = Style::default()
+                .fg(t.accent.into())
+                .add_modifier(Modifier::BOLD);
+            let hint_style = Style::default().fg(t.subtle_fg.into());
+            let footer = Line::from(vec![
+                Span::styled(" s/f", key_style),
+                Span::styled(" sort/filter  ", hint_style),
+                Span::styled("r", key_style),
+                Span::styled(" rename  ", hint_style),
+                Span::styled("a", key_style),
+                Span::styled(" auto  ", hint_style),
+                Span::styled("Enter", key_style),
+                Span::styled(" open  ", hint_style),
+                Span::styled("Tab", key_style),
+                Span::styled(" scope  ", hint_style),
+                Span::styled("Esc", key_style),
+                Span::styled(" close", hint_style),
+            ]);
+            f.render_widget(
+                Paragraph::new(footer)
+                    .style(Style::default().bg(t.code_bg.into()))
+                    .block(
+                        Block::default()
+                            .borders(Borders::TOP)
+                            .border_style(Style::default().fg(t.border.into()))
+                            .padding(Padding::horizontal(1)),
+                    ),
+                footer_rect,
+            );
         }
         let list_height = if !self.rename_mode
             && self.delete_armed.is_none()
             && !self.filter_mode
             && area.height >= 2
         {
-            area.height.saturating_sub(1)
+            area.height.saturating_sub(2)
         } else {
             area.height
         };
@@ -370,76 +413,112 @@ impl crate::wm::modal::ModalOverlay for SessionSwitcher {
                 }
                 SessionScope::All => "no other sessions exist yet",
             };
+            let empty_area = Rect {
+                x: area.x.saturating_add(1),
+                y: area.y.saturating_add(1),
+                width: area.width.saturating_sub(2),
+                height: list_height.saturating_sub(2),
+            };
             f.render_widget(
                 ratatui::widgets::Paragraph::new(Line::from(Span::styled(
                     hint,
                     Style::default().fg(t.subtle_fg.into()),
-                ))),
-                area,
+                )))
+                .style(Style::default().bg(t.modal_bg.into())),
+                empty_area,
             );
             return;
         }
+        let list_area = Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(1),
+            width: area.width.saturating_sub(2),
+            height: list_height.saturating_sub(2),
+        };
         let items: Vec<ListItem<'static>> = self
             .rows
             .iter()
             .map(|row| {
-                let sid_short: String = row.id.chars().take(8).collect();
-                let current = if row.is_current { "  [current]" } else { "" };
-                let available = area.width.saturating_sub(42) as usize;
-                let name_budget = available / 3;
-                let project_budget = available.saturating_sub(name_budget);
-                let name = crate::width::truncate(
-                    row.name.as_deref().unwrap_or("Untitled session"),
-                    name_budget.saturating_sub(crate::width::width(current)),
+                let current = if row.is_current { "● " } else { "  " };
+                let inner_width = list_area.width.saturating_sub(4) as usize;
+                let meta_width = 31.min(inner_width / 3);
+                let base_project_width = 30.min(inner_width / 3);
+                let base_name_width = inner_width
+                    .saturating_sub(meta_width)
+                    .saturating_sub(base_project_width)
+                    .saturating_sub(4);
+                let name_width = (base_name_width / 2).max(12);
+                let project_width = inner_width
+                    .saturating_sub(meta_width)
+                    .saturating_sub(name_width)
+                    .saturating_sub(4);
+                let name_column_width = name_width.saturating_sub(2);
+                let name = crate::width::pad_right(
+                    &crate::width::truncate(
+                        row.name.as_deref().unwrap_or("Untitled session"),
+                        name_column_width,
+                    ),
+                    name_column_width,
                 );
-                let goal_snippet = crate::width::truncate(
-                    row.goal.as_deref().unwrap_or("No goal"),
-                    area.width.saturating_sub(4) as usize,
+                let timestamp =
+                    crate::width::pad_right(&format_local_timestamp(&row.updated_at), 11);
+                let message_label = format!("{} msgs", row.message_count);
+                let message_width = meta_width.saturating_sub(14);
+                let meta = format!(
+                    "{} · {timestamp}  ",
+                    crate::width::pad_right(&message_label, message_width),
                 );
-                let project_label =
-                    crate::width::truncate(row.project.as_deref().unwrap_or("-"), project_budget);
-                let updated: String = row.updated_at.chars().take(19).collect();
+                let project_label = crate::width::pad_right(
+                    &crate::width::middle_truncate(
+                        row.project.as_deref().unwrap_or("-"),
+                        project_width,
+                    ),
+                    project_width,
+                );
+                let goal_snippet = crate::width::pad_right(
+                    &crate::width::truncate(row.goal.as_deref().unwrap_or("No goal"), inner_width),
+                    inner_width,
+                );
                 ListItem::new(vec![
                     Line::from(vec![
                         Span::styled(
-                            format!("{name}{current}"),
+                            current,
+                            Style::default()
+                                .fg(t.accent.into())
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            name,
                             Style::default()
                                 .fg(t.heading.into())
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!("  {sid_short} · {} msgs · {updated}", row.message_count),
-                            Style::default().fg(t.subtle_fg.into()),
-                        ),
-                        Span::styled(
-                            format!("  {project_label}"),
-                            Style::default().fg(t.success.into()),
-                        ),
+                        Span::styled(meta, Style::default().fg(t.subtle_fg.into())),
+                        Span::styled(project_label, Style::default().fg(t.success.into())),
                     ]),
                     Line::from(Span::styled(
-                        format!("  {goal_snippet}"),
+                        format!("  {}", goal_snippet),
                         Style::default().fg(t.tinted_fg.into()),
                     )),
+                    Line::raw(""),
                 ])
+                .style(Style::default().bg(t.modal_bg.into()))
             })
             .collect();
         let list = List::new(items)
+            .style(Style::default().bg(t.modal_bg.into()))
             .highlight_style(
                 Style::default()
-                    .fg(t.tinted_fg.into())
+                    .fg(t.heading.into())
+                    .bg(t.code_bg.into())
                     .add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol("▶ ");
+            .highlight_symbol("▌ ");
         let mut state = ListState::default();
         if !self.rows.is_empty() {
             state.select(Some(self.selected));
         }
-        let list_rect = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: list_height,
-        };
+        let list_rect = list_area;
         f.render_stateful_widget(list, list_rect, &mut state);
     }
 

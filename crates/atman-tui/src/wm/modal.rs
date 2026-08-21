@@ -454,9 +454,12 @@ impl ModalManager {
                 center_rect(canvas, w, h)
             }
             ModalKind::SessionSwitcher => {
-                let w = canvas.width.saturating_sub(4).clamp(72, 140);
+                let w = canvas
+                    .width
+                    .saturating_sub(4)
+                    .clamp(72, crate::session_switcher::SESSION_SWITCHER_WIDTH);
                 let desired =
-                    3 + (self.session_switcher.rows.len().max(1) as u16).saturating_mul(2) + 2;
+                    4 + (self.session_switcher.rows.len().max(1) as u16).saturating_mul(3) + 3;
                 let h = canvas.height.saturating_sub(4).min(desired).max(10);
                 center_rect(canvas, w, h)
             }

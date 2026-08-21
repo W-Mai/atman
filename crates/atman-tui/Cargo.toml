@@ -15,6 +15,7 @@ categories = ["command-line-interface", "development-tools"]
 [dependencies]
 atman-runtime = { path = "../atman-runtime", version = "1.8.1" }
 anyhow.workspace = true
+chrono.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true
@@ -30,7 +31,6 @@ terminal-colorsaurus.workspace = true
 unicode-width = "0.2"
 unicode-segmentation = "1"
 txm = "0.1"
-chrono.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
