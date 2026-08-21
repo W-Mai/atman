@@ -32,6 +32,7 @@ struct Renderer {
     heading_level: Option<HeadingLevel>,
     blockquote_depth: u16,
     fresh_line: bool,
+    pending_separator: bool,
     in_table: bool,
     in_table_head: bool,
     table_row: Vec<String>,
@@ -84,6 +85,11 @@ impl Renderer {
     }
 
     fn push_text(&mut self, text: &str) {
+        if self.pending_separator && !text.is_empty() && !self.fresh_line {
+            self.current.push(Span::raw(" "));
+            self.current_width += 1;
+        }
+        self.pending_separator = false;
         let style = self.active_style();
         let limit = self.content_width();
         let indent = self.indent_prefix();
@@ -232,7 +238,9 @@ impl Renderer {
                     }
                     return;
                 }
+                let had_separator = text.ends_with(' ') && !text.ends_with("\n");
                 self.push_text(&text);
+                self.pending_separator = had_separator;
             }
             Event::Code(text) => {
                 if self.in_table {
@@ -968,6 +976,18 @@ mod tests {
             "want crossed_out: {:?}",
             old_span.style
         );
+    }
+
+    #[test]
+    fn inline_code_preserves_left_separator_space() {
+        let lines = render_markdown("before `code` after");
+        assert_eq!(plain(&lines), vec!["before code after"]);
+    }
+
+    #[test]
+    fn inline_code_without_separator_stays_adjacent() {
+        let lines = render_markdown("before`code` after");
+        assert_eq!(plain(&lines), vec!["beforecode after"]);
     }
 
     #[test]
