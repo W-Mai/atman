@@ -17,13 +17,9 @@ async fn built_in_flow_generates_and_persists_session_name() {
         MockProvider::new("cheap").with_fallback(Value::Str("Fix session switching".into())),
     ));
 
-    let written = atman_runtime::session_naming::maybe_generate_session_name(
-        &executor,
-        &session,
-        "fix switch session",
-    )
-    .await
-    .unwrap();
+    let written = atman_runtime::session_naming::maybe_generate_session_name(&executor, &session)
+        .await
+        .unwrap();
 
     assert!(written);
     let meta = SessionMeta::load(session.dir()).unwrap();
@@ -33,7 +29,24 @@ async fn built_in_flow_generates_and_persists_session_name() {
 }
 
 #[tokio::test]
-async fn built_in_flow_never_overwrites_user_name() {
+async fn scheduled_auto_name_does_not_replace_user_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = Arc::new(Session::open(tmp.path()).unwrap());
+    SessionMeta::set_title(session.dir(), Some("Pinned by user".into())).unwrap();
+    let executor = Executor::with_events(EventSink::new());
+
+    let written = atman_runtime::session_naming::maybe_generate_session_name(&executor, &session)
+        .await
+        .unwrap();
+
+    assert!(!written);
+    let meta = SessionMeta::load(session.dir()).unwrap();
+    assert_eq!(meta.title.as_deref(), Some("Pinned by user"));
+    assert_eq!(meta.name_source, NameSource::User);
+}
+
+#[tokio::test]
+async fn user_triggered_auto_name_replaces_user_name_and_source() {
     let tmp = tempfile::tempdir().unwrap();
     let session = Arc::new(Session::open(tmp.path()).unwrap());
     SessionMeta::set_title(session.dir(), Some("Pinned by user".into())).unwrap();
@@ -42,16 +55,13 @@ async fn built_in_flow_never_overwrites_user_name() {
         MockProvider::new("cheap").with_fallback(Value::Str("Replacement".into())),
     ));
 
-    let written = atman_runtime::session_naming::maybe_generate_session_name(
-        &executor,
-        &session,
-        "replace it",
-    )
-    .await
-    .unwrap();
+    let written = atman_runtime::session_naming::force_generate_session_name(&executor, &session)
+        .await
+        .unwrap();
 
-    assert!(!written);
+    assert!(written);
     let meta = SessionMeta::load(session.dir()).unwrap();
-    assert_eq!(meta.title.as_deref(), Some("Pinned by user"));
-    assert_eq!(meta.name_source, NameSource::User);
+    assert_eq!(meta.title.as_deref(), Some("Replacement"));
+    assert_eq!(meta.name_source, NameSource::Auto);
+    assert_eq!(session.successful_flow_count(), 0);
 }

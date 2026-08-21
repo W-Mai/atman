@@ -19,6 +19,16 @@ use crate::stream::StreamFrame;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(pub Uuid);
 
+fn is_auto_name_threshold(mut count: u64) -> bool {
+    if count < 3 {
+        return false;
+    }
+    while count % 3 == 0 {
+        count /= 3;
+    }
+    count == 1
+}
+
 impl SessionId {
     pub fn now() -> Self {
         Self(Uuid::new_v4())
@@ -117,6 +127,7 @@ pub struct Session {
     pub flow_registry: std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>,
     /// Handle of the current root FlowRun; set per turn.
     current_root: std::sync::Mutex<Option<String>>,
+    successful_flow_count: std::sync::atomic::AtomicU64,
     pub compaction: CompactionState,
     pub interactions: InteractionServices,
     injection_queue: Mutex<Vec<Injection>>,
@@ -665,6 +676,7 @@ impl Session {
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
             current_root: std::sync::Mutex::new(None),
+            successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
@@ -770,6 +782,7 @@ impl Session {
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
             current_root: std::sync::Mutex::new(None),
+            successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: {
                 let c = CompactionState::new();
                 if persisted.window_tokens > 0 {
@@ -824,6 +837,7 @@ impl Session {
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
             current_root: std::sync::Mutex::new(None),
+            successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
             interactions: InteractionServices::new(),
             injection_queue: Mutex::new(Vec::new()),
@@ -902,6 +916,19 @@ impl Session {
 
     pub fn clear_current_root(&self) {
         *self.current_root.lock().unwrap() = None;
+    }
+
+    pub fn record_successful_flow(&self) -> Option<u64> {
+        let count = self
+            .successful_flow_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        is_auto_name_threshold(count).then_some(count)
+    }
+
+    pub fn successful_flow_count(&self) -> u64 {
+        self.successful_flow_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn stream_subscribe(&self) -> broadcast::Receiver<StreamFrame> {
@@ -1849,6 +1876,20 @@ mod tests {
     fn write_events(dir: &Path, lines: &[&str]) {
         let path = dir.join("events.jsonl");
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    }
+
+    #[test]
+    fn successful_flow_count_triggers_at_powers_of_three_and_resets_per_session() {
+        let session = Session::open_ephemeral();
+        let mut hits = Vec::new();
+        for _ in 0..27 {
+            if let Some(count) = session.record_successful_flow() {
+                hits.push(count);
+            }
+        }
+        assert_eq!(hits, vec![3, 9, 27]);
+        assert_eq!(session.successful_flow_count(), 27);
+        assert_eq!(Session::open_ephemeral().successful_flow_count(), 0);
     }
 
     #[test]

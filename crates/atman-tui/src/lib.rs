@@ -107,6 +107,7 @@ pub enum TuiControl {
         reason: String,
     },
     CompactNow,
+    AutoNameSession,
     CompactReviewAccept {
         review_id: String,
         edited: Option<String>,

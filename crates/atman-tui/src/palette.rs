@@ -10,6 +10,7 @@ use crate::keys::KeyAction;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteEntryId {
     SwitchSession,
+    AutoNameSession,
     NewSession,
     MoveSession,
     DeleteSession,
@@ -45,6 +46,13 @@ pub const PALETTE_ENTRIES: &[PaletteEntry] = &[
         label: "Switch Session",
         hint: "Pick a recent session to swap into",
         keyword: "session switch swap",
+    },
+    PaletteEntry {
+        id: PaletteEntryId::AutoNameSession,
+        group: "Session",
+        label: "Generate Session Name",
+        hint: "Ask the VM to regenerate this session's name",
+        keyword: "session name rename title auto",
     },
     PaletteEntry {
         id: PaletteEntryId::NewSession,
@@ -513,6 +521,8 @@ mod tests {
         let mut p = CommandPalette::default();
         p.open();
         assert_eq!(p.selected(), Some(PaletteEntryId::SwitchSession));
+        p.move_down();
+        assert_eq!(p.selected(), Some(PaletteEntryId::AutoNameSession));
         p.move_down();
         assert_eq!(p.selected(), Some(PaletteEntryId::NewSession));
     }

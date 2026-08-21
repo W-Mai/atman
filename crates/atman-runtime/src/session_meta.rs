@@ -246,10 +246,16 @@ impl SessionMeta {
     }
 
     pub fn set_auto_title(session_dir: &Path, title: impl Into<String>) -> std::io::Result<bool> {
+        Self::set_auto_title_with_force(session_dir, title, false)
+    }
+
+    pub fn set_auto_title_with_force(
+        session_dir: &Path,
+        title: impl Into<String>,
+        force: bool,
+    ) -> std::io::Result<bool> {
         let mut meta = Self::load(session_dir).unwrap_or_default();
-        if meta.name_source == NameSource::User
-            || meta.title.as_deref().is_some_and(|t| !t.is_empty())
-        {
+        if !force && meta.name_source == NameSource::User {
             return Ok(false);
         }
         let title = title.into().trim().replace(['\n', '\r'], " ");

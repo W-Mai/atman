@@ -722,11 +722,9 @@ async fn cmd_run(
         )
         .await;
     session.end_turn();
-    if outcome.is_ok() {
-        let _ = atman_runtime::session_naming::maybe_generate_session_name(
-            &executor, &session, &user_text,
-        )
-        .await;
+    if outcome.is_ok() && session.record_successful_flow().is_some() {
+        let _ =
+            atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;
     }
     session.shutdown().await;
 
@@ -1682,6 +1680,25 @@ async fn cmd_repl_once(
                         session_for_ctrl
                             .approval()
                             .decide_all(atman_runtime::session::ApprovalDecision::Deny { reason });
+                    }
+                    atman_tui::TuiControl::AutoNameSession => {
+                        match atman_runtime::session_naming::force_generate_session_name(
+                            &executor_for_ctrl,
+                            &session_for_ctrl,
+                        )
+                        .await
+                        {
+                            Ok(true) => atman_runtime::notify!(success, "session name generated"),
+                            Ok(false) => {
+                                atman_runtime::notify!(warn, "session name was not changed")
+                            }
+                            Err(error) => {
+                                atman_runtime::notify!(
+                                    error,
+                                    "session name generation failed: {error}"
+                                )
+                            }
+                        }
                     }
                     atman_tui::TuiControl::CompactNow => {
                         session_for_ctrl.request_manual_compact();
@@ -2978,6 +2995,7 @@ async fn run_turn_with_interjection(
         }
     };
     let streamed = session.take_streamed_flag();
+    let succeeded = result.is_ok();
     match result {
         Ok(v) => {
             if !(reporter.is_tui() && streamed) {
@@ -2993,6 +3011,10 @@ async fn run_turn_with_interjection(
         .fire(executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
         .await;
     session.end_turn();
+    if succeeded && session.record_successful_flow().is_some() {
+        let _ =
+            atman_runtime::session_naming::maybe_generate_session_name(executor, &session).await;
+    }
 }
 
 /// Returns true if the line was fully consumed as an interjection (`!nudge` / `!course-correct` /

@@ -6,7 +6,7 @@ pub const SESSION_NAME_AT: &str = r#"flow session_name(input: string) -> string 
     return llm.call(
         model: "cheap",
         context: "none",
-        system: "Generate a concise session name from the user prompt and goal. Return only the name, without quotes, markdown, punctuation, or explanation. Use 3 to 8 words and at most 60 characters.",
+        system: "Generate a concise session name from the goal and recent conversation. Reflect the session's current substantive work, not greetings or setup chatter. Return only the name, without quotes, markdown, punctuation, or explanation. Use 3 to 8 words and at most 60 characters.",
         prompt: input
     )
 }

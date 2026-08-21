@@ -253,11 +253,9 @@ async fn run_flow_inner(
         .fire(&executor, atman_dsl::ast::LifecycleEvent::TurnEnd)
         .await;
     session.end_turn();
-    if result.is_ok() {
-        let _ = atman_runtime::session_naming::maybe_generate_session_name(
-            &executor, &session, &user_text,
-        )
-        .await;
+    if result.is_ok() && session.record_successful_flow().is_some() {
+        let _ =
+            atman_runtime::session_naming::maybe_generate_session_name(&executor, &session).await;
     }
     lifecycles
         .fire(&executor, atman_dsl::ast::LifecycleEvent::SessionEnd)

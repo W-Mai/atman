@@ -739,6 +739,11 @@ impl WindowManager {
             PaletteEntryId::SetTrustMode => {
                 self.modals.trust_mode_picker_open = true;
             }
+            PaletteEntryId::AutoNameSession => {
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(crate::TuiControl::AutoNameSession);
+                }
+            }
             PaletteEntryId::SetModeTheme => {
                 self.modals.theme_picker_open = true;
             }
