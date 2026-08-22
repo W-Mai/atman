@@ -416,7 +416,8 @@ pub fn truncate_tool_result_content_with_budget(
     output_store: Option<&OutputStore>,
     budget: ToolOutputBudget,
 ) -> String {
-    if is_live_pagination_envelope(content, output_store)
+    if is_output_read_result(content)
+        || is_live_pagination_envelope(content, output_store)
         || is_live_pagination_notice(content, output_store)
     {
         return content.to_string();
@@ -445,6 +446,40 @@ pub fn truncate_tool_result_content_with_budget(
             total = total,
         ),
     }
+}
+
+fn is_output_read_result(content: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if let Some(mode) = object.get("mode").and_then(serde_json::Value::as_str) {
+        return matches!(mode, "bytes" | "lines")
+            && object
+                .get("content")
+                .is_some_and(serde_json::Value::is_string)
+            && ["offset", "next_offset", "total_lines", "total_bytes"]
+                .iter()
+                .all(|field| object.get(*field).is_some_and(serde_json::Value::is_u64))
+            && object
+                .get("has_more")
+                .is_some_and(serde_json::Value::is_boolean);
+    }
+    object
+        .get("query")
+        .is_some_and(serde_json::Value::is_string)
+        && object
+            .get("total_matches")
+            .is_some_and(serde_json::Value::is_u64)
+        && object.get("hits").is_some_and(serde_json::Value::is_array)
+        && object
+            .get("has_more")
+            .is_some_and(serde_json::Value::is_boolean)
+        && object
+            .get("next_match")
+            .is_some_and(serde_json::Value::is_u64)
 }
 
 fn is_live_pagination_notice(content: &str, output_store: Option<&OutputStore>) -> bool {
@@ -697,6 +732,42 @@ mod output_store_tests {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn output_page_keeps_structure_without_nested_spill() {
+        let content = "x".repeat(budget().max_bytes);
+        let page = serde_json::json!({
+            "content": content,
+            "mode": "bytes",
+            "offset": 0,
+            "next_offset": 64,
+            "total_lines": 1,
+            "total_bytes": 64,
+            "has_more": false,
+        })
+        .to_string();
+        let result = truncate_tool_result_content_with_budget(&page, "output.read", None, budget());
+        assert_eq!(result, page);
+        assert!(!result.contains("Output truncated"));
+        assert!(is_output_read_result(&result));
+    }
+
+    #[test]
+    fn output_search_keeps_structure_without_nested_spill() {
+        let result = serde_json::json!({
+            "query": "needle",
+            "total_matches": 1,
+            "hits": [{"line": 1, "snippet": "x".repeat(budget().max_bytes)}],
+            "has_more": false,
+            "next_match": 1,
+        })
+        .to_string();
+        let unchanged =
+            truncate_tool_result_content_with_budget(&result, "output.read", None, budget());
+        assert_eq!(unchanged, result);
+        assert!(!unchanged.contains("Output truncated"));
+        assert!(is_output_read_result(&unchanged));
     }
 
     #[test]
