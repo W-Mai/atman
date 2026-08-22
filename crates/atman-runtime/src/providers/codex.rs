@@ -420,24 +420,32 @@ impl Provider for CodexProvider {
                     });
                 }
 
-                let token_usage = final_usage.map(|u| TokenUsage {
-                    input: u.input_tokens.unwrap_or(0),
-                    cached_input: u
+                let token_usage = final_usage.map(|u| {
+                    let input_tokens = u.input_tokens.unwrap_or(0);
+                    let cached_input = u
                         .input_tokens_details
                         .as_ref()
                         .and_then(|d| d.cached_tokens)
-                        .unwrap_or(0),
-                    output: u.output_tokens.unwrap_or(0),
-                    cache_write: u
-                        .input_tokens_details
-                        .as_ref()
-                        .and_then(|d| d.cache_write_tokens)
-                        .unwrap_or(0),
-                    reasoning_tokens: u
-                        .output_tokens_details
-                        .as_ref()
-                        .and_then(|d| d.reasoning_tokens)
-                        .unwrap_or(0),
+                        .unwrap_or(0);
+                    TokenUsage {
+                        // Responses API reports input_tokens as the total input,
+                        // including cached tokens. TokenUsage.input is the
+                        // uncached portion so the shared window accounting can
+                        // add cached_input exactly once.
+                        input: normalize_input_tokens(input_tokens, cached_input),
+                        cached_input,
+                        output: u.output_tokens.unwrap_or(0),
+                        cache_write: u
+                            .input_tokens_details
+                            .as_ref()
+                            .and_then(|d| d.cache_write_tokens)
+                            .unwrap_or(0),
+                        reasoning_tokens: u
+                            .output_tokens_details
+                            .as_ref()
+                            .and_then(|d| d.reasoning_tokens)
+                            .unwrap_or(0),
+                    }
                 });
 
                 Ok(AssistantMessage {
@@ -687,6 +695,10 @@ fn net_err(e: reqwest::Error) -> RuntimeError {
     RuntimeError::ToolFailed(format!("codex net: {e}"))
 }
 
+fn normalize_input_tokens(total_input: u64, cached_input: u64) -> u64 {
+    total_input.saturating_sub(cached_input)
+}
+
 #[derive(Serialize)]
 struct ResponsesRequest {
     model: String,
@@ -769,4 +781,19 @@ struct InputTokensDetails {
 struct OutputTokensDetails {
     #[serde(default)]
     reasoning_tokens: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_input_tokens;
+
+    #[test]
+    fn input_tokens_exclude_cached_tokens_for_window_accounting() {
+        assert_eq!(normalize_input_tokens(100_000, 60_000), 40_000);
+    }
+
+    #[test]
+    fn cached_tokens_cannot_underflow_input_tokens() {
+        assert_eq!(normalize_input_tokens(10, 20), 0);
+    }
 }

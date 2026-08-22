@@ -6,6 +6,10 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### 🐛 Fixes
+
+- **Codex context accounting** — cached input tokens are counted once when tracking the effective context window.
+
 ## [1.9.0] — 2026-08-22
 
 ### ✨ Features
