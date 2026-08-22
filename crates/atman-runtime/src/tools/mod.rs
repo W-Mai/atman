@@ -3,6 +3,8 @@ use std::sync::Arc;
 use crate::tool::ToolRegistry;
 
 pub mod agent_ctrl;
+pub mod anchor;
+pub mod anchor_fs;
 pub mod bash_bg;
 pub mod flow_check;
 pub mod flow_list;
@@ -34,6 +36,10 @@ pub fn register_tier_zero(reg: &ToolRegistry) {
 }
 
 pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stubs::RuleFetch) {
+    reg.register(Arc::new(anchor::AnchorRead));
+    reg.register(Arc::new(anchor::AnchorEdit));
+    reg.register(Arc::new(anchor::AnchorWrite));
+    reg.register(Arc::new(anchor::AnchorUndo));
     reg.register(Arc::new(fs::FsRead));
     reg.register(Arc::new(tool_output::OutputRead));
     reg.register(Arc::new(fs::FsList));
