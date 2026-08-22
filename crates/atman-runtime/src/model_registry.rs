@@ -138,13 +138,65 @@ pub fn register_discovered(
     provider_name: &str,
     models: &[crate::provider::DiscoveredModel],
 ) {
+    register_discovered_entries(provider_name, provider_name, models, true);
+}
+
+pub fn register_discovered_for_provider(
+    provider_key: &str,
+    provider_name: &str,
+    models: &[crate::provider::DiscoveredModel],
+) {
+    let provider_ids = AuthStore::load()
+        .map(|auth| {
+            auth.providers
+                .into_iter()
+                .map(|provider| provider.id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|_| vec![provider_key.to_string()]);
+    let short_id = shortest_unique_provider_id(provider_key, &provider_ids);
+    let model_namespace = format!("{short_id}@{provider_name}");
+    register_discovered_entries(&model_namespace, provider_key, models, false);
+}
+
+fn shortest_unique_provider_id(provider_id: &str, provider_ids: &[String]) -> String {
+    let normalized: String = provider_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
+    let peers: Vec<String> = provider_ids
+        .iter()
+        .map(|id| id.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect())
+        .collect();
+    let mut len = normalized.len().min(6);
+    while len < normalized.len()
+        && peers
+            .iter()
+            .filter(|peer| peer.as_str() != normalized)
+            .any(|peer| peer.starts_with(&normalized[..len]))
+    {
+        len += 1;
+    }
+    normalized[..len].to_string()
+}
+
+fn register_discovered_entries(
+    model_namespace: &str,
+    provider_key: &str,
+    models: &[crate::provider::DiscoveredModel],
+    api_model_uses_registry_key: bool,
+) {
     let entries: Vec<(String, ModelEntry)> = models
         .iter()
         .map(|m| {
-            let name = format!("{provider_name}:{}", m.slug);
+            let name = format!("{model_namespace}:{}", m.slug);
             let entry = ModelEntry {
-                model: name.clone(),
-                provider: Some(provider_name.to_string()),
+                model: if api_model_uses_registry_key {
+                    name.clone()
+                } else {
+                    m.slug.clone()
+                },
+                provider: Some(provider_key.to_string()),
                 context_budget: m.context_budget,
                 thinking: Some(m.thinking),
                 enabled: None,
@@ -179,6 +231,26 @@ pub struct ProviderGroup {
 /// discovered_models + aliases.
 pub fn all_provider_groups() -> Vec<ProviderGroup> {
     provider_groups(false)
+}
+
+pub fn enabled_provider_names() -> std::collections::HashSet<String> {
+    let auth = AuthStore::load().unwrap_or_default();
+    enabled_provider_names_from_auth(&auth)
+}
+
+fn enabled_provider_names_from_auth(auth: &AuthStore) -> std::collections::HashSet<String> {
+    let mut names: std::collections::HashSet<String> = all_provider_entries()
+        .into_iter()
+        .filter(|(_, entry)| entry.enabled.unwrap_or(true))
+        .map(|(name, _)| name)
+        .collect();
+    names.extend(
+        auth.providers
+            .iter()
+            .filter(|provider| provider.enabled)
+            .map(|provider| provider.id.clone()),
+    );
+    names
 }
 
 /// Return enabled configured providers even when no model has been registered yet.
@@ -252,13 +324,35 @@ pub fn all_model_entries() -> Vec<(String, ModelEntry)> {
     Vec::new()
 }
 
+pub fn provider_display_name(provider_key: &str) -> String {
+    AuthStore::load()
+        .ok()
+        .and_then(|auth| {
+            auth.providers
+                .into_iter()
+                .find(|provider| provider.id == provider_key)
+        })
+        .map(|provider| match provider.account {
+            Some(account) if !account.is_empty() => format!("{} · {account}", provider.name),
+            _ => provider.name,
+        })
+        .unwrap_or_else(|| provider_key.to_string())
+}
+
 pub fn is_provider_enabled(name: &str) -> bool {
-    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref() {
-        if let Some(entry) = cfg.providers.get(name) {
-            return entry.enabled.unwrap_or(true);
-        }
+    if let Ok(Some(cfg)) = MODEL_CONFIG.read().as_deref()
+        && let Some(entry) = cfg.providers.get(name)
+    {
+        return entry.enabled.unwrap_or(true);
     }
-    true
+    AuthStore::load()
+        .ok()
+        .and_then(|auth| {
+            auth.providers
+                .into_iter()
+                .find(|provider| provider.id == name)
+        })
+        .is_none_or(|provider| provider.enabled)
 }
 
 pub fn all_provider_entries() -> Vec<(String, ProviderEntry)> {
@@ -954,6 +1048,70 @@ mod tests {
     /// Tests that mutate MODEL_CONFIG must hold this lock to avoid races
     /// when cargo test runs them in parallel.
     static TEST_CFG_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[test]
+    fn enabled_auth_provider_names_match_discovered_model_groups() {
+        let _lock = TEST_CFG_LOCK.lock().unwrap();
+        *MODEL_CONFIG.write().unwrap() = Some(ModelConfig::default());
+        let auth = AuthStore {
+            providers: vec![
+                crate::auth_store::StoredProvider {
+                    id: "disabled-id".into(),
+                    name: "Codex".into(),
+                    kind: crate::auth_store::ProviderKind::Codex,
+                    access_token: String::new(),
+                    refresh_token: None,
+                    expires_at: 0,
+                    account: Some("old@example.com".into()),
+                    enabled: false,
+                    model_cache: None,
+                },
+                crate::auth_store::StoredProvider {
+                    id: "enabled-id".into(),
+                    name: "Codex".into(),
+                    kind: crate::auth_store::ProviderKind::Codex,
+                    access_token: String::new(),
+                    refresh_token: None,
+                    expires_at: 0,
+                    account: Some("current@example.com".into()),
+                    enabled: true,
+                    model_cache: None,
+                },
+            ],
+        };
+
+        let names = enabled_provider_names_from_auth(&auth);
+        assert!(names.contains("enabled-id"));
+        assert!(!names.contains("disabled-id"));
+
+        let models = vec![crate::provider::DiscoveredModel {
+            slug: "codex/gpt-test".into(),
+            context_budget: Some(272_000),
+            thinking: true,
+        }];
+        assert_eq!(
+            shortest_unique_provider_id("1234567-account", &["1234567-account".into()]),
+            "123456"
+        );
+        assert_eq!(
+            shortest_unique_provider_id(
+                "abcdef1-account",
+                &["abcdef1-account".into(), "abcdef2-account".into()]
+            ),
+            "abcdef1"
+        );
+        register_discovered_for_provider("enabled-id", "Codex", &models);
+        let model_key = "enable@Codex:codex/gpt-test";
+        let entry = model_entry(model_key).unwrap();
+        assert_eq!(entry.provider.as_deref(), Some("enabled-id"));
+        assert_eq!(entry.model, "codex/gpt-test");
+
+        let providers = crate::provider::ProviderRegistry::new();
+        providers.register(std::sync::Arc::new(
+            crate::providers::mock::MockProvider::new("enabled-id"),
+        ));
+        assert_eq!(providers.resolve(model_key).unwrap().name(), "enabled-id");
+    }
 
     #[test]
     fn unregistered_model_returns_zero_budget() {

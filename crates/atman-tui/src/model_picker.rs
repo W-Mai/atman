@@ -33,12 +33,7 @@ impl ModelPicker {
     }
 
     fn refresh(&mut self) {
-        let enabled_providers: std::collections::HashSet<String> =
-            atman_runtime::model_registry::all_provider_entries()
-                .into_iter()
-                .filter(|(_, e)| e.enabled.unwrap_or(true))
-                .map(|(n, _)| n)
-                .collect();
+        let enabled_providers = atman_runtime::model_registry::enabled_provider_names();
         self.groups = atman_runtime::model_registry::all_provider_groups()
             .into_iter()
             .filter(|g| enabled_providers.contains(&g.provider_name))

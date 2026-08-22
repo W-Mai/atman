@@ -53,12 +53,7 @@ impl ModelManager {
     pub fn refresh(&mut self) {
         let selected_provider = self.current_provider().to_string();
         let selected_model = self.current_model().map(|model| model.slug.clone());
-        let enabled_providers: std::collections::HashSet<String> =
-            atman_runtime::model_registry::all_provider_entries()
-                .into_iter()
-                .filter(|(_, e)| e.enabled.unwrap_or(true))
-                .map(|(n, _)| n)
-                .collect();
+        let enabled_providers = atman_runtime::model_registry::enabled_provider_names();
         self.groups = atman_runtime::model_registry::all_provider_groups_with_empty()
             .into_iter()
             .filter(|g| enabled_providers.contains(&g.provider_name))
@@ -383,8 +378,10 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
             } else {
                 Style::default().fg(t.meta_fg.into())
             };
+            let provider_label =
+                atman_runtime::model_registry::provider_display_name(&g.provider_name);
             lines.push(Line::from(Span::styled(
-                format!(" {} [{} models]", g.provider_name, g.models.len()),
+                format!(" {provider_label} [{} models]", g.models.len()),
                 p_style,
             )));
             for (mi, m) in g.models.iter().enumerate() {

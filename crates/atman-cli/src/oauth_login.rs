@@ -46,11 +46,19 @@ pub async fn oauth_login<P: OAuthProvider + Provider>(
                     let models = discover_provider.discover_models().await;
                     if !models.is_empty() {
                         let _ = atman_runtime::auth_store::save_provider_model_cache(&id, &models);
-                        atman_runtime::model_registry::register_discovered(
-                            &id,
-                            &provider.name,
-                            &models,
-                        );
+                        if provider.kind == ProviderKind::Codex {
+                            atman_runtime::model_registry::register_discovered_for_provider(
+                                &id,
+                                &provider.name,
+                                &models,
+                            );
+                        } else {
+                            atman_runtime::model_registry::register_discovered(
+                                &id,
+                                &provider.name,
+                                &models,
+                            );
+                        }
                     }
 
                     let _ = tx.send(Ok(provider));

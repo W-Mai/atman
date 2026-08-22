@@ -665,7 +665,7 @@ impl crate::oauth::OAuthProvider for CodexProvider {
 
     fn from_stored(stored: &crate::auth_store::StoredProvider) -> Self {
         let account_id = stored.account.as_deref().unwrap_or("");
-        CodexProvider::new(&stored.name, &stored.access_token, account_id)
+        CodexProvider::new(&stored.id, &stored.access_token, account_id)
     }
 }
 

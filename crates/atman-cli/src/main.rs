@@ -2107,7 +2107,7 @@ async fn cmd_repl_once(
                                 return;
                             };
                             let provider = atman_runtime::providers::codex::CodexProvider::new(
-                                &p.name,
+                                &p.id,
                                 &p.access_token,
                                 p.account.as_deref().unwrap_or(""),
                             );
@@ -2117,7 +2117,7 @@ async fn cmd_repl_once(
                                 let _ = atman_runtime::auth_store::save_provider_model_cache(
                                     &pid, &models,
                                 );
-                                atman_runtime::model_registry::register_discovered(
+                                atman_runtime::model_registry::register_discovered_for_provider(
                                     &pid, &p.name, &models,
                                 );
                             }

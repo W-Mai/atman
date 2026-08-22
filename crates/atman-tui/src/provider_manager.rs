@@ -327,8 +327,13 @@ impl ProviderManager {
                 KeyAction::Char('n') => self.open_add(),
                 KeyAction::Char('m') => {
                     if let Some(p) = self.providers.get(self.selected) {
-                        if matches!(p.source, ProviderSource::Config) {
-                            return Some(ModalAction::OpenModelManager(p.name.clone()));
+                        let provider = match &p.source {
+                            ProviderSource::AuthStore { id } => Some(id.clone()),
+                            ProviderSource::Config => Some(p.name.clone()),
+                            ProviderSource::Env => None,
+                        };
+                        if let Some(provider) = provider {
+                            return Some(ModalAction::OpenModelManager(provider));
                         }
                     }
                 }
@@ -930,9 +935,12 @@ fn render_model_detail(
             ]));
         }
 
-        // Show models for this provider (works for all sources)
+        let provider_key = match &p.source {
+            ProviderSource::AuthStore { id } => id.as_str(),
+            ProviderSource::Env | ProviderSource::Config => p.name.as_str(),
+        };
         for g in &mgr.groups {
-            if g.provider_name == p.name {
+            if g.provider_name == provider_key {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     format!(" {} models:", g.models.len()),

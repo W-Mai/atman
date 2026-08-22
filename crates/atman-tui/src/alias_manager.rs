@@ -43,6 +43,7 @@ impl AliasManager {
     pub fn open(&mut self) {
         self.open = true;
         self.refresh_list();
+        self.refresh_groups();
     }
 
     pub fn close(&mut self) {
@@ -61,15 +62,10 @@ impl AliasManager {
     }
 
     fn refresh_groups(&mut self) {
-        let config_providers: std::collections::HashSet<String> =
-            atman_runtime::model_registry::all_provider_entries()
-                .into_iter()
-                .filter(|(_, e)| e.enabled.unwrap_or(true))
-                .map(|(n, _)| n)
-                .collect();
+        let enabled_providers = atman_runtime::model_registry::enabled_provider_names();
         self.groups = atman_runtime::model_registry::all_provider_groups()
             .into_iter()
-            .filter(|g| config_providers.contains(&g.provider_name))
+            .filter(|g| enabled_providers.contains(&g.provider_name))
             .collect();
         self.model_idx = vec![0; self.groups.len()];
         self.provider_idx = 0;
@@ -298,8 +294,10 @@ fn render_tree_panel(
     for (pi, grp) in mgr.groups.iter().enumerate() {
         let is_active = mgr.focus == Focus::Tree && mgr.provider_idx == pi;
         let hdr_style = crate::directional_selector::value_style(theme, is_active);
+        let provider_label =
+            atman_runtime::model_registry::provider_display_name(&grp.provider_name);
         lines.push(Line::from(Span::styled(
-            format!("▸ {}", grp.provider_name),
+            format!("▸ {provider_label}"),
             hdr_style,
         )));
 
