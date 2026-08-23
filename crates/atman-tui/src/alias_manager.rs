@@ -242,9 +242,7 @@ impl AliasManager {
                 | KeyAction::PageDown
                 | KeyAction::End => {
                     self.browser.handle_key(action, 0);
-                    if let Some(row) = self.browser.selected() {
-                        self.select_model(&row.value.clone());
-                    }
+                    self.apply_browser_selection();
                 }
                 KeyAction::CursorLeft | KeyAction::CursorRight => {
                     let Some(direction) =
@@ -257,6 +255,8 @@ impl AliasManager {
                         self.groups.len(),
                         direction,
                     );
+                    let selected = self.current_model().map(|model| model.slug.clone());
+                    self.sync_browser(selected.as_deref());
                 }
                 KeyAction::Submit => self.commit_alias(control_tx),
                 _ => {}

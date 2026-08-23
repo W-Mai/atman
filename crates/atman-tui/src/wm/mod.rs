@@ -696,7 +696,8 @@ impl WindowManager {
                 self.modals.model_manager.open();
             }
             PaletteEntryId::SwitchModel => {
-                self.modals.model_picker.open();
+                let current = app.context.model.clone();
+                self.modals.model_picker.open_with_model(Some(&current));
             }
             PaletteEntryId::ManageMcp => {
                 let canvas = app.last_transcript_rect.unwrap_or_default();

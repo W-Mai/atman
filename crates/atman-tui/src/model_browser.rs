@@ -300,6 +300,28 @@ mod tests {
     }
 
     #[test]
+    fn initial_value_selects_matching_internal_row() {
+        let b = ModelBrowser::new(
+            vec![
+                BrowserRow {
+                    kind: BrowserRowKind::Alias,
+                    label: "smart".into(),
+                    value: "smart".into(),
+                    selectable: true,
+                },
+                BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: "Codex / gpt".into(),
+                    value: "codex-account:gpt".into(),
+                    selectable: true,
+                },
+            ],
+            Some("codex-account:gpt"),
+        );
+        assert_eq!(b.selected().unwrap().value, "codex-account:gpt");
+    }
+
+    #[test]
     fn initial_selection_is_visible() {
         let b = ModelBrowser::new(
             vec![BrowserRow {

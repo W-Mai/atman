@@ -17,15 +17,19 @@ pub struct ModelPicker {
 
 impl ModelPicker {
     pub fn open(&mut self) {
+        self.open_with_model(None);
+    }
+
+    pub fn open_with_model(&mut self, current: Option<&str>) {
         self.open = true;
-        self.refresh();
+        self.refresh(current);
     }
 
     pub fn close(&mut self) {
         self.open = false;
     }
 
-    fn refresh(&mut self) {
+    fn refresh(&mut self, current: Option<&str>) {
         let enabled = atman_runtime::model_registry::enabled_provider_names();
         let mut rows = Vec::new();
         for (name, model) in atman_runtime::model_registry::all_aliases() {
@@ -43,7 +47,11 @@ impl ModelPicker {
             for model in group.models {
                 rows.push(BrowserRow {
                     kind: BrowserRowKind::Model,
-                    label: format!("{} / {}", group.provider_name, model.slug),
+                    label: format!(
+                        "{} / {}",
+                        atman_runtime::model_registry::provider_display_name(&group.provider_name),
+                        model.slug
+                    ),
                     value: model.slug,
                     selectable: true,
                 });
@@ -53,7 +61,7 @@ impl ModelPicker {
             (a.kind != BrowserRowKind::Alias, &a.label)
                 .cmp(&(b.kind != BrowserRowKind::Alias, &b.label))
         });
-        self.browser.replace_rows(rows, None);
+        self.browser.replace_rows(rows, current);
         self.picked = None;
     }
 
