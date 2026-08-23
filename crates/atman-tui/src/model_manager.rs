@@ -7,6 +7,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
+use crate::model_browser::{BrowserRow, BrowserRowKind, ModelBrowser};
 
 #[derive(Default)]
 pub struct ModelManager {
@@ -14,6 +15,7 @@ pub struct ModelManager {
     groups: Vec<atman_runtime::model_registry::ProviderGroup>,
     provider_idx: usize,
     model_idx: Vec<usize>,
+    browser: ModelBrowser,
     show_form: bool,
     form_field: usize,
     editing: Option<String>,
@@ -73,11 +75,64 @@ impl ModelManager {
                 .position(|model| model.slug == selected_model)
                 .unwrap_or(0);
         }
+        self.sync_browser();
+    }
+
+    fn sync_browser(&mut self) {
+        let mut rows = Vec::new();
+        for group in &self.groups {
+            rows.push(BrowserRow {
+                kind: BrowserRowKind::Provider,
+                label: atman_runtime::model_registry::provider_display_name(&group.provider_name),
+                value: group.provider_name.clone(),
+                selectable: false,
+            });
+            rows.extend(group.models.iter().map(|model| BrowserRow {
+                kind: BrowserRowKind::Model,
+                label: model.slug.clone(),
+                value: format!("{}\0{}", group.provider_name, model.slug),
+                selectable: true,
+            }));
+        }
+        let selected = self
+            .groups
+            .get(self.provider_idx)
+            .and_then(|group| {
+                group
+                    .models
+                    .get(self.model_idx.get(self.provider_idx).copied().unwrap_or(0))
+            })
+            .map(|model| format!("{}\0{}", self.current_provider(), model.slug));
+        self.browser.replace_rows(rows, selected.as_deref());
+    }
+
+    fn apply_browser_selection(&mut self) {
+        let Some(row) = self.browser.selected() else {
+            return;
+        };
+        let Some((provider, slug)) = row.value.split_once('\0') else {
+            return;
+        };
+        if let Some(pi) = self
+            .groups
+            .iter()
+            .position(|group| group.provider_name == provider)
+        {
+            if let Some(mi) = self.groups[pi]
+                .models
+                .iter()
+                .position(|model| model.slug == slug)
+            {
+                self.provider_idx = pi;
+                self.model_idx[pi] = mi;
+            }
+        }
     }
 
     fn select_provider(&mut self, name: &str) {
         if let Some(idx) = self.groups.iter().position(|g| g.provider_name == name) {
             self.provider_idx = idx;
+            self.sync_browser();
         }
     }
 
@@ -155,29 +210,16 @@ impl ModelManager {
         }
         match action {
             KeyAction::Escape => self.close(),
-            KeyAction::HistoryUp | KeyAction::Char('k') => {
-                if self.groups.is_empty() {
-                    return;
-                }
-                if self.model_idx[self.provider_idx] > 0 {
-                    self.model_idx[self.provider_idx] -= 1;
-                } else if self.provider_idx > 0 {
-                    self.provider_idx -= 1;
-                    let prev = &self.groups[self.provider_idx];
-                    self.model_idx[self.provider_idx] = prev.models.len().saturating_sub(1);
-                }
-            }
-            KeyAction::HistoryDown | KeyAction::Char('j') => {
-                if self.groups.is_empty() {
-                    return;
-                }
-                let g = &self.groups[self.provider_idx];
-                if self.model_idx[self.provider_idx] + 1 < g.models.len() {
-                    self.model_idx[self.provider_idx] += 1;
-                } else if self.provider_idx + 1 < self.groups.len() {
-                    self.provider_idx += 1;
-                    self.model_idx[self.provider_idx] = 0;
-                }
+            KeyAction::HistoryUp
+            | KeyAction::HistoryDown
+            | KeyAction::Char('j')
+            | KeyAction::Char('k')
+            | KeyAction::PageUp
+            | KeyAction::PageDown
+            | KeyAction::Home
+            | KeyAction::End => {
+                self.browser.handle_key(action, 0);
+                self.apply_browser_selection();
             }
             KeyAction::Char('n') => self.open_form(),
             KeyAction::Char('a') => {
@@ -362,54 +404,60 @@ impl crate::wm::modal::ModalOverlay for ModelManager {
             height: left_col.height.saturating_sub(2).saturating_sub(1),
         };
 
-        let mut lines: Vec<Line> = vec![];
-        if self.groups.is_empty() {
-            lines.push(Line::from(Span::styled(
-                " No enabled providers or models",
-                Style::default().fg(t.meta_fg.into()),
-            )));
-        }
-        for (pi, g) in self.groups.iter().enumerate() {
-            let provider_active = pi == self.provider_idx;
-            let p_style = if provider_active {
+        self.browser.set_visible_rows(inner_left.height as usize);
+        let mut lines: Vec<Line> = Vec::new();
+        for index in self.browser.visible_rows(inner_left.height as usize) {
+            let row = &self.browser.rows()[index];
+            let selected = index == self.browser.selected_index();
+            let style = if selected {
+                Style::default()
+                    .fg(t.accent.into())
+                    .add_modifier(Modifier::BOLD)
+            } else if row.kind == BrowserRowKind::Provider {
                 Style::default()
                     .fg(t.heading.into())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(t.meta_fg.into())
+                Style::default().fg(t.tinted_fg.into())
             };
-            let provider_label =
-                atman_runtime::model_registry::provider_display_name(&g.provider_name);
-            lines.push(Line::from(Span::styled(
-                format!(" {provider_label} [{} models]", g.models.len()),
-                p_style,
-            )));
-            for (mi, m) in g.models.iter().enumerate() {
-                let is_current = pi == self.provider_idx && mi == self.model_idx[pi];
-                let m_style = if is_current {
-                    Style::default()
-                        .fg(t.accent.into())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(t.tinted_fg.into())
-                };
-                let thinking = if m.thinking { " \u{1F9E0}" } else { "" };
-                let budget = atman_runtime::humanize::format_count(m.context_budget);
+            if row.kind == BrowserRowKind::Provider {
+                let count = self
+                    .groups
+                    .iter()
+                    .find(|group| group.provider_name == row.value)
+                    .map(|group| group.models.len())
+                    .unwrap_or(0);
                 lines.push(Line::from(Span::styled(
-                    format!("   {}  {}{}", m.slug, budget, thinking),
-                    m_style,
+                    format!(" {} [{} models]", row.label, count),
+                    style,
+                )));
+            } else if let Some((provider, slug)) = row.value.split_once('\0') {
+                let suffix = self
+                    .groups
+                    .iter()
+                    .find(|group| group.provider_name == provider)
+                    .and_then(|group| group.models.iter().find(|model| model.slug == slug))
+                    .map(|model| {
+                        let thinking = if model.thinking { " 🧠" } else { "" };
+                        format!(
+                            "  {}{}",
+                            atman_runtime::humanize::format_count(model.context_budget),
+                            thinking
+                        )
+                    })
+                    .unwrap_or_default();
+                lines.push(Line::from(Span::styled(
+                    format!("   {slug}{suffix}"),
+                    style,
                 )));
             }
-            lines.push(Line::from(""));
         }
-
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 " No models. Press n to add one.",
                 Style::default().fg(t.meta_fg.into()),
             )));
         }
-
         f.render_widget(Paragraph::new(lines), inner_left);
 
         crate::wm::shell::render_section_header(f, right_col, Line::from("Details"), t);

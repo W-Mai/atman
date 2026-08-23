@@ -3,23 +3,16 @@ use crate::wm::modal::ModalAction;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::keys::KeyAction;
+use crate::model_browser::{BrowserAction, BrowserRow, BrowserRowKind, ModelBrowser};
 
 #[derive(Default)]
 pub struct ModelPicker {
     pub open: bool,
-    groups: Vec<atman_runtime::model_registry::ProviderGroup>,
-    aliases: Vec<(String, String)>,
-    selected: usize,
+    browser: ModelBrowser,
     pub picked: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-enum PickerRow {
-    Alias { name: String, model: String },
-    Model { slug: String },
 }
 
 impl ModelPicker {
@@ -33,54 +26,45 @@ impl ModelPicker {
     }
 
     fn refresh(&mut self) {
-        let enabled_providers = atman_runtime::model_registry::enabled_provider_names();
-        self.groups = atman_runtime::model_registry::all_provider_groups()
+        let enabled = atman_runtime::model_registry::enabled_provider_names();
+        let mut rows = Vec::new();
+        for (name, model) in atman_runtime::model_registry::all_aliases() {
+            rows.push(BrowserRow {
+                kind: BrowserRowKind::Alias,
+                label: format!("{name:<10} → {model}"),
+                value: name,
+                selectable: true,
+            });
+        }
+        for group in atman_runtime::model_registry::all_provider_groups()
             .into_iter()
-            .filter(|g| enabled_providers.contains(&g.provider_name))
-            .collect();
-        self.aliases = atman_runtime::model_registry::all_aliases();
-        self.aliases.sort_by(|a, b| a.0.cmp(&b.0));
-        self.selected = 0;
+            .filter(|group| enabled.contains(&group.provider_name))
+        {
+            for model in group.models {
+                rows.push(BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: format!("{} / {}", group.provider_name, model.slug),
+                    value: model.slug,
+                    selectable: true,
+                });
+            }
+        }
+        rows.sort_by(|a, b| {
+            (a.kind != BrowserRowKind::Alias, &a.label)
+                .cmp(&(b.kind != BrowserRowKind::Alias, &b.label))
+        });
+        self.browser.replace_rows(rows, None);
         self.picked = None;
     }
 
-    fn rows(&self) -> Vec<PickerRow> {
-        let mut rows = Vec::new();
-        for (name, model) in &self.aliases {
-            rows.push(PickerRow::Alias {
-                name: name.clone(),
-                model: model.clone(),
-            });
-        }
-        for group in &self.groups {
-            for model in &group.models {
-                rows.push(PickerRow::Model {
-                    slug: model.slug.clone(),
-                });
-            }
-        }
-        rows
-    }
-
     pub fn handle_key(&mut self, action: &KeyAction) {
-        let len = self.rows().len();
-        match action {
-            KeyAction::Escape => self.close(),
-            KeyAction::HistoryUp | KeyAction::Char('k') if len > 0 => {
-                self.selected = self.selected.checked_sub(1).unwrap_or(len - 1);
-            }
-            KeyAction::HistoryDown | KeyAction::Char('j') if len > 0 => {
-                self.selected = (self.selected + 1) % len;
-            }
-            KeyAction::Submit if len > 0 => {
-                let rows = self.rows();
-                self.picked = rows.get(self.selected).map(|row| match row {
-                    PickerRow::Alias { name, .. } => name.clone(),
-                    PickerRow::Model { slug } => slug.clone(),
-                });
+        match self.browser.handle_key(action, 0) {
+            BrowserAction::Cancelled => self.close(),
+            BrowserAction::Selected => {
+                self.picked = self.browser.selected().map(|row| row.value.clone());
                 self.close();
             }
-            _ => {}
+            BrowserAction::Consumed => {}
         }
     }
 }
@@ -110,38 +94,26 @@ impl crate::wm::modal::ModalOverlay for ModelPicker {
             rows[0],
         );
 
-        let picker_rows = self.rows();
-        let items: Vec<ListItem> = picker_rows
-            .iter()
-            .enumerate()
-            .map(|(i, row)| {
-                let selected = i == self.selected;
-                let style = if selected {
+        self.browser.set_visible_rows(rows[1].height as usize);
+        let visible = self.browser.visible_rows(rows[1].height as usize);
+        let lines = visible
+            .map(|index| {
+                let row = &self.browser.rows()[index];
+                let style = if index == self.browser.selected_index() {
                     Style::default()
                         .fg(t.accent.into())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
-                let line = match row {
-                    PickerRow::Alias { name, model } => Line::from(vec![
-                        Span::styled(format!(" {name:<10}"), style),
-                        Span::styled(" → ", Style::default().fg(t.meta_fg.into())),
-                        Span::styled(model.clone(), style),
-                    ]),
-                    PickerRow::Model { slug } => {
-                        Line::from(Span::styled(format!(" {slug}"), style))
-                    }
-                };
-                ListItem::new(line)
+                Line::from(Span::styled(format!(" {}", row.label), style))
             })
-            .collect();
-        let mut state = ListState::default().with_selected(Some(self.selected));
-        f.render_stateful_widget(List::new(items), rows[1], &mut state);
+            .collect::<Vec<_>>();
+        f.render_widget(Paragraph::new(lines), rows[1]);
 
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "↑↓/j/k navigate · Enter select · Esc cancel",
+                "↑↓/j/k navigate · PgUp/PgDn scroll · Enter select · Esc cancel",
                 Style::default().fg(t.meta_fg.into()),
             )))
             .alignment(ratatui::layout::Alignment::Right),

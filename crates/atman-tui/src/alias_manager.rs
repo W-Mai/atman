@@ -7,6 +7,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::input::InputEditor;
 use crate::keys::KeyAction;
+use crate::model_browser::{BrowserRow, BrowserRowKind, ModelBrowser};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Focus {
@@ -29,6 +30,7 @@ pub struct AliasManager {
     focus: Focus,
     provider_idx: usize,
     model_idx: Vec<usize>,
+    browser: ModelBrowser,
 }
 
 impl AliasManager {
@@ -69,7 +71,27 @@ impl AliasManager {
             .collect();
         self.model_idx = vec![0; self.groups.len()];
         self.provider_idx = 0;
+        self.sync_browser(None);
         self.focus = Focus::NameInput;
+    }
+
+    fn sync_browser(&mut self, selected: Option<&str>) {
+        let mut rows = Vec::new();
+        for group in &self.groups {
+            rows.push(BrowserRow {
+                kind: BrowserRowKind::Provider,
+                label: atman_runtime::model_registry::provider_display_name(&group.provider_name),
+                value: group.provider_name.clone(),
+                selectable: false,
+            });
+            rows.extend(group.models.iter().map(|model| BrowserRow {
+                kind: BrowserRowKind::Model,
+                label: model.slug.clone(),
+                value: model.slug.clone(),
+                selectable: true,
+            }));
+        }
+        self.browser.replace_rows(rows, selected);
     }
 
     pub fn open_form_with_model(&mut self, model: &str) {
@@ -99,10 +121,28 @@ impl AliasManager {
             if let Some(mi) = g.models.iter().position(|m| m.slug == slug) {
                 self.provider_idx = pi;
                 self.model_idx[pi] = mi;
+                self.sync_browser(Some(slug));
                 self.focus = Focus::Tree;
                 return;
             }
         }
+    }
+
+    fn apply_browser_selection(&mut self) {
+        let Some(row) = self.browser.selected() else {
+            return;
+        };
+        let Some((pi, mi)) = self.groups.iter().enumerate().find_map(|(pi, group)| {
+            group
+                .models
+                .iter()
+                .position(|model| model.slug == row.value)
+                .map(|mi| (pi, mi))
+        }) else {
+            return;
+        };
+        self.provider_idx = pi;
+        self.model_idx[pi] = mi;
     }
 
     fn current_model(&self) -> Option<&atman_runtime::model_registry::ModelRow> {
@@ -184,32 +224,26 @@ impl AliasManager {
                         return;
                     }
                     self.provider_idx = (self.provider_idx + 1) % total;
+                    let selected = self.current_model().map(|model| model.slug.clone());
+                    self.sync_browser(selected.as_deref());
                     if self.provider_idx == 0 && total > 0 {
                         self.focus = Focus::NameInput;
                     }
                 }
-                KeyAction::HistoryUp | KeyAction::Char('k') => {
-                    if self.groups.is_empty() {
-                        return;
-                    }
-                    if self.model_idx[self.provider_idx] > 0 {
-                        self.model_idx[self.provider_idx] -= 1;
-                    } else if self.provider_idx > 0 {
-                        self.provider_idx -= 1;
-                        let prev = &self.groups[self.provider_idx];
-                        self.model_idx[self.provider_idx] = prev.models.len().saturating_sub(1);
-                    }
+                KeyAction::HistoryUp
+                | KeyAction::Char('k')
+                | KeyAction::PageUp
+                | KeyAction::Home => {
+                    self.browser.handle_key(action, 0);
+                    self.apply_browser_selection();
                 }
-                KeyAction::HistoryDown | KeyAction::Char('j') => {
-                    if self.groups.is_empty() {
-                        return;
-                    }
-                    let g = &self.groups[self.provider_idx];
-                    if self.model_idx[self.provider_idx] + 1 < g.models.len() {
-                        self.model_idx[self.provider_idx] += 1;
-                    } else if self.provider_idx + 1 < self.groups.len() {
-                        self.provider_idx += 1;
-                        self.model_idx[self.provider_idx] = 0;
+                KeyAction::HistoryDown
+                | KeyAction::Char('j')
+                | KeyAction::PageDown
+                | KeyAction::End => {
+                    self.browser.handle_key(action, 0);
+                    if let Some(row) = self.browser.selected() {
+                        self.select_model(&row.value.clone());
                     }
                 }
                 KeyAction::CursorLeft | KeyAction::CursorRight => {
@@ -268,7 +302,7 @@ impl AliasManager {
 fn render_tree_panel(
     f: &mut ratatui::Frame,
     area: Rect,
-    mgr: &AliasManager,
+    mgr: &mut AliasManager,
     theme: &crate::theme::Theme,
 ) {
     let mut lines: Vec<Line> = vec![];
@@ -291,31 +325,33 @@ fn render_tree_panel(
     )));
     lines.push(Line::from(""));
 
-    for (pi, grp) in mgr.groups.iter().enumerate() {
-        let is_active = mgr.focus == Focus::Tree && mgr.provider_idx == pi;
-        let hdr_style = crate::directional_selector::value_style(theme, is_active);
-        let provider_label =
-            atman_runtime::model_registry::provider_display_name(&grp.provider_name);
+    let browser_height = area.height.saturating_sub(2) as usize;
+    mgr.browser.set_visible_rows(browser_height);
+    for index in mgr.browser.visible_rows(browser_height) {
+        let row = &mgr.browser.rows()[index];
+        let selected = mgr.focus == Focus::Tree && index == mgr.browser.selected_index();
+        let style = if selected {
+            Style::default()
+                .fg(theme.accent.into())
+                .add_modifier(Modifier::BOLD)
+        } else if row.kind == BrowserRowKind::Provider {
+            Style::default()
+                .fg(theme.heading.into())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.tinted_fg.into())
+        };
+        let prefix = if selected {
+            " ▶"
+        } else if row.kind == BrowserRowKind::Provider {
+            "▸ "
+        } else {
+            "  "
+        };
         lines.push(Line::from(Span::styled(
-            format!("▸ {provider_label}"),
-            hdr_style,
+            format!("{}{}", prefix, row.label),
+            style,
         )));
-
-        for (mi, m) in grp.models.iter().enumerate() {
-            let is_sel = is_active && mgr.model_idx[pi] == mi;
-            let style = if is_sel {
-                Style::default()
-                    .fg(theme.accent.into())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.tinted_fg.into())
-            };
-            let prefix = if is_sel { " ▶" } else { "  " };
-            lines.push(Line::from(Span::styled(
-                format!("{} {}", prefix, m.slug),
-                style,
-            )));
-        }
     }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
