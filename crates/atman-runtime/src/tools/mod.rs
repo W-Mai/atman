@@ -12,6 +12,7 @@ pub mod form;
 pub mod fs;
 pub mod git;
 pub mod git_branch;
+pub mod git_history;
 pub mod git_ops;
 pub mod git_workspace;
 pub mod git_worktree;
@@ -103,6 +104,10 @@ pub fn register_git_ops(reg: &ToolRegistry) {
     reg.register(Arc::new(git_ops::GitFetch));
     reg.register(Arc::new(git_ops::GitBranch));
     reg.register(Arc::new(git_ops::GitPush));
+    reg.register(Arc::new(git_history::GitRestore));
+    reg.register(Arc::new(git_history::GitRevert));
+    reg.register(Arc::new(git_history::GitTagList));
+    reg.register(Arc::new(git_history::GitTagCreate));
     reg.register(Arc::new(git_branch::GitBranchList));
     reg.register(Arc::new(git_branch::GitBranchCreate));
     reg.register(Arc::new(git_branch::GitBranchSwitch));
