@@ -8,6 +8,81 @@ use crate::value::Value;
 
 pub struct GitDiff;
 
+pub struct GitInit;
+
+impl Tool for GitInit {
+    fn name(&self) -> &str {
+        "git.init"
+    }
+
+    fn tier(&self) -> Tier {
+        Tier::Two
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Initialize a Git repository using libgit2, without spawning git.")
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "cwd": {"type": "string", "description": "Directory to initialize; defaults to the current directory."},
+                "initial_branch": {"type": "string", "description": "Initial branch name; uses libgit2's configured default when omitted."},
+                "bare": {"type": "boolean", "description": "Create a bare repository."}
+            }
+        })
+    }
+
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let path = match args.named("cwd") {
+                Some(Value::Path(path)) => path.clone(),
+                Some(Value::Str(path)) => PathBuf::from(path),
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "string".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+                None => std::env::current_dir()
+                    .map_err(|e| RuntimeError::ToolFailed(format!("git.init: {e}")))?,
+            };
+            let bare = match args.named("bare") {
+                Some(Value::Bool(bare)) => *bare,
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "boolean".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+                None => false,
+            };
+            let initial_branch = match args.named("initial_branch") {
+                Some(Value::Str(branch)) => Some(branch.as_str()),
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "string".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+                None => None,
+            };
+            let info = git::init_repository(&path, bare, initial_branch)
+                .map_err(|e| RuntimeError::ToolFailed(format!("git.init: {e}")))?;
+            Ok(Value::Struct(vec![
+                ("path".into(), Value::Path(info.path)),
+                (
+                    "workdir".into(),
+                    info.workdir.map(Value::Path).unwrap_or(Value::Unit),
+                ),
+                ("git_dir".into(), Value::Path(info.git_dir)),
+                ("bare".into(), Value::Bool(info.bare)),
+            ]))
+        })
+    }
+}
+
 impl Tool for GitDiff {
     fn name(&self) -> &str {
         "git.diff"

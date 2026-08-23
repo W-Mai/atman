@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use git2::{BranchType, Commit, Diff, DiffFormat, Repository, Status, StatusOptions};
 
+pub use super::git::GitInit;
+
 use crate::error::RuntimeError;
 use crate::stream::StreamFrame;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};

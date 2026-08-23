@@ -21,13 +21,53 @@ pub enum GitError {
     NotARepo(PathBuf),
 }
 
-pub fn discover_toplevel(start: &Path) -> Result<PathBuf> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryInfo {
+    pub path: PathBuf,
+    pub workdir: Option<PathBuf>,
+    pub git_dir: PathBuf,
+    pub bare: bool,
+}
+
+impl RepositoryInfo {
+    fn from_repository(repo: &git2::Repository, requested: &Path) -> Self {
+        Self {
+            path: canonical_path(requested),
+            workdir: repo.workdir().map(canonical_path),
+            git_dir: canonical_path(repo.path()),
+            bare: repo.is_bare(),
+        }
+    }
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub fn init_repository(
+    path: &Path,
+    bare: bool,
+    initial_branch: Option<&str>,
+) -> Result<RepositoryInfo> {
+    let mut options = git2::RepositoryInitOptions::new();
+    options.bare(bare);
+    if let Some(branch) = initial_branch {
+        options.initial_head(branch);
+    }
+    let repo = git2::Repository::init_opts(path, &options)?;
+    Ok(RepositoryInfo::from_repository(&repo, path))
+}
+
+pub fn discover_repository(start: &Path) -> Result<RepositoryInfo> {
     let repo =
         git2::Repository::discover(start).map_err(|_| GitError::NotARepo(start.to_path_buf()))?;
-    let workdir = repo
-        .workdir()
-        .ok_or_else(|| GitError::NotARepo(start.to_path_buf()))?;
-    Ok(workdir.to_path_buf())
+    Ok(RepositoryInfo::from_repository(&repo, start))
+}
+
+pub fn discover_toplevel(start: &Path) -> Result<PathBuf> {
+    discover_repository(start)?
+        .workdir
+        .ok_or_else(|| GitError::NotARepo(start.to_path_buf()))
 }
 
 pub fn diff_range(cwd: &Path, range: &str, paths: &[String]) -> Result<DiffResult> {
@@ -291,6 +331,62 @@ mod tests {
         std::fs::write(dir.join("c.txt"), "new file\n").unwrap();
         cli.add_all().unwrap();
         cli.commit("second").unwrap();
+    }
+
+    #[test]
+    fn init_repository_supports_empty_and_non_empty_directories() {
+        let empty = tempfile::tempdir().unwrap();
+        let info = init_repository(empty.path(), false, None).unwrap();
+        assert!(!info.bare);
+        assert_eq!(info.workdir, Some(empty.path().canonicalize().unwrap()));
+        assert!(info.git_dir.is_dir());
+
+        let non_empty = tempfile::tempdir().unwrap();
+        std::fs::write(non_empty.path().join("README.md"), "content\n").unwrap();
+        let info = init_repository(non_empty.path(), false, None).unwrap();
+        assert!(!info.bare);
+        assert_eq!(info.workdir, Some(non_empty.path().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn init_repository_sets_initial_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let info = init_repository(tmp.path(), false, Some("trunk")).unwrap();
+        let repo = git2::Repository::open(info.path).unwrap();
+        assert_eq!(
+            repo.find_reference("HEAD").unwrap().symbolic_target(),
+            Some("refs/heads/trunk")
+        );
+    }
+
+    #[test]
+    fn init_repository_supports_bare_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let info = init_repository(tmp.path(), true, None).unwrap();
+        assert!(info.bare);
+        assert_eq!(info.workdir, None);
+        assert_eq!(info.git_dir, tmp.path().canonicalize().unwrap());
+        assert!(tmp.path().join("HEAD").is_file());
+    }
+
+    #[test]
+    fn git_init_discover_reports_worktree_and_bare_repositories() {
+        let worktree = tempfile::tempdir().unwrap();
+        init_repository(worktree.path(), false, None).unwrap();
+        let nested = worktree.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let info = discover_repository(&nested).unwrap();
+        assert!(!info.bare);
+        assert_eq!(
+            std::fs::canonicalize(info.workdir.as_ref().unwrap()).unwrap(),
+            std::fs::canonicalize(worktree.path()).unwrap()
+        );
+
+        let bare = tempfile::tempdir().unwrap();
+        init_repository(bare.path(), true, None).unwrap();
+        let info = discover_repository(bare.path()).unwrap();
+        assert!(info.bare);
+        assert_eq!(info.workdir, None);
     }
 
     #[test]
