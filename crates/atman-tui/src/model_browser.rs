@@ -176,6 +176,13 @@ impl ModelBrowser {
         } else if self.selected >= self.viewport + height {
             self.viewport = self.selected + 1 - height;
         }
+        if height > 1
+            && self.selected > 0
+            && self.rows[self.selected].kind == BrowserRowKind::Model
+            && self.rows[self.selected - 1].kind == BrowserRowKind::Provider
+        {
+            self.viewport = self.viewport.min(self.selected - 1);
+        }
         self.viewport = self.viewport.min(self.rows.len().saturating_sub(height));
     }
 }
@@ -256,6 +263,40 @@ mod tests {
         b.handle_key(&KeyAction::Char('j'), 2);
         assert_eq!(b.selected().unwrap().value, "second");
         assert_eq!(b.viewport(), 1);
+    }
+
+    #[test]
+    fn returning_to_group_first_model_reveals_provider_header() {
+        let mut b = ModelBrowser::new(
+            vec![
+                BrowserRow {
+                    kind: BrowserRowKind::Provider,
+                    label: "provider".into(),
+                    value: "provider".into(),
+                    selectable: false,
+                },
+                BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: "first".into(),
+                    value: "first".into(),
+                    selectable: true,
+                },
+                BrowserRow {
+                    kind: BrowserRowKind::Model,
+                    label: "second".into(),
+                    value: "second".into(),
+                    selectable: true,
+                },
+            ],
+            None,
+        );
+        b.set_visible_rows(2);
+        b.handle_key(&KeyAction::End, 0);
+        assert_eq!(b.viewport(), 1);
+        b.handle_key(&KeyAction::Home, 0);
+        assert_eq!(b.selected().unwrap().value, "first");
+        assert_eq!(b.viewport(), 0);
+        assert_eq!(b.visible_rows(2).start, 0);
     }
 
     #[test]
