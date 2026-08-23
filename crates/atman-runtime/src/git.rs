@@ -440,6 +440,18 @@ impl GitCli {
         self.run(&["add", "."]).map(|_| ())
     }
 
+    pub fn switch_branch(&self, name: &str, create: bool, start: Option<&str>) -> Result<()> {
+        let mut args = vec!["switch"];
+        if create {
+            args.push("-c");
+        }
+        args.push(name);
+        if let Some(start) = start {
+            args.push(start);
+        }
+        self.run(&args).map(|_| ())
+    }
+
     pub fn commit(&self, message: &str) -> Result<()> {
         self.commit_with_options(message, false).map(|_| ())
     }
@@ -461,12 +473,96 @@ impl GitCli {
         self.run(&["push", "-u", remote, branch])
     }
 
+    pub fn push_with_lease(
+        &self,
+        remote: &str,
+        branch: &str,
+        force_with_lease: bool,
+    ) -> Result<String> {
+        let mut args = vec!["push", "-u"];
+        if force_with_lease {
+            args.push("--force-with-lease");
+        }
+        args.extend([remote, branch]);
+        self.run(&args)
+    }
+
+    pub fn branch_list(&self) -> Result<Vec<String>> {
+        Ok(self
+            .run(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    pub fn branch_create(&self, name: &str, start: Option<&str>) -> Result<()> {
+        let mut args = vec!["branch", name];
+        if let Some(start) = start {
+            args.push(start);
+        }
+        self.run(&args).map(|_| ())
+    }
+
+    pub fn branch_switch(&self, name: &str) -> Result<()> {
+        self.run(&["switch", name]).map(|_| ())
+    }
+
+    pub fn branch_delete(&self, name: &str, force: bool) -> Result<()> {
+        let active = self
+            .worktree_list()?
+            .into_iter()
+            .any(|entry| entry.branch.as_deref() == Some(&format!("refs/heads/{name}")));
+        if active {
+            return Err(GitError::InvalidWorktree(format!(
+                "branch {name} is checked out in a worktree"
+            )));
+        }
+        let flag = if force { "-D" } else { "-d" };
+        self.run(&["branch", flag, name]).map(|_| ())
+    }
+
+    pub fn branch_rename(&self, old: &str, new: &str) -> Result<()> {
+        let active = self
+            .worktree_list()?
+            .into_iter()
+            .any(|entry| entry.branch.as_deref() == Some(&format!("refs/heads/{old}")));
+        if active {
+            return Err(GitError::InvalidWorktree(format!(
+                "branch {old} is checked out in a worktree"
+            )));
+        }
+        self.run(&["branch", "-m", old, new]).map(|_| ())
+    }
+
+    pub fn remote_list(&self) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .run(&["remote", "-v"])?
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let name = parts.next()?;
+                let url = parts.next()?;
+                let kind = parts.next()?;
+                (kind == "(fetch)").then(|| (name.to_owned(), url.to_owned()))
+            })
+            .collect())
+    }
+
     pub fn pull_rebase(&self, remote: &str, branch: &str) -> Result<String> {
         self.run(&["pull", "--rebase", remote, branch])
     }
 
     pub fn fetch(&self, remote: &str, branch: &str) -> Result<()> {
         self.run(&["fetch", remote, branch]).map(|_| ())
+    }
+
+    pub fn fetch_remote(&self, remote: &str, refspec: Option<&str>) -> Result<String> {
+        match refspec {
+            Some(refspec) => self.run(&["fetch", remote, refspec]),
+            None => self.run(&["fetch", remote]),
+        }
     }
 
     pub fn reset_hard(&self, target: &str) -> Result<()> {

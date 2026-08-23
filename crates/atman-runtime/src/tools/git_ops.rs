@@ -405,6 +405,7 @@ impl Tool for GitPush {
             "properties": {
                 "remote": {"type": "string", "default": "origin", "description": "Remote name."},
                 "branch": {"type": "string", "description": "Branch name; defaults to current branch."},
+                "force_with_lease": {"type": "boolean", "default": false, "description": "Use lease-protected force push."},
                 "cwd": {"type": "string", "description": "Optional working dir; defaults to current process directory."}
             }
         })
@@ -419,8 +420,14 @@ impl Tool for GitPush {
                 Some(branch) => branch,
                 None => current_branch(&cwd)?,
             };
+            let force_with_lease =
+                extract_optional_bool(&args, "force_with_lease").unwrap_or(false);
             let mut child = tokio::process::Command::new("git");
-            child.args(["push", &remote, &branch]).current_dir(&cwd);
+            child.args(["push", "-u"]);
+            if force_with_lease {
+                child.arg("--force-with-lease");
+            }
+            child.args([&remote, &branch]).current_dir(&cwd);
             let output = tokio::time::timeout(Duration::from_secs(300), child.output())
                 .await
                 .map_err(|_| RuntimeError::ToolFailed("git.push timeout after 300s".into()))?
@@ -437,6 +444,7 @@ impl Tool for GitPush {
                 ("ok".into(), Value::Bool(output.status.success())),
                 ("remote".into(), Value::Str(remote)),
                 ("branch".into(), Value::Str(branch)),
+                ("force_with_lease".into(), Value::Bool(force_with_lease)),
                 ("output".into(), Value::Str(combined)),
             ]))
         })
