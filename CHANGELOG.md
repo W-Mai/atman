@@ -6,8 +6,19 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-08-23
+
+### ✨ Features
+
+- **Anchor-based file tools** — read, edit, write, and undo file changes using stable content anchors.
+- **Unified model browsing** — Model Manager, Alias Manager, and Switch Model share consistent navigation with scrolling, paging, and visible selection state.
+
 ### 🐛 Fixes
 
+- **Codex account model identity** — multiple OAuth accounts remain distinct in model management and routing, including accounts with the same provider name.
+- **Output pagination** — paginated tool results continue from the original output without creating nested output wrappers.
+- **Tool output defaults** — default output pages provide up to 256 lines and 10 KiB while preserving explicit configuration overrides.
+- **UTF-8 extract errors** — truncated `llm.extract` responses produce safe diagnostics and identify incomplete JSON objects without panicking.
 - **Codex context accounting** — cached input tokens are counted once when tracking the effective context window.
 
 ## [1.9.0] — 2026-08-22
