@@ -386,9 +386,9 @@ pub struct ToolOutputBudget {
 impl Default for ToolOutputBudget {
     fn default() -> Self {
         Self {
-            max_lines: 32,
-            max_bytes: 1024,
-            max_line_bytes: 384,
+            max_lines: 256,
+            max_bytes: 10 * 1024,
+            max_line_bytes: 10 * 1024,
         }
     }
 }

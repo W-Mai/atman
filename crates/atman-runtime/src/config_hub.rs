@@ -1341,7 +1341,11 @@ mod tests {
         let (dir, hub) = temp_hub();
         assert_eq!(
             hub.tool_output_budget().unwrap(),
-            crate::tools::tool_output::ToolOutputBudget::default()
+            crate::tools::tool_output::ToolOutputBudget {
+                max_lines: 256,
+                max_bytes: 10 * 1024,
+                max_line_bytes: 10 * 1024,
+            }
         );
         write_config(
             &hub,
