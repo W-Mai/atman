@@ -925,6 +925,56 @@ mod tests {
     }
 
     #[test]
+    fn git_cli_fetches_from_local_bare_remote() {
+        if !have_git() {
+            eprintln!("skip");
+            return;
+        }
+        let source = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        let cli = GitCli::at(source.path());
+        cli.init("main").unwrap();
+        for (key, value) in [
+            ("user.email", "t@atman.local"),
+            ("user.name", "atman test"),
+            ("commit.gpgsign", "false"),
+        ] {
+            cli.run(&["config", key, value]).unwrap();
+        }
+        std::fs::write(source.path().join("a.txt"), "one\n").unwrap();
+        cli.add_all().unwrap();
+        cli.commit("initial").unwrap();
+        GitCli::at(remote.path())
+            .run(&["init", "--bare", "-q"])
+            .unwrap();
+        cli.remote_add("origin", remote.path().to_str().unwrap())
+            .unwrap();
+        cli.run(&["push", "-q", "origin", "main"]).unwrap();
+        let clone = tempfile::tempdir().unwrap();
+        GitCli::at(clone.path())
+            .run(&["clone", "-q", remote.path().to_str().unwrap(), "."])
+            .unwrap();
+        std::fs::write(clone.path().join("b.txt"), "two\n").unwrap();
+        let clone_cli = GitCli::at(clone.path());
+        clone_cli
+            .run(&["config", "user.email", "t@atman.local"])
+            .unwrap();
+        clone_cli
+            .run(&["config", "user.name", "atman test"])
+            .unwrap();
+        clone_cli.add_all().unwrap();
+        clone_cli.commit("second").unwrap();
+        clone_cli.run(&["push", "-q", "origin", "main"]).unwrap();
+        cli.run(&["fetch", "origin"]).unwrap();
+        assert!(
+            !cli.run(&["rev-parse", "origin/main"])
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn git_cli_commit_honors_amend_and_hooks() {
         if !have_git() {
             eprintln!("skip");

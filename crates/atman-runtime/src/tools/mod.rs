@@ -100,6 +100,7 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
 pub fn register_git_ops(reg: &ToolRegistry) {
     reg.register(Arc::new(git_ops::GitAdd));
     reg.register(Arc::new(git_ops::GitCommit));
+    reg.register(Arc::new(git_ops::GitFetch));
     reg.register(Arc::new(git_ops::GitBranch));
     reg.register(Arc::new(git_ops::GitPush));
     reg.register(Arc::new(git_branch::GitBranchList));

@@ -380,7 +380,46 @@ impl Tool for GitBranch {
     }
 }
 
+pub struct GitFetch;
 pub struct GitPush;
+
+impl Tool for GitFetch {
+    fn name(&self) -> &str {
+        "git.fetch"
+    }
+    fn tier(&self) -> Tier {
+        Tier::Two
+    }
+    fn approval_level(&self, _args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
+        ApprovalLevel::Approve
+    }
+    fn description(&self) -> Option<&str> {
+        Some("Fetch refs from a remote without changing the worktree.")
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"remote":{"type":"string","default":"origin"},"prune":{"type":"boolean","default":false},"cwd":{"type":"string"}}})
+    }
+    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let remote =
+                extract_optional_string(&args, "remote").unwrap_or_else(|| "origin".into());
+            let cwd = extract_cwd(&args, "git.fetch cwd")?;
+            let prune = extract_optional_bool(&args, "prune").unwrap_or(false);
+            let cli = crate::git::GitCli::at(&cwd);
+            let output = if prune {
+                cli.run(&["fetch", "--prune", &remote])
+            } else {
+                cli.run(&["fetch", &remote])
+            };
+            let output = output.map_err(|e| RuntimeError::ToolFailed(format!("git.fetch: {e}")))?;
+            Ok(Value::Struct(vec![
+                ("remote".into(), Value::Str(remote)),
+                ("prune".into(), Value::Bool(prune)),
+                ("output".into(), Value::Str(output)),
+            ]))
+        })
+    }
+}
 
 impl Tool for GitPush {
     fn name(&self) -> &str {
@@ -420,6 +459,20 @@ impl Tool for GitPush {
                 Some(branch) => branch,
                 None => current_branch(&cwd)?,
             };
+            if remote.is_empty()
+                || branch.is_empty()
+                || branch.starts_with('-')
+                || remote.starts_with('-')
+            {
+                return Err(RuntimeError::ToolFailed(
+                    "git.push: remote and branch must be non-empty names".into(),
+                ));
+            }
+            if branch == ":" || branch.starts_with(':') || branch.contains("..") {
+                return Err(RuntimeError::ToolFailed(
+                    "git.push: ref deletion and ambiguous refspecs are not allowed".into(),
+                ));
+            }
             let force_with_lease =
                 extract_optional_bool(&args, "force_with_lease").unwrap_or(false);
             let mut child = tokio::process::Command::new("git");
