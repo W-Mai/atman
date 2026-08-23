@@ -265,7 +265,20 @@ impl GitCli {
     }
 
     pub fn commit(&self, message: &str) -> Result<()> {
-        self.run(&["commit", "-m", message]).map(|_| ())
+        self.commit_with_options(message, false).map(|_| ())
+    }
+
+    pub fn commit_with_options(&self, message: &str, amend: bool) -> Result<String> {
+        let mut args = vec!["commit", "-m", message];
+        if amend {
+            args.insert(1, "--amend");
+        }
+        self.run(&args)
+    }
+
+    pub fn head_oid(&self) -> Result<String> {
+        self.run(&["rev-parse", "HEAD"])
+            .map(|output| output.trim().to_string())
     }
 
     pub fn push(&self, remote: &str, branch: &str) -> Result<String> {
@@ -506,6 +519,44 @@ mod tests {
             .unwrap();
         let list = cli.run(&["remote", "get-url", "origin"]).unwrap();
         assert!(list.contains("other.git"), "want reset url: {list}");
+    }
+
+    #[test]
+    fn git_cli_commit_honors_amend_and_hooks() {
+        if !have_git() {
+            eprintln!("skip");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = GitCli::at(tmp.path());
+        cli.init("main").unwrap();
+        cli.run(&["config", "user.name", "atman test"]).unwrap();
+        cli.run(&["config", "user.email", "test@atman.local"])
+            .unwrap();
+        std::fs::write(tmp.path().join("file.txt"), "one\n").unwrap();
+        cli.add_all().unwrap();
+        cli.commit_with_options("first\n\nbody", false).unwrap();
+        let first = cli.head_oid().unwrap();
+        std::fs::write(tmp.path().join("file.txt"), "two\n").unwrap();
+        cli.add_all().unwrap();
+        cli.commit_with_options("amended", true).unwrap();
+        assert_ne!(first, cli.head_oid().unwrap());
+        assert_eq!(
+            cli.run(&["log", "-1", "--format=%B"]).unwrap().trim(),
+            "amended"
+        );
+
+        let hook = tmp.path().join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 17\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(tmp.path().join("file.txt"), "three\n").unwrap();
+        cli.add_all().unwrap();
+        let err = cli.commit_with_options("blocked", false).unwrap_err();
+        assert!(matches!(err, GitError::ExitNonZero { .. }));
     }
 
     #[test]

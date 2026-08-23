@@ -305,44 +305,14 @@ impl Tool for GitCommit {
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.commit: {e}")))?;
             let files_count = staged_count(&repo, "git.commit")?;
-            let mut index = repo
-                .index()
+            let cli = crate::git::GitCli::at(&cwd);
+            cli.commit_with_options(&message, amend)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.commit: {e}")))?;
-            let tree_id = index
-                .write_tree()
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.commit: {e}")))?;
-            let tree = repo
-                .find_tree(tree_id)
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.commit: {e}")))?;
-            let sig = repo
-                .signature()
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.commit signature: {e}")))?;
-            let head = repo
-                .head()
+            let sha = cli
+                .head_oid()
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.commit head: {e}")))?;
-            let parent = head
-                .peel_to_commit()
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.commit head: {e}")))?;
-            let oid = if amend {
-                parent
-                    .amend(
-                        Some("HEAD"),
-                        Some(&sig),
-                        Some(&sig),
-                        None,
-                        Some(&message),
-                        Some(&tree),
-                    )
-                    .map_err(|e| RuntimeError::ToolFailed(format!("git.commit amend: {e}")))?
-            } else {
-                repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &[&parent])
-                    .map_err(|e| RuntimeError::ToolFailed(format!("git.commit: {e}")))?
-            };
-            index
-                .write()
-                .map_err(|e| RuntimeError::ToolFailed(format!("git.commit index: {e}")))?;
             Ok(Value::Struct(vec![
-                ("sha".into(), Value::Str(oid.to_string())),
+                ("sha".into(), Value::Str(sha)),
                 ("message".into(), Value::Str(message)),
                 ("files_count".into(), Value::Int(files_count)),
             ]))
