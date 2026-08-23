@@ -282,6 +282,7 @@ impl GitCli {
                 target.display()
             )));
         }
+        let branch = branch.map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch));
         if let Some(branch) = branch {
             let full_branch = format!("refs/heads/{branch}");
             if worktrees

@@ -12,6 +12,7 @@ pub mod form;
 pub mod fs;
 pub mod git;
 pub mod git_ops;
+pub mod git_workspace;
 pub mod git_worktree;
 pub mod help;
 pub mod hunk;
@@ -106,6 +107,12 @@ pub fn register_git_ops(reg: &ToolRegistry) {
     reg.register(Arc::new(git_worktree::GitWorktreePrune));
     reg.register(Arc::new(git_worktree::GitWorktreeLock));
     reg.register(Arc::new(git_worktree::GitWorktreeUnlock));
+    reg.register(Arc::new(git_workspace::GitWorkspaceCreate));
+    reg.register(Arc::new(git_workspace::GitWorkspaceList));
+    reg.register(Arc::new(git_workspace::GitWorkspaceGet));
+    reg.register(Arc::new(git_workspace::GitWorkspaceRelease));
+    reg.register(Arc::new(git_workspace::GitWorkspaceRetain));
+    reg.register(Arc::new(git_workspace::GitWorkspacePrune));
 }
 
 pub fn register_watch(reg: &ToolRegistry) {
