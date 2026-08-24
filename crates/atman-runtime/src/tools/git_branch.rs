@@ -14,11 +14,12 @@ pub struct GitBranchRename;
 pub struct GitBranchDelete;
 pub struct GitRemoteList;
 
-fn cwd(args: &ToolArgs) -> PathBuf {
-    match args.named("cwd") {
-        Some(Value::Str(path)) => PathBuf::from(path),
-        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    }
+fn cwd(args: &ToolArgs, ctx: &ToolCtx) -> Result<PathBuf, RuntimeError> {
+    let explicit = args.named("cwd").and_then(|value| match value {
+        Value::Str(path) => Some(std::path::Path::new(path)),
+        _ => None,
+    });
+    ctx.resolve_cwd(explicit)
 }
 
 fn string_arg<'a>(args: &'a ToolArgs, name: &str) -> Result<&'a str, RuntimeError> {
@@ -54,8 +55,20 @@ fn bool_arg(args: &ToolArgs, name: &str, default: bool) -> Result<bool, RuntimeE
     }
 }
 
-fn repo(args: &ToolArgs, tool: &str) -> Result<(PathBuf, Repository), RuntimeError> {
-    let cwd = cwd(args);
+fn repo(args: &ToolArgs, ctx: &ToolCtx, tool: &str) -> Result<(PathBuf, Repository), RuntimeError> {
+    let cwd = cwd(args, ctx)?;
+    let repository = Repository::open(&cwd)
+        .map_err(|error| RuntimeError::ToolFailed(format!("{tool}: {error}")))?;
+    Ok((cwd, repository))
+}
+
+async fn repo_mut(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+    tool: &str,
+) -> Result<(PathBuf, Repository), RuntimeError> {
+    let cwd = cwd(args, ctx)?;
+    crate::fs_access::authorize_write(ctx, &cwd, tool, true).await?;
     let repository = Repository::open(&cwd)
         .map_err(|error| RuntimeError::ToolFailed(format!("{tool}: {error}")))?;
     Ok((cwd, repository))
@@ -96,9 +109,9 @@ impl Tool for GitBranchList {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (_, repository) = repo(&args, self.name())?;
+            let (_, repository) = repo(&args, ctx, self.name())?;
             let current = repository
                 .head()
                 .ok()
@@ -138,9 +151,9 @@ impl Tool for GitBranchCreate {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"},"start":{"type":"string"},"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (_, repository) = repo(&args, self.name())?;
+            let (_, repository) = repo_mut(&args, ctx, self.name()).await?;
             let name = string_arg(&args, "name")?;
             let start = optional_string(&args, "start")?;
             let commit = match start {
@@ -180,9 +193,9 @@ impl Tool for GitBranchSwitch {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"},"create":{"type":"boolean"},"start":{"type":"string"},"force":{"type":"boolean"},"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (cwd, repository) = repo(&args, self.name())?;
+            let (cwd, repository) = repo_mut(&args, ctx, self.name()).await?;
             let name = string_arg(&args, "name")?;
             let create = bool_arg(&args, "create", false)?;
             let force = bool_arg(&args, "force", false)?;
@@ -221,9 +234,9 @@ impl Tool for GitBranchRename {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["old","new"],"properties":{"old":{"type":"string"},"new":{"type":"string"},"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (_, repository) = repo(&args, self.name())?;
+            let (_, repository) = repo_mut(&args, ctx, self.name()).await?;
             let old = string_arg(&args, "old")?;
             let new = string_arg(&args, "new")?;
             let mut branch = repository
@@ -256,9 +269,9 @@ impl Tool for GitBranchDelete {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"},"force":{"type":"boolean"},"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (_, repository) = repo(&args, self.name())?;
+            let (_, repository) = repo_mut(&args, ctx, self.name()).await?;
             let name = string_arg(&args, "name")?;
             if repository
                 .head()
@@ -299,9 +312,9 @@ impl Tool for GitRemoteList {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let (_, repository) = repo(&args, self.name())?;
+            let (_, repository) = repo(&args, ctx, self.name())?;
             let mut values = Vec::new();
             for name in repository
                 .remotes()

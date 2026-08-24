@@ -19,13 +19,11 @@ async fn main() -> Result<()> {
         .with_daemon_config_path(&config_path);
     migrate_legacy_layout_for_daemon(&hub, &data_dir)?;
     hub.migrate_and_reload_models()?;
-    let state = Arc::new(DaemonState::new(data_dir.clone()));
     let launcher = std::sync::Arc::new(atman_daemon::run::RunLauncher {
         project_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         config_dir: atman_daemon::bootstrap::default_config_dir().ok(),
         home_dir: std::env::var("HOME").ok().map(std::path::PathBuf::from),
     });
-    state.set_launcher(launcher);
 
     let pid_path = pidfile::default_pid_path()?;
     if let Some(existing) = pidfile::read_pid(&pid_path)?
@@ -37,6 +35,21 @@ async fn main() -> Result<()> {
         );
     }
     pidfile::write_pid(&pid_path, std::process::id())?;
+
+    let daemon_generation = uuid::Uuid::now_v7().to_string();
+    let state = Arc::new(DaemonState::new_with_generation(
+        data_dir.clone(),
+        daemon_generation,
+    ));
+    let reconciled =
+        atman_daemon::run::reconcile_workspaces(&launcher.project_root, state.daemon_generation())?;
+    if !reconciled.is_empty() {
+        eprintln!(
+            "[atman-daemon] marked {} stale workspace lease(s) orphaned",
+            reconciled.len()
+        );
+    }
+    state.set_launcher(launcher);
 
     let config = hub.load_or_init_daemon_config()?;
     println!(

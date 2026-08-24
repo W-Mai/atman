@@ -1,5 +1,8 @@
 use crate::error::RuntimeError;
 use crate::event::{Event, FlowRunId, FlowStatus};
+use crate::git_workspace::{
+    WorkspaceBinding, WorkspaceFinalizeOutcome, WorkspacePolicy, WorkspaceState,
+};
 use crate::message::Message;
 use crate::tool::{ApprovalLevel, BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
@@ -64,6 +67,9 @@ pub struct FlowEntry {
     pub pending_injections: Arc<std::sync::Mutex<Vec<crate::injection::Injection>>>,
     pub injection_notify: Arc<tokio::sync::Notify>,
     pub frame_tx: tokio::sync::broadcast::Sender<crate::stream::StreamFrame>,
+    pub workspace: Option<WorkspaceBinding>,
+    pub workspace_state: Arc<Mutex<Option<WorkspaceState>>>,
+    pub cleanup_error: Arc<Mutex<Option<String>>>,
 }
 
 impl crate::watch::Watchable for FlowEntry {
@@ -156,6 +162,17 @@ impl FlowRegistry {
         model: String,
         child_run_id: FlowRunId,
     ) -> Arc<FlowEntry> {
+        self.create_entry_with_workspace(handle, goal, model, child_run_id, None)
+    }
+
+    pub fn create_entry_with_workspace(
+        &self,
+        handle: String,
+        goal: String,
+        model: String,
+        child_run_id: FlowRunId,
+        workspace: Option<WorkspaceBinding>,
+    ) -> Arc<FlowEntry> {
         let (stream_tx, _) = tokio::sync::broadcast::channel(64);
         let entry = Arc::new(FlowEntry {
             handle: handle.clone(),
@@ -176,6 +193,11 @@ impl FlowRegistry {
             pending_injections: Arc::new(std::sync::Mutex::new(Vec::new())),
             injection_notify: Arc::new(tokio::sync::Notify::new()),
             frame_tx: tokio::sync::broadcast::channel(256).0,
+            workspace_state: Arc::new(Mutex::new(
+                workspace.as_ref().map(|_| WorkspaceState::Active),
+            )),
+            workspace,
+            cleanup_error: Arc::new(Mutex::new(None)),
         });
         self.entries
             .lock()
@@ -195,6 +217,10 @@ impl FlowRegistry {
 
     pub fn remove(&self, handle: &str) {
         self.entries.lock().unwrap().remove(handle);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.lock().unwrap().is_empty()
     }
 }
 
@@ -241,7 +267,8 @@ impl Tool for AgentSpawn {
                     "description": "Target flow parameters as key-value pairs. You MUST call flow.list first to discover the flow's description and parameter signatures (names, types, required/optional), then construct this object accordingly. Example: arguments={\"goal\":\"read Cargo.toml\",\"role\":\"research\"}"
                 },
                 "async": {"type": "boolean", "default": true, "description": "If true (default), run in background and return a handle. If false, block until done."},
-                "inherit_context": {"type": "boolean", "default": false, "description": "If true, seed the sub-agent's context with a snapshot of the parent's messages."}
+                "inherit_context": {"type": "boolean", "default": false, "description": "If true, seed the sub-agent's context with a snapshot of the parent's messages."},
+                "workspace": {"type": "string", "enum": ["none", "auto", "retain"], "default": "none", "description": "Workspace policy for the child flow."}
             },
             "required": ["flow"]
         })
@@ -268,9 +295,135 @@ impl Tool for AgentSpawn {
     }
 }
 
+fn workspace_policy(args: &ToolArgs) -> Result<WorkspacePolicy, RuntimeError> {
+    match args.named("workspace") {
+        None => Ok(WorkspacePolicy::None),
+        Some(Value::Str(value)) => value.parse().map_err(|error| {
+            RuntimeError::ToolFailed(format!("flow.spawn: invalid workspace policy: {error}"))
+        }),
+        Some(_) => Err(RuntimeError::ToolFailed(
+            "flow.spawn: workspace must be one of none, auto, or retain".into(),
+        )),
+    }
+}
+
+fn workspace_session(
+    ctx: &ToolCtx,
+    policy: WorkspacePolicy,
+) -> Result<Option<String>, RuntimeError> {
+    if policy == WorkspacePolicy::None {
+        return Ok(ctx.session_id.clone().filter(|id| !id.is_empty()));
+    }
+    ctx.session_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .map(Some)
+        .ok_or_else(|| {
+            RuntimeError::ToolFailed(
+                "flow.spawn: workspace auto/retain requires a non-empty session id".into(),
+            )
+        })
+}
+
+fn allocate_workspace(
+    ctx: &ToolCtx,
+    policy: WorkspacePolicy,
+    session_id: Option<&str>,
+    run_id: &FlowRunId,
+) -> Result<Option<WorkspaceBinding>, RuntimeError> {
+    if policy == WorkspacePolicy::None {
+        return Ok(None);
+    }
+    let service = ctx.flow_workspace_service.as_ref().ok_or_else(|| {
+        RuntimeError::ToolFailed("flow.spawn: workspace service is unavailable".into())
+    })?;
+    service
+        .allocate(
+            policy,
+            session_id.expect("validated managed workspace session"),
+            &run_id.0.to_string(),
+            ctx.workspace.as_ref().map(|binding| binding.path.as_path()),
+        )
+        .map_err(|error| RuntimeError::ToolFailed(format!("flow.spawn: {error}")))
+}
+
+fn finalize_workspace(
+    ctx: &ToolCtx,
+    binding: Option<&WorkspaceBinding>,
+    session_id: Option<&str>,
+    run_id: &FlowRunId,
+    state_projection: Option<&Arc<Mutex<Option<WorkspaceState>>>>,
+    error_projection: Option<&Arc<Mutex<Option<String>>>>,
+) {
+    let Some(binding) = binding else {
+        return;
+    };
+    let service = ctx.flow_workspace_service.as_ref();
+    let result = service
+        .ok_or_else(|| "workspace service is unavailable".to_string())
+        .and_then(|service| {
+            service
+                .finalize(
+                    binding,
+                    session_id.unwrap_or_default(),
+                    &run_id.0.to_string(),
+                )
+                .map_err(|error| error.to_string())
+        });
+    let (state, cleanup_error) = match result {
+        Ok(outcome) => {
+            let record = match outcome {
+                WorkspaceFinalizeOutcome::Released(record)
+                | WorkspaceFinalizeOutcome::Dirty(record)
+                | WorkspaceFinalizeOutcome::Retained(record)
+                | WorkspaceFinalizeOutcome::AlreadyReleased(record) => record,
+            };
+            (record.lifecycle_state(), None)
+        }
+        Err(error) => (
+            service
+                .and_then(|service| service.persisted_state(binding))
+                .unwrap_or_else(|| WorkspaceState::Unknown("unknown".into())),
+            Some(error),
+        ),
+    };
+    if let Some(projection) = state_projection {
+        *projection.lock().unwrap() = Some(state.clone());
+    }
+    if let Some(projection) = error_projection {
+        *projection.lock().unwrap() = cleanup_error.clone();
+    }
+    if let Some(sink) = &ctx.events {
+        sink.emit(Event::WorkspaceLifecycle {
+            run_id: run_id.clone(),
+            workspace_id: binding.workspace_id.clone(),
+            path: binding.path.display().to_string(),
+            state: state.as_str().into(),
+            cleanup_error,
+        });
+    }
+}
+
 async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let flow = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
-    run_flow_agent(&flow, &args, ctx, FlowRunId::now()).await
+    let run_id = FlowRunId::now();
+    let policy = workspace_policy(&args)?;
+    let session_id = workspace_session(ctx, policy)?;
+    let binding = allocate_workspace(ctx, policy, session_id.as_deref(), &run_id)?;
+    let child_ctx = match binding.clone() {
+        Some(binding) => ctx.clone().with_workspace(binding),
+        None => ctx.clone(),
+    };
+    let result = run_flow_agent(&flow, &args, &child_ctx, run_id.clone()).await;
+    finalize_workspace(
+        ctx,
+        binding.as_ref(),
+        session_id.as_deref(),
+        &run_id,
+        None,
+        None,
+    );
+    result
 }
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
@@ -302,11 +455,15 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
     let handle = format!("agent_{}", uuid::Uuid::now_v7().simple());
     let child_run_id = FlowRunId::now();
-    let entry = flow_registry.create_entry(
+    let policy = workspace_policy(&args)?;
+    let session_id = workspace_session(ctx, policy)?;
+    let workspace = allocate_workspace(ctx, policy, session_id.as_deref(), &child_run_id)?;
+    let entry = flow_registry.create_entry_with_workspace(
         handle.clone(),
         display_label,
         String::new(),
         child_run_id.clone(),
+        workspace.clone(),
     );
     if inherit_context {
         if let Some(parent) = &ctx.session_messages_handle {
@@ -316,14 +473,15 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     }
 
     let task_registry = ctx.task_registry.clone();
-    let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".into());
     let task_id = task_registry.as_ref().map(|tr| {
-        tr.register(
-            crate::task_registry::TaskKind::Flow,
+        tr.register_flow(
             entry.goal.clone(),
             handle.clone(),
-            session_id,
+            session_id.clone().unwrap_or_default(),
             entry.cancel.clone(),
+            workspace
+                .as_ref()
+                .map(|binding| binding.workspace_id.clone()),
         )
     });
 
@@ -352,10 +510,17 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         ctx_for_flow.cancel = entry_clone.cancel.clone();
         ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
         ctx_for_flow.compact_lock_handle = Some(Arc::clone(&entry_clone.compact_lock));
+        if let Some(binding) = entry_clone.workspace.clone() {
+            ctx_for_flow = ctx_for_flow.with_workspace(binding);
+        }
 
         let result = run_flow_agent(&flow_ref, &args, &ctx_for_flow, child_run_id.clone()).await;
 
+        let killed = entry_clone.cancel.is_cancelled();
         let status = match &result {
+            _ if killed => FlowRunStatus::Killed {
+                ended_at: chrono::Utc::now(),
+            },
             Ok(Value::Str(s)) => FlowRunStatus::Ok {
                 ended_at: chrono::Utc::now(),
                 final_text: s.clone(),
@@ -369,6 +534,14 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
                 message: e.to_string(),
             },
         };
+        finalize_workspace(
+            &ctx_for_flow,
+            entry_clone.workspace.as_ref(),
+            session_id.as_deref(),
+            &child_run_id,
+            Some(&entry_clone.workspace_state),
+            Some(&entry_clone.cleanup_error),
+        );
         *entry_clone.status.lock().unwrap() = status.clone();
 
         // Send SubAgentDone so the TUI updates the SubAgentActivity item.
@@ -386,18 +559,34 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
         let _ = entry_clone.stream_tx.send(FlowEvent::Exited { status });
         if let (Some(tr), Some(tid)) = (&task_registry, &task_id) {
-            let ts = match result {
-                Ok(_) => crate::task_registry::TaskStatus::Ok,
-                Err(_) => crate::task_registry::TaskStatus::Err,
+            let ts = if killed {
+                crate::task_registry::TaskStatus::Killed
+            } else {
+                match result {
+                    Ok(_) => crate::task_registry::TaskStatus::Ok,
+                    Err(_) => crate::task_registry::TaskStatus::Err,
+                }
             };
             tr.finish(tid, ts);
         }
     });
 
-    Ok(Value::Struct(vec![
+    let mut fields = vec![
         ("handle".into(), Value::Str(handle)),
         ("status".into(), Value::Str("running".into())),
-    ]))
+    ];
+    if let Some(binding) = workspace {
+        fields.push(("workspace_id".into(), Value::Str(binding.workspace_id)));
+        fields.push((
+            "workspace_path".into(),
+            Value::Str(binding.path.display().to_string()),
+        ));
+        fields.push((
+            "workspace_state".into(),
+            Value::Str(WorkspaceState::Active.as_str().into()),
+        ));
+    }
+    Ok(Value::Struct(fields))
 }
 
 pub struct AgentStatus;
@@ -435,6 +624,22 @@ impl Tool for AgentStatus {
             ];
             if let FlowRunStatus::Err { message, .. } = &st {
                 fields.push(("error".into(), Value::Str(message.clone())));
+            }
+            if let Some(binding) = &entry.workspace {
+                fields.push((
+                    "workspace_id".into(),
+                    Value::Str(binding.workspace_id.clone()),
+                ));
+                fields.push((
+                    "workspace_path".into(),
+                    Value::Str(binding.path.display().to_string()),
+                ));
+                if let Some(state) = entry.workspace_state.lock().unwrap().clone() {
+                    fields.push(("workspace_state".into(), Value::Str(state.as_str().into())));
+                }
+                if let Some(error) = entry.cleanup_error.lock().unwrap().clone() {
+                    fields.push(("cleanup_error".into(), Value::Str(error)));
+                }
             }
             Ok(Value::Struct(fields))
         })
@@ -685,7 +890,7 @@ async fn run_flow_agent(
     let mut flow_args: Vec<(String, Value)> = Vec::new();
     if let Some(Value::Struct(fields)) = args.named("arguments") {
         for (key, value) in fields {
-            if key == "flow" || key == "async" || key == "inherit_context" {
+            if key == "flow" || key == "async" || key == "inherit_context" || key == "workspace" {
                 continue;
             }
             if flow.params.iter().any(|p| p.name.name == *key) {
@@ -695,7 +900,12 @@ async fn run_flow_agent(
     }
     // Backward compat: top-level named args (pre-arguments schema).
     for (key, value) in &args.named {
-        if key == "flow" || key == "async" || key == "inherit_context" || key == "arguments" {
+        if key == "flow"
+            || key == "async"
+            || key == "inherit_context"
+            || key == "arguments"
+            || key == "workspace"
+        {
             continue;
         }
         if flow.params.iter().any(|p| p.name.name == *key)

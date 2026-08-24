@@ -71,6 +71,7 @@ pub struct TaskSnapshot {
     pub ended_at: Option<Instant>,
     pub source_handle: String,
     pub session_id: String,
+    pub workspace_id: Option<String>,
 }
 
 impl TaskSnapshot {
@@ -167,6 +168,26 @@ impl Default for TaskRegistry {
     }
 }
 
+fn running_snapshot(
+    kind: TaskKind,
+    label: String,
+    source_handle: String,
+    session_id: String,
+    workspace_id: Option<String>,
+) -> TaskSnapshot {
+    TaskSnapshot {
+        id: TaskId::now(),
+        kind,
+        label,
+        status: TaskStatus::Running,
+        started_at: Instant::now(),
+        ended_at: None,
+        source_handle,
+        session_id,
+        workspace_id,
+    }
+}
+
 impl TaskRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -180,7 +201,32 @@ impl TaskRegistry {
         session_id: String,
         cancel: CancellationToken,
     ) -> TaskId {
-        self.register_with_kill_hook(kind, label, source_handle, session_id, cancel, None)
+        self.register_snapshot(
+            running_snapshot(kind, label, source_handle, session_id, None),
+            cancel,
+            None,
+        )
+    }
+
+    pub fn register_flow(
+        &self,
+        label: String,
+        source_handle: String,
+        session_id: String,
+        cancel: CancellationToken,
+        workspace_id: Option<String>,
+    ) -> TaskId {
+        self.register_snapshot(
+            running_snapshot(
+                TaskKind::Flow,
+                label,
+                source_handle,
+                session_id,
+                workspace_id,
+            ),
+            cancel,
+            None,
+        )
     }
 
     pub fn register_with_kill_hook(
@@ -192,17 +238,20 @@ impl TaskRegistry {
         cancel: CancellationToken,
         kill_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     ) -> TaskId {
-        let id = TaskId::now();
-        let snapshot = TaskSnapshot {
-            id: id.clone(),
-            kind,
-            label,
-            status: TaskStatus::Running,
-            started_at: Instant::now(),
-            ended_at: None,
-            source_handle,
-            session_id,
-        };
+        self.register_snapshot(
+            running_snapshot(kind, label, source_handle, session_id, None),
+            cancel,
+            kill_hook,
+        )
+    }
+
+    fn register_snapshot(
+        &self,
+        snapshot: TaskSnapshot,
+        cancel: CancellationToken,
+        kill_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    ) -> TaskId {
+        let id = snapshot.id.clone();
         let entry = TaskEntry {
             snapshot: snapshot.clone(),
             cancel,
@@ -505,6 +554,7 @@ mod tests {
             ended_at: None,
             source_handle: "term_1".into(),
             session_id: "sess_a".into(),
+            workspace_id: None,
         };
         let f = TaskFilter {
             kind: Some(TaskKind::Terminal),

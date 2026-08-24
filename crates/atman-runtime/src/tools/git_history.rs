@@ -10,12 +10,20 @@ pub struct GitRevert;
 pub struct GitTagList;
 pub struct GitTagCreate;
 
-fn cwd(args: &ToolArgs) -> PathBuf {
-    match args.named("cwd") {
-        Some(Value::Str(path)) => PathBuf::from(path),
-        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    }
+fn cwd(args: &ToolArgs, ctx: &ToolCtx) -> Result<PathBuf, RuntimeError> {
+    let explicit = args.named("cwd").and_then(|value| match value {
+        Value::Str(path) => Some(std::path::Path::new(path)),
+        _ => None,
+    });
+    ctx.resolve_cwd(explicit)
 }
+
+async fn cwd_mut(args: &ToolArgs, ctx: &ToolCtx, tool: &str) -> Result<PathBuf, RuntimeError> {
+    let cwd = cwd(args, ctx)?;
+    crate::fs_access::authorize_write(ctx, &cwd, tool, true).await?;
+    Ok(cwd)
+}
+
 fn string_arg<'a>(args: &'a ToolArgs, name: &str) -> Result<&'a str, RuntimeError> {
     match args.named(name) {
         Some(Value::Str(value)) => Ok(value),
@@ -65,9 +73,9 @@ impl Tool for GitRestore {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["paths"],"properties":{"paths":{"type":"array","items":{"type":"string"}},"mode":{"type":"string","enum":["worktree","staged","both"],"default":"worktree"},"source":{"type":"string"},"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let cwd = cwd(&args);
+            let cwd = cwd_mut(&args, ctx, self.name()).await?;
             let values = paths(&args)?;
             let mode = match args.named("mode") {
                 Some(Value::Str(mode)) => mode.as_str(),
@@ -136,7 +144,7 @@ impl Tool for GitRevert {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["revision"],"properties":{"revision":{"type":"string"},"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let revision = string_arg(&args, "revision")?;
             if revision.is_empty() || revision.starts_with('-') || revision.contains(' ') {
@@ -144,7 +152,7 @@ impl Tool for GitRevert {
                     "git.revert: invalid revision".into(),
                 ));
             }
-            GitCli::at(cwd(&args))
+            GitCli::at(cwd_mut(&args, ctx, self.name()).await?)
                 .run(&["revert", "--no-edit", revision])
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.revert: {e}")))?;
             Ok(Value::Struct(vec![(
@@ -168,9 +176,9 @@ impl Tool for GitTagList {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let output = GitCli::at(cwd(&args))
+            let output = GitCli::at(cwd(&args, ctx)?)
                 .run(&["tag", "--list", "--format=%(refname:short)"])
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.tag.list: {e}")))?;
             Ok(Value::List(
@@ -200,7 +208,7 @@ impl Tool for GitTagCreate {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"},"revision":{"type":"string","default":"HEAD"},"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let name = string_arg(&args, "name")?;
             let revision = match args.named("revision") {
@@ -223,7 +231,7 @@ impl Tool for GitTagCreate {
                     "git.tag.create: invalid tag or revision".into(),
                 ));
             }
-            GitCli::at(cwd(&args))
+            GitCli::at(cwd_mut(&args, ctx, self.name()).await?)
                 .run(&["tag", name, revision])
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.tag.create: {e}")))?;
             Ok(Value::Struct(vec![

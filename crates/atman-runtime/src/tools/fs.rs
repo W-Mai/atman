@@ -41,7 +41,7 @@ impl Tool for FsRead {
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let path = extract_path(&args, "path", 0)?;
+            let path = ctx.resolve_path(&extract_path(&args, "path", 0)?)?;
             let mut offset = extract_optional_int(&args, "offset")?;
             let mut limit = extract_optional_int(&args, "limit")?;
             let anchor = match args.named("anchor") {
@@ -266,26 +266,11 @@ impl Tool for FsWrite {
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let path = extract_path(&args, "path", 0)?;
+            let path = ctx
+                .resolve_path_with_origin(&extract_path(&args, "path", 0)?)?
+                .path;
             let content = extract_string(&args, "content", 1)?;
-            let mut approved = false;
-            if let Err(e) = ctx.fs_access.check_write(&path) {
-                match request_fs_write_approval(ctx, &path, &e.to_string()).await {
-                    Some(true) => approved = true,
-                    Some(false) => {
-                        return Err(RuntimeError::ToolFailed(format!(
-                            "fs.write({}): user denied the write operation",
-                            path.display()
-                        )));
-                    }
-                    None => {
-                        return Err(RuntimeError::ToolFailed(format!(
-                            "fs.write({}): {e}",
-                            path.display()
-                        )));
-                    }
-                }
-            }
+            let approved = crate::fs_access::authorize_write(ctx, &path, "fs.write", true).await?;
             let old_content = tokio::fs::read_to_string(&path).await.ok();
             tokio::fs::write(&path, content.as_bytes())
                 .await
@@ -377,10 +362,12 @@ impl Tool for FsEdit {
     fn preview_call<'a>(
         &'a self,
         args: &'a ToolArgs,
-        _ctx: &'a ToolCtx,
+        ctx: &'a ToolCtx,
     ) -> BoxFut<'a, Option<String>> {
         Box::pin(async move {
-            let path = extract_path(args, "path", 0).ok()?;
+            let path = ctx
+                .resolve_path(&extract_path(args, "path", 0).ok()?)
+                .ok()?;
             let old_string = extract_string(args, "old_string", 1).ok()?;
             let new_string = extract_string(args, "new_string", 2).ok()?;
             let start_line = extract_optional_positive_usize(args, "start_line").ok()?;
@@ -422,29 +409,14 @@ impl Tool for FsEdit {
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let path = extract_path(&args, "path", 0)?;
+            let path = ctx
+                .resolve_path_with_origin(&extract_path(&args, "path", 0)?)?
+                .path;
             let old_string = extract_string(&args, "old_string", 1)?;
             let new_string = extract_string(&args, "new_string", 2)?;
             let start_line = extract_optional_positive_usize(&args, "start_line")?;
             let replace_all = matches!(args.named("replace_all"), Some(Value::Bool(true)));
-            let mut approved = false;
-            if let Err(e) = ctx.fs_access.check_write(&path) {
-                match request_fs_write_approval(ctx, &path, &e.to_string()).await {
-                    Some(true) => approved = true,
-                    Some(false) => {
-                        return Err(RuntimeError::ToolFailed(format!(
-                            "fs.edit({}): user denied the write operation",
-                            path.display()
-                        )));
-                    }
-                    None => {
-                        return Err(RuntimeError::ToolFailed(format!(
-                            "fs.edit({}): {e}",
-                            path.display()
-                        )));
-                    }
-                }
-            }
+            let approved = crate::fs_access::authorize_write(ctx, &path, "fs.edit", true).await?;
             let canonical = canonicalize_or_owned(&path);
             if ctx.read_files.is_some() && !ctx.has_read(&canonical) {
                 return Err(RuntimeError::ToolFailed(format!(
@@ -671,9 +643,9 @@ impl Tool for FsList {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let path = extract_path(&args, "path", 0)?;
+            let path = ctx.resolve_path(&extract_path(&args, "path", 0)?)?;
             let mut rd = tokio::fs::read_dir(&path).await.map_err(|e| {
                 RuntimeError::ToolFailed(format!("fs.list({}): {e}", path.display()))
             })?;
@@ -774,28 +746,28 @@ impl Tool for FsGrep {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
-        Box::pin(async move { fs_grep_impl(args).await })
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move { fs_grep_impl(args, ctx).await })
     }
 }
 
-async fn fs_grep_impl(args: ToolArgs) -> ToolResult {
+async fn fs_grep_impl(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let pattern = extract_string(&args, "pattern", 0)?;
     if pattern.is_empty() {
         return Err(RuntimeError::ToolFailed("fs.grep: empty pattern".into()));
     }
-    let base_path: std::path::PathBuf = match args.named("path") {
-        Some(Value::Str(s)) => std::path::PathBuf::from(s),
-        Some(Value::Path(p)) => p.clone(),
+    let explicit = match args.named("path") {
+        Some(Value::Str(s)) => Some(std::path::Path::new(s)),
+        Some(Value::Path(p)) => Some(p.as_path()),
         Some(other) => {
             return Err(RuntimeError::TypeMismatch {
                 expected: "path or string".into(),
                 actual: other.kind_name().into(),
             });
         }
-        None => std::env::current_dir()
-            .map_err(|e| RuntimeError::ToolFailed(format!("fs.grep: cwd: {e}")))?,
+        None => None,
     };
+    let base_path = ctx.resolve_cwd(explicit)?;
     let context_lines: usize = match args.named("context_lines") {
         Some(Value::Int(n)) if *n >= 0 => (*n as usize).min(10),
         _ => 3,
@@ -857,45 +829,6 @@ async fn fs_grep_impl(args: ToolArgs) -> ToolResult {
         }
     }
     Ok(Value::List(hits))
-}
-
-async fn request_fs_write_approval(
-    ctx: &ToolCtx,
-    path: &std::path::Path,
-    reason: &str,
-) -> Option<bool> {
-    use crate::tool::ApprovalLevel;
-    let Some(approval) = &ctx.approval else {
-        return None;
-    };
-    let run_id = ctx.flow_run_id.clone()?;
-    let id = format!("fs_write_{}", uuid::Uuid::now_v7());
-    let pending = crate::session::PendingApproval {
-        tool_use_id: id.clone(),
-        tool_name: "fs.write (sandboxed)".to_string(),
-        args_preview: format!("path={}", path.display()),
-        preview: Some(reason.to_string()),
-        level: ApprovalLevel::Dangerous,
-        run_id,
-        emitted_at: chrono::Utc::now(),
-        bypass_auto_ceiling: false,
-    };
-    let rx = approval.request(pending);
-    let run_id_for_emit = ctx.flow_run_id.clone();
-    if let (Some(sink), Some(rid)) = (ctx.events.as_ref(), run_id_for_emit) {
-        sink.emit(crate::event::Event::ToolPendingApproval {
-            run_id: rid,
-            tool_use_id: id,
-            tool_name: "fs.write".into(),
-            args_preview: path.display().to_string(),
-            level: "dangerous".into(),
-            preview: Some(reason.to_string()),
-        });
-    }
-    match rx.await {
-        Ok(crate::session::ApprovalDecision::Approve) => Some(true),
-        _ => Some(false),
-    }
 }
 
 #[cfg(test)]
@@ -1322,6 +1255,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fs_edit_preview_resolves_relative_path_in_managed_workspace() {
+        let dir = TempDir::new().unwrap();
+        assert!(std::env::current_dir().unwrap().join("Cargo.toml").exists());
+        tokio::fs::write(dir.path().join("Cargo.toml"), b"managed-before\n")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new().with_workspace(crate::git_workspace::WorkspaceBinding {
+            workspace_id: "test".into(),
+            repository_root: dir.path().to_path_buf(),
+            path: dir.path().to_path_buf(),
+            branch: None,
+        });
+        let args = ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("path".into(), Value::Path(PathBuf::from("Cargo.toml"))),
+                ("old_string".into(), Value::Str("managed-before".into())),
+                ("new_string".into(), Value::Str("managed-after".into())),
+            ],
+        };
+
+        let preview = FsEdit.preview_call(&args, &ctx).await.unwrap();
+
+        assert!(preview.contains("-managed-before"));
+        assert!(preview.contains("+managed-after"));
+        assert!(preview.contains(&dir.path().join("Cargo.toml").display().to_string()));
+        assert!(!preview.contains("[workspace]"));
+    }
+
+    #[tokio::test]
     async fn fs_edit_missing_match_returns_similar_lines_hint() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("code.rs");
@@ -1473,6 +1436,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fs_read_resolves_relative_path_in_managed_workspace() {
+        let dir = TempDir::new().unwrap();
+        tokio::fs::write(dir.path().join("relative.txt"), b"workspace\n")
+            .await
+            .unwrap();
+        let ctx = ToolCtx::new().with_workspace(crate::git_workspace::WorkspaceBinding {
+            workspace_id: "test".into(),
+            repository_root: dir.path().to_path_buf(),
+            path: dir.path().to_path_buf(),
+            branch: None,
+        });
+        let args = ToolArgs {
+            positional: vec![Value::Path(PathBuf::from("relative.txt"))],
+            named: vec![],
+        };
+
+        let value = FsRead.call(args, &ctx).await.unwrap();
+        assert!(matches!(value, Value::Str(text) if text == "workspace\n"));
+    }
+
+    #[tokio::test]
     async fn fs_read_without_offset_limit_is_backward_compatible() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("plain.txt");
@@ -1585,6 +1569,64 @@ mod tests {
             _ => 0,
         };
         assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn fs_read_allows_explicit_external_path_in_managed_context() {
+        let workspace = TempDir::new().unwrap();
+        let ctx = ToolCtx::new()
+            .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
+                workspace.path().into(),
+            ))
+            .with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "test".into(),
+                repository_root: workspace.path().into(),
+                path: workspace.path().into(),
+                branch: None,
+            });
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let value = FsRead
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Path(path)],
+                    named: vec![],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(value, Value::Str(text) if text.contains("[package]")));
+    }
+
+    #[tokio::test]
+    async fn fs_write_external_temp_path_is_allowed_in_managed_context() {
+        let workspace = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let target = external.path().join("allowed.txt");
+        let ctx = ToolCtx::new()
+            .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
+                workspace.path().into(),
+            ))
+            .with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "test".into(),
+                repository_root: workspace.path().into(),
+                path: workspace.path().into(),
+                branch: None,
+            });
+        FsWrite
+            .call(
+                ToolArgs {
+                    positional: vec![],
+                    named: vec![
+                        ("path".into(), Value::Path(target.clone())),
+                        ("content".into(), Value::Str("ok".into())),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "ok");
     }
 
     #[tokio::test]

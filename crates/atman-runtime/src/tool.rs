@@ -74,6 +74,21 @@ pub enum HistorySegment {
     Spawned,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathOrigin {
+    Omitted,
+    Relative,
+    ExplicitInside,
+    ExplicitExternal,
+    Unbound,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedPath {
+    pub path: std::path::PathBuf,
+    pub origin: PathOrigin,
+}
+
 #[derive(Clone, Default)]
 pub struct ToolCtx {
     pub cancel: CancellationToken,
@@ -103,6 +118,8 @@ pub struct ToolCtx {
     pub data_root: Option<std::path::PathBuf>,
     pub project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
     pub fs_access: crate::fs_access::FsAccessPolicy,
+    pub workspace: Option<crate::git_workspace::WorkspaceBinding>,
+    pub flow_workspace_service: Option<std::sync::Arc<crate::flow_workspace::FlowWorkspaceService>>,
     pub lifecycle_fire_tx:
         Option<tokio::sync::mpsc::UnboundedSender<atman_dsl::ast::LifecycleEvent>>,
     pub bg_registry: Option<std::sync::Arc<crate::tools::bash_bg::BgRegistry>>,
@@ -256,6 +273,95 @@ impl ToolCtx {
     pub fn with_fs_access(mut self, policy: crate::fs_access::FsAccessPolicy) -> Self {
         self.fs_access = policy;
         self
+    }
+
+    pub fn with_workspace(mut self, binding: crate::git_workspace::WorkspaceBinding) -> Self {
+        self.fs_access.workspace = Some(binding.path.clone());
+        self.workspace = Some(binding);
+        self
+    }
+
+    pub fn with_flow_workspace_service(
+        mut self,
+        service: std::sync::Arc<crate::flow_workspace::FlowWorkspaceService>,
+    ) -> Self {
+        self.flow_workspace_service = Some(service);
+        self
+    }
+
+    pub fn resolve_cwd(
+        &self,
+        explicit: Option<&std::path::Path>,
+    ) -> Result<std::path::PathBuf, RuntimeError> {
+        Ok(self.resolve_cwd_with_origin(explicit)?.path)
+    }
+
+    pub fn resolve_cwd_with_origin(
+        &self,
+        explicit: Option<&std::path::Path>,
+    ) -> Result<ResolvedPath, RuntimeError> {
+        match explicit {
+            Some(path) => self.resolve_path_with_origin(path),
+            None => {
+                let mut resolved = self.resolve_path_with_origin(std::path::Path::new("."))?;
+                resolved.origin = if self.workspace.is_some() {
+                    PathOrigin::Omitted
+                } else {
+                    PathOrigin::Unbound
+                };
+                Ok(resolved)
+            }
+        }
+    }
+
+    pub fn resolve_path(&self, path: &std::path::Path) -> Result<std::path::PathBuf, RuntimeError> {
+        Ok(self.resolve_path_with_origin(path)?.path)
+    }
+
+    pub fn resolve_path_with_origin(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<ResolvedPath, RuntimeError> {
+        let Some(binding) = &self.workspace else {
+            let base = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let candidate = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                base.join(path)
+            };
+            return Ok(ResolvedPath {
+                path: crate::fs_access::canonicalize_stable(&candidate),
+                origin: PathOrigin::Unbound,
+            });
+        };
+        let root = crate::fs_access::canonicalize_stable(&binding.path);
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            binding.path.join(path)
+        };
+        let resolved = crate::fs_access::canonicalize_stable(&candidate);
+        if path.is_absolute() {
+            return Ok(ResolvedPath {
+                origin: if resolved.starts_with(&root) {
+                    PathOrigin::ExplicitInside
+                } else {
+                    PathOrigin::ExplicitExternal
+                },
+                path: resolved,
+            });
+        }
+        if !resolved.starts_with(&root) {
+            return Err(RuntimeError::ToolFailed(format!(
+                "managed workspace path {} escapes workspace root {}",
+                path.display(),
+                binding.path.display()
+            )));
+        }
+        Ok(ResolvedPath {
+            path: resolved,
+            origin: PathOrigin::Relative,
+        })
     }
 
     pub fn with_lifecycle_fire_tx(
@@ -486,5 +592,83 @@ mod tests {
     fn approval_level_ordered_auto_lt_approve_lt_dangerous() {
         assert!(ApprovalLevel::Auto < ApprovalLevel::Approve);
         assert!(ApprovalLevel::Approve < ApprovalLevel::Dangerous);
+    }
+
+    fn binding(path: std::path::PathBuf) -> crate::git_workspace::WorkspaceBinding {
+        crate::git_workspace::WorkspaceBinding {
+            workspace_id: "workspace".into(),
+            repository_root: path.clone(),
+            path,
+            branch: None,
+        }
+    }
+
+    #[test]
+    fn workspace_resolver_rebinds_policy_without_changing_process_cwd() {
+        let workspace = tempfile::tempdir().unwrap();
+        let process_cwd = std::env::current_dir().unwrap();
+        let ctx = ToolCtx::new()
+            .with_fs_access(crate::fs_access::FsAccessPolicy {
+                mode: crate::fs_access::FsAccessMode::ReadOnly,
+                workspace: Some(process_cwd.clone()),
+            })
+            .with_workspace(binding(workspace.path().to_path_buf()));
+
+        let canonical_workspace = crate::fs_access::canonicalize_stable(workspace.path());
+        let omitted = ctx.resolve_cwd_with_origin(None).unwrap();
+        assert_eq!(omitted.path, canonical_workspace);
+        assert_eq!(omitted.origin, PathOrigin::Omitted);
+
+        let relative = ctx
+            .resolve_path_with_origin(std::path::Path::new("nested/file"))
+            .unwrap();
+        assert_eq!(relative.path, canonical_workspace.join("nested/file"));
+        assert_eq!(relative.origin, PathOrigin::Relative);
+
+        let inside = ctx
+            .resolve_path_with_origin(&workspace.path().join("inside"))
+            .unwrap();
+        assert_eq!(inside.origin, PathOrigin::ExplicitInside);
+
+        let external = ctx.resolve_path_with_origin(&process_cwd).unwrap();
+        assert_eq!(external.origin, PathOrigin::ExplicitExternal);
+        assert_eq!(ctx.fs_access.mode, crate::fs_access::FsAccessMode::ReadOnly);
+        assert_eq!(ctx.fs_access.workspace.as_deref(), Some(workspace.path()));
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+    }
+
+    #[test]
+    fn workspace_resolver_rejects_parent_escape() {
+        let workspace = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new().with_workspace(binding(workspace.path().to_path_buf()));
+        let error = ctx
+            .resolve_path(std::path::Path::new("../outside"))
+            .unwrap_err();
+        assert!(error.to_string().contains("escapes workspace root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_resolver_rejects_symlink_escape() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("link")).unwrap();
+        let ctx = ToolCtx::new().with_workspace(binding(workspace.path().to_path_buf()));
+
+        let error = ctx
+            .resolve_path(std::path::Path::new("link/file"))
+            .unwrap_err();
+        assert!(error.to_string().contains("escapes workspace root"));
+    }
+
+    #[test]
+    fn ordinary_context_keeps_process_cwd_semantics() {
+        let process_cwd = std::env::current_dir().unwrap();
+        let ctx = ToolCtx::new();
+        assert_eq!(ctx.resolve_cwd(None).unwrap(), process_cwd);
+        assert_eq!(
+            ctx.resolve_path(std::path::Path::new("child")).unwrap(),
+            process_cwd.join("child")
+        );
     }
 }

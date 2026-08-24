@@ -1,4 +1,5 @@
 use atman_dsl::parse::parse_file;
+use atman_runtime::fs_access::{FsAccessMode, FsAccessPolicy};
 use atman_runtime::{Executor, Value, tools};
 
 #[tokio::test]
@@ -23,7 +24,11 @@ async fn term_spawn_in_flow_captures_terminal_output() {
         .clone()
         .with_bg_registry(bg)
         .with_term_registry(term_reg)
-        .with_session_dir(dir);
+        .with_session_dir(dir)
+        .with_fs_access(FsAccessPolicy {
+            mode: FsAccessMode::WorkspaceWrite,
+            workspace: Some(std::env::current_dir().unwrap()),
+        });
 
     let out = ex.run(&file, "t", vec![]).await.unwrap();
     let text = match out {

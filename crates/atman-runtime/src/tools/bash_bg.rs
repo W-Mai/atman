@@ -288,6 +288,7 @@ impl BgRegistry {
         max_output_bytes: u64,
         ctx: &ToolCtx,
     ) -> Result<Value, RuntimeError> {
+        let cwd = ctx.resolve_cwd(None)?;
         let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
         let local_id = uuid::Uuid::now_v7().as_u64_pair().0;
         let handle = BgHandle {
@@ -370,6 +371,7 @@ impl BgRegistry {
                 task_registry,
                 task_id_for_spawn,
                 flow_run_id,
+                cwd,
             )
             .await;
         });
@@ -718,6 +720,7 @@ async fn run_bg_process(
     task_registry: Option<TaskRegistry>,
     task_id: Option<crate::task_registry::TaskId>,
     flow_run_id: Option<String>,
+    cwd: std::path::PathBuf,
 ) {
     let started_at = now_ms();
     let mut command = tokio::process::Command::new("sh");
@@ -726,7 +729,8 @@ async fn run_bg_process(
         .arg(&cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .current_dir(cwd);
     let mut child: AsyncGroupChild = match command.group().kill_on_drop(true).spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -1678,6 +1682,49 @@ mod tests {
             }
         }
         panic!("process did not exit in time");
+    }
+
+    #[tokio::test]
+    async fn spawn_defaults_to_managed_workspace() {
+        let registry = Arc::new(BgRegistry::new());
+        let session_dir = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let ctx = ctx_with_registry(registry, session_dir.path()).with_workspace(
+            crate::git_workspace::WorkspaceBinding {
+                workspace_id: "test".into(),
+                repository_root: workspace.path().to_path_buf(),
+                path: workspace.path().to_path_buf(),
+                branch: None,
+            },
+        );
+        let value = BashSpawn
+            .call(
+                ToolArgs {
+                    positional: vec![Value::Str("pwd".into())],
+                    named: vec![],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let log_path = value
+            .field("log_path")
+            .and_then(|value| match value {
+                Value::Str(path) => Some(path.clone()),
+                _ => None,
+            })
+            .unwrap();
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let output = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if !output.is_empty() {
+                let canonical_workspace = crate::fs_access::canonicalize_stable(workspace.path());
+                assert!(output.contains(&canonical_workspace.display().to_string()));
+                return;
+            }
+        }
+        panic!("pwd output did not arrive in time");
     }
 
     #[tokio::test]

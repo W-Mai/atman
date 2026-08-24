@@ -79,7 +79,7 @@ impl Tool for AnchorRead {
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let p = path(&args)?;
+            let p = ctx.resolve_path(&path(&args)?)?;
             anchor_fs::read_anchor_text(&p, &store(ctx))
                 .map(Value::Str)
                 .map_err(error)
@@ -108,7 +108,8 @@ impl Tool for AnchorEdit {
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let p = path(&args)?;
+            let p = ctx.resolve_path_with_origin(&path(&args)?)?.path;
+            crate::fs_access::authorize_write(ctx, &p, self.name(), true).await?;
             let operation = text(&args, "operation", true)?.unwrap();
             let change = anchor_fs::edit_by_anchor(
                 &p,
@@ -148,7 +149,8 @@ impl Tool for AnchorWrite {
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let p = path(&args)?;
+            let p = ctx.resolve_path_with_origin(&path(&args)?)?.path;
+            crate::fs_access::authorize_write(ctx, &p, self.name(), true).await?;
             let h = text(&args, "expected_file_hash", true)?.unwrap();
             let c = text(&args, "content", true)?.unwrap();
             anchor_fs::overwrite_with_hash(&p, &h, &c, &store(ctx))
@@ -179,8 +181,8 @@ impl Tool for AnchorUndo {
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let p = path(&args);
-            let p = p?;
+            let p = ctx.resolve_path_with_origin(&path(&args)?)?.path;
+            crate::fs_access::authorize_write(ctx, &p, self.name(), true).await?;
             let s = store(ctx);
             let id = text(&args, "change_id", false)?;
             let change = match id {
@@ -195,5 +197,47 @@ impl Tool for AnchorUndo {
             s.undo_strict(&p, &change, &current).map_err(error)?;
             Ok(change_value(&change))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn anchor_write_rejects_external_path_without_changing_file() {
+        let workspace = tempfile::tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("r4-anchor-{}.txt", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+        std::fs::write(&fixture, "original").unwrap();
+        let ctx = ToolCtx::new()
+            .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
+                workspace.path().into(),
+            ))
+            .with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "test".into(),
+                repository_root: workspace.path().into(),
+                path: workspace.path().into(),
+                branch: None,
+            });
+        let error = AnchorWrite
+            .call(
+                ToolArgs {
+                    positional: vec![],
+                    named: vec![
+                        ("path".into(), Value::Path(fixture.clone())),
+                        ("expected_file_hash".into(), Value::Str("unused".into())),
+                        ("content".into(), Value::Str("changed".into())),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("outside workspace"));
+        assert_eq!(std::fs::read_to_string(&fixture).unwrap(), "original");
+        std::fs::remove_file(fixture).unwrap();
     }
 }

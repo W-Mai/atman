@@ -1074,6 +1074,7 @@ mod tests {
                 ended_at: None,
                 source_handle: "term_0".into(),
                 session_id: "s".into(),
+                workspace_id: None,
             },
             TaskSnapshot {
                 id: TaskId::default(),
@@ -1084,6 +1085,7 @@ mod tests {
                 ended_at: None,
                 source_handle: "flow_0".into(),
                 session_id: "s".into(),
+                workspace_id: None,
             },
         ];
         let items = vec![crate::app::OutputItem::Terminal {

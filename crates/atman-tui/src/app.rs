@@ -3353,6 +3353,7 @@ mod terminal_e2e_tests {
                 ended_at: Some(std::time::Instant::now()),
                 source_handle: src.to_string(),
                 session_id: "s".to_string(),
+                workspace_id: None,
             }
         }
     }

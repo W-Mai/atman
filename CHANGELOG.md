@@ -6,6 +6,15 @@ All notable changes to atman are documented in this file.
 
 ## [Unreleased]
 
+### ✨ Features
+
+- **Managed child workspaces** — `flow.spawn` can opt into automatic or retained Git worktrees, with child Git, filesystem, shell, and terminal operations using the managed directory by default while the parent working directory remains unchanged.
+- **Workspace lifecycle visibility** — flow status, task snapshots, and session events expose optional workspace identity, path, state, and cleanup diagnostics for spawned children.
+
+### 🐛 Fixes
+
+- **Workspace ownership and cleanup safety** — automatic workspaces use runtime-derived session and child-flow ownership, release only clean worktrees, preserve dirty or retained work, and reconcile stale daemon-generation leases as inspectable orphans without automatic deletion.
+
 ## [1.9.1] — 2026-08-23
 
 ### ✨ Features

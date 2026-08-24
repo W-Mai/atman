@@ -44,7 +44,7 @@ impl Tool for GitLog {
             let limit = extract_optional_int(&args, "limit")
                 .unwrap_or(20)
                 .clamp(1, 100) as usize;
-            let cwd = extract_cwd(&args, "git.log cwd")?;
+            let cwd = extract_cwd(&args, ctx, "git.log cwd")?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.log: {e}")))?;
             let mut revwalk = repo
@@ -124,7 +124,7 @@ impl Tool for GitShow {
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let sha = extract_string(&args, "sha", 0)?;
-            let cwd = extract_cwd(&args, "git.show cwd")?;
+            let cwd = extract_cwd(&args, ctx, "git.show cwd")?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.show: {e}")))?;
             let object = repo
@@ -180,9 +180,9 @@ impl Tool for GitStatus {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let cwd = extract_cwd(&args, "git.status cwd")?;
+            let cwd = extract_cwd(&args, ctx, "git.status cwd")?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.status: {e}")))?;
             let mut opts = StatusOptions::new();
@@ -245,10 +245,11 @@ impl Tool for GitAdd {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let paths = extract_string_list(&args, "paths")?;
-            let cwd = extract_cwd(&args, "git.add cwd")?;
+            let cwd = extract_cwd(&args, ctx, "git.add cwd")?;
+            crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.add: {e}")))?;
             let mut index = repo
@@ -297,11 +298,12 @@ impl Tool for GitCommit {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let message = extract_string(&args, "message", 0)?;
             let amend = extract_optional_bool(&args, "amend").unwrap_or(false);
-            let cwd = extract_cwd(&args, "git.commit cwd")?;
+            let cwd = extract_cwd(&args, ctx, "git.commit cwd")?;
+            crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.commit: {e}")))?;
             let files_count = staged_count(&repo, "git.commit")?;
@@ -348,12 +350,13 @@ impl Tool for GitBranch {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let name = extract_string(&args, "name", 0)?;
             let create = extract_optional_bool(&args, "create").unwrap_or(true);
             let checkout = extract_optional_bool(&args, "checkout").unwrap_or(true);
-            let cwd = extract_cwd(&args, "git.branch cwd")?;
+            let cwd = extract_cwd(&args, ctx, "git.branch cwd")?;
+            crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let repo = Repository::open(&cwd)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.branch: {e}")))?;
             if create {
@@ -399,11 +402,12 @@ impl Tool for GitFetch {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"remote":{"type":"string","default":"origin"},"prune":{"type":"boolean","default":false},"cwd":{"type":"string"}}})
     }
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let remote =
                 extract_optional_string(&args, "remote").unwrap_or_else(|| "origin".into());
-            let cwd = extract_cwd(&args, "git.fetch cwd")?;
+            let cwd = extract_cwd(&args, ctx, "git.fetch cwd")?;
+            crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let prune = extract_optional_bool(&args, "prune").unwrap_or(false);
             let cli = crate::git::GitCli::at(&cwd);
             let output = if prune {
@@ -450,11 +454,12 @@ impl Tool for GitPush {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let remote =
                 extract_optional_string(&args, "remote").unwrap_or_else(|| "origin".into());
-            let cwd = extract_cwd(&args, "git.push cwd")?;
+            let cwd = extract_cwd(&args, ctx, "git.push cwd")?;
+            crate::fs_access::authorize_write(ctx, &cwd, self.name(), true).await?;
             let branch = match extract_optional_string(&args, "branch") {
                 Some(branch) => branch,
                 None => current_branch(&cwd)?,
@@ -504,18 +509,20 @@ impl Tool for GitPush {
     }
 }
 
-fn extract_cwd(args: &ToolArgs, label: &str) -> Result<PathBuf, RuntimeError> {
-    match args.named("cwd") {
-        Some(Value::Path(p)) => Ok(p.clone()),
-        Some(Value::Str(s)) => Ok(PathBuf::from(s)),
-        Some(other) => Err(RuntimeError::TypeMismatch {
-            expected: "string".into(),
-            actual: other.kind_name().into(),
-        }),
-        None => {
-            std::env::current_dir().map_err(|e| RuntimeError::ToolFailed(format!("{label}: {e}")))
+fn extract_cwd(args: &ToolArgs, ctx: &ToolCtx, label: &str) -> Result<PathBuf, RuntimeError> {
+    let explicit = match args.named("cwd") {
+        Some(Value::Path(p)) => Some(p.as_path()),
+        Some(Value::Str(s)) => Some(std::path::Path::new(s)),
+        Some(other) => {
+            return Err(RuntimeError::TypeMismatch {
+                expected: "string".into(),
+                actual: other.kind_name().into(),
+            });
         }
-    }
+        None => None,
+    };
+    ctx.resolve_cwd(explicit)
+        .map_err(|error| RuntimeError::ToolFailed(format!("{label}: {error}")))
 }
 
 fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, RuntimeError> {
@@ -751,6 +758,119 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
         cli.add_all().unwrap();
         cli.commit("second").unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_defaults_to_managed_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let ctx = ToolCtx::new().with_workspace(crate::git_workspace::WorkspaceBinding {
+            workspace_id: "test".into(),
+            repository_root: tmp.path().to_path_buf(),
+            path: tmp.path().to_path_buf(),
+            branch: None,
+        });
+
+        let value = GitStatus
+            .call(
+                ToolArgs {
+                    positional: Vec::new(),
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(value.field("staged"), Some(Value::List(_))));
+    }
+
+    #[tokio::test]
+    async fn managed_git_external_read_allowed_but_mutations_leave_repo_unchanged() {
+        if !have_git() {
+            return;
+        }
+        let repo_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("r4-git-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        seed_two_commits(&repo_dir);
+        std::fs::write(repo_dir.join("new.txt"), "new\n").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new()
+            .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
+                workspace.path().into(),
+            ))
+            .with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "test".into(),
+                repository_root: workspace.path().into(),
+                path: workspace.path().into(),
+                branch: None,
+            });
+        let cwd = Value::Str(repo_dir.to_string_lossy().into());
+        let status = GitStatus
+            .call(
+                ToolArgs {
+                    positional: vec![],
+                    named: vec![("cwd".into(), cwd.clone())],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(status.field("untracked"), Some(Value::List(paths)) if !paths.is_empty()));
+        let repo = Repository::open(&repo_dir).unwrap();
+        let index_before = repo.index().unwrap().write_tree().unwrap();
+        let head_before = repo.head().unwrap().target().unwrap();
+        let add_error = GitAdd
+            .call(
+                ToolArgs {
+                    positional: vec![],
+                    named: vec![
+                        (
+                            "paths".into(),
+                            Value::List(vec![Value::Str("new.txt".into())]),
+                        ),
+                        ("cwd".into(), cwd.clone()),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(add_error.to_string().contains("outside workspace"));
+        assert_eq!(
+            Repository::open(&repo_dir)
+                .unwrap()
+                .index()
+                .unwrap()
+                .write_tree()
+                .unwrap(),
+            index_before
+        );
+        let commit_error = GitCommit
+            .call(
+                ToolArgs {
+                    positional: vec![],
+                    named: vec![
+                        ("message".into(), Value::Str("blocked".into())),
+                        ("cwd".into(), cwd),
+                    ],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(commit_error.to_string().contains("outside workspace"));
+        assert_eq!(
+            Repository::open(&repo_dir)
+                .unwrap()
+                .head()
+                .unwrap()
+                .target()
+                .unwrap(),
+            head_before
+        );
+        std::fs::remove_dir_all(repo_dir).unwrap();
     }
 
     #[tokio::test]

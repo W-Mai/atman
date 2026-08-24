@@ -128,6 +128,31 @@ Run the managed flow through the default route after `atman init`, or run the ex
 ```bash
 atman run examples/agent.at --flow agent user_prompt="read Cargo.toml and list the workspace members"
 ```
+
+### Managed child workspaces
+
+`flow.spawn` can isolate a child flow in a managed Git worktree with `workspace: "auto"` or `workspace: "retain"`. The default is `workspace: "none"`, which preserves the existing working-directory behavior and does not require a Git repository.
+
+```atman
+flow delegate() -> string {
+    return flow.spawn(
+        flow: "subagent.at@implement",
+        async: false,
+        workspace: "auto",
+    )
+}
+```
+
+The policies are:
+
+- `none` — do not allocate a workspace.
+- `auto` — release the worktree after any known terminal outcome when it is clean; preserve it as `dirty` when it contains changes.
+- `retain` — preserve the worktree after the child terminates, even when it is clean.
+
+For managed children, Git, filesystem, Bash, terminal, and other process-backed tools use the worktree as their default working directory. This binding is local to the child execution context and never changes the parent flow's or process's working directory. Runtime-generated session and child-flow identities own the workspace; caller-supplied owner fields are not trusted.
+
+Bare repositories require a configured, policy-approved external workspace root. The daemon does not currently configure one, so managed child allocation from a bare repository fails clearly instead of choosing an arbitrary path. After a daemon restart, workspaces with active leases from an older daemon generation are marked `orphaned` for inspection; they are never deleted automatically. Orphan pruning remains an explicit, dry-run-first operation.
+
 ### An approval-gated edit-and-test loop
 
 From [`examples/edit_and_verify.at`](examples/edit_and_verify.at):

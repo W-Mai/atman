@@ -71,6 +71,64 @@ impl FsAccessPolicy {
     }
 }
 
+pub async fn authorize_write(
+    ctx: &crate::tool::ToolCtx,
+    target: &Path,
+    operation: &str,
+    allow_approval: bool,
+) -> Result<bool, crate::error::RuntimeError> {
+    let Err(error) = ctx.fs_access.check_write(target) else {
+        return Ok(false);
+    };
+    if !allow_approval {
+        return Err(crate::error::RuntimeError::ToolFailed(format!(
+            "{operation}({}): {error}",
+            target.display()
+        )));
+    }
+    let (Some(approval), Some(run_id)) = (&ctx.approval, ctx.flow_run_id.clone()) else {
+        return Err(crate::error::RuntimeError::ToolFailed(format!(
+            "{operation}({}): {error}",
+            target.display()
+        )));
+    };
+    let id = format!("external_write_{}", uuid::Uuid::now_v7());
+    let reason = error.to_string();
+    let rx = approval.request(crate::session::PendingApproval {
+        tool_use_id: id.clone(),
+        tool_name: operation.to_string(),
+        args_preview: format!("path={}", target.display()),
+        preview: Some(reason.clone()),
+        level: crate::tool::ApprovalLevel::Dangerous,
+        run_id: run_id.clone(),
+        emitted_at: chrono::Utc::now(),
+        bypass_auto_ceiling: false,
+    });
+    if let Some(sink) = ctx.events.as_ref() {
+        sink.emit(crate::event::Event::ToolPendingApproval {
+            run_id,
+            tool_use_id: id,
+            tool_name: operation.to_string(),
+            args_preview: target.display().to_string(),
+            level: "dangerous".into(),
+            preview: Some(reason),
+        });
+    }
+    match rx.await {
+        Ok(crate::session::ApprovalDecision::Approve) => Ok(true),
+        Ok(crate::session::ApprovalDecision::Deny { reason }) => {
+            Err(crate::error::RuntimeError::ToolFailed(format!(
+                "{operation}({}): user denied the write operation: {reason}",
+                target.display()
+            )))
+        }
+        Err(_) => Err(crate::error::RuntimeError::ToolFailed(format!(
+            "{operation}({}): approval channel dropped",
+            target.display()
+        ))),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum FsAccessError {
     #[error("read-only fs access: refusing to write {}", path.display())]
@@ -129,7 +187,7 @@ pub fn check_write(
 // ancestor, canonicalize it (this resolves macOS /var → /private/var
 // symlinks), then re-attach the missing tail. That way "workspace" and
 // "target" get the same symlink-resolved prefix and starts_with works.
-fn canonicalize_stable(p: &Path) -> PathBuf {
+pub(crate) fn canonicalize_stable(p: &Path) -> PathBuf {
     let absolute = if p.is_absolute() {
         p.to_path_buf()
     } else {

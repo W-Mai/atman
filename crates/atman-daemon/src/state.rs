@@ -15,6 +15,7 @@ struct PendingPrompt {
 
 pub struct DaemonState {
     data_dir: PathBuf,
+    daemon_generation: String,
     live: Mutex<HashMap<SessionId, LiveSession>>,
     prompts: Mutex<HashMap<PromptId, PendingPrompt>>,
     launcher: Mutex<Option<std::sync::Arc<crate::run::RunLauncher>>>,
@@ -29,12 +30,25 @@ pub struct LiveSession {
 
 impl DaemonState {
     pub fn new(data_dir: PathBuf) -> Self {
+        Self::new_with_generation(data_dir, uuid::Uuid::now_v7().to_string())
+    }
+
+    pub fn new_with_generation(data_dir: PathBuf, daemon_generation: String) -> Self {
+        assert!(
+            !daemon_generation.is_empty(),
+            "daemon generation must be non-empty"
+        );
         Self {
             data_dir,
+            daemon_generation,
             live: Mutex::new(HashMap::new()),
             prompts: Mutex::new(HashMap::new()),
             launcher: Mutex::new(None),
         }
+    }
+
+    pub fn daemon_generation(&self) -> &str {
+        &self.daemon_generation
     }
 
     pub fn set_launcher(&self, launcher: std::sync::Arc<crate::run::RunLauncher>) {

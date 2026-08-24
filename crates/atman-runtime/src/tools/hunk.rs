@@ -35,9 +35,9 @@ impl Tool for FsEdit {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let path = extract_path(&args, "path", 0)?;
+            let path = ctx.resolve_path(&extract_path(&args, "path", 0)?)?;
             let new_content = extract_string(&args, "new_content", 1)?;
             let original = tokio::fs::read_to_string(&path).await.map_err(|e| {
                 RuntimeError::ToolFailed(format!("fs.edit({}): {e}", path.display()))
@@ -246,9 +246,10 @@ impl Tool for HunkApply {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let proposal = extract_proposal(&args)?;
+            crate::fs_access::authorize_write(ctx, &proposal.path, self.name(), true).await?;
             let selection = resolve_selection(&args, &proposal)?;
             let applied = proposal
                 .apply_selected(&selection)
@@ -473,6 +474,44 @@ mod tests {
         assert!(on_disk.contains("L3\n"));
         assert!(!on_disk.contains("L15\n"));
         assert!(on_disk.contains("l15\n"));
+    }
+
+    #[tokio::test]
+    async fn hunk_apply_rejects_external_path_without_changing_file() {
+        let workspace = tempfile::tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("r4-hunk-{}.txt", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+        std::fs::write(&fixture, "original\n").unwrap();
+        let proposal = Value::EditProposal(Box::new(EditProposal::compute(
+            fixture.clone(),
+            "original\n".into(),
+            "changed\n".into(),
+        )));
+        let ctx = ToolCtx::new()
+            .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
+                workspace.path().into(),
+            ))
+            .with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "test".into(),
+                repository_root: workspace.path().into(),
+                path: workspace.path().into(),
+                branch: None,
+            });
+        let error = HunkApply
+            .call(
+                ToolArgs {
+                    positional: vec![proposal],
+                    named: vec![],
+                },
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("outside workspace"));
+        assert_eq!(std::fs::read_to_string(&fixture).unwrap(), "original\n");
+        std::fs::remove_file(fixture).unwrap();
     }
 
     #[tokio::test]

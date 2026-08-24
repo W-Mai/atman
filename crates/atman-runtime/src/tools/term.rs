@@ -658,9 +658,8 @@ async fn spawn_impl(
         .map(|v| v as u16)
         .unwrap_or(DEFAULT_COLS)
         .max(2);
-    let cwd = extract_optional_string(&args, "cwd")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let explicit_cwd = extract_optional_string(&args, "cwd").map(std::path::PathBuf::from);
+    let cwd = ctx.resolve_cwd(explicit_cwd.as_deref())?;
     let env: Vec<(String, String)> = if let Some(Value::Struct(fields)) = args.named("env") {
         fields
             .iter()
@@ -736,6 +735,7 @@ async fn spawn_impl(
             }
         }
     } else {
+        crate::fs_access::authorize_write(ctx, &cwd, "term.spawn", false).await?;
         spawn_pty_direct(&cmd_args, &env_refs, &cwd, pty_size)?
     };
 
@@ -1855,6 +1855,239 @@ impl Tool for TermList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::{ToolArgs, ToolCtx};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct StrictRecordingSandbox {
+        pty_calls: AtomicUsize,
+    }
+
+    struct FallbackSandbox {
+        strict_calls: AtomicUsize,
+        relaxed_calls: AtomicUsize,
+    }
+
+    impl crate::sandbox::Sandbox for FallbackSandbox {
+        fn spawn<'a>(
+            &'a self,
+            _cmd: &'a [&'a str],
+            _env: &'a [(String, String)],
+            _cwd: &'a Path,
+        ) -> crate::tool::BoxFut<'a, Result<std::process::Output, RuntimeError>> {
+            Box::pin(async { Err(RuntimeError::ToolFailed("Operation not permitted".into())) })
+        }
+
+        fn spawn_pty<'a>(
+            &'a self,
+            _cmd: &'a [&'a str],
+            _env: &'a [(String, String)],
+            _cwd: &'a Path,
+            _pty_size: portable_pty::PtySize,
+        ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
+            self.strict_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(RuntimeError::ToolFailed("Operation not permitted".into())) })
+        }
+
+        fn spawn_pty_relaxed<'a>(
+            &'a self,
+            cmd: &'a [&'a str],
+            env: &'a [(String, String)],
+            cwd: &'a Path,
+            pty_size: portable_pty::PtySize,
+        ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
+            self.relaxed_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { spawn_pty_direct(cmd, env, cwd, pty_size) })
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn kind(&self) -> &'static str {
+            "test-fallback"
+        }
+    }
+
+    impl crate::sandbox::Sandbox for StrictRecordingSandbox {
+        fn spawn<'a>(
+            &'a self,
+            _cmd: &'a [&'a str],
+            _env: &'a [(String, String)],
+            _cwd: &'a Path,
+        ) -> crate::tool::BoxFut<'a, Result<std::process::Output, RuntimeError>> {
+            Box::pin(async { Err(RuntimeError::ToolFailed("strict sentinel".into())) })
+        }
+
+        fn spawn_pty<'a>(
+            &'a self,
+            _cmd: &'a [&'a str],
+            _env: &'a [(String, String)],
+            _cwd: &'a Path,
+            _pty_size: portable_pty::PtySize,
+        ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
+            self.pty_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(RuntimeError::ToolFailed("strict sentinel".into())) })
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn kind(&self) -> &'static str {
+            "test"
+        }
+    }
+
+    fn managed_term_ctx(
+        workspace: &Path,
+        registry: Arc<TermRegistry>,
+        session_dir: &Path,
+    ) -> ToolCtx {
+        let mut ctx = ToolCtx::new()
+            .with_term_registry(registry)
+            .with_session_dir(session_dir.to_path_buf())
+            .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
+                workspace.to_path_buf(),
+            ))
+            .with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "test".into(),
+                repository_root: workspace.to_path_buf(),
+                path: workspace.to_path_buf(),
+                branch: None,
+            });
+        ctx.session_id = Some("r4".into());
+        ctx
+    }
+
+    fn term_args(cwd: &Path) -> ToolArgs {
+        ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("cmd".into(), Value::Str("exit 0".into())),
+                ("cwd".into(), Value::Str(cwd.to_string_lossy().into())),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_strict_path_receives_external_cwd_before_fs_policy() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TermRegistry::new());
+        let sandbox = Arc::new(StrictRecordingSandbox {
+            pty_calls: AtomicUsize::new(0),
+        });
+        let ctx = managed_term_ctx(workspace.path(), registry, session_dir.path())
+            .with_sandbox(sandbox.clone());
+        let error = spawn_impl(term_args(Path::new(env!("CARGO_MANIFEST_DIR"))), &ctx)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("strict sentinel"));
+        assert_eq!(sandbox.pty_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn relaxed_fallback_registers_terminal_after_approval() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TermRegistry::new());
+        let sandbox = Arc::new(FallbackSandbox {
+            strict_calls: AtomicUsize::new(0),
+            relaxed_calls: AtomicUsize::new(0),
+        });
+        let approval = Arc::new(crate::session::ApprovalRegistry::new());
+        approval.set_auto_ceiling(ApprovalLevel::Dangerous);
+        let ctx = managed_term_ctx(workspace.path(), registry.clone(), session_dir.path())
+            .with_sandbox(sandbox.clone())
+            .with_approval(approval)
+            .with_anchors(None, Some(crate::event::FlowRunId::now()), None);
+
+        spawn_impl(term_args(workspace.path()), &ctx).await.unwrap();
+
+        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.list("r4").len(), 1);
+        registry.kill_all();
+    }
+
+    #[tokio::test]
+    async fn relaxed_fallback_denial_leaves_terminal_and_task_registries_unchanged() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let tasks = crate::task_registry::TaskRegistry::new();
+        let registry = Arc::new(TermRegistry::new().with_task_registry(tasks.clone()));
+        let sandbox = Arc::new(FallbackSandbox {
+            strict_calls: AtomicUsize::new(0),
+            relaxed_calls: AtomicUsize::new(0),
+        });
+        let approval = Arc::new(crate::session::ApprovalRegistry::new());
+        approval.set_auto_ceiling(ApprovalLevel::Approve);
+        let mut pending = approval.subscribe();
+        let ctx = managed_term_ctx(workspace.path(), registry.clone(), session_dir.path())
+            .with_sandbox(sandbox.clone())
+            .with_approval(approval.clone())
+            .with_task_registry(tasks.clone())
+            .with_anchors(None, Some(crate::event::FlowRunId::now()), None);
+
+        let (result, ()) = tokio::join!(spawn_impl(term_args(workspace.path()), &ctx), async {
+            pending.changed().await.unwrap();
+            assert_eq!(approval.list_pending().len(), 1);
+            assert_eq!(
+                approval.decide_all(crate::session::ApprovalDecision::Deny {
+                    reason: "test denial".into(),
+                }),
+                1
+            );
+        });
+
+        assert!(result.unwrap_err().to_string().contains("test denial"));
+        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 0);
+        assert!(registry.list("r4").is_empty());
+        assert!(
+            tasks
+                .list(&crate::task_registry::TaskFilter::all())
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_spawn_rejects_external_cwd_without_registering_terminal() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TermRegistry::new());
+        let ctx = managed_term_ctx(workspace.path(), registry.clone(), session_dir.path());
+        let error = spawn_impl(term_args(Path::new(env!("CARGO_MANIFEST_DIR"))), &ctx)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("outside workspace"));
+        assert!(registry.list("r4").is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_spawn_allows_external_temp_cwd() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TermRegistry::new());
+        let ctx = managed_term_ctx(workspace.path(), registry.clone(), session_dir.path());
+        spawn_impl(term_args(external.path()), &ctx).await.unwrap();
+        assert_eq!(registry.list("r4").len(), 1);
+        registry.kill_all();
+    }
+
+    #[tokio::test]
+    async fn direct_spawn_allows_external_cwd_under_full_access() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TermRegistry::new());
+        let ctx = managed_term_ctx(workspace.path(), registry.clone(), session_dir.path())
+            .with_fs_access(crate::fs_access::FsAccessPolicy::danger_full_access());
+        spawn_impl(term_args(Path::new(env!("CARGO_MANIFEST_DIR"))), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(registry.list("r4").len(), 1);
+        registry.kill_all();
+    }
 
     #[test]
     fn handle_parse_roundtrip() {

@@ -15,6 +15,7 @@ pub mod executor;
 pub mod flow_lint;
 pub mod flow_meta;
 pub mod flow_registry;
+pub mod flow_workspace;
 pub mod form;
 pub mod fs_access;
 pub mod git;

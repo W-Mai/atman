@@ -35,10 +35,11 @@ impl Tool for TestRun {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let cwd = extract_optional_path(&args, "cwd")
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let explicit_cwd = extract_optional_path(&args, "cwd");
+            let cwd = ctx.resolve_cwd(explicit_cwd.as_deref())?;
+            crate::fs_access::authorize_write(ctx, &cwd, self.name(), false).await?;
             let framework_override = extract_optional_string(&args, "framework");
             let scope = extract_optional_string(&args, "scope");
             let timeout_ms = extract_optional_int(&args, "timeout_ms").unwrap_or(300_000) as u64;
@@ -275,6 +276,92 @@ mod tests {
         assert!(matches!(f("duration_ms"), Some(Value::Int(_))));
         assert!(matches!(f("timed_out"), Some(Value::Bool(_))));
         assert!(matches!(f("cmd"), Some(Value::Str(s)) if s.starts_with("cargo test")));
+    }
+
+    fn managed_ctx(workspace: &Path) -> ToolCtx {
+        ToolCtx::new()
+            .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
+                workspace.to_path_buf(),
+            ))
+            .with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "test".into(),
+                repository_root: workspace.to_path_buf(),
+                path: workspace.to_path_buf(),
+                branch: None,
+            })
+    }
+
+    fn run_args(cwd: &Path, framework: &str) -> ToolArgs {
+        ToolArgs {
+            positional: vec![],
+            named: vec![
+                ("framework".into(), Value::Str(framework.into())),
+                ("cwd".into(), Value::Path(cwd.to_path_buf())),
+                ("timeout_ms".into(), Value::Int(30_000)),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_test_run_rejects_external_cwd_before_command_construction() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let error = TestRun
+            .call(
+                run_args(external, "must-not-be-parsed"),
+                &managed_ctx(workspace.path()),
+            )
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("outside workspace"), "{message}");
+        assert!(!message.contains("unknown framework"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn managed_test_run_allows_temp_cwd() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external_temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external_temp.path().join("Cargo.toml"),
+            "[package]\nname='r4-temp'\nversion='0.0.0'\n",
+        )
+        .unwrap();
+        std::fs::create_dir(external_temp.path().join("src")).unwrap();
+        std::fs::write(external_temp.path().join("src/lib.rs"), "").unwrap();
+        let result = TestRun
+            .call(
+                run_args(external_temp.path(), "cargo"),
+                &managed_ctx(workspace.path()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result.field("exit"), Some(Value::Int(0))));
+    }
+
+    #[tokio::test]
+    async fn managed_test_run_allows_external_cwd_under_full_access() {
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&fixture_root).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("r4-test-run-")
+            .tempdir_in(fixture_root)
+            .unwrap();
+        std::fs::create_dir_all(fixture.path().join("src")).unwrap();
+        std::fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname='r4-full'\nversion='0.0.0'\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(fixture.path().join("src/lib.rs"), "").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let ctx = managed_ctx(workspace.path())
+            .with_fs_access(crate::fs_access::FsAccessPolicy::danger_full_access());
+        let result = TestRun
+            .call(run_args(fixture.path(), "cargo"), &ctx)
+            .await
+            .unwrap();
+        assert!(matches!(result.field("exit"), Some(Value::Int(0))));
     }
 
     #[test]

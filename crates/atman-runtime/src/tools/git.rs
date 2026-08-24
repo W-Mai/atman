@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::error::RuntimeError;
 use crate::git;
 use crate::stream::StreamFrame;
@@ -34,20 +32,21 @@ impl Tool for GitInit {
         })
     }
 
-    fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
-            let path = match args.named("cwd") {
-                Some(Value::Path(path)) => path.clone(),
-                Some(Value::Str(path)) => PathBuf::from(path),
+            let explicit = match args.named("cwd") {
+                Some(Value::Path(path)) => Some(path.as_path()),
+                Some(Value::Str(path)) => Some(std::path::Path::new(path)),
                 Some(other) => {
                     return Err(RuntimeError::TypeMismatch {
                         expected: "string".into(),
                         actual: other.kind_name().into(),
                     });
                 }
-                None => std::env::current_dir()
-                    .map_err(|e| RuntimeError::ToolFailed(format!("git.init: {e}")))?,
+                None => None,
             };
+            let path = ctx.resolve_cwd(explicit)?;
+            crate::fs_access::authorize_write(ctx, &path, self.name(), true).await?;
             let bare = match args.named("bare") {
                 Some(Value::Bool(bare)) => *bare,
                 Some(other) => {
@@ -116,11 +115,11 @@ impl Tool for GitDiff {
         Box::pin(async move {
             let range = extract_string(&args, "range", 0)?;
             let paths = extract_string_list(&args, "paths", 1).unwrap_or_default();
-            let cwd = match args.named("cwd") {
-                Some(Value::Str(s)) => PathBuf::from(s),
-                _ => std::env::current_dir()
-                    .map_err(|e| RuntimeError::ToolFailed(format!("git.diff cwd: {e}")))?,
-            };
+            let explicit = args.named("cwd").and_then(|value| match value {
+                Value::Str(path) => Some(std::path::Path::new(path)),
+                _ => None,
+            });
+            let cwd = ctx.resolve_cwd(explicit)?;
             let out = git::diff_range(&cwd, &range, &paths)
                 .map_err(|e| RuntimeError::ToolFailed(format!("git.diff: {e}")))?;
             if let Some(tx) = &ctx.stream_tx {

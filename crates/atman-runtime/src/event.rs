@@ -98,6 +98,14 @@ pub enum Event {
         flow_name: String,
         status: FlowStatus,
     },
+    WorkspaceLifecycle {
+        run_id: FlowRunId,
+        workspace_id: String,
+        path: String,
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cleanup_error: Option<String>,
+    },
     LlmCall {
         model: String,
         provider: String,

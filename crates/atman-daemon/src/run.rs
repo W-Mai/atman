@@ -30,6 +30,43 @@ pub struct SpawnedRun {
     pub run_id: ProtoRunId,
 }
 
+pub fn reconcile_workspaces(
+    project_root: &Path,
+    daemon_generation: &str,
+) -> Result<Vec<atman_runtime::git_workspace::WorkspaceRecord>> {
+    let repository = match atman_runtime::git::discover_repository(project_root) {
+        Ok(repository) => repository,
+        Err(atman_runtime::git::GitError::NotARepo(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if repository.bare {
+        return Ok(Vec::new());
+    }
+    let Some(manager) =
+        atman_runtime::git_workspace::WorkspaceManager::open_existing(project_root, None)?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(manager.reconcile_generation(daemon_generation)?)
+}
+
+fn attach_flow_workspace_service(
+    executor: &mut atman_runtime::Executor,
+    project_root: &Path,
+    state: &DaemonState,
+) -> Result<()> {
+    let service = atman_runtime::flow_workspace::FlowWorkspaceService::new(
+        project_root,
+        None,
+        state.daemon_generation(),
+    )?;
+    executor.tool_ctx = executor
+        .tool_ctx
+        .clone()
+        .with_flow_workspace_service(Arc::new(service));
+    Ok(())
+}
+
 impl RunLauncher {
     // Runs on a dedicated blocking thread + current-thread runtime because
     // atman_dsl::ast::File and Executor are !Send (proc-macro2 spans hold Rc<()>).
@@ -171,6 +208,9 @@ async fn run_flow_inner(
     })
     .await?;
     let mut executor = outcome.executor;
+    if let Some(state) = &daemon_state {
+        attach_flow_workspace_service(&mut executor, &project_root, state)?;
+    }
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
 
     let lifecycles = match &config_dir {
@@ -307,9 +347,100 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::sync::Mutex;
 
     static MODEL_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        git(tmp.path(), &["init", "-q"]);
+        git(tmp.path(), &["config", "user.name", "Atman Test"]);
+        git(
+            tmp.path(),
+            &["config", "user.email", "atman@example.invalid"],
+        );
+        git(tmp.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(tmp.path().join("README.md"), "committed\n").unwrap();
+        git(tmp.path(), &["add", "README.md"]);
+        git(tmp.path(), &["commit", "-q", "-m", "initial"]);
+        tmp
+    }
+
+    #[test]
+    fn reconciliation_is_noop_without_git_or_registry_and_reports_bad_registry() {
+        let plain = tempfile::tempdir().unwrap();
+        assert!(
+            reconcile_workspaces(plain.path(), "generation")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!plain.path().join(".atman").exists());
+
+        let repository = repo();
+        assert!(
+            reconcile_workspaces(repository.path(), "generation")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!repository.path().join(".atman").exists());
+
+        let manager =
+            atman_runtime::git_workspace::WorkspaceManager::at(repository.path(), None).unwrap();
+        std::fs::write(
+            repository.path().join(".atman/workspaces.json"),
+            b"not-json",
+        )
+        .unwrap();
+        assert!(reconcile_workspaces(repository.path(), "generation").is_err());
+        assert!(manager.managed_root().exists());
+    }
+
+    #[test]
+    fn attached_workspace_service_uses_daemon_generation() {
+        let repository = repo();
+        let state = DaemonState::new_with_generation(
+            repository.path().join("data"),
+            "daemon-generation".into(),
+        );
+        let mut executor = atman_runtime::Executor::new();
+        attach_flow_workspace_service(&mut executor, repository.path(), &state).unwrap();
+
+        let service = executor.tool_ctx.flow_workspace_service.as_ref().unwrap();
+        let binding = service
+            .allocate(
+                atman_runtime::git_workspace::WorkspacePolicy::Auto,
+                "session",
+                "flow",
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        let manager =
+            atman_runtime::git_workspace::WorkspaceManager::at(repository.path(), None).unwrap();
+        let record = manager.get(&binding.workspace_id).unwrap();
+        assert_eq!(
+            record
+                .lease
+                .as_ref()
+                .map(|lease| lease.daemon_generation.as_str()),
+            Some("daemon-generation")
+        );
+    }
 
     #[test]
     fn reload_model_config_refreshes_registry_and_ignores_invalid_toml() {

@@ -1,3 +1,4 @@
+use atman_runtime::fs_access::{FsAccessMode, FsAccessPolicy};
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::tool::{Tool, ToolArgs};
 use atman_runtime::tools::{self, term::TermSpawn};
@@ -15,7 +16,11 @@ async fn term_spawn_emits_terminal_chunk_to_stream() {
         .tool_ctx
         .clone()
         .with_term_registry(term_reg)
-        .with_session_dir(dir);
+        .with_session_dir(dir)
+        .with_fs_access(FsAccessPolicy {
+            mode: FsAccessMode::WorkspaceWrite,
+            workspace: Some(std::env::current_dir().unwrap()),
+        });
     ex.tool_ctx.stream_tx = Some(stream_tx);
 
     let args = ToolArgs {
