@@ -4,7 +4,7 @@ use atman_runtime::provider::Provider;
 use atman_runtime::{Executor, Session, Value};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 mod init;
 mod mcp_templates;
@@ -5596,15 +5596,21 @@ fn bootstrap_opts(
     events: atman_runtime::event::EventSink,
     mock: bool,
 ) -> Result<atman_daemon::bootstrap::BootstrapOptions> {
+    static WORKSPACE_GENERATION: OnceLock<String> = OnceLock::new();
+
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let home_dir = std::env::var("HOME").ok().map(std::path::PathBuf::from);
     let config_dir = config_dir().ok();
+    let workspace_generation = WORKSPACE_GENERATION
+        .get_or_init(|| uuid::Uuid::now_v7().to_string())
+        .clone();
     Ok(atman_daemon::bootstrap::BootstrapOptions {
         events,
         mock,
         config_dir,
         project_root,
         home_dir,
+        workspace_generation,
     })
 }
 

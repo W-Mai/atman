@@ -17,6 +17,7 @@ pub struct BootstrapOptions {
     pub config_dir: Option<PathBuf>,
     pub project_root: PathBuf,
     pub home_dir: Option<PathBuf>,
+    pub workspace_generation: String,
 }
 
 pub fn load_redact_config(config_dir: Option<&Path>) -> RedactConfig {
@@ -258,6 +259,15 @@ pub fn spawn_mcp_boot(
 pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> {
     let events = opts.events.clone();
     let mut executor = Executor::with_events(events);
+    let workspace_service = atman_runtime::flow_workspace::FlowWorkspaceService::new(
+        &opts.project_root,
+        None,
+        &opts.workspace_generation,
+    )?;
+    executor.tool_ctx = executor
+        .tool_ctx
+        .clone()
+        .with_flow_workspace_service(Arc::new(workspace_service));
 
     let rule_fetch = build_rule_fetch(&opts.project_root, opts.home_dir.as_deref()).await;
     tools::register_tier_zero_with_rules(&executor.tools, rule_fetch);
@@ -633,6 +643,7 @@ mod tests {
             config_dir: Some(config.path().to_path_buf()),
             project_root: project.path().to_path_buf(),
             home_dir: Some(home.path().to_path_buf()),
+            workspace_generation: "bootstrap-test-generation".into(),
         })
         .await
         .unwrap();

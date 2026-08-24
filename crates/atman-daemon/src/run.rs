@@ -50,23 +50,6 @@ pub fn reconcile_workspaces(
     Ok(manager.reconcile_generation(daemon_generation)?)
 }
 
-fn attach_flow_workspace_service(
-    executor: &mut atman_runtime::Executor,
-    project_root: &Path,
-    state: &DaemonState,
-) -> Result<()> {
-    let service = atman_runtime::flow_workspace::FlowWorkspaceService::new(
-        project_root,
-        None,
-        state.daemon_generation(),
-    )?;
-    executor.tool_ctx = executor
-        .tool_ctx
-        .clone()
-        .with_flow_workspace_service(Arc::new(service));
-    Ok(())
-}
-
 impl RunLauncher {
     // Runs on a dedicated blocking thread + current-thread runtime because
     // atman_dsl::ast::File and Executor are !Send (proc-macro2 spans hold Rc<()>).
@@ -199,18 +182,20 @@ async fn run_flow_inner(
     }
     let flow_name = parsed.flows[0].name.name.clone();
 
+    let workspace_generation = daemon_state
+        .as_ref()
+        .map(|state| state.daemon_generation().to_owned())
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
         events: session.sink().clone(),
         mock: false,
         config_dir: config_dir.clone(),
         project_root: project_root.clone(),
         home_dir,
+        workspace_generation,
     })
     .await?;
     let mut executor = outcome.executor;
-    if let Some(state) = &daemon_state {
-        attach_flow_workspace_service(&mut executor, &project_root, state)?;
-    }
     executor.source_dir = path.parent().map(|p| p.to_path_buf());
 
     let lifecycles = match &config_dir {
@@ -410,17 +395,30 @@ mod tests {
         assert!(manager.managed_root().exists());
     }
 
-    #[test]
-    fn attached_workspace_service_uses_daemon_generation() {
+    #[tokio::test]
+    async fn bootstrap_workspace_service_uses_daemon_generation() {
         let repository = repo();
         let state = DaemonState::new_with_generation(
             repository.path().join("data"),
             "daemon-generation".into(),
         );
-        let mut executor = atman_runtime::Executor::new();
-        attach_flow_workspace_service(&mut executor, repository.path(), &state).unwrap();
+        let outcome = crate::bootstrap::build_executor(crate::bootstrap::BootstrapOptions {
+            events: atman_runtime::event::EventSink::new(),
+            mock: true,
+            config_dir: None,
+            project_root: repository.path().to_path_buf(),
+            home_dir: None,
+            workspace_generation: state.daemon_generation().to_owned(),
+        })
+        .await
+        .unwrap();
 
-        let service = executor.tool_ctx.flow_workspace_service.as_ref().unwrap();
+        let service = outcome
+            .executor
+            .tool_ctx
+            .flow_workspace_service
+            .as_ref()
+            .unwrap();
         let binding = service
             .allocate(
                 atman_runtime::git_workspace::WorkspacePolicy::Auto,
