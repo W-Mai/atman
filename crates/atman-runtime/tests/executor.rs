@@ -1,5 +1,9 @@
 use atman_dsl::parse::parse_file;
+use atman_runtime::event::FlowRunId;
+use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::providers::mock::MockProvider;
+use atman_runtime::task_registry::{TaskFilter, TaskRegistry};
+use atman_runtime::tools::agent_ctrl::FlowRegistry;
 use atman_runtime::tools::memory_stubs::RuleFetch;
 use atman_runtime::{Event, Executor, FlowStatus, Value, tools};
 
@@ -30,6 +34,36 @@ async fn executor_runs_flow_and_emits_start_end() {
         Some(Event::FlowEnd { status, .. }) => assert!(matches!(status, FlowStatus::Ok)),
         other => panic!("expected FlowEnd last, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn root_registration_failure_does_not_leave_running_task() {
+    let file = parse_file("flow t() -> Int { return 1 }").unwrap();
+    let run_id = FlowRunId::now();
+    let flow_registry = Arc::new(FlowRegistry::new());
+    flow_registry
+        .register_root(
+            "existing-session".into(),
+            run_id.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let tasks = TaskRegistry::new();
+    let mut ex = Executor::new();
+    ex.tool_ctx = ex
+        .tool_ctx
+        .clone()
+        .with_flow_registry(flow_registry)
+        .with_task_registry(tasks.clone());
+
+    let error = ex
+        .run_in_turn_with_run_id(&file, "t", vec![], None, None, Some(run_id))
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("already registered"));
+    assert!(tasks.list(&TaskFilter::running()).is_empty());
+    assert!(tasks.list(&TaskFilter::all()).is_empty());
 }
 
 #[tokio::test]

@@ -202,6 +202,7 @@ mod tests {
                 mode: TrustMode::Eager,
                 theme: Theme::Weather,
                 outside: OutsideBehavior::Deny,
+                ..TrustConfig::default()
             },
             sidebar_visible: true,
             mouse_captured: true,

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atman_runtime::error::RuntimeError;
-use atman_runtime::event::{Event, EventSink};
+use atman_runtime::event::{Event, EventSink, FlowRunId};
+use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::flow_workspace::FlowWorkspaceService;
 use atman_runtime::git_workspace::{WorkspaceManager, WorkspaceState};
 use atman_runtime::provider::ProviderRegistry;
@@ -107,12 +108,22 @@ impl Setup {
         tools.register(Arc::new(AgentKill));
         tools.register(Arc::new(LifecycleProbe));
 
+        let root_run_id = FlowRunId::now();
+        let root_identity = flows
+            .register_root(
+                "session-one".into(),
+                root_run_id.clone(),
+                EffectiveAuthority::root(&Default::default(), false, None),
+            )
+            .unwrap();
         let mut ctx = ToolCtx::new()
             .with_registry(Arc::new(tools))
             .with_providers(Arc::new(ProviderRegistry::new()))
             .with_flow_registry(Arc::clone(&flows))
             .with_task_registry(tasks.clone())
             .with_events(events.clone());
+        ctx.flow_run_id = Some(root_run_id);
+        ctx.flow_identity = Some(root_identity);
         if with_session {
             ctx = ctx.with_session_id("session-one");
         }
@@ -294,6 +305,40 @@ async fn managed_allocation_failures_do_not_register_flow_or_task() {
         assert!(setup.flows.is_empty());
         assert!(setup.tasks.list(&TaskFilter::all()).is_empty());
     }
+}
+
+#[tokio::test]
+async fn prepare_failure_releases_allocated_workspace() {
+    let setup = Setup::new(true, true);
+    let missing_flow = setup._repo.path().join("missing.at");
+
+    let error = AgentSpawn
+        .call(
+            ToolArgs {
+                positional: vec![],
+                named: vec![
+                    (
+                        "flow".into(),
+                        Value::Str(format!("{}@missing", missing_flow.display())),
+                    ),
+                    ("workspace".into(), Value::Str("auto".into())),
+                ],
+            },
+            &setup.ctx,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("missing.at"));
+    assert!(setup.flows.is_empty());
+    assert!(setup.tasks.list(&TaskFilter::all()).is_empty());
+    let records = WorkspaceManager::at(setup._repo.path(), None)
+        .unwrap()
+        .list()
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].lifecycle_state(), WorkspaceState::Released);
+    assert!(!records[0].worktree_path.exists());
 }
 
 #[tokio::test]

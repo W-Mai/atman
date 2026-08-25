@@ -2,11 +2,13 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
+use atman_runtime::event::FlowRunId;
+use atman_runtime::flow_authority::EffectiveAuthority;
 use atman_runtime::flow_workspace::FlowWorkspaceService;
 use atman_runtime::git_workspace::{WorkspaceManager, WorkspacePolicy, WorkspaceState};
 use atman_runtime::provider::ProviderRegistry;
 use atman_runtime::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolRegistry, ToolResult};
-use atman_runtime::tools::agent_ctrl::AgentSpawn;
+use atman_runtime::tools::agent_ctrl::{AgentSpawn, FlowRegistry};
 use atman_runtime::tools::git_workspace::GitWorkspacePrune;
 use atman_runtime::value::Value;
 
@@ -142,11 +144,23 @@ async fn automatic_ownership_ignores_user_supplied_owner_fields() {
     tools.register(Arc::new(AgentSpawn));
     tools.register(Arc::new(Noop));
     let service = FlowWorkspaceService::new(repo.path(), None, "generation").unwrap();
-    let ctx = ToolCtx::new()
+    let registry = Arc::new(FlowRegistry::new());
+    let root_run_id = FlowRunId::now();
+    let root_identity = registry
+        .register_root(
+            "trusted-session".into(),
+            root_run_id.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(ProviderRegistry::new()))
+        .with_flow_registry(registry)
         .with_session_id("trusted-session")
         .with_flow_workspace_service(Arc::new(service));
+    ctx.flow_run_id = Some(root_run_id);
+    ctx.flow_identity = Some(root_identity);
     let value = AgentSpawn
         .call(
             ToolArgs {

@@ -89,7 +89,142 @@ impl std::str::FromStr for TrustMode {
     }
 }
 
-/// What to do when a tool outside the flow's declared tool list is invoked (Eager mode only).
+/// The action selected by controlled permission policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PolicyAction {
+    Auto,
+    Ask,
+    Deny,
+}
+
+impl PolicyAction {
+    fn most_restrictive(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
+            (Self::Ask, _) | (_, Self::Ask) => Self::Ask,
+            (Self::Auto, Self::Auto) => Self::Auto,
+        }
+    }
+}
+
+/// How Eager mode handles risks that require escalation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EscalationPolicy {
+    Deny,
+    #[default]
+    Ask,
+    Allow,
+}
+
+/// Whether Atman's permission controls apply to an execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionPolicy {
+    Controlled,
+    Unrestricted,
+}
+
+/// Structured resource risks combined with a tool's Tier policy.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskKind {
+    WorkspaceExternal,
+    SandboxViolation,
+    Network,
+    Irreversible,
+    FilesystemWrite,
+    ProcessSpawn,
+    RepositoryMutation,
+}
+
+/// Optional Eager-mode overrides for each tool Tier.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TierPolicyOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier0: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier1: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier2: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier3: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier4: Option<PolicyAction>,
+}
+
+impl TierPolicyOverrides {
+    fn resolve(&self, tier: crate::tool::Tier) -> PolicyAction {
+        let configured = match tier {
+            crate::tool::Tier::Zero => self.tier0,
+            crate::tool::Tier::One => self.tier1,
+            crate::tool::Tier::Two => self.tier2,
+            crate::tool::Tier::Three => self.tier3,
+            crate::tool::Tier::Four => self.tier4,
+        };
+        configured.unwrap_or_else(|| default_eager_tier_action(tier))
+    }
+}
+
+/// Mode-specific Tier overrides. Calm and Steady intentionally have no configurable entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TierPolicyConfig {
+    #[serde(default)]
+    pub eager: TierPolicyOverrides,
+}
+
+/// Optional Eager-mode overrides for structured resource risks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RiskPolicyOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outside_workspace: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_violation: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub irreversible: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_write: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_spawn: Option<PolicyAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_mutation: Option<PolicyAction>,
+}
+
+impl RiskPolicyOverrides {
+    fn resolve(&self, risk: RiskKind) -> PolicyAction {
+        match risk {
+            RiskKind::WorkspaceExternal => self.outside_workspace,
+            RiskKind::SandboxViolation => self.sandbox_violation,
+            RiskKind::Network => self.network,
+            RiskKind::Irreversible => self.irreversible,
+            RiskKind::FilesystemWrite => self.filesystem_write,
+            RiskKind::ProcessSpawn => self.process_spawn,
+            RiskKind::RepositoryMutation => self.repository_mutation,
+        }
+        .unwrap_or(PolicyAction::Ask)
+    }
+}
+
+/// Mode-specific risk overrides. Calm and Steady retain fixed safety floors.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RiskPolicyConfig {
+    #[serde(default)]
+    pub eager: RiskPolicyOverrides,
+}
+
+fn default_eager_tier_action(tier: crate::tool::Tier) -> PolicyAction {
+    match tier {
+        crate::tool::Tier::Zero | crate::tool::Tier::One => PolicyAction::Auto,
+        crate::tool::Tier::Two | crate::tool::Tier::Three | crate::tool::Tier::Four => {
+            PolicyAction::Ask
+        }
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -447,9 +582,18 @@ pub struct TrustConfig {
     /// Display theme for trust mode labels.
     #[serde(default)]
     pub theme: Theme,
-    /// Behavior for tools outside the declared list (Eager mode only).
+    /// Legacy Eager escalation setting, retained for persisted UI/config compatibility.
     #[serde(default)]
     pub outside: OutsideBehavior,
+    /// Explicit Eager escalation policy. When absent, `outside` supplies the legacy value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<EscalationPolicy>,
+    /// Mode-specific Tier policy overrides.
+    #[serde(default)]
+    pub tiers: TierPolicyConfig,
+    /// Mode-specific resource-risk policy overrides.
+    #[serde(default)]
+    pub risks: RiskPolicyConfig,
 }
 
 impl TrustConfig {
@@ -459,6 +603,75 @@ impl TrustConfig {
 
     pub fn outside_display(&self) -> OutsideDisplay {
         self.theme.outside_display(self.outside)
+    }
+
+    pub fn execution_policy(&self) -> ExecutionPolicy {
+        match self.mode {
+            TrustMode::Reckless => ExecutionPolicy::Unrestricted,
+            TrustMode::Calm | TrustMode::Steady | TrustMode::Eager => ExecutionPolicy::Controlled,
+        }
+    }
+
+    pub fn resolved_escalation(&self) -> EscalationPolicy {
+        self.escalation.unwrap_or(match self.outside {
+            OutsideBehavior::Deny => EscalationPolicy::Deny,
+            OutsideBehavior::Approve => EscalationPolicy::Ask,
+            OutsideBehavior::Allow => EscalationPolicy::Allow,
+        })
+    }
+
+    pub fn resolve_tier(&self, tier: crate::tool::Tier) -> PolicyAction {
+        match self.mode {
+            TrustMode::Calm => match tier {
+                crate::tool::Tier::Zero => PolicyAction::Auto,
+                crate::tool::Tier::One
+                | crate::tool::Tier::Two
+                | crate::tool::Tier::Three
+                | crate::tool::Tier::Four => PolicyAction::Ask,
+            },
+            TrustMode::Steady => match tier {
+                crate::tool::Tier::Zero | crate::tool::Tier::One => PolicyAction::Auto,
+                crate::tool::Tier::Two | crate::tool::Tier::Three | crate::tool::Tier::Four => {
+                    PolicyAction::Ask
+                }
+            },
+            TrustMode::Eager => self.tiers.eager.resolve(tier),
+            TrustMode::Reckless => PolicyAction::Auto,
+        }
+    }
+
+    pub fn resolve_risk(&self, risk: RiskKind) -> PolicyAction {
+        match self.mode {
+            TrustMode::Calm | TrustMode::Steady => PolicyAction::Ask,
+            TrustMode::Eager => self.risks.eager.resolve(risk),
+            TrustMode::Reckless => PolicyAction::Auto,
+        }
+    }
+
+    /// Resolves the controlled policy before grants or hard-boundary checks.
+    pub fn resolve_policy(
+        &self,
+        tier: crate::tool::Tier,
+        risks: impl IntoIterator<Item = RiskKind>,
+    ) -> PolicyAction {
+        if self.execution_policy() == ExecutionPolicy::Unrestricted {
+            return PolicyAction::Auto;
+        }
+
+        let action = risks
+            .into_iter()
+            .fold(self.resolve_tier(tier), |action, risk| {
+                action.most_restrictive(self.resolve_risk(risk))
+            });
+
+        if self.mode != TrustMode::Eager || action != PolicyAction::Ask {
+            return action;
+        }
+        match self.resolved_escalation() {
+            EscalationPolicy::Deny => PolicyAction::Deny,
+            EscalationPolicy::Ask => PolicyAction::Ask,
+            EscalationPolicy::Allow => PolicyAction::Auto,
+        }
     }
 }
 
@@ -496,6 +709,7 @@ mod tests {
             mode: TrustMode::Eager,
             theme: Theme::Default,
             outside: OutsideBehavior::default(),
+            ..TrustConfig::default()
         };
         let display = cfg.display();
         let warning = TrustMode::Eager.warning(&display).unwrap();
@@ -505,6 +719,7 @@ mod tests {
             mode: TrustMode::Reckless,
             theme: Theme::Animal,
             outside: OutsideBehavior::default(),
+            ..TrustConfig::default()
         };
         let display2 = cfg2.display();
         let warning2 = TrustMode::Reckless.warning(&display2).unwrap();
@@ -643,5 +858,228 @@ mod tests {
         assert_eq!(TrustMode::Steady.level(), 2);
         assert_eq!(TrustMode::Eager.level(), 3);
         assert_eq!(TrustMode::Reckless.level(), 4);
+    }
+
+    #[test]
+    fn default_tier_matrix_matches_modes() {
+        use crate::tool::Tier;
+
+        let tiers = [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four];
+        let cases = [
+            (
+                TrustMode::Calm,
+                [
+                    PolicyAction::Auto,
+                    PolicyAction::Ask,
+                    PolicyAction::Ask,
+                    PolicyAction::Ask,
+                    PolicyAction::Ask,
+                ],
+            ),
+            (
+                TrustMode::Steady,
+                [
+                    PolicyAction::Auto,
+                    PolicyAction::Auto,
+                    PolicyAction::Ask,
+                    PolicyAction::Ask,
+                    PolicyAction::Ask,
+                ],
+            ),
+            (
+                TrustMode::Eager,
+                [
+                    PolicyAction::Auto,
+                    PolicyAction::Auto,
+                    PolicyAction::Ask,
+                    PolicyAction::Ask,
+                    PolicyAction::Ask,
+                ],
+            ),
+            (TrustMode::Reckless, [PolicyAction::Auto; 5]),
+        ];
+
+        for (mode, expected) in cases {
+            let config = TrustConfig {
+                mode,
+                ..TrustConfig::default()
+            };
+            for (tier, action) in tiers.into_iter().zip(expected) {
+                assert_eq!(
+                    config.resolve_tier(tier),
+                    action,
+                    "mode={mode:?}, tier={tier:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn calm_and_steady_keep_fixed_safety_floors() {
+        use crate::tool::Tier;
+
+        let configured = TierPolicyConfig {
+            eager: TierPolicyOverrides {
+                tier4: Some(PolicyAction::Auto),
+                ..TierPolicyOverrides::default()
+            },
+        };
+        for mode in [TrustMode::Calm, TrustMode::Steady] {
+            let config = TrustConfig {
+                mode,
+                tiers: configured.clone(),
+                ..TrustConfig::default()
+            };
+            assert_eq!(config.resolve_tier(Tier::Four), PolicyAction::Ask);
+            assert_eq!(
+                config.resolve_risk(RiskKind::SandboxViolation),
+                PolicyAction::Ask
+            );
+        }
+    }
+
+    #[test]
+    fn eager_allow_never_overrides_explicit_deny() {
+        use crate::tool::Tier;
+
+        let config = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: Some(EscalationPolicy::Allow),
+            tiers: TierPolicyConfig {
+                eager: TierPolicyOverrides {
+                    tier4: Some(PolicyAction::Deny),
+                    ..TierPolicyOverrides::default()
+                },
+            },
+            risks: RiskPolicyConfig {
+                eager: RiskPolicyOverrides {
+                    network: Some(PolicyAction::Deny),
+                    ..RiskPolicyOverrides::default()
+                },
+            },
+            ..TrustConfig::default()
+        };
+
+        assert_eq!(config.resolve_policy(Tier::Four, []), PolicyAction::Deny);
+        assert_eq!(
+            config.resolve_policy(Tier::Zero, [RiskKind::Network]),
+            PolicyAction::Deny
+        );
+        assert_eq!(config.resolve_policy(Tier::Three, []), PolicyAction::Auto);
+    }
+
+    #[test]
+    fn eager_escalation_applies_only_to_ask() {
+        use crate::tool::Tier;
+
+        for (escalation, expected) in [
+            (EscalationPolicy::Deny, PolicyAction::Deny),
+            (EscalationPolicy::Ask, PolicyAction::Ask),
+            (EscalationPolicy::Allow, PolicyAction::Auto),
+        ] {
+            let config = TrustConfig {
+                mode: TrustMode::Eager,
+                escalation: Some(escalation),
+                ..TrustConfig::default()
+            };
+            assert_eq!(config.resolve_policy(Tier::Three, []), expected);
+            assert_eq!(config.resolve_policy(Tier::Zero, []), PolicyAction::Auto);
+        }
+    }
+
+    #[test]
+    fn every_risk_defaults_to_ask_in_controlled_modes() {
+        let risks = [
+            RiskKind::WorkspaceExternal,
+            RiskKind::SandboxViolation,
+            RiskKind::Network,
+            RiskKind::Irreversible,
+            RiskKind::FilesystemWrite,
+            RiskKind::ProcessSpawn,
+            RiskKind::RepositoryMutation,
+        ];
+        for mode in [TrustMode::Calm, TrustMode::Steady, TrustMode::Eager] {
+            let config = TrustConfig {
+                mode,
+                ..TrustConfig::default()
+            };
+            for risk in risks {
+                assert_eq!(config.resolve_risk(risk), PolicyAction::Ask);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_outside_maps_to_escalation_and_explicit_field_wins() {
+        for (outside, expected) in [
+            (OutsideBehavior::Deny, EscalationPolicy::Deny),
+            (OutsideBehavior::Approve, EscalationPolicy::Ask),
+            (OutsideBehavior::Allow, EscalationPolicy::Allow),
+        ] {
+            let config = TrustConfig {
+                outside,
+                ..TrustConfig::default()
+            };
+            assert_eq!(config.resolved_escalation(), expected);
+        }
+
+        let explicit = TrustConfig {
+            outside: OutsideBehavior::Deny,
+            escalation: Some(EscalationPolicy::Allow),
+            ..TrustConfig::default()
+        };
+        assert_eq!(explicit.resolved_escalation(), EscalationPolicy::Allow);
+    }
+
+    #[test]
+    fn reckless_is_explicitly_unrestricted() {
+        use crate::tool::Tier;
+
+        let config = TrustConfig {
+            mode: TrustMode::Reckless,
+            escalation: Some(EscalationPolicy::Deny),
+            ..TrustConfig::default()
+        };
+        assert_eq!(config.execution_policy(), ExecutionPolicy::Unrestricted);
+        assert_eq!(
+            config.resolve_policy(Tier::Four, [RiskKind::SandboxViolation]),
+            PolicyAction::Auto
+        );
+    }
+
+    #[test]
+    fn trust_config_json_and_toml_round_trip() {
+        let old: TrustConfig =
+            serde_json::from_str(r#"{"mode":"eager","theme":"weather","outside":"deny"}"#).unwrap();
+        assert_eq!(old.resolved_escalation(), EscalationPolicy::Deny);
+
+        let config = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: Some(EscalationPolicy::Allow),
+            tiers: TierPolicyConfig {
+                eager: TierPolicyOverrides {
+                    tier4: Some(PolicyAction::Deny),
+                    ..TierPolicyOverrides::default()
+                },
+            },
+            risks: RiskPolicyConfig {
+                eager: RiskPolicyOverrides {
+                    network: Some(PolicyAction::Ask),
+                    ..RiskPolicyOverrides::default()
+                },
+            },
+            ..TrustConfig::default()
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let from_json: TrustConfig = serde_json::from_str(&json).unwrap();
+        let toml = toml::to_string(&config).unwrap();
+        let from_toml: TrustConfig = toml::from_str(&toml).unwrap();
+        for back in [from_json, from_toml] {
+            assert_eq!(back.mode, config.mode);
+            assert_eq!(back.escalation, config.escalation);
+            assert_eq!(back.tiers, config.tiers);
+            assert_eq!(back.risks, config.risks);
+        }
     }
 }

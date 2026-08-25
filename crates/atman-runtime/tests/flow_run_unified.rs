@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 use atman_dsl::parse::parse_file;
 use atman_runtime::event::FlowRunId;
+use atman_runtime::flow_authority::{
+    ChildWorkspaceAuthority, EffectiveAuthority, FlowExecutionState, InvocationKind,
+};
 use atman_runtime::session::Session;
 use atman_runtime::tool::{Tool, ToolArgs, ToolCtx};
 use atman_runtime::tools::agent_ctrl::{FlowInterject, FlowRegistry};
@@ -72,6 +75,222 @@ async fn root_flow_run_registered_in_flow_registry() {
 
     // current_root pointer should point at "root".
     assert_eq!(session.current_root(), Some("root".to_string()));
+}
+
+#[test]
+fn lifecycle_guard_marks_registered_run_terminal_on_drop() {
+    let registry = Arc::new(FlowRegistry::new());
+    let run_id = FlowRunId::now();
+    registry
+        .register_root(
+            "session".into(),
+            run_id.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+
+    {
+        let _guard = registry.lifecycle_guard(&run_id);
+        assert_eq!(
+            registry.execution_state(&run_id),
+            Some(FlowExecutionState::Running)
+        );
+    }
+
+    assert_eq!(
+        registry.execution_state(&run_id),
+        Some(FlowExecutionState::Terminal)
+    );
+}
+
+#[test]
+fn ancestry_and_handle_removal_matrix_preserves_run_identities() {
+    let registry = Arc::new(FlowRegistry::new());
+    let root = FlowRunId::now();
+    let child = FlowRunId::now();
+    let grandchild = FlowRunId::now();
+    let sibling = FlowRunId::now();
+    let other_root = FlowRunId::now();
+    registry
+        .register_root(
+            "session-a".into(),
+            root.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    for (parent, run) in [
+        (&root, child.clone()),
+        (&child, grandchild.clone()),
+        (&root, sibling.clone()),
+    ] {
+        registry
+            .register_child(
+                parent,
+                run,
+                InvocationKind::InlineSubflow,
+                false,
+                ChildWorkspaceAuthority::Inherit,
+            )
+            .unwrap();
+    }
+    registry
+        .register_root(
+            "session-b".into(),
+            other_root.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+
+    assert!(!registry.is_strict_ancestor(&root, &root));
+    assert!(registry.is_strict_ancestor(&root, &child));
+    assert!(registry.is_strict_ancestor(&root, &grandchild));
+    assert!(registry.is_strict_ancestor(&child, &grandchild));
+    assert!(!registry.is_strict_ancestor(&child, &sibling));
+    assert!(!registry.is_strict_ancestor(&root, &other_root));
+    assert!(!registry.is_strict_ancestor(&FlowRunId::now(), &grandchild));
+    assert_eq!(
+        registry
+            .strict_ancestors(&grandchild)
+            .iter()
+            .map(|identity| identity.run_id.clone())
+            .collect::<Vec<_>>(),
+        vec![child.clone(), root.clone()]
+    );
+
+    registry.create_entry(
+        "child-handle".into(),
+        "child".into(),
+        "m".into(),
+        child.clone(),
+    );
+    registry.remove("child-handle");
+    assert!(registry.lookup("child-handle").is_err());
+    assert!(registry.lookup_run(&child).is_some());
+    assert!(registry.is_strict_ancestor(&root, &grandchild));
+}
+
+#[test]
+fn register_child_rejections_leave_the_identity_graph_unchanged() {
+    let registry = Arc::new(FlowRegistry::new());
+    let root = FlowRunId::now();
+    let child = FlowRunId::now();
+    registry
+        .register_root(
+            "session".into(),
+            root.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    registry
+        .register_child(
+            &root,
+            child.clone(),
+            InvocationKind::InlineSubflow,
+            false,
+            ChildWorkspaceAuthority::Inherit,
+        )
+        .unwrap();
+
+    let duplicate_error = registry
+        .register_child(
+            &root,
+            child.clone(),
+            InvocationKind::SpawnSync,
+            false,
+            ChildWorkspaceAuthority::Inherit,
+        )
+        .unwrap_err();
+    assert!(duplicate_error.to_string().contains("already registered"));
+
+    let missing_parent = FlowRunId::now();
+    let missing_parent_child = FlowRunId::now();
+    let missing_error = registry
+        .register_child(
+            &missing_parent,
+            missing_parent_child.clone(),
+            InvocationKind::SpawnAsync,
+            false,
+            ChildWorkspaceAuthority::Inherit,
+        )
+        .unwrap_err();
+    assert!(missing_error.to_string().contains("is not registered"));
+
+    let terminal_parent = FlowRunId::now();
+    let terminal_parent_child = FlowRunId::now();
+    registry
+        .register_root(
+            "session".into(),
+            terminal_parent.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    registry.mark_terminal(&terminal_parent);
+    let terminal_error = registry
+        .register_child(
+            &terminal_parent,
+            terminal_parent_child.clone(),
+            InvocationKind::InlineSubflow,
+            false,
+            ChildWorkspaceAuthority::Inherit,
+        )
+        .unwrap_err();
+    assert!(terminal_error.to_string().contains("is terminal"));
+
+    let registered_child = registry.lookup_run(&child).unwrap();
+    assert_eq!(registered_child.parent_run_id.as_ref(), Some(&root));
+    assert_eq!(registered_child.invocation, InvocationKind::InlineSubflow);
+    assert!(registry.is_strict_ancestor(&root, &child));
+    assert!(registry.lookup_run(&missing_parent_child).is_none());
+    assert!(registry.lookup_run(&terminal_parent_child).is_none());
+    assert_eq!(
+        registry.execution_state(&root),
+        Some(FlowExecutionState::Running)
+    );
+    assert_eq!(
+        registry.execution_state(&terminal_parent),
+        Some(FlowExecutionState::Terminal)
+    );
+}
+
+#[test]
+fn duplicate_descendant_guards_are_reference_counted() {
+    let registry = Arc::new(FlowRegistry::new());
+    let parent_run_id = FlowRunId::now();
+    let child_run_id = FlowRunId::now();
+    registry
+        .register_root(
+            "session".into(),
+            parent_run_id.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    registry
+        .register_child(
+            &parent_run_id,
+            child_run_id.clone(),
+            InvocationKind::InlineSubflow,
+            false,
+            ChildWorkspaceAuthority::Inherit,
+        )
+        .unwrap();
+
+    let first = registry
+        .block_on_descendant(&parent_run_id, &child_run_id)
+        .unwrap();
+    let second = registry
+        .block_on_descendant(&parent_run_id, &child_run_id)
+        .unwrap();
+    drop(first);
+    assert!(matches!(
+        registry.execution_state(&parent_run_id),
+        Some(FlowExecutionState::BlockedOnDescendants { .. })
+    ));
+
+    drop(second);
+    assert_eq!(
+        registry.execution_state(&parent_run_id),
+        Some(FlowExecutionState::Running)
+    );
 }
 
 #[tokio::test]
@@ -195,11 +414,21 @@ flow test_flow(goal: string) -> string {
     atman_runtime::tools::register_tier_zero(&tools);
     let (stream_tx, _) = tokio::sync::broadcast::channel::<atman_runtime::stream::StreamFrame>(256);
 
-    let ctx = ToolCtx::new()
+    let root_run_id = FlowRunId::now();
+    let root_identity = registry
+        .register_root(
+            "test-session".into(),
+            root_run_id.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
         .with_flow_registry(registry.clone())
         .with_stream_tx(stream_tx);
+    ctx.flow_run_id = Some(root_run_id);
+    ctx.flow_identity = Some(root_identity);
 
     let spawn_args = ToolArgs {
         positional: vec![],
@@ -290,11 +519,21 @@ flow test_flow(goal: string) -> string {
     atman_runtime::tools::register_tier_zero(&tools);
 
     let (stream_tx, _) = tokio::sync::broadcast::channel::<atman_runtime::stream::StreamFrame>(256);
-    let ctx = ToolCtx::new()
+    let root_run_id = FlowRunId::now();
+    let root_identity = registry
+        .register_root(
+            "test-session".into(),
+            root_run_id.clone(),
+            EffectiveAuthority::root(&Default::default(), false, None),
+        )
+        .unwrap();
+    let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
         .with_flow_registry(registry.clone())
         .with_stream_tx(stream_tx);
+    ctx.flow_run_id = Some(root_run_id);
+    ctx.flow_identity = Some(root_identity);
 
     let spawn_args = ToolArgs {
         positional: vec![],

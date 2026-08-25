@@ -1,5 +1,7 @@
 mod common;
 
+use atman_runtime::event::{Event, EventSink};
+use atman_runtime::flow_authority::FlowExecutionState;
 use atman_runtime::provider::ProviderRegistry;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::tool::{Tool, ToolArgs, ToolCtx, ToolRegistry};
@@ -43,10 +45,24 @@ async fn spawn_test_setup(
             MockProvider::new("mock").with_fallback(Value::Str("ok — sub-agent completed".into())),
         ));
     }
-    let ctx = ToolCtx::new()
+    let root_run_id = atman_runtime::event::FlowRunId::now();
+    let root_identity = registry
+        .register_root(
+            "test-session".into(),
+            root_run_id.clone(),
+            atman_runtime::flow_authority::EffectiveAuthority::root(
+                &atman_runtime::trust::TrustConfig::default(),
+                false,
+                None,
+            ),
+        )
+        .unwrap();
+    let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
         .with_flow_registry(Arc::clone(&registry));
+    ctx.flow_run_id = Some(root_run_id);
+    ctx.flow_identity = Some(root_identity);
 
     (
         tmp,
@@ -73,6 +89,67 @@ async fn wait_for_status(registry: &FlowRegistry, handle: &str) -> FlowRunStatus
         .lock()
         .unwrap()
         .clone()
+}
+
+#[tokio::test]
+async fn sync_and_async_flow_end_observe_terminal_registry_state() {
+    for is_async in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let flow_path = tmp.path().join("terminal_state.at");
+        std::fs::write(
+            &flow_path,
+            "flow terminal_state() -> string { return \"done\" }",
+        )
+        .unwrap();
+        let registry = Arc::new(FlowRegistry::new());
+        let root_run_id = atman_runtime::event::FlowRunId::now();
+        let root_identity = registry
+            .register_root(
+                "test-session".into(),
+                root_run_id.clone(),
+                atman_runtime::flow_authority::EffectiveAuthority::root(
+                    &Default::default(),
+                    false,
+                    None,
+                ),
+            )
+            .unwrap();
+        let tools = ToolRegistry::new();
+        tools.register(Arc::new(AgentSpawn));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = EventSink::new().with_forwarder(event_tx);
+        let mut ctx = ToolCtx::new()
+            .with_registry(Arc::new(tools))
+            .with_providers(Arc::new(ProviderRegistry::new()))
+            .with_flow_registry(Arc::clone(&registry))
+            .with_events(events);
+        ctx.flow_run_id = Some(root_run_id);
+        ctx.flow_identity = Some(root_identity);
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                (
+                    "flow".into(),
+                    Value::Str(format!("{}@terminal_state", flow_path.display())),
+                ),
+                ("async".into(), Value::Bool(is_async)),
+            ],
+        };
+
+        AgentSpawn.call(args, &ctx).await.unwrap();
+        let terminal_at_flow_end = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(envelope) = event_rx.recv().await {
+                if let Event::FlowEnd { run_id, .. } = envelope.event {
+                    return registry.execution_state(&run_id);
+                }
+            }
+            None
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(terminal_at_flow_end, Some(FlowExecutionState::Terminal));
+    }
 }
 
 #[tokio::test]

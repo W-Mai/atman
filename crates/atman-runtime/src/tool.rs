@@ -126,6 +126,7 @@ pub struct ToolCtx {
     pub term_registry: Option<std::sync::Arc<crate::tools::term::TermRegistry>>,
     pub watch_hub: Option<std::sync::Arc<crate::watch::WatchHub>>,
     pub flow_registry: Option<std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>>,
+    pub flow_identity: Option<std::sync::Arc<crate::flow_authority::FlowIdentity>>,
     pub task_registry: Option<crate::task_registry::TaskRegistry>,
     pub session_id: Option<String>,
     pub trust: Option<crate::trust::TrustConfig>,

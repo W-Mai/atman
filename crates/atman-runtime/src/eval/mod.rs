@@ -1431,11 +1431,45 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                 sub_env.bind(n, v);
             }
             let sub_run_id = crate::event::FlowRunId::now();
+            let flow_registry = match ctx.tool_ctx.flow_registry.clone() {
+                Some(registry) => registry,
+                None => {
+                    return Value::Err(RuntimeError::ToolFailed(
+                        "subflow: trusted flow registry is unavailable".into(),
+                    ));
+                }
+            };
+            let Some(parent_run_id) = ctx
+                .tool_ctx
+                .flow_identity
+                .as_ref()
+                .map(|identity| identity.run_id.clone())
+            else {
+                return Value::Err(RuntimeError::ToolFailed(
+                    "subflow: trusted parent flow identity is unavailable".into(),
+                ));
+            };
+            let child_identity = match flow_registry.register_child(
+                &parent_run_id,
+                sub_run_id.clone(),
+                crate::flow_authority::InvocationKind::InlineSubflow,
+                crate::flow_authority::contract_allows_shell(target.contract.as_ref()),
+                crate::flow_authority::ChildWorkspaceAuthority::Inherit,
+            ) {
+                Ok(identity) => identity,
+                Err(error) => return Value::Err(error),
+            };
+            let lifecycle_guard = flow_registry.lifecycle_guard(&sub_run_id);
+            let _block_guard = match flow_registry.block_on_descendant(&parent_run_id, &sub_run_id)
+            {
+                Ok(guard) => guard,
+                Err(error) => return Value::Err(error),
+            };
             if let Some(sink) = ctx.events {
                 sink.emit(crate::event::Event::FlowStart {
                     run_id: sub_run_id.clone(),
                     flow_name: name.name.clone(),
-                    parent_run_id: ctx.flow_run_id.clone(),
+                    parent_run_id: Some(parent_run_id.clone()),
                     parent_node_id: ctx.current_node_id.clone(),
                     spawned: false,
                 });
@@ -1446,23 +1480,29 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     .send(crate::stream::StreamFrame::FlowStart {
                         run_id: sub_run_id.0.to_string(),
                         flow_name: name.name.clone(),
-                        parent_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+                        parent_run_id: Some(parent_run_id.0.to_string()),
                         parent_node_id: ctx.current_node_id.clone(),
                     });
             } else if let Some(tx) = ctx.tool_ctx.stream_tx.as_ref() {
                 let _ = tx.send(crate::stream::StreamFrame::FlowStart {
                     run_id: sub_run_id.0.to_string(),
                     flow_name: name.name.clone(),
-                    parent_run_id: ctx.flow_run_id.as_ref().map(|r| r.0.to_string()),
+                    parent_run_id: Some(parent_run_id.0.to_string()),
                     parent_node_id: ctx.current_node_id.clone(),
                 });
             }
+            let mut sub_tool_ctx = ctx.tool_ctx.clone();
+            sub_tool_ctx.flow_run_id = Some(sub_run_id.clone());
+            sub_tool_ctx.flow_identity = Some(child_identity);
             let sub_ctx = EvalCtx {
+                tool_ctx: &sub_tool_ctx,
+                contract: target.contract.as_ref(),
                 flow_run_id: Some(sub_run_id.clone()),
                 current_node_id: None,
                 ..ctx.clone()
             };
             let outcome = crate::exec::exec_stmts(&target.body, &mut sub_env, &sub_ctx).await;
+            drop(lifecycle_guard);
             let (result, status, ok) = match outcome {
                 crate::exec::StmtOutcome::Return(v) => (v, crate::event::FlowStatus::Ok, true),
                 crate::exec::StmtOutcome::Err(e) => {
@@ -1904,21 +1944,7 @@ fn guess_image_mime(path: &std::path::Path) -> Option<String> {
 }
 
 fn contract_allows_shell(contract: Option<&atman_dsl::ast::Contract>) -> bool {
-    let Some(c) = contract else { return false };
-    for block in &c.blocks {
-        if block.name.name != "capabilities" {
-            continue;
-        }
-        for (k, v) in &block.kwargs {
-            if k.name != "shell" {
-                continue;
-            }
-            if let atman_dsl::ast::Expr::Literal(atman_dsl::ast::Literal::Bool(true)) = v {
-                return true;
-            }
-        }
-    }
-    false
+    crate::flow_authority::contract_allows_shell(contract)
 }
 
 pub struct TruncationStat {
@@ -2592,7 +2618,23 @@ flow parent(x: Int) -> Int {
             .collect();
         let parent = &file.flows[1];
         let tools = ToolRegistry::new();
-        let tool_ctx = ToolCtx::new();
+        let flow_registry = std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new());
+        let root_run_id = crate::event::FlowRunId::now();
+        let root_identity = flow_registry
+            .register_root(
+                "test-session".into(),
+                root_run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(
+                    &crate::trust::TrustConfig::default(),
+                    false,
+                    None,
+                ),
+            )
+            .unwrap();
+        let mut tool_ctx = ToolCtx::new();
+        tool_ctx.flow_run_id = Some(root_run_id);
+        tool_ctx.flow_registry = Some(flow_registry);
+        tool_ctx.flow_identity = Some(root_identity);
         let providers = crate::provider::ProviderRegistry::new();
         let out = crate::exec::exec_flow_with_siblings(
             parent,
@@ -2612,6 +2654,55 @@ flow parent(x: Int) -> Int {
         .await
         .unwrap();
         assert!(matches!(out, Value::Int(106)));
+    }
+
+    #[tokio::test]
+    async fn subflow_rejects_spoofed_run_id_without_trusted_identity() {
+        let src = r#"flow child() -> Int {
+    return 1
+}
+
+flow parent() -> Int {
+    return subflow(child)
+}
+"#;
+        let file = parse_file(src).unwrap();
+        let flows: std::collections::HashMap<_, _> = file
+            .flows
+            .iter()
+            .map(|flow| (flow.name.name.clone(), flow.clone()))
+            .collect();
+        let tools = ToolRegistry::new();
+        let mut tool_ctx = ToolCtx::new();
+        tool_ctx.flow_run_id = Some(crate::event::FlowRunId::now());
+        tool_ctx.flow_registry = Some(std::sync::Arc::new(
+            crate::tools::agent_ctrl::FlowRegistry::new(),
+        ));
+        let providers = crate::provider::ProviderRegistry::new();
+
+        let error = crate::exec::exec_flow_with_siblings(
+            &file.flows[1],
+            vec![],
+            &tools,
+            &tool_ctx,
+            &providers,
+            &flows,
+            None,
+            None,
+            tool_ctx.flow_run_id.clone(),
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeError::ToolFailed(message)
+                if message == "subflow: trusted parent flow identity is unavailable"
+        ));
     }
 
     #[tokio::test]

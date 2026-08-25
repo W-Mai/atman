@@ -1965,6 +1965,34 @@ max_results = 6
     }
 
     #[test]
+    fn trust_config_parses_new_policy_and_prefers_escalation() {
+        use crate::tool::Tier;
+        use crate::trust::{EscalationPolicy, PolicyAction, RiskKind};
+
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            "[trust]\nmode = \"eager\"\noutside = \"deny\"\nescalation = \"allow\"\n\
+             [trust.tiers.eager]\ntier4 = \"deny\"\n\
+             [trust.risks.eager]\nnetwork = \"deny\"\nfilesystem_write = \"auto\"\n",
+        );
+
+        let config = hub.trust_config().unwrap();
+        assert_eq!(config.resolved_escalation(), EscalationPolicy::Allow);
+        assert_eq!(config.resolve_tier(Tier::Four), PolicyAction::Deny);
+        assert_eq!(config.resolve_risk(RiskKind::Network), PolicyAction::Deny);
+        assert_eq!(
+            config.resolve_risk(RiskKind::FilesystemWrite),
+            PolicyAction::Auto
+        );
+        assert_eq!(config.resolve_policy(Tier::Four, []), PolicyAction::Deny);
+        assert_eq!(
+            config.resolve_policy(Tier::Zero, [RiskKind::Network]),
+            PolicyAction::Deny
+        );
+    }
+
+    #[test]
     fn trust_config_rejects_invalid_enum() {
         let (_dir, hub) = temp_hub();
         write_config(&hub, "[trust]\noutside = \"sometimes\"\n");

@@ -133,6 +133,32 @@ impl Executor {
             .as_ref()
             .map(|s| s.flow_cancel_token())
             .unwrap_or_default();
+        let flow_registry = session
+            .as_ref()
+            .map(|session| std::sync::Arc::clone(&session.flow_registry))
+            .or_else(|| self.tool_ctx.flow_registry.clone())
+            .unwrap_or_else(|| std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()));
+        let session_id = session
+            .as_ref()
+            .map(|session| session.id().to_string())
+            .or_else(|| self.tool_ctx.session_id.clone())
+            .unwrap_or_else(|| format!("standalone-{}", uuid::Uuid::now_v7()));
+        let trust = self.tool_ctx.trust.clone().unwrap_or_default();
+        let workspace_root = self
+            .tool_ctx
+            .workspace
+            .as_ref()
+            .map(|binding| binding.path.clone())
+            .or_else(|| self.tool_ctx.fs_access.workspace.clone());
+        let identity = flow_registry.register_root(
+            session_id.clone(),
+            run_id.clone(),
+            crate::flow_authority::EffectiveAuthority::root(
+                &trust,
+                crate::flow_authority::contract_allows_shell(flow.contract.as_ref()),
+                workspace_root,
+            ),
+        )?;
         let task_id = self.tool_ctx.task_registry.as_ref().map(|tr| {
             tr.register(
                 crate::task_registry::TaskKind::Flow,
@@ -145,6 +171,7 @@ impl Executor {
                 flow_cancel.clone(),
             )
         });
+        let _lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
         self.events.emit(Event::FlowStart {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),
@@ -178,6 +205,10 @@ impl Executor {
         // Root's tool_ctx carries session stream_tx so emit sites use
         // tool_ctx.stream_tx uniformly.
         let mut tool_ctx = self.tool_ctx.clone();
+        tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
+        tool_ctx.flow_identity = Some(identity);
+        tool_ctx.flow_run_id = Some(run_id.clone());
+        tool_ctx.session_id = Some(session_id);
         if let Some(sess) = session.as_ref() {
             tool_ctx.stream_tx = Some(sess.stream_tx());
             tool_ctx.session_messages_handle = Some(sess.messages_handle());
@@ -242,6 +273,7 @@ impl Executor {
             };
             tr.finish(tid, ts);
         }
+        drop(_lifecycle_guard);
         self.events.emit(Event::FlowEnd {
             run_id: run_id.clone(),
             flow_name: flow.name.name.clone(),

@@ -148,11 +148,259 @@ impl crate::watch::Watchable for FlowEntry {
 #[derive(Default)]
 pub struct FlowRegistry {
     entries: Mutex<std::collections::HashMap<String, Arc<FlowEntry>>>,
+    runs: Mutex<std::collections::HashMap<FlowRunId, Arc<crate::flow_authority::FlowIdentity>>>,
+}
+
+pub struct DescendantBlockGuard {
+    registry: Arc<FlowRegistry>,
+    parent_run_id: FlowRunId,
+    child_run_id: FlowRunId,
+}
+
+pub struct FlowLifecycleGuard {
+    registry: Arc<FlowRegistry>,
+    run_id: FlowRunId,
+}
+
+impl Drop for DescendantBlockGuard {
+    fn drop(&mut self) {
+        self.registry
+            .unblock_descendant(&self.parent_run_id, &self.child_run_id);
+    }
+}
+
+impl Drop for FlowLifecycleGuard {
+    fn drop(&mut self) {
+        self.registry.mark_terminal(&self.run_id);
+    }
 }
 
 impl FlowRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn register_root(
+        &self,
+        session_id: String,
+        run_id: FlowRunId,
+        authority: crate::flow_authority::EffectiveAuthority,
+    ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+        let identity = Arc::new(crate::flow_authority::FlowIdentity {
+            session_id,
+            run_id: run_id.clone(),
+            parent_run_id: None,
+            root_run_id: run_id.clone(),
+            invocation: crate::flow_authority::InvocationKind::Root,
+            effective_authority: authority,
+            execution_state: Mutex::new(crate::flow_authority::FlowExecutionState::Running),
+        });
+        let mut runs = self.runs.lock().unwrap();
+        if runs.contains_key(&run_id) {
+            return Err(RuntimeError::ToolFailed(format!(
+                "flow identity '{run_id}' is already registered"
+            )));
+        }
+        runs.insert(run_id, Arc::clone(&identity));
+        Ok(identity)
+    }
+
+    pub fn register_child(
+        &self,
+        parent_run_id: &FlowRunId,
+        child_run_id: FlowRunId,
+        invocation: crate::flow_authority::InvocationKind,
+        contract_allows_shell: bool,
+        workspace: crate::flow_authority::ChildWorkspaceAuthority,
+    ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+        if invocation == crate::flow_authority::InvocationKind::Root {
+            return Err(RuntimeError::ToolFailed(
+                "child flow identity cannot use root invocation".into(),
+            ));
+        }
+        let mut runs = self.runs.lock().unwrap();
+        if runs.contains_key(&child_run_id) {
+            return Err(RuntimeError::ToolFailed(format!(
+                "flow identity '{child_run_id}' is already registered"
+            )));
+        }
+        let parent = runs.get(parent_run_id).cloned().ok_or_else(|| {
+            RuntimeError::ToolFailed(format!(
+                "parent flow identity '{parent_run_id}' is not registered"
+            ))
+        })?;
+        if matches!(
+            parent.execution_state(),
+            crate::flow_authority::FlowExecutionState::Terminal
+        ) {
+            return Err(RuntimeError::ToolFailed(format!(
+                "parent flow identity '{parent_run_id}' is terminal"
+            )));
+        }
+        let identity = Arc::new(crate::flow_authority::FlowIdentity {
+            session_id: parent.session_id.clone(),
+            run_id: child_run_id.clone(),
+            parent_run_id: Some(parent_run_id.clone()),
+            root_run_id: parent.root_run_id.clone(),
+            invocation,
+            effective_authority: parent
+                .effective_authority
+                .inherited_child(contract_allows_shell, workspace)
+                .map_err(|error| RuntimeError::ToolFailed(format!("child authority: {error}")))?,
+            execution_state: Mutex::new(crate::flow_authority::FlowExecutionState::Running),
+        });
+        runs.insert(child_run_id, Arc::clone(&identity));
+        Ok(identity)
+    }
+
+    pub fn lookup_run(
+        &self,
+        run_id: &FlowRunId,
+    ) -> Option<Arc<crate::flow_authority::FlowIdentity>> {
+        self.runs.lock().unwrap().get(run_id).cloned()
+    }
+
+    pub fn is_strict_ancestor(&self, ancestor: &FlowRunId, descendant: &FlowRunId) -> bool {
+        if ancestor == descendant {
+            return false;
+        }
+        let runs = self.runs.lock().unwrap();
+        let Some(ancestor_identity) = runs.get(ancestor) else {
+            return false;
+        };
+        let Some(mut current) = runs.get(descendant).cloned() else {
+            return false;
+        };
+        if ancestor_identity.session_id != current.session_id {
+            return false;
+        }
+        let mut visited = std::collections::HashSet::new();
+        while let Some(parent_run_id) = current.parent_run_id.as_ref() {
+            if !visited.insert(current.run_id.clone()) {
+                return false;
+            }
+            if parent_run_id == ancestor {
+                return true;
+            }
+            let Some(parent) = runs.get(parent_run_id) else {
+                return false;
+            };
+            if parent.session_id != ancestor_identity.session_id {
+                return false;
+            }
+            current = Arc::clone(parent);
+        }
+        false
+    }
+
+    pub fn strict_ancestors(
+        &self,
+        run_id: &FlowRunId,
+    ) -> Vec<Arc<crate::flow_authority::FlowIdentity>> {
+        let runs = self.runs.lock().unwrap();
+        let Some(start) = runs.get(run_id) else {
+            return Vec::new();
+        };
+        let session_id = start.session_id.clone();
+        let mut current = Arc::clone(start);
+        let mut ancestors = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(parent_run_id) = current.parent_run_id.as_ref() {
+            if !visited.insert(current.run_id.clone()) {
+                return Vec::new();
+            }
+            let Some(parent) = runs.get(parent_run_id) else {
+                return Vec::new();
+            };
+            if parent.session_id != session_id {
+                return Vec::new();
+            }
+            ancestors.push(Arc::clone(parent));
+            current = Arc::clone(parent);
+        }
+        ancestors
+    }
+
+    pub fn execution_state(
+        &self,
+        run_id: &FlowRunId,
+    ) -> Option<crate::flow_authority::FlowExecutionState> {
+        self.lookup_run(run_id)
+            .map(|identity| identity.execution_state())
+    }
+
+    pub fn mark_terminal(&self, run_id: &FlowRunId) {
+        if let Some(identity) = self.lookup_run(run_id) {
+            *identity.execution_state.lock().unwrap() =
+                crate::flow_authority::FlowExecutionState::Terminal;
+        }
+    }
+
+    pub fn lifecycle_guard(self: &Arc<Self>, run_id: &FlowRunId) -> FlowLifecycleGuard {
+        FlowLifecycleGuard {
+            registry: Arc::clone(self),
+            run_id: run_id.clone(),
+        }
+    }
+
+    pub fn block_on_descendant(
+        self: &Arc<Self>,
+        parent_run_id: &FlowRunId,
+        child_run_id: &FlowRunId,
+    ) -> Result<DescendantBlockGuard, RuntimeError> {
+        if !self.is_strict_ancestor(parent_run_id, child_run_id) {
+            return Err(RuntimeError::ToolFailed(format!(
+                "flow '{parent_run_id}' is not a strict ancestor of '{child_run_id}'"
+            )));
+        }
+        let parent = self.lookup_run(parent_run_id).ok_or_else(|| {
+            RuntimeError::ToolFailed(format!("flow identity '{parent_run_id}' is not registered"))
+        })?;
+        let mut state = parent.execution_state.lock().unwrap();
+        match &mut *state {
+            crate::flow_authority::FlowExecutionState::Running => {
+                *state = crate::flow_authority::FlowExecutionState::BlockedOnDescendants {
+                    child_run_counts: std::collections::HashMap::from([(child_run_id.clone(), 1)]),
+                };
+            }
+            crate::flow_authority::FlowExecutionState::BlockedOnDescendants {
+                child_run_counts,
+            } => {
+                *child_run_counts.entry(child_run_id.clone()).or_default() += 1;
+            }
+            crate::flow_authority::FlowExecutionState::Terminal => {
+                return Err(RuntimeError::ToolFailed(format!(
+                    "flow identity '{parent_run_id}' is terminal"
+                )));
+            }
+        }
+        drop(state);
+        Ok(DescendantBlockGuard {
+            registry: Arc::clone(self),
+            parent_run_id: parent_run_id.clone(),
+            child_run_id: child_run_id.clone(),
+        })
+    }
+
+    fn unblock_descendant(&self, parent_run_id: &FlowRunId, child_run_id: &FlowRunId) {
+        let Some(parent) = self.lookup_run(parent_run_id) else {
+            return;
+        };
+        let mut state = parent.execution_state.lock().unwrap();
+        let crate::flow_authority::FlowExecutionState::BlockedOnDescendants { child_run_counts } =
+            &mut *state
+        else {
+            return;
+        };
+        if let Some(count) = child_run_counts.get_mut(child_run_id) {
+            *count -= 1;
+            if *count == 0 {
+                child_run_counts.remove(child_run_id);
+            }
+        }
+        if child_run_counts.is_empty() {
+            *state = crate::flow_authority::FlowExecutionState::Running;
+        }
     }
 
     pub fn create_entry(
@@ -347,6 +595,60 @@ fn allocate_workspace(
         .map_err(|error| RuntimeError::ToolFailed(format!("flow.spawn: {error}")))
 }
 
+struct WorkspaceFinalizeGuard {
+    ctx: ToolCtx,
+    binding: Option<WorkspaceBinding>,
+    session_id: Option<String>,
+    run_id: FlowRunId,
+    state_projection: Option<Arc<Mutex<Option<WorkspaceState>>>>,
+    error_projection: Option<Arc<Mutex<Option<String>>>>,
+}
+
+impl WorkspaceFinalizeGuard {
+    fn new(
+        ctx: &ToolCtx,
+        binding: Option<WorkspaceBinding>,
+        session_id: Option<String>,
+        run_id: FlowRunId,
+    ) -> Self {
+        Self {
+            ctx: ctx.clone(),
+            binding,
+            session_id,
+            run_id,
+            state_projection: None,
+            error_projection: None,
+        }
+    }
+
+    fn with_projections(
+        mut self,
+        state_projection: Arc<Mutex<Option<WorkspaceState>>>,
+        error_projection: Arc<Mutex<Option<String>>>,
+    ) -> Self {
+        self.state_projection = Some(state_projection);
+        self.error_projection = Some(error_projection);
+        self
+    }
+
+    fn binding(&self) -> Option<&WorkspaceBinding> {
+        self.binding.as_ref()
+    }
+}
+
+impl Drop for WorkspaceFinalizeGuard {
+    fn drop(&mut self) {
+        finalize_workspace(
+            &self.ctx,
+            self.binding.as_ref(),
+            self.session_id.as_deref(),
+            &self.run_id,
+            self.state_projection.as_ref(),
+            self.error_projection.as_ref(),
+        );
+    }
+}
+
 fn finalize_workspace(
     ctx: &ToolCtx,
     binding: Option<&WorkspaceBinding>,
@@ -404,26 +706,108 @@ fn finalize_workspace(
     }
 }
 
+struct PreparedFlowAgent {
+    path: PathBuf,
+    flow: atman_dsl::ast::FlowDecl,
+    flows: std::collections::HashMap<String, atman_dsl::ast::FlowDecl>,
+}
+
+async fn prepare_flow_agent(flow_ref: &str) -> Result<PreparedFlowAgent, RuntimeError> {
+    let (file_part, flow_name) = match flow_ref.split_once('@') {
+        Some((file, name)) => (file, Some(name)),
+        None => (flow_ref, None),
+    };
+    let (path, source) = read_flow_source(file_part).await?;
+    let file = atman_dsl::parse::parse_file(&source).map_err(|error| {
+        RuntimeError::ToolFailed(format!("flow.spawn: parse {}: {error}", path.display()))
+    })?;
+    let flow = match flow_name {
+        Some(name) => file.flows.iter().find(|flow| flow.name.name == name),
+        None => file.flows.iter().find(|flow| flow.name.name != "describe"),
+    }
+    .cloned()
+    .ok_or_else(|| {
+        RuntimeError::ToolFailed(format!(
+            "flow.spawn: target flow not found in {}",
+            path.display()
+        ))
+    })?;
+    let flows = file
+        .flows
+        .into_iter()
+        .map(|flow| (flow.name.name.clone(), flow))
+        .collect();
+    Ok(PreparedFlowAgent { path, flow, flows })
+}
+
+fn register_prepared_identity(
+    prepared: &PreparedFlowAgent,
+    ctx: &ToolCtx,
+    child_run_id: &FlowRunId,
+    invocation: crate::flow_authority::InvocationKind,
+    workspace: crate::flow_authority::ChildWorkspaceAuthority,
+) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+    let registry = ctx.flow_registry.as_ref().ok_or_else(|| {
+        RuntimeError::ToolFailed("flow.spawn: trusted flow registry is unavailable".into())
+    })?;
+    let parent = ctx.flow_identity.as_ref().ok_or_else(|| {
+        RuntimeError::ToolFailed("flow.spawn: trusted parent flow identity is unavailable".into())
+    })?;
+    registry.register_child(
+        &parent.run_id,
+        child_run_id.clone(),
+        invocation,
+        crate::flow_authority::contract_allows_shell(prepared.flow.contract.as_ref()),
+        workspace,
+    )
+}
+
+fn spawned_workspace_authority(
+    binding: Option<&WorkspaceBinding>,
+) -> crate::flow_authority::ChildWorkspaceAuthority {
+    match binding {
+        Some(binding) => {
+            crate::flow_authority::ChildWorkspaceAuthority::TrustedDelegation(binding.path.clone())
+        }
+        None => crate::flow_authority::ChildWorkspaceAuthority::Inherit,
+    }
+}
+
 async fn run_sub_agent(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let flow = extract_flow(&args)?.unwrap_or_else(|| "subagent.at".to_string());
     let run_id = FlowRunId::now();
     let policy = workspace_policy(&args)?;
     let session_id = workspace_session(ctx, policy)?;
-    let binding = allocate_workspace(ctx, policy, session_id.as_deref(), &run_id)?;
-    let child_ctx = match binding.clone() {
+    let workspace_guard = WorkspaceFinalizeGuard::new(
+        ctx,
+        allocate_workspace(ctx, policy, session_id.as_deref(), &run_id)?,
+        session_id,
+        run_id.clone(),
+    );
+    let prepared = prepare_flow_agent(&flow).await?;
+    let child_identity = register_prepared_identity(
+        &prepared,
+        ctx,
+        &run_id,
+        crate::flow_authority::InvocationKind::SpawnSync,
+        spawned_workspace_authority(workspace_guard.binding()),
+    )?;
+    let flow_registry = ctx.flow_registry.as_ref().expect("validated flow registry");
+    let _lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
+    let parent_run_id = ctx
+        .flow_identity
+        .as_ref()
+        .expect("validated parent flow identity")
+        .run_id
+        .clone();
+    let _block_guard = flow_registry.block_on_descendant(&parent_run_id, &run_id)?;
+    let mut child_ctx = match workspace_guard.binding().cloned() {
         Some(binding) => ctx.clone().with_workspace(binding),
         None => ctx.clone(),
     };
-    let result = run_flow_agent(&flow, &args, &child_ctx, run_id.clone()).await;
-    finalize_workspace(
-        ctx,
-        binding.as_ref(),
-        session_id.as_deref(),
-        &run_id,
-        None,
-        None,
-    );
-    result
+    child_ctx.flow_run_id = Some(run_id.clone());
+    child_ctx.flow_identity = Some(child_identity);
+    run_prepared_flow_agent(prepared, &args, &child_ctx, run_id).await
 }
 
 async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
@@ -457,13 +841,32 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let child_run_id = FlowRunId::now();
     let policy = workspace_policy(&args)?;
     let session_id = workspace_session(ctx, policy)?;
-    let workspace = allocate_workspace(ctx, policy, session_id.as_deref(), &child_run_id)?;
+    let mut workspace_guard = WorkspaceFinalizeGuard::new(
+        ctx,
+        allocate_workspace(ctx, policy, session_id.as_deref(), &child_run_id)?,
+        session_id.clone(),
+        child_run_id.clone(),
+    );
+    let prepared = prepare_flow_agent(&flow_ref).await?;
+    let child_identity = register_prepared_identity(
+        &prepared,
+        ctx,
+        &child_run_id,
+        crate::flow_authority::InvocationKind::SpawnAsync,
+        spawned_workspace_authority(workspace_guard.binding()),
+    )?;
+    let lifecycle_guard = flow_registry.lifecycle_guard(&child_run_id);
+    let workspace = workspace_guard.binding().cloned();
     let entry = flow_registry.create_entry_with_workspace(
         handle.clone(),
         display_label,
         String::new(),
         child_run_id.clone(),
         workspace.clone(),
+    );
+    workspace_guard = workspace_guard.with_projections(
+        Arc::clone(&entry.workspace_state),
+        Arc::clone(&entry.cleanup_error),
     );
     if inherit_context {
         if let Some(parent) = &ctx.session_messages_handle {
@@ -490,6 +893,8 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     let parent_stream_tx = ctx.stream_tx.clone();
     let child_run_id_str = child_run_id.0.to_string();
     tokio::spawn(async move {
+        let _lifecycle_guard = lifecycle_guard;
+        let _workspace_guard = workspace_guard;
         // Send SubAgentStarted so the TUI creates a SubAgentActivity item and
         // registers child_run_id in sub_agent_run_ids for frame routing.
         if let Some(tx) = &parent_stream_tx {
@@ -509,13 +914,15 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
         let mut ctx_for_flow = ctx_clone;
         ctx_for_flow.cancel = entry_clone.cancel.clone();
         ctx_for_flow.agent_entry = Some(Arc::clone(&entry_clone));
+        ctx_for_flow.flow_run_id = Some(child_run_id.clone());
+        ctx_for_flow.flow_identity = Some(child_identity);
         ctx_for_flow.compact_lock_handle = Some(Arc::clone(&entry_clone.compact_lock));
         if let Some(binding) = entry_clone.workspace.clone() {
             ctx_for_flow = ctx_for_flow.with_workspace(binding);
         }
 
-        let result = run_flow_agent(&flow_ref, &args, &ctx_for_flow, child_run_id.clone()).await;
-
+        let result =
+            run_prepared_flow_agent(prepared, &args, &ctx_for_flow, child_run_id.clone()).await;
         let killed = entry_clone.cancel.is_cancelled();
         let status = match &result {
             _ if killed => FlowRunStatus::Killed {
@@ -534,14 +941,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
                 message: e.to_string(),
             },
         };
-        finalize_workspace(
-            &ctx_for_flow,
-            entry_clone.workspace.as_ref(),
-            session_id.as_deref(),
-            &child_run_id,
-            Some(&entry_clone.workspace_state),
-            Some(&entry_clone.cleanup_error),
-        );
+
         *entry_clone.status.lock().unwrap() = status.clone();
 
         // Send SubAgentDone so the TUI updates the SubAgentActivity item.
@@ -836,8 +1236,8 @@ fn extract_string(args: &ToolArgs, name: &str, pos: usize) -> Result<String, Run
     }
 }
 
-async fn run_flow_agent(
-    flow_ref: &str,
+async fn run_prepared_flow_agent(
+    prepared: PreparedFlowAgent,
     args: &ToolArgs,
     ctx: &ToolCtx,
     run_id: FlowRunId,
@@ -852,39 +1252,7 @@ async fn run_flow_agent(
             "flow.spawn: no provider registry available on ctx".into(),
         ));
     };
-    let (file_part, flow_name) = match flow_ref.split_once('@') {
-        Some((f, n)) => (f, Some(n.to_string())),
-        None => (flow_ref, None),
-    };
-    let (path, src) = read_flow_source(file_part).await?;
-    let file = atman_dsl::parse::parse_file(&src).map_err(|e| {
-        RuntimeError::ToolFailed(format!("flow.spawn: parse {}: {e}", path.display()))
-    })?;
-    let flow = match &flow_name {
-        Some(name) => file
-            .flows
-            .iter()
-            .find(|f| f.name.name == *name)
-            .ok_or_else(|| {
-                let available: Vec<&str> =
-                    file.flows.iter().map(|f| f.name.name.as_str()).collect();
-                RuntimeError::ToolFailed(format!(
-                    "flow.spawn: flow `{name}` not found in {}. available: {}",
-                    path.display(),
-                    available.join(", ")
-                ))
-            })?,
-        None => file
-            .flows
-            .iter()
-            .find(|f| f.name.name != "describe")
-            .ok_or_else(|| {
-                RuntimeError::ToolFailed(format!(
-                    "flow.spawn: no entry flow in {} (all flows are describe())",
-                    path.display()
-                ))
-            })?,
-    };
+    let PreparedFlowAgent { path, flow, flows } = prepared;
     // Extract flow params from the `arguments` object — generic, matches by
     // param name, no hardcoded param names.
     let mut flow_args: Vec<(String, Value)> = Vec::new();
@@ -914,11 +1282,6 @@ async fn run_flow_agent(
             flow_args.push((key.clone(), value.clone()));
         }
     }
-    let flows = file
-        .flows
-        .iter()
-        .map(|flow| (flow.name.name.clone(), flow.clone()))
-        .collect();
     emit_flow_agent_start(ctx, &run_id, &flow.name.name);
     let mut child_ctx = sanitize_child_ctx(ctx);
     // One message segment per FlowRun: async shares entry.messages, sync gets
@@ -946,7 +1309,7 @@ async fn run_flow_agent(
         child_ctx.compact_lock_handle = Some(std::sync::Arc::new(tokio::sync::Mutex::new(())));
     }
     let out = crate::exec::exec_flow_with_siblings(
-        flow,
+        &flow,
         flow_args,
         registry.as_ref(),
         &child_ctx,
@@ -967,8 +1330,24 @@ async fn run_flow_agent(
             message: e.to_string(),
         },
     };
-    emit_child_flow_end(ctx, &run_id, &status);
+    mark_terminal_and_emit_child_flow_end(ctx, &run_id, &status);
     out
+}
+
+fn mark_terminal_and_emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
+    terminal_then_emit(
+        || {
+            if let Some(flow_registry) = &ctx.flow_registry {
+                flow_registry.mark_terminal(run_id);
+            }
+        },
+        || emit_child_flow_end(ctx, run_id, status),
+    );
+}
+
+fn terminal_then_emit(mark_terminal: impl FnOnce(), emit: impl FnOnce()) {
+    mark_terminal();
+    emit();
 }
 
 fn extract_flow(args: &ToolArgs) -> Result<Option<String>, RuntimeError> {
@@ -1025,7 +1404,15 @@ fn flow_candidates(flow_ref: &str) -> Vec<PathBuf> {
 }
 
 fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
-    let parent_run_id = ctx.flow_run_id.clone();
+    let parent_run_id = ctx
+        .flow_identity
+        .as_ref()
+        .and_then(|identity| identity.parent_run_id.clone())
+        .or_else(|| {
+            ctx.flow_run_id
+                .clone()
+                .filter(|candidate| candidate != run_id)
+        });
     let parent_node_id = ctx.current_node_id.clone();
     if let Some(sink) = &ctx.events {
         sink.emit(Event::FlowStart {
@@ -1073,4 +1460,20 @@ fn sanitize_child_ctx(parent: &ToolCtx) -> ToolCtx {
     c.forms = None;
     c.on_memory_recent = None;
     c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_then_emit;
+    use std::cell::Cell;
+
+    #[test]
+    fn terminal_transition_happens_before_flow_end_emit() {
+        let terminal = Cell::new(false);
+
+        terminal_then_emit(
+            || terminal.set(true),
+            || assert!(terminal.get(), "FlowEnd emitted before terminal transition"),
+        );
+    }
 }
