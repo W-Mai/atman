@@ -46,10 +46,7 @@ impl Env {
             {
                 return Some(v);
             }
-            match &inner.parent {
-                Some(p) => inner = p,
-                None => return None,
-            }
+            inner = inner.parent.as_ref()?;
         }
     }
 
