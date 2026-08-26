@@ -276,7 +276,7 @@ impl BgRegistry {
 
     pub fn kill_all(&self) {
         let entries = self.entries.lock().unwrap();
-        for (_, entry) in entries.iter() {
+        for entry in entries.values() {
             let _ = entry.control_tx.try_send(BgControl::Kill);
         }
     }

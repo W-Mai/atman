@@ -179,10 +179,11 @@ pub fn filter_orphan_tool_messages(messages: &mut Vec<Message>) {
         for p in &m.parts {
             match p {
                 MessagePart::ToolUse { id, .. } if !result_ids.contains(id) => return false,
-                MessagePart::ToolResult { tool_use_id, .. } => {
-                    if !use_ids.contains(tool_use_id) || !seen_results.insert(tool_use_id.clone()) {
-                        return false;
-                    }
+                MessagePart::ToolResult { tool_use_id, .. }
+                    if (!use_ids.contains(tool_use_id)
+                        || !seen_results.insert(tool_use_id.clone())) =>
+                {
+                    return false;
                 }
                 _ => {}
             }
