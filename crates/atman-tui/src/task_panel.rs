@@ -507,9 +507,7 @@ pub fn render(
                     } else {
                         1 + crate::width::width(&summary_trunc)
                     };
-                let c_pad = w
-                    .saturating_sub(left_w + collapsed_label_w + right_w)
-                    .max(0);
+                let c_pad = w.saturating_sub(left_w + collapsed_label_w + right_w);
 
                 // top padding (with bar)
                 let top_y = row;

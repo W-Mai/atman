@@ -311,7 +311,7 @@ impl TermRegistry {
 
     pub fn kill_all(&self) {
         let entries = self.entries.lock().expect("entries poisoned");
-        for (_, entry) in entries.iter() {
+        for entry in entries.values() {
             let mut child = entry.child.lock().expect("child poisoned");
             if let Some(child) = child.as_mut() {
                 let _ = child.kill();

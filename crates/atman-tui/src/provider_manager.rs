@@ -719,10 +719,10 @@ impl ProviderManager {
                         self.kind_selected -= 1;
                     }
                 }
-                KeyAction::HistoryDown | KeyAction::Char('j') => {
-                    if self.kind_selected + 1 < self.add_options.len() {
-                        self.kind_selected += 1;
-                    }
+                KeyAction::HistoryDown | KeyAction::Char('j')
+                    if self.kind_selected + 1 < self.add_options.len() =>
+                {
+                    self.kind_selected += 1;
                 }
                 _ => {}
             }
