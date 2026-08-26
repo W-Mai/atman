@@ -422,10 +422,14 @@ flow test_flow(goal: string) -> string {
             EffectiveAuthority::root(&Default::default(), false, None),
         )
         .unwrap();
+    let broker = atman_runtime::permission::PermissionBroker::shared(registry.clone());
     let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
         .with_flow_registry(registry.clone())
+        .with_permission_broker(broker)
+        .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
+        .with_trust(atman_runtime::trust::TrustConfig::default())
         .with_stream_tx(stream_tx);
     ctx.flow_run_id = Some(root_run_id);
     ctx.flow_identity = Some(root_identity);
@@ -527,10 +531,14 @@ flow test_flow(goal: string) -> string {
             EffectiveAuthority::root(&Default::default(), false, None),
         )
         .unwrap();
+    let broker = atman_runtime::permission::PermissionBroker::shared(registry.clone());
     let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
         .with_flow_registry(registry.clone())
+        .with_permission_broker(broker)
+        .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
+        .with_trust(atman_runtime::trust::TrustConfig::default())
         .with_stream_tx(stream_tx);
     ctx.flow_run_id = Some(root_run_id);
     ctx.flow_identity = Some(root_identity);

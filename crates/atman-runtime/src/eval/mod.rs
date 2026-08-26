@@ -774,13 +774,6 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
-    let ctx_with_anchors = if matches!(tool.tier(), crate::tool::Tier::Four) {
-        ctx_with_anchors
-    } else {
-        let mut c = ctx_with_anchors;
-        c.sandbox = None;
-        c
-    };
     let ctx_with_anchors = if let Some(session) = ctx.session_runtime.as_ref() {
         ctx_with_anchors
             .with_session_messages(session.messages_full())
@@ -792,6 +785,7 @@ async fn dispatch_tool_call<'a>(
     } else {
         ctx_with_anchors
     };
+    let ctx_with_anchors = ctx_with_anchors.for_tool_invocation(tool.tier());
     let ctx_with_anchors = ctx_with_anchors.with_current_node(ctx.current_node_id.clone());
     let ctx_with_anchors = if let Some(s) = ctx.safety.cloned() {
         ctx_with_anchors.with_safety(s)
@@ -2219,6 +2213,40 @@ mod tests {
     use super::*;
     use atman_dsl::parse::parse_file;
 
+    fn authorized_eval_tool_ctx(workspace: Option<&std::path::Path>) -> ToolCtx {
+        let trust = crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Eager,
+            escalation: crate::trust::EscalationPolicy::Allow,
+            ..crate::trust::TrustConfig::default()
+        };
+        let flows = std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::default());
+        let run_id = crate::event::FlowRunId::now();
+        let identity = flows
+            .register_root(
+                "eval-test".into(),
+                run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&trust, true, None),
+            )
+            .unwrap();
+        let broker = crate::permission::PermissionBroker::shared(std::sync::Arc::clone(&flows));
+        let mut ctx = ToolCtx::new()
+            .with_flow_registry(flows)
+            .with_permission_broker(broker)
+            .with_trust(trust)
+            .with_approval(std::sync::Arc::new(crate::session::ApprovalRegistry::new()))
+            .with_anchors(None, Some(run_id), None);
+        ctx.flow_identity = Some(identity);
+        if let Some(path) = workspace {
+            ctx = ctx.with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "eval-test".into(),
+                path: path.to_path_buf(),
+                repository_root: path.to_path_buf(),
+                branch: None,
+            });
+        }
+        ctx
+    }
+
     #[test]
     fn char_boundary_rounds_around_multibyte_characters() {
         let text = "a你😀b";
@@ -2394,6 +2422,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn eager_allow_session_backed_root_flow_spawn_executes_without_pending() {
+        use crate::flow_authority::EffectiveAuthority;
+        use crate::tools::agent_ctrl::AgentSpawn;
+        use crate::trust::{EscalationPolicy, TrustConfig, TrustMode};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let root = TempDir::new().unwrap();
+        let trust = TrustConfig {
+            mode: TrustMode::Eager,
+            escalation: EscalationPolicy::Allow,
+            ..TrustConfig::default()
+        };
+        let session =
+            Arc::new(crate::session::Session::open_with_trust(root.path(), trust.clone()).unwrap());
+        let run_id = crate::event::FlowRunId::now();
+        let identity = session
+            .flow_registry
+            .register_root(
+                session.id().to_string(),
+                run_id.clone(),
+                EffectiveAuthority::root(&trust, true, None),
+            )
+            .unwrap();
+        let flow_path = root.path().join("acceptance.at");
+        std::fs::write(&flow_path, "flow child() { return \"ok\" }\n").unwrap();
+        let source = format!(
+            "flow t() {{ return flow.spawn(flow: \"{}\", async: true) }}",
+            flow_path.display()
+        );
+        let file = parse_file(&source).unwrap();
+        let tools = ToolRegistry::new();
+        tools.register(Arc::new(AgentSpawn));
+        let mut tool_ctx = ToolCtx::new();
+        tool_ctx.flow_identity = Some(identity);
+        let providers = crate::provider::ProviderRegistry::new();
+        let flows = std::collections::HashMap::new();
+        let ctx = EvalCtx {
+            tools: &tools,
+            tool_ctx: &tool_ctx,
+            providers: &providers,
+            flows: &flows,
+            contract: None,
+            events: None,
+            turn_id: None,
+            flow_run_id: Some(run_id),
+            session_runtime: Some(Arc::clone(&session)),
+            flow_cancel: tokio_util::sync::CancellationToken::new(),
+            safety: None,
+            current_node_id: None,
+            source_dir: None,
+        };
+        let atman_dsl::ast::Stmt::Return { value } = &file.flows[0].body[0] else {
+            panic!("expected return statement");
+        };
+
+        let result = eval_expr(value, &Env::new(), &ctx).await;
+
+        assert!(
+            matches!(&result, Value::Struct(fields) if fields.iter().any(|(key, value)| key == "status" && matches!(value, Value::Str(status) if status == "running"))),
+            "flow.spawn did not execute: {result:?}"
+        );
+        assert!(session.permission_broker.list().is_empty());
+        assert!(session.approval().list_pending().is_empty());
+    }
+
+    #[tokio::test]
     async fn fanout_all_gathers_results_in_order() {
         use crate::tools::fs::FsRead;
         use std::sync::Arc;
@@ -2407,7 +2502,7 @@ mod tests {
 
         let tools = ToolRegistry::new();
         tools.register(Arc::new(FsRead));
-        let tool_ctx = ToolCtx::new();
+        let tool_ctx = authorized_eval_tool_ctx(Some(dir.path()));
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
@@ -2418,7 +2513,10 @@ mod tests {
             contract: None,
             events: None,
             turn_id: None,
-            flow_run_id: None,
+            flow_run_id: tool_ctx
+                .flow_identity
+                .as_ref()
+                .map(|identity| identity.run_id.clone()),
             session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
@@ -2439,7 +2537,7 @@ mod tests {
                 assert!(matches!(&items[0], Value::Str(s) if s == "AAA"));
                 assert!(matches!(&items[1], Value::Str(s) if s == "BBB"));
             } else {
-                panic!("expected list");
+                panic!("expected list, got {v:?}");
             }
         }
     }
@@ -2503,7 +2601,7 @@ mod tests {
         )));
         let tools = ToolRegistry::new();
         crate::tools::register_tier_zero(&tools);
-        let tool_ctx = ToolCtx::new()
+        let tool_ctx = authorized_eval_tool_ctx(None)
             .with_providers(std::sync::Arc::new(providers.clone()))
             .with_registry(std::sync::Arc::new(tools.clone()));
         let flows = std::collections::HashMap::new();
@@ -2515,7 +2613,10 @@ mod tests {
             contract: None,
             events: None,
             turn_id: None,
-            flow_run_id: None,
+            flow_run_id: tool_ctx
+                .flow_identity
+                .as_ref()
+                .map(|identity| identity.run_id.clone()),
             session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,
@@ -2756,7 +2857,7 @@ flow parent() -> Int {
 
         let tools = ToolRegistry::new();
         tools.register(Arc::new(FsRead));
-        let tool_ctx = ToolCtx::new();
+        let tool_ctx = authorized_eval_tool_ctx(Some(dir.path()));
         let providers = crate::provider::ProviderRegistry::new();
         let flows = std::collections::HashMap::new();
         let ctx = EvalCtx {
@@ -2767,7 +2868,10 @@ flow parent() -> Int {
             contract: None,
             events: None,
             turn_id: None,
-            flow_run_id: None,
+            flow_run_id: tool_ctx
+                .flow_identity
+                .as_ref()
+                .map(|identity| identity.run_id.clone()),
             session_runtime: None,
             flow_cancel: tokio_util::sync::CancellationToken::new(),
             safety: None,

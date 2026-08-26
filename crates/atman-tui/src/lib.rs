@@ -96,6 +96,7 @@ impl TuiNote {
 }
 
 pub enum TuiControl {
+    UpdateTrust(atman_runtime::trust::TrustConfig),
     CancelFlow,
     HardStop,
     ApproveTool(String),
@@ -216,7 +217,6 @@ pub enum TuiCommand {
     OpenTrustModePicker,
     OpenThemePicker,
     OpenModelPicker,
-    CycleOutside,
     ProviderModelsUpdated,
     ProviderTestResult((String, bool)),
     McpTestResult {
@@ -257,6 +257,7 @@ pub struct TuiHandle {
     pub plans_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::memory::plan::Plan>>>,
     pub approvals_rx:
         Option<tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
+    pub trust_rx: Option<tokio::sync::watch::Receiver<atman_runtime::trust::TrustConfig>>,
     pub compact_review_rx:
         Option<tokio::sync::watch::Receiver<Option<atman_runtime::PendingCompactReview>>>,
     pub form_rx: Option<tokio::sync::watch::Receiver<Vec<atman_runtime::form::PendingForm>>>,
@@ -296,6 +297,7 @@ impl TuiHandle {
             todos_rx: Some(session.subscribe_todos()),
             plans_rx: Some(session.subscribe_plans()),
             approvals_rx: Some(session.subscribe_pending_approvals()),
+            trust_rx: Some(session.subscribe_trust()),
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
             injection_rx: Some(session.subscribe_injections()),

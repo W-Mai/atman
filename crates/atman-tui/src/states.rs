@@ -9,7 +9,7 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedUiState {
     #[serde(default)]
-    pub trust: atman_runtime::trust::TrustConfig,
+    pub theme: atman_runtime::trust::Theme,
     #[serde(default)]
     pub sidebar_mode: SidebarMode,
     #[serde(default = "default_true")]
@@ -45,7 +45,7 @@ pub struct PersistedUiState {
 impl Default for PersistedUiState {
     fn default() -> Self {
         Self {
-            trust: atman_runtime::trust::TrustConfig::default(),
+            theme: atman_runtime::trust::Theme::default(),
             sidebar_mode: SidebarMode::default(),
             sidebar_visible: true,
             sidebar_collapse_locked: false,
@@ -107,7 +107,7 @@ impl PersistedUiState {
     /// Snapshot relevant fields from an AppState for persistence.
     pub fn snapshot(app: &crate::app::AppState) -> Self {
         Self {
-            trust: app.trust.clone(),
+            theme: app.trust.theme,
             sidebar_mode: app.sidebar_mode,
             sidebar_visible: !app.sidebar_collapsed,
             sidebar_collapse_locked: app.sidebar_collapse_locked,
@@ -128,7 +128,7 @@ impl PersistedUiState {
 
     /// Apply persisted state onto an AppState.
     pub fn apply(&self, app: &mut crate::app::AppState) {
-        app.trust = self.trust.clone();
+        app.trust.theme = self.theme;
         app.sidebar_mode = self.sidebar_mode;
         app.sidebar_collapsed = !self.sidebar_visible;
         app.sidebar_collapse_locked = self.sidebar_collapse_locked;
@@ -189,30 +189,26 @@ mod tests {
     }
 
     #[test]
-    fn apply_writes_all_fields() {
-        use atman_runtime::trust::{OutsideBehavior, Theme, TrustConfig, TrustMode};
+    fn apply_writes_ui_fields_without_changing_permissions() {
+        use atman_runtime::trust::{EscalationPolicy, Theme, TrustMode};
 
         let mut app = crate::app::AppState::new("s".into(), None);
         app.sidebar_collapsed = true;
         app.mouse_captured = false;
         app.trust.mode = TrustMode::Calm;
+        app.trust.escalation = EscalationPolicy::Deny;
 
         let state = PersistedUiState {
-            trust: TrustConfig {
-                mode: TrustMode::Eager,
-                theme: Theme::Weather,
-                outside: OutsideBehavior::Deny,
-                ..TrustConfig::default()
-            },
+            theme: Theme::Weather,
             sidebar_visible: true,
             mouse_captured: true,
             goal_collapsed: true,
             ..PersistedUiState::default()
         };
         state.apply(&mut app);
-        assert_eq!(app.trust.mode, TrustMode::Eager);
+        assert_eq!(app.trust.mode, TrustMode::Calm);
         assert_eq!(app.trust.theme, Theme::Weather);
-        assert_eq!(app.trust.outside, OutsideBehavior::Deny);
+        assert_eq!(app.trust.escalation, EscalationPolicy::Deny);
         assert!(!app.sidebar_collapsed);
         assert!(app.mouse_captured);
         assert!(app.goal_collapsed);

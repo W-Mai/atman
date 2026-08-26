@@ -49,12 +49,6 @@ pub const META_COMMANDS: &[MetaCommand] = &[
         aliases: &[],
     },
     MetaCommand {
-        name: "outside",
-        desc: "cycle outside behavior in eager (deny/approve/allow)",
-        usage: ":outside",
-        aliases: &[],
-    },
-    MetaCommand {
         name: "attach",
         desc: "attach file / list / clear",
         usage: ":attach <path> | :attach clear | :attach list",

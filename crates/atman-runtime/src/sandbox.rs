@@ -41,7 +41,15 @@ pub trait Sandbox: Send + Sync {
         env: &'a [(String, String)],
         cwd: &'a Path,
         pty_size: portable_pty::PtySize,
+        authorization: &'a crate::permission::InvocationAuthorization,
     ) -> BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
+        if !authorization.is_for_call("term.spawn", "term.spawn") {
+            return Box::pin(async {
+                Err(RuntimeError::ToolFailed(
+                    "relaxed PTY execution requires term.spawn authorization".into(),
+                ))
+            });
+        }
         self.spawn_pty(cmd, env, cwd, pty_size)
     }
 
@@ -253,8 +261,14 @@ impl Sandbox for SandboxExec {
         env: &'a [(String, String)],
         cwd: &'a Path,
         pty_size: portable_pty::PtySize,
+        authorization: &'a crate::permission::InvocationAuthorization,
     ) -> BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
         Box::pin(async move {
+            if !authorization.is_for_call("term.spawn", "term.spawn") {
+                return Err(RuntimeError::ToolFailed(
+                    "relaxed PTY execution requires term.spawn authorization".into(),
+                ));
+            }
             if !self.is_available() {
                 return Err(RuntimeError::ToolFailed(
                     "sandbox-exec not available on this host".into(),

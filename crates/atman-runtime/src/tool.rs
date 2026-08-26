@@ -422,6 +422,32 @@ impl ToolCtx {
         self
     }
 
+    /// Freezes the active trust policy for one tool invocation. Session-backed
+    /// calls read the latest snapshot; the resulting context is then shared by
+    /// approval, sandbox selection, and execution for that invocation.
+    pub fn for_tool_invocation(mut self, tier: Tier) -> Self {
+        if let Some(session) = self.session_runtime.as_ref() {
+            self.trust = Some(session.trust_config());
+        }
+        let trust = self.trust.as_ref().cloned().unwrap_or_default();
+        let execution_policy = self
+            .flow_identity
+            .as_ref()
+            .map(|identity| {
+                identity
+                    .effective_authority
+                    .constrain_policy(&trust, tier, [])
+                    .0
+            })
+            .unwrap_or_else(|| trust.execution_policy());
+        let controlled_tier4 =
+            tier == Tier::Four && execution_policy == crate::trust::ExecutionPolicy::Controlled;
+        if !controlled_tier4 {
+            self.sandbox = None;
+        }
+        self
+    }
+
     pub fn with_safety(mut self, safety: crate::safety::SafetyConfig) -> Self {
         self.safety = Some(safety);
         self
@@ -627,6 +653,55 @@ mod tests {
     fn approval_level_ordered_auto_lt_approve_lt_dangerous() {
         assert!(ApprovalLevel::Auto < ApprovalLevel::Approve);
         assert!(ApprovalLevel::Approve < ApprovalLevel::Dangerous);
+    }
+
+    #[test]
+    fn invocation_snapshot_tracks_session_trust_and_selects_tier4_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = crate::trust::TrustConfig::default();
+        let session = std::sync::Arc::new(
+            crate::session::Session::open_with_trust(dir.path(), initial.clone()).unwrap(),
+        );
+        let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
+            std::sync::Arc::new(crate::sandbox::SandboxExec::new(dir.path()));
+        let base = ToolCtx::new()
+            .with_trust(crate::trust::TrustConfig {
+                mode: crate::trust::TrustMode::Reckless,
+                ..crate::trust::TrustConfig::default()
+            })
+            .with_session_runtime(std::sync::Arc::clone(&session))
+            .with_sandbox(sandbox);
+
+        let controlled = base.clone().for_tool_invocation(Tier::Four);
+        assert_eq!(controlled.trust, Some(initial));
+        assert!(controlled.sandbox.is_some());
+
+        let reckless = crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Reckless,
+            ..crate::trust::TrustConfig::default()
+        };
+        session.update_trust(reckless.clone(), |_| Ok(())).unwrap();
+        let unrestricted = base.for_tool_invocation(Tier::Four);
+
+        assert_eq!(unrestricted.trust, Some(reckless));
+        assert!(unrestricted.sandbox.is_none());
+        assert!(controlled.sandbox.is_some());
+    }
+
+    #[test]
+    fn invocation_snapshot_only_exposes_sandbox_to_controlled_tier4() {
+        let dir = tempfile::tempdir().unwrap();
+        let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
+            std::sync::Arc::new(crate::sandbox::SandboxExec::new(dir.path()));
+        let base = ToolCtx::new().with_sandbox(sandbox);
+
+        assert!(
+            base.clone()
+                .for_tool_invocation(Tier::Three)
+                .sandbox
+                .is_none()
+        );
+        assert!(base.for_tool_invocation(Tier::Four).sandbox.is_some());
     }
 
     fn binding(path: std::path::PathBuf) -> crate::git_workspace::WorkspaceBinding {

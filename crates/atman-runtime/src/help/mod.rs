@@ -155,7 +155,9 @@ fn render_config() -> String {
     for (field, ty) in [
         ("mode", "TrustMode"),
         ("theme", "Theme"),
-        ("outside", "OutsideBehavior"),
+        ("escalation", "EscalationPolicy"),
+        ("tiers", "TierPolicyConfig"),
+        ("risks", "RiskPolicyConfig"),
     ] {
         let doc = TrustConfig::get_field_docs(field).unwrap_or("");
         out.push_str(&format!("| `{}` | {} | {} |\n", field, ty, doc));

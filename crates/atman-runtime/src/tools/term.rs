@@ -719,19 +719,26 @@ async fn spawn_impl(
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("Operation not permitted") || msg.contains("denied") {
-                    let outcome = crate::approval::request_approval(
+                    let outcome = crate::approval::request_approval_with_additional_risks(
                         ctx,
                         "term.spawn",
                         "term.spawn",
                         &args,
                         ApprovalLevel::Dangerous,
                         Some(&TermSpawn),
+                        [crate::trust::RiskKind::SandboxViolation],
                     )
                     .await;
                     match outcome {
-                        crate::approval::ApprovalOutcome::Approve { authorization: _ } => {
+                        crate::approval::ApprovalOutcome::Approve { authorization } => {
                             sandbox
-                                .spawn_pty_relaxed(&cmd_args, &env_refs, &cwd, pty_size)
+                                .spawn_pty_relaxed(
+                                    &cmd_args,
+                                    &env_refs,
+                                    &cwd,
+                                    pty_size,
+                                    &authorization,
+                                )
                                 .await?
                         }
                         crate::approval::ApprovalOutcome::Deny { reason } => {
@@ -1930,9 +1937,15 @@ mod tests {
             env: &'a [(String, String)],
             cwd: &'a Path,
             pty_size: portable_pty::PtySize,
+            authorization: &'a crate::permission::InvocationAuthorization,
         ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
             self.relaxed_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async move { spawn_pty_direct(cmd, env, cwd, pty_size) })
+            Box::pin(async move {
+                if !authorization.is_for_call("term.spawn", "term.spawn") {
+                    return Err(RuntimeError::ToolFailed("invalid authorization".into()));
+                }
+                spawn_pty_direct(cmd, env, cwd, pty_size)
+            })
         }
 
         fn is_available(&self) -> bool {
@@ -2004,6 +2017,35 @@ mod tests {
         }
     }
 
+    fn brokered_term_ctx(
+        workspace: &Path,
+        registry: Arc<TermRegistry>,
+        session_dir: &Path,
+        trust: crate::trust::TrustConfig,
+    ) -> ToolCtx {
+        let flows = Arc::new(crate::tools::agent_ctrl::FlowRegistry::default());
+        let identity = flows
+            .register_root(
+                "r4".into(),
+                crate::event::FlowRunId::now(),
+                crate::flow_authority::EffectiveAuthority::root(
+                    &trust,
+                    true,
+                    Some(workspace.to_path_buf()),
+                ),
+            )
+            .unwrap();
+        let broker = crate::permission::PermissionBroker::shared(Arc::clone(&flows));
+        let mut ctx = managed_term_ctx(workspace, registry, session_dir)
+            .with_flow_registry(flows)
+            .with_permission_broker(broker)
+            .with_trust(trust)
+            .with_approval(Arc::new(crate::session::ApprovalRegistry::new()))
+            .with_anchors(None, Some(identity.run_id.clone()), None);
+        ctx.flow_identity = Some(identity);
+        ctx
+    }
+
     #[tokio::test]
     async fn sandbox_strict_path_receives_external_cwd_before_fs_policy() {
         let workspace = tempfile::tempdir().unwrap();
@@ -2021,8 +2063,28 @@ mod tests {
         assert_eq!(sandbox.pty_calls.load(Ordering::SeqCst), 1);
     }
 
+    fn eager_relaxed_policy(action: crate::trust::PolicyAction) -> crate::trust::TrustConfig {
+        crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Eager,
+            tiers: crate::trust::TierPolicyConfig {
+                eager: crate::trust::TierPolicyOverrides {
+                    tier4: Some(crate::trust::PolicyAction::Auto),
+                    ..crate::trust::TierPolicyOverrides::default()
+                },
+            },
+            risks: crate::trust::RiskPolicyConfig {
+                eager: crate::trust::RiskPolicyOverrides {
+                    process_spawn: Some(crate::trust::PolicyAction::Auto),
+                    sandbox_violation: Some(action),
+                    ..crate::trust::RiskPolicyOverrides::default()
+                },
+            },
+            ..crate::trust::TrustConfig::default()
+        }
+    }
+
     #[tokio::test]
-    async fn relaxed_fallback_registers_terminal_after_approval() {
+    async fn relaxed_fallback_auto_policy_passes_authorization_to_execution() {
         let workspace = tempfile::tempdir().unwrap();
         let session_dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(TermRegistry::new());
@@ -2030,12 +2092,13 @@ mod tests {
             strict_calls: AtomicUsize::new(0),
             relaxed_calls: AtomicUsize::new(0),
         });
-        let approval = Arc::new(crate::session::ApprovalRegistry::new());
-        approval.set_auto_ceiling(ApprovalLevel::Dangerous);
-        let ctx = managed_term_ctx(workspace.path(), registry.clone(), session_dir.path())
-            .with_sandbox(sandbox.clone())
-            .with_approval(approval)
-            .with_anchors(None, Some(crate::event::FlowRunId::now()), None);
+        let ctx = brokered_term_ctx(
+            workspace.path(),
+            registry.clone(),
+            session_dir.path(),
+            eager_relaxed_policy(crate::trust::PolicyAction::Auto),
+        )
+        .with_sandbox(sandbox.clone());
 
         spawn_impl(term_args(workspace.path()), &ctx).await.unwrap();
 
@@ -2043,6 +2106,68 @@ mod tests {
         assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 1);
         assert_eq!(registry.list("r4").len(), 1);
         registry.kill_all();
+    }
+
+    #[tokio::test]
+    async fn relaxed_fallback_ask_policy_requires_manual_authorization() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TermRegistry::new());
+        let sandbox = Arc::new(FallbackSandbox {
+            strict_calls: AtomicUsize::new(0),
+            relaxed_calls: AtomicUsize::new(0),
+        });
+        let ctx = brokered_term_ctx(
+            workspace.path(),
+            registry.clone(),
+            session_dir.path(),
+            eager_relaxed_policy(crate::trust::PolicyAction::Ask),
+        )
+        .with_sandbox(sandbox.clone());
+        let approval = ctx.approval.clone().unwrap();
+        let mut pending = approval.subscribe();
+
+        let (result, ()) = tokio::join!(spawn_impl(term_args(workspace.path()), &ctx), async {
+            pending.changed().await.unwrap();
+            let requests = approval.list_pending();
+            assert_eq!(requests.len(), 1);
+            assert!(approval.decide(
+                &requests[0].tool_use_id,
+                crate::session::ApprovalDecision::Approve,
+            ));
+        });
+        result.unwrap();
+
+        assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.list("r4").len(), 1);
+        registry.kill_all();
+    }
+
+    #[tokio::test]
+    async fn relaxed_fallback_deny_policy_never_executes_relaxed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(TermRegistry::new());
+        let sandbox = Arc::new(FallbackSandbox {
+            strict_calls: AtomicUsize::new(0),
+            relaxed_calls: AtomicUsize::new(0),
+        });
+        let ctx = brokered_term_ctx(
+            workspace.path(),
+            registry.clone(),
+            session_dir.path(),
+            eager_relaxed_policy(crate::trust::PolicyAction::Deny),
+        )
+        .with_sandbox(sandbox.clone());
+
+        let error = spawn_impl(term_args(workspace.path()), &ctx)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("denied"));
+        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 0);
+        assert!(registry.list("r4").is_empty());
     }
 
     #[tokio::test]
@@ -2055,14 +2180,16 @@ mod tests {
             strict_calls: AtomicUsize::new(0),
             relaxed_calls: AtomicUsize::new(0),
         });
-        let approval = Arc::new(crate::session::ApprovalRegistry::new());
-        approval.set_auto_ceiling(ApprovalLevel::Approve);
+        let ctx = brokered_term_ctx(
+            workspace.path(),
+            registry.clone(),
+            session_dir.path(),
+            eager_relaxed_policy(crate::trust::PolicyAction::Ask),
+        )
+        .with_sandbox(sandbox.clone())
+        .with_task_registry(tasks.clone());
+        let approval = ctx.approval.as_ref().unwrap().clone();
         let mut pending = approval.subscribe();
-        let ctx = managed_term_ctx(workspace.path(), registry.clone(), session_dir.path())
-            .with_sandbox(sandbox.clone())
-            .with_approval(approval.clone())
-            .with_task_registry(tasks.clone())
-            .with_anchors(None, Some(crate::event::FlowRunId::now()), None);
 
         let (result, ()) = tokio::join!(spawn_impl(term_args(workspace.path()), &ctx), async {
             pending.changed().await.unwrap();

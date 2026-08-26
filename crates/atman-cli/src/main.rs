@@ -647,8 +647,13 @@ async fn cmd_run(
     } else {
         let root = data_dir()?;
         let project_index = open_current_project_index()?;
-        Session::open_with_context(&root, redactor.clone(), project_index)
-            .with_context(|| format!("opening session under {}", root.display()))?
+        Session::open_with_context_and_trust(
+            &root,
+            redactor.clone(),
+            project_index,
+            load_global_trust_config()?,
+        )
+        .with_context(|| format!("opening session under {}", root.display()))?
     });
 
     if let Some(path) = session.events_path() {
@@ -705,9 +710,6 @@ async fn cmd_run(
             .join(" ")
     };
     let user_msg = atman_runtime::message::Message::user_text(turn_id.clone(), user_text.clone());
-    session
-        .approval()
-        .set_auto_ceiling(atman_runtime::tool::ApprovalLevel::Dangerous);
     {
         let _compact_guard = session.acquire_compact_lock().await;
         session.begin_turn(user_msg);
@@ -1173,8 +1175,9 @@ async fn cmd_session_sanitize(sid: String, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let session = atman_runtime::Session::open_existing(&root, &sid)
-        .with_context(|| format!("open session {sid}"))?;
+    let session =
+        atman_runtime::Session::open_existing_with_trust(&root, &sid, load_global_trust_config()?)
+            .with_context(|| format!("open session {sid}"))?;
     let session = std::sync::Arc::new(session);
     for (seq, idx, basename, reason) in &findings {
         session.emit_attachment_degrade(*seq, *idx, basename.clone(), reason.clone());
@@ -1427,19 +1430,26 @@ async fn prebuild_session(
     let redactor = atman_daemon::bootstrap::build_redactor(config_dir().ok().as_deref());
     let is_fresh = resume_sid.is_none();
     let project_index = open_current_project_index()?;
+    let global_trust = load_global_trust_config()?;
     let session = std::sync::Arc::new(match resume_sid {
         Some(sid) => {
             let resolved_sid = resolve_session_prefix(&root, &sid)?;
-            Session::open_existing_with_context(
+            Session::open_existing_with_context_and_trust(
                 &root,
                 &resolved_sid,
                 redactor.clone(),
                 project_index.clone(),
+                global_trust.clone(),
             )
             .with_context(|| format!("resuming session {resolved_sid} under {}", root.display()))?
         }
-        None => Session::open_with_context(&root, redactor.clone(), project_index.clone())
-            .with_context(|| format!("opening session under {}", root.display()))?,
+        None => Session::open_with_context_and_trust(
+            &root,
+            redactor.clone(),
+            project_index.clone(),
+            global_trust,
+        )
+        .with_context(|| format!("opening session under {}", root.display()))?,
     });
     apply_session_config(&session);
     emit(BootStepId::OpenSession, false, true);
@@ -1639,10 +1649,24 @@ async fn cmd_repl_once(
         let data_root_for_ctrl = root.clone();
         let executor_for_ctrl = executor.clone();
         let tools_for_ctrl = executor.tools.clone();
+        let reporter_for_ctrl = reporter.clone();
         let mut mcp_shutdown_tx = mcp_shutdown_tx;
         let ctrl_task = tokio::spawn(async move {
             while let Some(msg) = ctrl_rx.recv().await {
                 match msg {
+                    atman_tui::TuiControl::UpdateTrust(mut trust) => {
+                        trust.theme = session_for_ctrl.trust_config().theme;
+                        let result = session_for_ctrl.update_trust(trust, |config| {
+                            let hub = atman_runtime::config_hub::ConfigHub::global()
+                                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                            hub.set_trust_config(config)
+                                .map_err(|error| std::io::Error::other(error.to_string()))
+                        });
+                        if let Err(error) = result {
+                            reporter_for_ctrl
+                                .error(format!("failed to update trust policy: {error}"));
+                        }
+                    }
                     atman_tui::TuiControl::CancelFlow => session_for_ctrl.cancel_flow(),
                     atman_tui::TuiControl::HardStop => {
                         session_for_ctrl.cancel_flow();
@@ -2311,6 +2335,7 @@ async fn cmd_repl_once(
             todos_rx: Some(session.subscribe_todos()),
             plans_rx: Some(session.subscribe_plans()),
             approvals_rx: Some(session.subscribe_pending_approvals()),
+            trust_rx: Some(session.subscribe_trust()),
             compact_review_rx: Some(session.compact_reviews().subscribe()),
             form_rx: Some(session.forms().subscribe()),
             injection_rx: Some(session.subscribe_injections()),
@@ -2318,7 +2343,7 @@ async fn cmd_repl_once(
             session: Some(std::sync::Arc::clone(&session)),
             startup_intro: intro.clone(),
             onboarding_recommended: atman_runtime::model_registry::is_first_run(),
-            trust: atman_daemon::bootstrap::load_trust_config(config_dir().ok().as_deref()),
+            trust: session.trust_config(),
             task_registry: executor.tool_ctx.task_registry.clone(),
             boot_toasts: boot_notifications
                 .into_iter()
@@ -2413,15 +2438,6 @@ async fn cmd_repl_once(
                         let _ = tx.send(atman_tui::TuiCommand::OpenModelPicker);
                     } else {
                         reporter.info(format!("current model: {}", session.last_model()));
-                    }
-                }
-                "outside" => {
-                    if let Some(tx) = cmd_tx_for_repl.as_ref() {
-                        let _ = tx.send(atman_tui::TuiCommand::CycleOutside);
-                    } else {
-                        reporter.info(
-                            "[atman] :outside — cycle outside behavior (available in TUI mode)",
-                        );
                     }
                 }
                 "suggest" => {
@@ -4878,7 +4894,6 @@ async fn preview_scene_approval(session: std::sync::Arc<Session>, count: usize) 
             level: ApprovalLevel::Dangerous,
             run_id: FlowRunId::now(),
             emitted_at: chrono::Utc::now(),
-            bypass_auto_ceiling: false,
         }));
     }
 }
@@ -5777,7 +5792,7 @@ async fn cmd_migrate(action: MigrateAction) -> Result<()> {
                 return Ok(());
             }
             let root = data_dir()?;
-            let session = Session::open(&root)
+            let session = Session::open_with_trust(&root, load_global_trust_config()?)
                 .with_context(|| format!("open a fresh atman session under {}", root.display()))?;
             let sid = session.id().to_string();
             let events = session.events_path().map(|p| p.display().to_string());
@@ -6374,6 +6389,12 @@ fn data_dir() -> Result<PathBuf> {
 
 fn config_dir() -> Result<PathBuf> {
     atman_runtime::storage::config_dir()
+}
+
+fn load_global_trust_config() -> Result<atman_runtime::trust::TrustConfig> {
+    atman_runtime::config_hub::ConfigHub::global()?
+        .trust_config()
+        .context("load global trust config")
 }
 
 fn resolve_session_prefix(root: &std::path::Path, sid: &str) -> Result<String> {

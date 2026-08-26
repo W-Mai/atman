@@ -86,9 +86,15 @@ impl RunLauncher {
                 None
             }
         };
+        let trust = hub.trust_config().context("load global trust config")?;
         let session = std::sync::Arc::new(
-            atman_runtime::Session::open_with_context(state.data_dir(), redactor, project_index)
-                .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
+            atman_runtime::Session::open_with_context_and_trust(
+                state.data_dir(),
+                redactor,
+                project_index,
+                trust,
+            )
+            .with_context(|| format!("opening session under {}", state.data_dir().display()))?,
         );
         let sid_proto = ProtoSessionId(session.id().0);
         let run_id_runtime = RuntimeRunId::now();

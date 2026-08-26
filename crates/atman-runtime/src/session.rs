@@ -128,6 +128,8 @@ pub struct Session {
     /// Broker for the structured permission pipeline. Bound to `flow_registry`
     /// so identity authentication and terminal cleanup observe the same runs.
     pub permission_broker: std::sync::Arc<crate::permission::PermissionBroker>,
+    trust: watch::Sender<crate::trust::TrustConfig>,
+    trust_update_lock: std::sync::Mutex<()>,
     /// Handle of the current root FlowRun; set per turn.
     current_root: std::sync::Mutex<Option<String>>,
     successful_flow_count: std::sync::atomic::AtomicU64,
@@ -253,7 +255,6 @@ pub struct PendingApproval {
     pub level: crate::tool::ApprovalLevel,
     pub run_id: FlowRunId,
     pub emitted_at: chrono::DateTime<chrono::Utc>,
-    pub bypass_auto_ceiling: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -380,7 +381,6 @@ impl FormRegistry {
 
 pub struct ApprovalRegistry {
     entries: std::sync::Mutex<Vec<ApprovalEntry>>,
-    auto_ceiling: std::sync::Mutex<crate::tool::ApprovalLevel>,
     watch_tx: watch::Sender<Vec<PendingApproval>>,
     next_entry_id: std::sync::atomic::AtomicU64,
 }
@@ -408,7 +408,6 @@ impl ApprovalRegistry {
         let (watch_tx, _) = watch::channel(Vec::new());
         Self {
             entries: std::sync::Mutex::new(Vec::new()),
-            auto_ceiling: std::sync::Mutex::new(crate::tool::ApprovalLevel::Approve),
             watch_tx,
             next_entry_id: std::sync::atomic::AtomicU64::new(0),
         }
@@ -431,10 +430,6 @@ impl ApprovalRegistry {
             .collect()
     }
 
-    pub fn set_auto_ceiling(&self, level: crate::tool::ApprovalLevel) {
-        *self.auto_ceiling.lock().unwrap() = level;
-    }
-
     pub fn request(
         &self,
         pending: PendingApproval,
@@ -443,8 +438,7 @@ impl ApprovalRegistry {
     }
 
     /// Same as [`Self::request`], but also returns a ticket that identifies this
-    /// exact queue entry for later [`Self::cancel`]. `None` means the request was
-    /// auto-approved by the ceiling and never queued.
+    /// exact queue entry for later [`Self::cancel`].
     pub fn request_tracked(
         &self,
         pending: PendingApproval,
@@ -453,10 +447,6 @@ impl ApprovalRegistry {
         tokio::sync::oneshot::Receiver<ApprovalDecision>,
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if !pending.bypass_auto_ceiling && pending.level <= *self.auto_ceiling.lock().unwrap() {
-            let _ = tx.send(ApprovalDecision::Approve);
-            return (None, rx);
-        }
         let entry_id = self
             .next_entry_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -599,6 +589,53 @@ pub enum SessionOpenError {
         #[source]
         source: std::io::Error,
     },
+    #[error("load session trust {}: {source}", path.display())]
+    Trust {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TrustUpdateError {
+    #[error("persist session trust: {0}")]
+    Session(#[source] std::io::Error),
+    #[error("persist global trust: {0}")]
+    Global(#[source] std::io::Error),
+    #[error(
+        "persist global trust failed ({global}); rollback session trust also failed ({rollback})"
+    )]
+    RollbackFailed {
+        global: std::io::Error,
+        rollback: std::io::Error,
+    },
+}
+
+fn trust_path(dir: &Path) -> PathBuf {
+    dir.join("trust.json")
+}
+
+fn read_trust(dir: &Path) -> std::io::Result<crate::trust::TrustConfig> {
+    let path = trust_path(dir);
+    let bytes = std::fs::read(&path)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn write_trust(dir: &Path, trust: &crate::trust::TrustConfig) -> std::io::Result<()> {
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(trust)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let temp = dir.join(format!(".trust.{}.tmp", std::process::id()));
+    std::fs::write(&temp, bytes)?;
+    if let Err(error) = std::fs::rename(&temp, trust_path(dir)) {
+        let _ = std::fs::remove_file(temp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn load_goal(dir: &Path) -> Option<String> {
@@ -675,16 +712,55 @@ impl Session {
         Self::open_with_redactor(root, None)
     }
 
+    pub fn open_with_trust(
+        root: impl AsRef<Path>,
+        trust: crate::trust::TrustConfig,
+    ) -> std::io::Result<Self> {
+        let root_ref = root.as_ref();
+        let project_index = default_project_index(root_ref);
+        Self::open_with_context_and_trust(root_ref, None, project_index, trust)
+    }
+
     pub fn open_with_redactor(
         root: impl AsRef<Path>,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
     ) -> std::io::Result<Self> {
         let root_ref = root.as_ref();
         let project_index = default_project_index(root_ref);
-        Self::open_with_context(root_ref, redactor, project_index)
+        Self::open_with_context_and_trust(
+            root_ref,
+            redactor,
+            project_index,
+            crate::trust::TrustConfig::default(),
+        )
+    }
+
+    pub fn open_with_context_and_trust(
+        root: impl AsRef<Path>,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+        trust: crate::trust::TrustConfig,
+    ) -> std::io::Result<Self> {
+        let session = Self::open_with_context_inner(root, redactor, project_index)?;
+        write_trust(&session.dir, &trust)?;
+        session.trust.send_replace(trust);
+        Ok(session)
     }
 
     pub fn open_with_context(
+        root: impl AsRef<Path>,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+    ) -> std::io::Result<Self> {
+        Self::open_with_context_and_trust(
+            root,
+            redactor,
+            project_index,
+            crate::trust::TrustConfig::default(),
+        )
+    }
+
+    fn open_with_context_inner(
         root: impl AsRef<Path>,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
         project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
@@ -738,6 +814,8 @@ impl Session {
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry,
             permission_broker,
+            trust: watch::channel(crate::trust::TrustConfig::default()).0,
+            trust_update_lock: std::sync::Mutex::new(()),
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
@@ -757,16 +835,72 @@ impl Session {
         Self::open_existing_with_redactor(root, sid, None)
     }
 
+    pub fn open_existing_with_trust(
+        root: impl AsRef<Path>,
+        sid: &str,
+        trust: crate::trust::TrustConfig,
+    ) -> Result<Self, SessionOpenError> {
+        let root_ref = root.as_ref();
+        let project_index = default_project_index(root_ref);
+        Self::open_existing_with_context_and_trust(root_ref, sid, None, project_index, trust)
+    }
+
     pub fn open_existing_with_redactor(
         root: impl AsRef<Path>,
         sid: &str,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
     ) -> Result<Self, SessionOpenError> {
         let project_index = default_project_index(root.as_ref());
-        Self::open_existing_with_context(root, sid, redactor, project_index)
+        Self::open_existing_with_context_and_trust(
+            root,
+            sid,
+            redactor,
+            project_index,
+            crate::trust::TrustConfig::default(),
+        )
+    }
+
+    pub fn open_existing_with_context_and_trust(
+        root: impl AsRef<Path>,
+        sid: &str,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+        global_trust: crate::trust::TrustConfig,
+    ) -> Result<Self, SessionOpenError> {
+        let session = Self::open_existing_with_context_inner(root, sid, redactor, project_index)?;
+        let path = trust_path(&session.dir);
+        let trust = if path.exists() {
+            read_trust(&session.dir).map_err(|source| SessionOpenError::Trust {
+                path: path.clone(),
+                source,
+            })?
+        } else {
+            write_trust(&session.dir, &global_trust).map_err(|source| SessionOpenError::Trust {
+                path: path.clone(),
+                source,
+            })?;
+            global_trust
+        };
+        session.trust.send_replace(trust);
+        Ok(session)
     }
 
     pub fn open_existing_with_context(
+        root: impl AsRef<Path>,
+        sid: &str,
+        redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
+        project_index: Option<std::sync::Arc<crate::index::AnchorIndex>>,
+    ) -> Result<Self, SessionOpenError> {
+        Self::open_existing_with_context_and_trust(
+            root,
+            sid,
+            redactor,
+            project_index,
+            crate::trust::TrustConfig::default(),
+        )
+    }
+
+    fn open_existing_with_context_inner(
         root: impl AsRef<Path>,
         sid: &str,
         redactor: Option<std::sync::Arc<crate::redact::Redactor>>,
@@ -846,6 +980,8 @@ impl Session {
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry,
             permission_broker,
+            trust: watch::channel(crate::trust::TrustConfig::default()).0,
+            trust_update_lock: std::sync::Mutex::new(()),
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: {
@@ -903,6 +1039,8 @@ impl Session {
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
             flow_registry,
             permission_broker,
+            trust: watch::channel(crate::trust::TrustConfig::default()).0,
+            trust_update_lock: std::sync::Mutex::new(()),
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
@@ -928,6 +1066,32 @@ impl Session {
 
     pub fn permission_broker(&self) -> std::sync::Arc<crate::permission::PermissionBroker> {
         std::sync::Arc::clone(&self.permission_broker)
+    }
+
+    pub fn trust_config(&self) -> crate::trust::TrustConfig {
+        self.trust.borrow().clone()
+    }
+
+    pub fn subscribe_trust(&self) -> watch::Receiver<crate::trust::TrustConfig> {
+        self.trust.subscribe()
+    }
+
+    pub fn update_trust(
+        &self,
+        trust: crate::trust::TrustConfig,
+        persist_global: impl FnOnce(&crate::trust::TrustConfig) -> std::io::Result<()>,
+    ) -> Result<(), TrustUpdateError> {
+        let _guard = self.trust_update_lock.lock().unwrap();
+        let previous = self.trust_config();
+        write_trust(&self.dir, &trust).map_err(TrustUpdateError::Session)?;
+        if let Err(global) = persist_global(&trust) {
+            return match write_trust(&self.dir, &previous) {
+                Ok(()) => Err(TrustUpdateError::Global(global)),
+                Err(rollback) => Err(TrustUpdateError::RollbackFailed { global, rollback }),
+            };
+        }
+        self.trust.send_replace(trust);
+        Ok(())
     }
 
     pub fn compact_reviews(&self) -> std::sync::Arc<CompactReviewRegistry> {
@@ -1950,6 +2114,184 @@ mod tests {
     }
 
     #[test]
+    fn new_session_constructor_persists_supplied_trust() {
+        let root = TempDir::new().unwrap();
+        let trust = crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Eager,
+            ..crate::trust::TrustConfig::default()
+        };
+        let session = Session::open_with_trust(root.path(), trust.clone()).unwrap();
+        assert_eq!(session.trust_config(), trust);
+        assert_eq!(read_trust(session.dir()).unwrap(), trust);
+    }
+
+    #[test]
+    fn existing_session_constructor_preserves_session_trust_over_global() {
+        let root = TempDir::new().unwrap();
+        let session_trust = crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Eager,
+            ..crate::trust::TrustConfig::default()
+        };
+        let created = Session::open_with_trust(root.path(), session_trust.clone()).unwrap();
+        let sid = created.id().to_string();
+        drop(created);
+        let global_trust = crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Reckless,
+            ..crate::trust::TrustConfig::default()
+        };
+        let reopened = Session::open_existing_with_trust(root.path(), &sid, global_trust).unwrap();
+        assert_eq!(reopened.trust_config(), session_trust);
+    }
+
+    #[test]
+    fn missing_trust_uses_global_and_persists_it() {
+        let root = TempDir::new().unwrap();
+        let created = Session::open(root.path()).unwrap();
+        let sid = created.id().to_string();
+        let session_dir = created.dir().to_path_buf();
+        drop(created);
+        std::fs::remove_file(trust_path(&session_dir)).unwrap();
+        let global_trust = crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Reckless,
+            ..crate::trust::TrustConfig::default()
+        };
+        let reopened =
+            Session::open_existing_with_trust(root.path(), &sid, global_trust.clone()).unwrap();
+        assert_eq!(reopened.trust_config(), global_trust);
+        assert_eq!(read_trust(&session_dir).unwrap(), global_trust);
+    }
+
+    #[test]
+    fn corrupt_trust_rejects_existing_session() {
+        let root = TempDir::new().unwrap();
+        let created = Session::open(root.path()).unwrap();
+        let sid = created.id().to_string();
+        let session_dir = created.dir().to_path_buf();
+        drop(created);
+        std::fs::write(trust_path(&session_dir), b"not json").unwrap();
+        let error = match Session::open_existing_with_trust(
+            root.path(),
+            &sid,
+            crate::trust::TrustConfig::default(),
+        ) {
+            Ok(_) => panic!("corrupt trust snapshot was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, SessionOpenError::Trust { .. }));
+    }
+
+    #[test]
+    fn open_existing_rejects_obsolete_outside_in_trust_snapshot() {
+        let root = TempDir::new().unwrap();
+        let created = Session::open(root.path()).unwrap();
+        let sid = created.id().to_string();
+        let session_dir = created.dir().to_path_buf();
+        drop(created);
+        std::fs::write(
+            trust_path(&session_dir),
+            br#"{"mode":"steady","outside":"allow"}"#,
+        )
+        .unwrap();
+
+        let error = match Session::open_existing_with_trust(
+            root.path(),
+            &sid,
+            crate::trust::TrustConfig::default(),
+        ) {
+            Ok(_) => panic!("obsolete outside field was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, SessionOpenError::Trust { source, .. } if source.to_string().contains("outside"))
+        );
+    }
+
+    #[test]
+    fn session_permission_pipeline_a_b_binds_each_broker_to_only_its_registry() {
+        let root = TempDir::new().unwrap();
+        let session_a = Session::open(root.path()).unwrap();
+        let session_b = Session::open(root.path()).unwrap();
+        assert!(
+            session_a
+                .permission_broker
+                .is_for_registry(&session_a.flow_registry)
+        );
+        assert!(
+            session_b
+                .permission_broker
+                .is_for_registry(&session_b.flow_registry)
+        );
+        assert!(
+            !session_a
+                .permission_broker
+                .is_for_registry(&session_b.flow_registry)
+        );
+        assert!(
+            !session_b
+                .permission_broker
+                .is_for_registry(&session_a.flow_registry)
+        );
+    }
+
+    #[test]
+    fn update_trust_persists_then_notifies_subscribers() {
+        let root = TempDir::new().unwrap();
+        let session =
+            Session::open_with_trust(root.path(), crate::trust::TrustConfig::default()).unwrap();
+        let mut rx = session.subscribe_trust();
+        let mut next = session.trust_config();
+        next.mode = crate::trust::TrustMode::Eager;
+
+        session.update_trust(next.clone(), |_| Ok(())).unwrap();
+
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*rx.borrow_and_update(), next);
+        assert_eq!(read_trust(&session.dir).unwrap(), next);
+    }
+
+    #[test]
+    fn update_trust_rolls_back_session_when_global_persist_fails() {
+        let root = TempDir::new().unwrap();
+        let previous = crate::trust::TrustConfig::default();
+        let session = Session::open_with_trust(root.path(), previous.clone()).unwrap();
+        let rx = session.subscribe_trust();
+        let mut next = previous.clone();
+        next.mode = crate::trust::TrustMode::Reckless;
+
+        let error = session
+            .update_trust(next, |_| Err(std::io::Error::other("global write failed")))
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TrustUpdateError::Global(source) if source.to_string() == "global write failed")
+        );
+        assert!(!rx.has_changed().unwrap());
+        assert_eq!(session.trust_config(), previous);
+        assert_eq!(read_trust(&session.dir).unwrap(), previous);
+    }
+
+    #[test]
+    fn update_trust_reports_rollback_failure() {
+        let root = TempDir::new().unwrap();
+        let previous = crate::trust::TrustConfig::default();
+        let session = Session::open_with_trust(root.path(), previous.clone()).unwrap();
+        let trust_file = trust_path(session.dir());
+        let mut next = previous;
+        next.mode = crate::trust::TrustMode::Eager;
+
+        let error = session
+            .update_trust(next, |_| {
+                std::fs::remove_file(&trust_file).unwrap();
+                std::fs::create_dir(&trust_file).unwrap();
+                Err(std::io::Error::other("global write failed"))
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, TrustUpdateError::RollbackFailed { .. }));
+    }
+
+    #[test]
     fn successful_flow_count_triggers_at_powers_of_three_and_resets_per_session() {
         let session = Session::open_ephemeral();
         let mut hits = Vec::new();
@@ -2089,29 +2431,8 @@ mod tests {
     }
 
     #[test]
-    fn approval_registry_auto_approves_when_level_leq_ceiling() {
-        let reg = ApprovalRegistry::new();
-        reg.set_auto_ceiling(crate::tool::ApprovalLevel::Approve);
-        let pending = PendingApproval {
-            tool_use_id: "tu1".into(),
-            tool_name: "fs.read".into(),
-            args_preview: "{}".into(),
-            preview: None,
-            level: crate::tool::ApprovalLevel::Auto,
-            run_id: FlowRunId::now(),
-            emitted_at: chrono::Utc::now(),
-            bypass_auto_ceiling: false,
-        };
-        let rx = reg.request(pending);
-        let got = rx.blocking_recv().unwrap();
-        assert!(matches!(got, ApprovalDecision::Approve));
-        assert!(reg.list_pending().is_empty());
-    }
-
-    #[test]
-    fn approval_registry_queues_when_level_above_ceiling() {
+    fn approval_registry_always_queues_for_manual_decision() {
         let reg = std::sync::Arc::new(ApprovalRegistry::new());
-        reg.set_auto_ceiling(crate::tool::ApprovalLevel::Auto);
         let pending = PendingApproval {
             tool_use_id: "tu42".into(),
             tool_name: "fs.write".into(),
@@ -2120,7 +2441,6 @@ mod tests {
             level: crate::tool::ApprovalLevel::Approve,
             run_id: FlowRunId::now(),
             emitted_at: chrono::Utc::now(),
-            bypass_auto_ceiling: false,
         };
         let mut rx = reg.request(pending);
         assert_eq!(reg.list_pending().len(), 1);
@@ -2134,7 +2454,6 @@ mod tests {
     #[test]
     fn approval_registry_decide_all_flushes_queue() {
         let reg = ApprovalRegistry::new();
-        reg.set_auto_ceiling(crate::tool::ApprovalLevel::Auto);
         let mut rxs = Vec::new();
         for i in 0..3 {
             rxs.push(reg.request(PendingApproval {
@@ -2145,7 +2464,6 @@ mod tests {
                 level: crate::tool::ApprovalLevel::Dangerous,
                 run_id: FlowRunId::now(),
                 emitted_at: chrono::Utc::now(),
-                bypass_auto_ceiling: false,
             }));
         }
         assert_eq!(reg.list_pending().len(), 3);

@@ -993,6 +993,7 @@ struct Approved {
     name: String,
     tool: std::sync::Arc<dyn Tool>,
     call_args: ToolArgs,
+    invocation_ctx: ToolCtx,
     authorization: crate::permission::InvocationAuthorization,
 }
 
@@ -1013,6 +1014,7 @@ async fn partition_and_gate(
         /// the auto/serial routing, so a call could be gated as one level and run
         /// as another.
         level: crate::tool::ApprovalLevel,
+        invocation_ctx: ToolCtx,
     }
     let mut ready: Vec<ReadyEntry> = Vec::new();
     for entry in prepared {
@@ -1027,7 +1029,8 @@ async fn partition_and_gate(
                 tool,
                 call_args,
             } => {
-                let level = tool.approval_level(&call_args, ctx);
+                let invocation_ctx = ctx.clone().for_tool_invocation(tool.tier());
+                let level = tool.approval_level(&call_args, &invocation_ctx);
                 ready.push(ReadyEntry {
                     index,
                     id,
@@ -1035,6 +1038,7 @@ async fn partition_and_gate(
                     tool,
                     call_args,
                     level,
+                    invocation_ctx,
                 });
             }
         }
@@ -1042,7 +1046,7 @@ async fn partition_and_gate(
     // Parallel: serial awaits hid all but the first pending node from the UI.
     let gates = ready.iter().map(|r| {
         request_approval(
-            ctx,
+            &r.invocation_ctx,
             &r.id,
             &r.name,
             &r.call_args,
@@ -1063,6 +1067,7 @@ async fn partition_and_gate(
                     name: r.name.clone(),
                     tool: r.tool,
                     call_args: r.call_args,
+                    invocation_ctx: r.invocation_ctx,
                     authorization: *authorization,
                 };
                 if level == crate::tool::ApprovalLevel::Auto {
@@ -1090,7 +1095,7 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
     let mut pending = futures::stream::FuturesUnordered::new();
     for a in batch {
         pending.push(async move {
-            let call_ctx = ctx.authorized_for(a.authorization);
+            let call_ctx = a.invocation_ctx.authorized_for(a.authorization);
             let result = a.tool.call(a.call_args, &call_ctx).await;
             (a.index, a.id, a.name, result)
         });
@@ -1102,7 +1107,7 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
 
 async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
     for a in batch {
-        let call_ctx = ctx.authorized_for(a.authorization);
+        let call_ctx = a.invocation_ctx.authorized_for(a.authorization);
         let result = a.tool.call(a.call_args, &call_ctx).await;
         out_slots[a.index] = Some(finish_dispatch(ctx, &a.id, &a.name, result));
     }
@@ -1376,6 +1381,31 @@ fn extract_string_list(
 mod tests {
     use super::*;
 
+    fn authorized_ctx(registry: std::sync::Arc<crate::tool::ToolRegistry>) -> ToolCtx {
+        let trust = crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Reckless,
+            ..crate::trust::TrustConfig::default()
+        };
+        let flows = std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new());
+        let run_id = crate::event::FlowRunId::now();
+        let identity = flows
+            .register_root(
+                "stdlib-test".into(),
+                run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&trust, true, None),
+            )
+            .unwrap();
+        let mut ctx = ToolCtx::new()
+            .with_registry(registry)
+            .with_flow_registry(std::sync::Arc::clone(&flows))
+            .with_permission_broker(crate::permission::PermissionBroker::shared(flows))
+            .with_approval(std::sync::Arc::new(crate::session::ApprovalRegistry::new()))
+            .with_trust(trust)
+            .with_anchors(None, Some(run_id), None);
+        ctx.flow_identity = Some(identity);
+        ctx
+    }
+
     #[test]
     fn shell_quote_wraps_and_escapes() {
         assert_eq!(shell_quote("hello"), "'hello'");
@@ -1409,7 +1439,7 @@ mod tests {
     async fn auto_parallel_call_receives_its_own_authorization() {
         let registry = crate::tool::ToolRegistry::new();
         registry.register(std::sync::Arc::new(PermitProbeTool));
-        let ctx = ToolCtx::new().with_registry(std::sync::Arc::new(registry));
+        let ctx = authorized_ctx(std::sync::Arc::new(registry));
         let uses = Value::List(vec![Value::Struct(vec![
             ("id".into(), Value::Str("probe_id".into())),
             ("name".into(), Value::Str("permit.probe".into())),
@@ -1476,10 +1506,9 @@ mod tests {
         }));
         let run_id = crate::event::FlowRunId::now();
         let (stream_tx, mut stream_rx) = tokio::sync::broadcast::channel(32);
-        let ctx = ToolCtx::new()
+        let ctx = authorized_ctx(std::sync::Arc::new(registry))
             .with_anchors(None, Some(run_id.clone()), None)
             .with_current_node(Some("dispatch_all".into()))
-            .with_registry(std::sync::Arc::new(registry))
             .with_stream_tx(stream_tx);
         let uses = Value::List(vec![
             Value::Struct(vec![
@@ -1579,9 +1608,14 @@ mod tests {
 
         let registry = crate::tool::ToolRegistry::new();
         crate::tools::register_tier_zero(&registry);
-        let ctx = ToolCtx::new()
-            .with_registry(std::sync::Arc::new(registry))
-            .with_session_dir(dir.path().to_path_buf());
+        let ctx = authorized_ctx(std::sync::Arc::new(registry))
+            .with_session_dir(dir.path().to_path_buf())
+            .with_workspace(crate::git_workspace::WorkspaceBinding {
+                workspace_id: "stdlib-test".into(),
+                repository_root: dir.path().to_path_buf(),
+                path: dir.path().to_path_buf(),
+                branch: None,
+            });
         let uses = Value::List(vec![Value::Struct(vec![
             ("id".into(), Value::Str("read_id".into())),
             ("name".into(), Value::Str("fs.read".into())),

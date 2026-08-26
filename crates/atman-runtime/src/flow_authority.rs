@@ -35,6 +35,8 @@ pub struct EffectiveAuthority {
     pub execution_policy: ExecutionPolicy,
     pub allowed_tiers: [bool; 5],
     pub allowed_risks: BTreeSet<RiskKind>,
+    pub tier_ceiling: [PolicyAction; 5],
+    pub risk_ceiling: [PolicyAction; 7],
     pub shell: bool,
     pub permission_management: bool,
     pub workspace_root: Option<PathBuf>,
@@ -48,17 +50,23 @@ impl EffectiveAuthority {
                 execution_policy == ExecutionPolicy::Unrestricted
                     || trust.resolve_tier(tier) != PolicyAction::Deny
             });
-        let allowed_risks = all_risks()
+        let risks = all_risks();
+        let allowed_risks = risks
             .into_iter()
             .filter(|risk| {
                 execution_policy == ExecutionPolicy::Unrestricted
                     || trust.resolve_risk(*risk) != PolicyAction::Deny
             })
             .collect();
+        let tier_ceiling = [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four]
+            .map(|tier| trust.resolve_policy(tier, []));
+        let risk_ceiling = risks.map(|risk| trust.resolve_policy(Tier::Zero, [risk]));
         Self {
             execution_policy,
             allowed_tiers,
             allowed_risks,
+            tier_ceiling,
+            risk_ceiling,
             shell,
             permission_management: false,
             workspace_root,
@@ -85,14 +93,56 @@ impl EffectiveAuthority {
             .intersection(&requested.allowed_risks)
             .copied()
             .collect();
+        let tier_ceiling = std::array::from_fn(|index| {
+            self.tier_ceiling[index].most_restrictive(requested.tier_ceiling[index])
+        });
+        let risk_ceiling = std::array::from_fn(|index| {
+            self.risk_ceiling[index].most_restrictive(requested.risk_ceiling[index])
+        });
         Ok(Self {
             execution_policy,
             allowed_tiers,
             allowed_risks,
+            tier_ceiling,
+            risk_ceiling,
             shell: self.shell && requested.shell && contract_allows_shell,
             permission_management: self.permission_management && requested.permission_management,
             workspace_root: narrowed_workspace(self.workspace_root.as_deref(), workspace_root)?,
         })
+    }
+
+    pub fn constrain_policy(
+        &self,
+        trust: &TrustConfig,
+        tier: Tier,
+        risks: impl IntoIterator<Item = RiskKind>,
+    ) -> (ExecutionPolicy, PolicyAction) {
+        let current_execution = match (self.execution_policy, trust.execution_policy()) {
+            (ExecutionPolicy::Unrestricted, ExecutionPolicy::Unrestricted) => {
+                ExecutionPolicy::Unrestricted
+            }
+            _ => ExecutionPolicy::Controlled,
+        };
+        if current_execution == ExecutionPolicy::Unrestricted {
+            return (current_execution, PolicyAction::Auto);
+        }
+        let tier_index = match tier {
+            Tier::Zero => 0,
+            Tier::One => 1,
+            Tier::Two => 2,
+            Tier::Three => 3,
+            Tier::Four => 4,
+        };
+        let risks: Vec<_> = risks.into_iter().collect();
+        let ceiling = risks
+            .iter()
+            .fold(self.tier_ceiling[tier_index], |action, risk| {
+                action.most_restrictive(self.risk_ceiling[risk_index(*risk)])
+            });
+        (
+            current_execution,
+            trust.resolve_policy(tier, risks).most_restrictive(ceiling),
+        )
     }
 
     pub fn inherited_child(
@@ -172,6 +222,18 @@ fn narrowed_workspace(
     }
 }
 
+fn risk_index(risk: RiskKind) -> usize {
+    match risk {
+        RiskKind::WorkspaceExternal => 0,
+        RiskKind::SandboxViolation => 1,
+        RiskKind::Network => 2,
+        RiskKind::Irreversible => 3,
+        RiskKind::FilesystemWrite => 4,
+        RiskKind::ProcessSpawn => 5,
+        RiskKind::RepositoryMutation => 6,
+    }
+}
+
 fn all_risks() -> [RiskKind; 7] {
     [
         RiskKind::WorkspaceExternal,
@@ -194,6 +256,8 @@ mod tests {
             execution_policy: ExecutionPolicy::Controlled,
             allowed_tiers: [true, false, true, false, true],
             allowed_risks: BTreeSet::from([RiskKind::Network, RiskKind::FilesystemWrite]),
+            tier_ceiling: [PolicyAction::Auto; 5],
+            risk_ceiling: [PolicyAction::Auto; 7],
             shell: true,
             permission_management: false,
             workspace_root: None,
@@ -202,6 +266,8 @@ mod tests {
             execution_policy: ExecutionPolicy::Unrestricted,
             allowed_tiers: [false, true, true, true, false],
             allowed_risks: BTreeSet::from([RiskKind::Network, RiskKind::ProcessSpawn]),
+            tier_ceiling: [PolicyAction::Auto; 5],
+            risk_ceiling: [PolicyAction::Auto; 7],
             shell: false,
             permission_management: true,
             workspace_root: None,

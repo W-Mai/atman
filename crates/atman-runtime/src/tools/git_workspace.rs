@@ -318,6 +318,8 @@ mod tests {
         git(path, &["init", "-q"]);
         git(path, &["config", "user.email", "atman@example.invalid"]);
         git(path, &["config", "user.name", "Atman Test"]);
+        git(path, &["config", "commit.gpgsign", "false"]);
+        git(path, &["config", "tag.gpgsign", "false"]);
         std::fs::write(path.join("README.md"), "seed\n").unwrap();
         git(path, &["add", "README.md"]);
         git(path, &["commit", "-qm", "seed"]);

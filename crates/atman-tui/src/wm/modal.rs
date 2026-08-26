@@ -367,7 +367,7 @@ impl ModalManager {
             }
             ModalKind::TrustModePicker => {
                 if self.trust_mode_picker_open {
-                    self.handle_trust_mode_picker_key(action, app);
+                    self.handle_trust_mode_picker_key(action, app, tx);
                 }
                 (true, None)
             }
@@ -820,6 +820,7 @@ impl ModalManager {
         &mut self,
         action: &crate::keys::KeyAction,
         app: &mut crate::app::AppState,
+        tx: Option<&mpsc::UnboundedSender<crate::TuiControl>>,
     ) {
         let modes = atman_runtime::trust::TrustMode::all();
         let max = modes.len();
@@ -836,12 +837,12 @@ impl ModalManager {
             crate::keys::KeyAction::Submit | crate::keys::KeyAction::Char('\r') => {
                 let new_mode = modes[app.picker_selected.min(max - 1)];
                 let prev = app.trust.mode;
-                app.trust.mode = new_mode;
                 self.trust_mode_picker_open = false;
-                app.save_ui_state();
                 if new_mode != prev {
-                    if let Some(sess) = app.session.as_ref() {
-                        sess.approval().set_auto_ceiling(new_mode.auto_ceiling());
+                    let mut trust = app.trust.clone();
+                    trust.mode = new_mode;
+                    if let Some(tx) = tx {
+                        let _ = tx.send(crate::TuiControl::UpdateTrust(trust));
                     }
                     let display = app.trust.theme.display(new_mode);
                     if let Some(warning) = new_mode.warning(&display) {

@@ -58,23 +58,37 @@ fn submit_to_broker(
     ctx: &ToolCtx,
     intent: crate::permission::PermissionIntent,
     tier: crate::tool::Tier,
-) -> Option<Result<crate::permission::SubmissionOutcome, crate::permission::PermissionError>> {
-    let broker = ctx.permission_broker.as_ref()?;
-    let identity = ctx.flow_identity.as_ref()?;
-    let trust = ctx.trust.as_ref()?;
+) -> Result<crate::permission::SubmissionOutcome, String> {
+    let broker = ctx
+        .permission_broker
+        .as_ref()
+        .ok_or_else(|| "missing permission broker".to_string())?;
+    let identity = ctx
+        .flow_identity
+        .as_ref()
+        .ok_or_else(|| "missing flow identity".to_string())?;
+    let trust = ctx
+        .trust
+        .as_ref()
+        .ok_or_else(|| "missing trust snapshot".to_string())?;
     // A broker bound to a different registry would authenticate this identity
     // against a foreign authority graph, so refuse rather than mis-authorize.
-    let registry = ctx.flow_registry.as_ref()?;
+    let registry = ctx
+        .flow_registry
+        .as_ref()
+        .ok_or_else(|| "missing flow registry".to_string())?;
     if !broker.is_for_registry(registry) {
-        return None;
+        return Err("permission broker and flow registry mismatch".into());
     }
-    Some(broker.submit(
-        Some(identity.session_id.as_str()),
-        Some(&identity.run_id),
-        intent,
-        tier == crate::tool::Tier::Four,
-        trust,
-    ))
+    broker
+        .submit(
+            Some(identity.session_id.as_str()),
+            Some(&identity.run_id),
+            intent,
+            tier == crate::tool::Tier::Four,
+            trust,
+        )
+        .map_err(|error| error.to_string())
 }
 
 /// Reports a queue decision back to the broker so its request leaves the pending
@@ -165,7 +179,18 @@ pub async fn request_approval(
     level: ApprovalLevel,
     tool: Option<&dyn crate::tool::Tool>,
 ) -> ApprovalOutcome {
-    use crate::trust::{OutsideBehavior, TrustMode};
+    request_approval_with_additional_risks(ctx, id, name, call_args, level, tool, []).await
+}
+
+pub async fn request_approval_with_additional_risks(
+    ctx: &ToolCtx,
+    id: &str,
+    name: &str,
+    call_args: &ToolArgs,
+    level: ApprovalLevel,
+    tool: Option<&dyn crate::tool::Tool>,
+    additional_risks: impl IntoIterator<Item = RiskKind>,
+) -> ApprovalOutcome {
     let provenance = match resolve_provenance(ctx, tool, call_args) {
         Ok(provenance) => provenance,
         // The resolver refused to classify the target (relative path escaping a
@@ -177,56 +202,16 @@ pub async fn request_approval(
             };
         }
     };
-    let outside_workspace = provenance.is_external();
-    if outside_workspace {
-        if let Some(trust) = &ctx.trust {
-            if trust.mode != TrustMode::Reckless {
-                match trust.outside {
-                    OutsideBehavior::Deny => {
-                        return ApprovalOutcome::Deny {
-                            reason: format!(
-                                "{name}: blocked — path outside workspace and outside=deny"
-                            ),
-                        };
-                    }
-                    OutsideBehavior::Allow => {}
-                    OutsideBehavior::Approve => {}
-                }
-            }
-        }
-    }
     let permit_provenance = provenance.clone();
     let permit = |manual: bool| {
         crate::permission::InvocationAuthorization::new(id, name, permit_provenance.clone(), manual)
     };
-    // A bound broker means this context is under controlled execution, so a
-    // missing prompt transport or run identity is an infrastructure gap, not
-    // consent. Contexts with no broker at all keep the legacy behaviour.
-    let brokered_context = ctx.permission_broker.is_some();
     let Some(run_id) = ctx.flow_run_id.clone() else {
-        return if brokered_context {
-            ApprovalOutcome::Deny {
-                reason: format!(
-                    "{name}: blocked — missing run identity under controlled execution"
-                ),
-            }
-        } else {
-            ApprovalOutcome::Approve {
-                authorization: Box::new(permit(false)),
-            }
+        return ApprovalOutcome::Deny {
+            reason: format!("{name}: blocked — missing run identity"),
         };
     };
-    let force_manual = outside_workspace
-        && ctx
-            .trust
-            .as_ref()
-            .map(|t| t.mode != TrustMode::Reckless && t.outside == OutsideBehavior::Approve)
-            .unwrap_or(true);
-    let effective_level = if force_manual {
-        ApprovalLevel::Dangerous
-    } else {
-        level
-    };
+    let effective_level = level;
     let args_preview: String = format!("{:?}", call_args.named)
         .chars()
         .take(4000)
@@ -240,11 +225,13 @@ pub async fn request_approval(
         }
     };
     let tier = tool.map(|t| t.tier()).unwrap_or(crate::tool::Tier::Zero);
+    let mut risks = intent_risks(tier, &provenance);
+    risks.extend(additional_risks);
     let intent = crate::permission::PermissionIntent {
         tool_use_id: id.to_string(),
         tool_name: name.to_string(),
         tier,
-        risks: intent_risks(tier, &provenance),
+        risks,
         args_digest: args_digest(&args_preview),
         preview: preview.clone(),
         provenance,
@@ -252,23 +239,18 @@ pub async fn request_approval(
     // The broker owns the policy decision; the legacy queue below is still the
     // only surface that renders a prompt, so a Pending outcome is handed to it.
     let brokered = match submit_to_broker(ctx, intent, tier) {
-        Some(Ok(outcome)) => Some(outcome),
-        Some(Err(error)) => {
+        Ok(outcome) => outcome,
+        Err(error) => {
             return ApprovalOutcome::Deny {
                 reason: format!("{name}: permission broker rejected the request: {error}"),
             };
         }
-        None => None,
     };
-    let mut pending_permission = None;
-    match brokered {
-        Some(crate::permission::SubmissionOutcome::Immediate(immediate)) => {
+    let pending_permission = match brokered {
+        crate::permission::SubmissionOutcome::Immediate(immediate) => {
             use crate::permission::ImmediateAuthorization;
             match *immediate {
-                // `force_manual` is the legacy outside-workspace escalation, which the
-                // risk projection cannot express as a Deny in Calm/Steady. Honour it so
-                // an Auto verdict never silently bypasses that prompt.
-                ImmediateAuthorization::Unrestricted if !force_manual => {
+                ImmediateAuthorization::Unrestricted => {
                     emit_approval_result(
                         ctx,
                         &run_id,
@@ -280,7 +262,7 @@ pub async fn request_approval(
                         authorization: Box::new(permit(false)),
                     };
                 }
-                ImmediateAuthorization::Auto if !force_manual => {
+                ImmediateAuthorization::Auto => {
                     emit_approval_result(
                         ctx,
                         &run_id,
@@ -292,7 +274,7 @@ pub async fn request_approval(
                         authorization: Box::new(permit(false)),
                     };
                 }
-                ImmediateAuthorization::Granted { .. } if !force_manual => {
+                ImmediateAuthorization::Granted { .. } => {
                     emit_approval_result(
                         ctx,
                         &run_id,
@@ -312,14 +294,10 @@ pub async fn request_approval(
                     emit_approval_result(ctx, &run_id, id, &decision, "policy");
                     return ApprovalOutcome::Deny { reason };
                 }
-                _ => {}
             }
         }
-        Some(crate::permission::SubmissionOutcome::Pending(pending)) => {
-            pending_permission = Some(pending);
-        }
-        None => {}
-    }
+        crate::permission::SubmissionOutcome::Pending(pending) => Some(pending),
+    };
     let Some(approval) = &ctx.approval else {
         if let Some(pending) = pending_permission.as_ref() {
             let reason = "no approval transport under controlled execution".to_string();
@@ -330,16 +308,8 @@ pub async fn request_approval(
                 reason: format!("{name}: blocked — {reason}"),
             };
         }
-        return if brokered_context {
-            ApprovalOutcome::Deny {
-                reason: format!(
-                    "{name}: blocked — no approval transport under controlled execution"
-                ),
-            }
-        } else {
-            ApprovalOutcome::Approve {
-                authorization: Box::new(permit(false)),
-            }
+        return ApprovalOutcome::Deny {
+            reason: format!("{name}: blocked — no approval transport under controlled execution"),
         };
     };
     if pending_permission.is_some() && !approval.has_subscribers() {
@@ -369,9 +339,6 @@ pub async fn request_approval(
         level: effective_level,
         run_id: run_id.clone(),
         emitted_at: chrono::Utc::now(),
-        // A broker Pending verdict must not be overridden by the legacy auto ceiling;
-        // the registry is only the prompt transport for broker-owned decisions.
-        bypass_auto_ceiling: pending_permission.is_some() || force_manual,
     };
     let (ticket, rx) = approval.request_tracked(pending);
     if let Some(sink) = ctx.events.as_ref() {
@@ -503,7 +470,6 @@ mod tests {
             )
             .unwrap();
         let approval = Arc::new(ApprovalRegistry::new());
-        approval.set_auto_ceiling(ApprovalLevel::Auto);
         let mut ctx = ToolCtx::new();
         ctx.approval = Some(Arc::clone(&approval));
         ctx.permission_broker = Some(broker);
@@ -525,6 +491,62 @@ mod tests {
             },
             ..TrustConfig::default()
         }
+    }
+
+    async fn assert_gate_denied(ctx: &ToolCtx, expected: &str) {
+        let outcome = request_approval(
+            ctx,
+            "tu_fail_closed",
+            "probe.tool",
+            &ToolArgs::default(),
+            ApprovalLevel::Approve,
+            Some(&Tier2Tool),
+        )
+        .await;
+        let ApprovalOutcome::Deny { reason } = outcome else {
+            panic!("expected fail-closed denial");
+        };
+        assert!(reason.contains(expected), "unexpected denial: {reason}");
+    }
+
+    #[tokio::test]
+    async fn no_broker_fails_closed_instead_of_legacy_auto_approve() {
+        let (mut ctx, approval, _flows) = ctx_with_broker(TrustConfig::default());
+        ctx.permission_broker = None;
+        assert_gate_denied(&ctx, "missing permission broker").await;
+        assert!(approval.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_flow_identity_fails_closed() {
+        let (mut ctx, approval, _flows) = ctx_with_broker(TrustConfig::default());
+        ctx.flow_identity = None;
+        assert_gate_denied(&ctx, "missing flow identity").await;
+        assert!(approval.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_trust_snapshot_fails_closed() {
+        let (mut ctx, approval, _flows) = ctx_with_broker(TrustConfig::default());
+        ctx.trust = None;
+        assert_gate_denied(&ctx, "missing trust snapshot").await;
+        assert!(approval.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_flow_registry_fails_closed() {
+        let (mut ctx, approval, _flows) = ctx_with_broker(TrustConfig::default());
+        ctx.flow_registry = None;
+        assert_gate_denied(&ctx, "missing flow registry").await;
+        assert!(approval.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn broker_registry_mismatch_fails_closed() {
+        let (mut ctx, approval, _flows) = ctx_with_broker(TrustConfig::default());
+        ctx.flow_registry = Some(Arc::new(FlowRegistry::new()));
+        assert_gate_denied(&ctx, "broker and flow registry mismatch").await;
+        assert!(approval.list_pending().is_empty());
     }
 
     /// The broker's policy verdict must reach the caller. Without wiring, the legacy

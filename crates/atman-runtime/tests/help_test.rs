@@ -70,7 +70,7 @@ fn tools_topic_offline_when_no_registry() {
 #[test]
 fn config_topic_contains_key_fields() {
     let content = help::topic_content("config", &ctx_empty()).unwrap();
-    for field in ["enabled", "mode", "auto_rewrite", "scope", "outside"] {
+    for field in ["enabled", "mode", "auto_rewrite", "scope", "escalation"] {
         assert!(
             content.contains(&format!("`{field}`")),
             "config topic missing field '{field}'"

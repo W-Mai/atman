@@ -684,6 +684,26 @@ impl ConfigHub {
         Ok(file.trust)
     }
 
+    pub fn set_trust_config(&self, trust: &crate::trust::TrustConfig) -> Result<(), ConfigError> {
+        let serialized = toml::to_string(trust)
+            .map_err(|error| ConfigError::Invalid(format!("serialize trust config: {error}")))?;
+        let trust_doc = serialized.parse::<toml_edit::DocumentMut>()?;
+        let _guard = CONFIG_WRITE_LOCK.lock().unwrap();
+        let _file_lock = self.lock_config_file()?;
+        let text = self.read_config_toml()?;
+        let mut doc = if text.trim().is_empty() {
+            toml_edit::DocumentMut::new()
+        } else {
+            text.parse()?
+        };
+        let mut table = toml_edit::Table::new();
+        for (key, item) in trust_doc.iter() {
+            table.insert(key, item.clone());
+        }
+        doc.insert("trust", toml_edit::Item::Table(table));
+        self.write_config_toml(&doc.to_string())
+    }
+
     pub fn preview_config(&self) -> Result<crate::tools::preview::PreviewConfig, ConfigError> {
         #[derive(Debug, serde::Deserialize, Default)]
         struct RawPreview {
@@ -1946,39 +1966,39 @@ max_results = 6
             let config = hub.trust_config().unwrap();
             assert_eq!(config.mode, crate::trust::TrustMode::Steady);
             assert_eq!(config.theme, crate::trust::Theme::Default);
-            assert_eq!(config.outside, crate::trust::OutsideBehavior::Approve);
+            assert_eq!(config.escalation, crate::trust::EscalationPolicy::Ask);
         }
     }
 
     #[test]
-    fn trust_config_parses_mode_theme_and_outside() {
+    fn trust_config_parses_mode_theme_and_escalation() {
         let (_dir, hub) = temp_hub();
         write_config(
             &hub,
-            "[trust]\nmode = \"eager\"\ntheme = \"weather\"\noutside = \"deny\"\n",
+            "[trust]\nmode = \"eager\"\ntheme = \"weather\"\nescalation = \"deny\"\n",
         );
 
         let config = hub.trust_config().unwrap();
         assert_eq!(config.mode, crate::trust::TrustMode::Eager);
         assert_eq!(config.theme, crate::trust::Theme::Weather);
-        assert_eq!(config.outside, crate::trust::OutsideBehavior::Deny);
+        assert_eq!(config.escalation, crate::trust::EscalationPolicy::Deny);
     }
 
     #[test]
-    fn trust_config_parses_new_policy_and_prefers_escalation() {
+    fn trust_config_parses_new_policy() {
         use crate::tool::Tier;
         use crate::trust::{EscalationPolicy, PolicyAction, RiskKind};
 
         let (_dir, hub) = temp_hub();
         write_config(
             &hub,
-            "[trust]\nmode = \"eager\"\noutside = \"deny\"\nescalation = \"allow\"\n\
+            "[trust]\nmode = \"eager\"\nescalation = \"allow\"\n\
              [trust.tiers.eager]\ntier4 = \"deny\"\n\
              [trust.risks.eager]\nnetwork = \"deny\"\nfilesystem_write = \"auto\"\n",
         );
 
         let config = hub.trust_config().unwrap();
-        assert_eq!(config.resolved_escalation(), EscalationPolicy::Allow);
+        assert_eq!(config.escalation, EscalationPolicy::Allow);
         assert_eq!(config.resolve_tier(Tier::Four), PolicyAction::Deny);
         assert_eq!(config.resolve_risk(RiskKind::Network), PolicyAction::Deny);
         assert_eq!(
@@ -1993,9 +2013,21 @@ max_results = 6
     }
 
     #[test]
+    fn config_hub_rejects_obsolete_trust_outside() {
+        let (_dir, hub) = temp_hub();
+        write_config(&hub, "[trust]\noutside = \"allow\"\n");
+
+        assert!(matches!(
+            hub.trust_config(),
+            Err(ConfigError::Invalid(message))
+                if message.contains("parse trust config") && message.contains("outside")
+        ));
+    }
+
+    #[test]
     fn trust_config_rejects_invalid_enum() {
         let (_dir, hub) = temp_hub();
-        write_config(&hub, "[trust]\noutside = \"sometimes\"\n");
+        write_config(&hub, "[trust]\nescalation = \"sometimes\"\n");
 
         assert!(matches!(
             hub.trust_config(),

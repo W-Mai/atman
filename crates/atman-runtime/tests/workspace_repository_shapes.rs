@@ -153,10 +153,14 @@ async fn automatic_ownership_ignores_user_supplied_owner_fields() {
             EffectiveAuthority::root(&Default::default(), false, None),
         )
         .unwrap();
+    let broker = atman_runtime::permission::PermissionBroker::shared(Arc::clone(&registry));
     let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(ProviderRegistry::new()))
         .with_flow_registry(registry)
+        .with_permission_broker(broker)
+        .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
+        .with_trust(atman_runtime::trust::TrustConfig::default())
         .with_session_id("trusted-session")
         .with_flow_workspace_service(Arc::new(service));
     ctx.flow_run_id = Some(root_run_id);

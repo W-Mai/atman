@@ -75,9 +75,10 @@ pub(crate) async fn run_frames(
     if let Some(rx) = handle.approvals_rx.as_ref() {
         app.app.pending_approvals = rx.borrow().clone();
     }
-    if let Some(sess) = &app.app.session {
-        sess.approval()
-            .set_auto_ceiling(app.app.trust.mode.auto_ceiling());
+    if let Some(rx) = handle.trust_rx.as_ref() {
+        let theme = app.app.trust.theme;
+        app.app.trust = rx.borrow().clone();
+        app.app.trust.theme = theme;
     }
     let mut editor = InputEditor::default();
     if let Some(sess) = handle.session.as_ref() {
@@ -1293,6 +1294,14 @@ pub(crate) async fn run_frames(
                     app.app.pending_approvals = rx.borrow().clone();
                 }
             }
+            _ = wait_trust_change(handle.trust_rx.as_mut()) => {
+                if let Some(rx) = handle.trust_rx.as_mut() {
+                    let theme = app.app.trust.theme;
+                    app.app.trust = rx.borrow().clone();
+                    app.app.trust.theme = theme;
+                    app.app.mark_items_dirty();
+                }
+            }
             inj = recv_injection(handle.injection_rx.as_mut()) => {
                 if let Some(inj) = inj {
                     // Keep only pending injections, drop consumed/cancelled ones.
@@ -1397,14 +1406,6 @@ pub(crate) async fn run_frames(
                         }
                         TuiCommand::OpenModelPicker => {
                             app.wm.modals.model_picker.open();
-                        }
-                        TuiCommand::CycleOutside => {
-                            if app.app.trust.mode == atman_runtime::trust::TrustMode::Eager {
-                                app.app.trust.outside = app.app.trust.outside.next();
-                                app.app.mark_items_dirty();
-                            } else {
-                                app.app.push_note("outside switch only available in eager mode", app::NoteLevel::Warn);
-                            }
                         }
                         TuiCommand::ProviderModelsUpdated => {
                             app.wm.modals.provider_manager.refresh_list();
@@ -1531,6 +1532,17 @@ pub(crate) async fn wait_plans_change(
 
 pub(crate) async fn wait_approvals_change(
     rx: Option<&mut tokio::sync::watch::Receiver<Vec<atman_runtime::session::PendingApproval>>>,
+) {
+    match rx {
+        Some(r) => {
+            let _ = r.changed().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+pub(crate) async fn wait_trust_change(
+    rx: Option<&mut tokio::sync::watch::Receiver<atman_runtime::trust::TrustConfig>>,
 ) {
     match rx {
         Some(r) => {

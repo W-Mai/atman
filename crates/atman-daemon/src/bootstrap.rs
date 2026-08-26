@@ -291,8 +291,6 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
         .map(atman_runtime::config_hub::ConfigHub::from_config_dir)
         .and_then(|hub| hub.tool_output_budget().ok())
         .unwrap_or_default();
-    let sandbox_enabled = trust_config.mode.sandbox_enabled();
-    let sandbox_trust = trust_config.clone();
     executor.tool_ctx = executor
         .tool_ctx
         .clone()
@@ -309,16 +307,10 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
     tools::register_web(&executor.tools, web_config.fetch);
     tools::register_web_search(&executor.tools, &web_config.search);
     register_providers_from_env(&mut executor).await;
-    if sandbox_enabled {
-        if let Some(sandbox) = build_sandbox(
-            &opts.project_root,
-            opts.config_dir.as_deref(),
-            &sandbox_trust,
-        )
-        .context("sandbox init")?
-        {
-            executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
-        }
+    if let Some(sandbox) =
+        build_sandbox(&opts.project_root, opts.config_dir.as_deref()).context("sandbox init")?
+    {
+        executor.tool_ctx = executor.tool_ctx.clone().with_sandbox(sandbox);
     }
     if opts.mock {
         executor.providers.register(Arc::new(
@@ -346,12 +338,8 @@ pub async fn build_executor(opts: BootstrapOptions) -> Result<BootstrapOutcome> 
 fn build_sandbox(
     project_root: &Path,
     config_dir: Option<&Path>,
-    trust: &atman_runtime::trust::TrustConfig,
 ) -> Result<Option<Arc<dyn atman_runtime::sandbox::Sandbox>>> {
-    let mut cfg = load_sandbox_config(config_dir);
-    if trust.mode.sandbox_enabled() && trust.mode.level() >= 3 {
-        cfg.allow_network = true;
-    }
+    let cfg = load_sandbox_config(config_dir);
     if !cfg.enabled {
         return Ok(None);
     }
@@ -683,19 +671,19 @@ mod tests {
 
     #[test]
     fn load_trust_config_uses_all_hub_fields_and_defaults_on_error() {
-        use atman_runtime::trust::{OutsideBehavior, Theme, TrustMode};
+        use atman_runtime::trust::{EscalationPolicy, Theme, TrustMode};
 
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("config.toml"),
-            "[trust]\nmode = \"eager\"\ntheme = \"weather\"\noutside = \"deny\"\n",
+            "[trust]\nmode = \"eager\"\ntheme = \"weather\"\nescalation = \"deny\"\n",
         )
         .unwrap();
 
         let configured = load_trust_config(Some(dir.path()));
         assert_eq!(configured.mode, TrustMode::Eager);
         assert_eq!(configured.theme, Theme::Weather);
-        assert_eq!(configured.outside, OutsideBehavior::Deny);
+        assert_eq!(configured.escalation, EscalationPolicy::Deny);
 
         std::fs::write(
             dir.path().join("config.toml"),
@@ -705,7 +693,7 @@ mod tests {
         let invalid = load_trust_config(Some(dir.path()));
         assert_eq!(invalid.mode, TrustMode::Steady);
         assert_eq!(invalid.theme, Theme::Default);
-        assert_eq!(invalid.outside, OutsideBehavior::Approve);
+        assert_eq!(invalid.escalation, EscalationPolicy::Ask);
     }
 
     #[test]

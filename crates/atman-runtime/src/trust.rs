@@ -1,5 +1,3 @@
-use crate::tool::ApprovalLevel;
-
 /// Trust mode controls how aggressively tools auto-approve.
 #[derive(
     Debug,
@@ -26,14 +24,6 @@ pub enum TrustMode {
 }
 
 impl TrustMode {
-    pub fn auto_ceiling(self) -> ApprovalLevel {
-        match self {
-            Self::Calm => ApprovalLevel::Auto,
-            Self::Steady => ApprovalLevel::Approve,
-            Self::Eager | Self::Reckless => ApprovalLevel::Dangerous,
-        }
-    }
-
     pub fn sandbox_enabled(self) -> bool {
         !matches!(self, Self::Reckless)
     }
@@ -55,8 +45,8 @@ impl TrustMode {
         match self {
             Self::Eager => Some(format!(
                 "⚠ {} mode: sandbox guards bash/fs. Workspace-internal ops auto-approved. \
-                 Network is unrestricted. Operations touching outside the workspace follow \
-                 the outside switch (deny / approve / allow).",
+                 Network is unrestricted. Escalated risks follow the configured \
+                 escalation policy (deny / ask / allow).",
                 display.name
             )),
             Self::Reckless => Some(format!(
@@ -99,7 +89,7 @@ pub enum PolicyAction {
 }
 
 impl PolicyAction {
-    fn most_restrictive(self, other: Self) -> Self {
+    pub fn most_restrictive(self, other: Self) -> Self {
         match (self, other) {
             (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
             (Self::Ask, _) | (_, Self::Ask) => Self::Ask,
@@ -116,6 +106,24 @@ pub enum EscalationPolicy {
     #[default]
     Ask,
     Allow,
+}
+
+impl EscalationPolicy {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Deny => Self::Ask,
+            Self::Ask => Self::Allow,
+            Self::Allow => Self::Deny,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::Ask => "ask",
+            Self::Allow => "allow",
+        }
+    }
 }
 
 /// Whether Atman's permission controls apply to an execution.
@@ -225,54 +233,6 @@ fn default_eager_tier_action(tier: crate::tool::Tier) -> PolicyAction {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-    documented::DocumentedVariants,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum OutsideBehavior {
-    /// Deny any tool not in the declared list.
-    Deny,
-    #[default]
-    /// Prompt the user to approve undeclared tools.
-    Approve,
-    /// Allow all tools without prompting.
-    Allow,
-}
-
-impl OutsideBehavior {
-    pub fn all() -> [Self; 3] {
-        [Self::Deny, Self::Approve, Self::Allow]
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Deny => Self::Approve,
-            Self::Approve => Self::Allow,
-            Self::Allow => Self::Deny,
-        }
-    }
-}
-
-impl std::str::FromStr for OutsideBehavior {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "deny" => Ok(Self::Deny),
-            "approve" | "confirm" => Ok(Self::Approve),
-            "allow" | "auto" => Ok(Self::Allow),
-            other => Err(format!("unknown outside behavior `{other}`")),
-        }
-    }
-}
-
 /// Display theme for trust mode labels in the TUI.
 #[derive(
     Debug,
@@ -343,13 +303,6 @@ pub struct ModeDisplay {
     pub description: &'static str,
 }
 
-#[derive(Debug, Clone)]
-pub struct OutsideDisplay {
-    pub name: &'static str,
-    pub emoji: &'static str,
-    pub color: ModeColor,
-}
-
 impl Theme {
     pub fn display(&self, mode: TrustMode) -> ModeDisplay {
         match (self, mode) {
@@ -363,13 +316,13 @@ impl Theme {
                 name: "steady",
                 emoji: "✓",
                 color: ModeColor::Green,
-                description: "free inside workspace, confirm outside",
+                description: "auto low-risk work, confirm escalation",
             },
             (Theme::Default, TrustMode::Eager) => ModeDisplay {
                 name: "eager",
                 emoji: "⚡",
                 color: ModeColor::Yellow,
-                description: "auto inside, outside switch controls",
+                description: "auto routine work, escalation policy controls risk",
             },
             (Theme::Default, TrustMode::Reckless) => ModeDisplay {
                 name: "reckless",
@@ -479,102 +432,21 @@ impl Theme {
             },
         }
     }
-
-    pub fn outside_display(&self, outside: OutsideBehavior) -> OutsideDisplay {
-        match (self, outside) {
-            (Theme::Default, OutsideBehavior::Deny) => OutsideDisplay {
-                name: "deny",
-                emoji: "🔒",
-                color: ModeColor::Orange,
-            },
-            (Theme::Default, OutsideBehavior::Approve) => OutsideDisplay {
-                name: "approve",
-                emoji: "⚠️",
-                color: ModeColor::Yellow,
-            },
-            (Theme::Default, OutsideBehavior::Allow) => OutsideDisplay {
-                name: "allow",
-                emoji: "✅",
-                color: ModeColor::Green,
-            },
-
-            (Theme::Wuxia, OutsideBehavior::Deny) => OutsideDisplay {
-                name: "画地为牢",
-                emoji: "⛩️",
-                color: ModeColor::Orange,
-            },
-            (Theme::Wuxia, OutsideBehavior::Approve) => OutsideDisplay {
-                name: "请示",
-                emoji: "📜",
-                color: ModeColor::Yellow,
-            },
-            (Theme::Wuxia, OutsideBehavior::Allow) => OutsideDisplay {
-                name: "放行",
-                emoji: "🎋",
-                color: ModeColor::Green,
-            },
-
-            (Theme::Animal, OutsideBehavior::Deny) => OutsideDisplay {
-                name: "turtle",
-                emoji: "🐢",
-                color: ModeColor::Orange,
-            },
-            (Theme::Animal, OutsideBehavior::Approve) => OutsideDisplay {
-                name: "owl",
-                emoji: "🦉",
-                color: ModeColor::Yellow,
-            },
-            (Theme::Animal, OutsideBehavior::Allow) => OutsideDisplay {
-                name: "bird",
-                emoji: "🐦",
-                color: ModeColor::Green,
-            },
-
-            (Theme::Weather, OutsideBehavior::Deny) => OutsideDisplay {
-                name: "fog",
-                emoji: "🌫",
-                color: ModeColor::Orange,
-            },
-            (Theme::Weather, OutsideBehavior::Approve) => OutsideDisplay {
-                name: "cloud",
-                emoji: "☁️",
-                color: ModeColor::Yellow,
-            },
-            (Theme::Weather, OutsideBehavior::Allow) => OutsideDisplay {
-                name: "clear",
-                emoji: "☀️",
-                color: ModeColor::Green,
-            },
-
-            (Theme::Drink, OutsideBehavior::Deny) => OutsideDisplay {
-                name: "lock-in",
-                emoji: "🍺",
-                color: ModeColor::Orange,
-            },
-            (Theme::Drink, OutsideBehavior::Approve) => OutsideDisplay {
-                name: "card",
-                emoji: "💳",
-                color: ModeColor::Yellow,
-            },
-            (Theme::Drink, OutsideBehavior::Allow) => OutsideDisplay {
-                name: "open-tab",
-                emoji: "🧾",
-                color: ModeColor::Green,
-            },
-        }
-    }
 }
 
-/// User-configurable trust settings: mode, display theme, and outside-tool behavior.
+/// User-configurable trust settings.
 #[derive(
     Debug,
     Clone,
     Default,
+    PartialEq,
+    Eq,
     serde::Serialize,
     serde::Deserialize,
     documented::Documented,
     documented::DocumentedFields,
 )]
+#[serde(deny_unknown_fields)]
 pub struct TrustConfig {
     /// How aggressively tools are auto-approved.
     #[serde(default)]
@@ -582,12 +454,9 @@ pub struct TrustConfig {
     /// Display theme for trust mode labels.
     #[serde(default)]
     pub theme: Theme,
-    /// Legacy Eager escalation setting, retained for persisted UI/config compatibility.
+    /// How Eager mode handles policy decisions that require escalation.
     #[serde(default)]
-    pub outside: OutsideBehavior,
-    /// Explicit Eager escalation policy. When absent, `outside` supplies the legacy value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub escalation: Option<EscalationPolicy>,
+    pub escalation: EscalationPolicy,
     /// Mode-specific Tier policy overrides.
     #[serde(default)]
     pub tiers: TierPolicyConfig,
@@ -601,23 +470,11 @@ impl TrustConfig {
         self.theme.display(self.mode)
     }
 
-    pub fn outside_display(&self) -> OutsideDisplay {
-        self.theme.outside_display(self.outside)
-    }
-
     pub fn execution_policy(&self) -> ExecutionPolicy {
         match self.mode {
             TrustMode::Reckless => ExecutionPolicy::Unrestricted,
             TrustMode::Calm | TrustMode::Steady | TrustMode::Eager => ExecutionPolicy::Controlled,
         }
-    }
-
-    pub fn resolved_escalation(&self) -> EscalationPolicy {
-        self.escalation.unwrap_or(match self.outside {
-            OutsideBehavior::Deny => EscalationPolicy::Deny,
-            OutsideBehavior::Approve => EscalationPolicy::Ask,
-            OutsideBehavior::Allow => EscalationPolicy::Allow,
-        })
     }
 
     pub fn resolve_tier(&self, tier: crate::tool::Tier) -> PolicyAction {
@@ -667,7 +524,7 @@ impl TrustConfig {
         if self.mode != TrustMode::Eager || action != PolicyAction::Ask {
             return action;
         }
-        match self.resolved_escalation() {
+        match self.escalation {
             EscalationPolicy::Deny => PolicyAction::Deny,
             EscalationPolicy::Ask => PolicyAction::Ask,
             EscalationPolicy::Allow => PolicyAction::Auto,
@@ -678,14 +535,6 @@ impl TrustConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn auto_ceiling_maps_correctly() {
-        assert_eq!(TrustMode::Calm.auto_ceiling(), ApprovalLevel::Auto);
-        assert_eq!(TrustMode::Steady.auto_ceiling(), ApprovalLevel::Approve);
-        assert_eq!(TrustMode::Eager.auto_ceiling(), ApprovalLevel::Dangerous);
-        assert_eq!(TrustMode::Reckless.auto_ceiling(), ApprovalLevel::Dangerous);
-    }
 
     #[test]
     fn sandbox_disabled_only_for_reckless() {
@@ -708,7 +557,6 @@ mod tests {
         let cfg = TrustConfig {
             mode: TrustMode::Eager,
             theme: Theme::Default,
-            outside: OutsideBehavior::default(),
             ..TrustConfig::default()
         };
         let display = cfg.display();
@@ -718,7 +566,6 @@ mod tests {
         let cfg2 = TrustConfig {
             mode: TrustMode::Reckless,
             theme: Theme::Animal,
-            outside: OutsideBehavior::default(),
             ..TrustConfig::default()
         };
         let display2 = cfg2.display();
@@ -742,11 +589,6 @@ mod tests {
                 assert!(!d.emoji.is_empty());
                 assert!(!d.description.is_empty());
             }
-            for outside in &OutsideBehavior::all() {
-                let d = theme.outside_display(*outside);
-                assert!(!d.name.is_empty());
-                assert!(!d.emoji.is_empty());
-            }
         }
     }
 
@@ -763,34 +605,6 @@ mod tests {
         assert_eq!("1".parse::<TrustMode>().unwrap(), TrustMode::Calm);
         assert_eq!("4".parse::<TrustMode>().unwrap(), TrustMode::Reckless);
         assert!("unknown".parse::<TrustMode>().is_err());
-    }
-
-    #[test]
-    fn outside_from_str_parses_all_variants() {
-        assert_eq!(
-            "deny".parse::<OutsideBehavior>().unwrap(),
-            OutsideBehavior::Deny
-        );
-        assert_eq!(
-            "approve".parse::<OutsideBehavior>().unwrap(),
-            OutsideBehavior::Approve
-        );
-        assert_eq!(
-            "allow".parse::<OutsideBehavior>().unwrap(),
-            OutsideBehavior::Allow
-        );
-        assert_eq!(
-            "auto".parse::<OutsideBehavior>().unwrap(),
-            OutsideBehavior::Allow
-        );
-        assert!("unknown".parse::<OutsideBehavior>().is_err());
-    }
-
-    #[test]
-    fn outside_next_cycles() {
-        assert_eq!(OutsideBehavior::Deny.next(), OutsideBehavior::Approve);
-        assert_eq!(OutsideBehavior::Approve.next(), OutsideBehavior::Allow);
-        assert_eq!(OutsideBehavior::Allow.next(), OutsideBehavior::Deny);
     }
 
     #[test]
@@ -823,7 +637,7 @@ mod tests {
         let cfg = TrustConfig::default();
         assert_eq!(cfg.mode, TrustMode::Steady);
         assert_eq!(cfg.theme, Theme::Default);
-        assert_eq!(cfg.outside, OutsideBehavior::Approve);
+        assert_eq!(cfg.escalation, EscalationPolicy::Ask);
     }
 
     #[test]
@@ -944,7 +758,7 @@ mod tests {
 
         let config = TrustConfig {
             mode: TrustMode::Eager,
-            escalation: Some(EscalationPolicy::Allow),
+            escalation: EscalationPolicy::Allow,
             tiers: TierPolicyConfig {
                 eager: TierPolicyOverrides {
                     tier4: Some(PolicyAction::Deny),
@@ -979,7 +793,7 @@ mod tests {
         ] {
             let config = TrustConfig {
                 mode: TrustMode::Eager,
-                escalation: Some(escalation),
+                escalation,
                 ..TrustConfig::default()
             };
             assert_eq!(config.resolve_policy(Tier::Three, []), expected);
@@ -1010,34 +824,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_outside_maps_to_escalation_and_explicit_field_wins() {
-        for (outside, expected) in [
-            (OutsideBehavior::Deny, EscalationPolicy::Deny),
-            (OutsideBehavior::Approve, EscalationPolicy::Ask),
-            (OutsideBehavior::Allow, EscalationPolicy::Allow),
-        ] {
-            let config = TrustConfig {
-                outside,
-                ..TrustConfig::default()
-            };
-            assert_eq!(config.resolved_escalation(), expected);
-        }
-
-        let explicit = TrustConfig {
-            outside: OutsideBehavior::Deny,
-            escalation: Some(EscalationPolicy::Allow),
-            ..TrustConfig::default()
-        };
-        assert_eq!(explicit.resolved_escalation(), EscalationPolicy::Allow);
-    }
-
-    #[test]
     fn reckless_is_explicitly_unrestricted() {
         use crate::tool::Tier;
 
         let config = TrustConfig {
             mode: TrustMode::Reckless,
-            escalation: Some(EscalationPolicy::Deny),
+            escalation: EscalationPolicy::Deny,
             ..TrustConfig::default()
         };
         assert_eq!(config.execution_policy(), ExecutionPolicy::Unrestricted);
@@ -1049,13 +841,9 @@ mod tests {
 
     #[test]
     fn trust_config_json_and_toml_round_trip() {
-        let old: TrustConfig =
-            serde_json::from_str(r#"{"mode":"eager","theme":"weather","outside":"deny"}"#).unwrap();
-        assert_eq!(old.resolved_escalation(), EscalationPolicy::Deny);
-
         let config = TrustConfig {
             mode: TrustMode::Eager,
-            escalation: Some(EscalationPolicy::Allow),
+            escalation: EscalationPolicy::Allow,
             tiers: TierPolicyConfig {
                 eager: TierPolicyOverrides {
                     tier4: Some(PolicyAction::Deny),

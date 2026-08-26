@@ -159,7 +159,11 @@ impl Executor {
             .map(|session| session.id().to_string())
             .or_else(|| self.tool_ctx.session_id.clone())
             .unwrap_or_else(|| format!("standalone-{}", uuid::Uuid::now_v7()));
-        let trust = self.tool_ctx.trust.clone().unwrap_or_default();
+        let trust = session
+            .as_ref()
+            .map(|session| session.trust_config())
+            .or_else(|| self.tool_ctx.trust.clone())
+            .unwrap_or_default();
         let workspace_root = self
             .tool_ctx
             .workspace

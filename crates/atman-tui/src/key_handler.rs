@@ -734,12 +734,12 @@ pub(crate) fn handle_key(
             KeyAction::Submit | KeyAction::Char('\r') => {
                 let new_mode = modes[app.picker_selected.min(max - 1)];
                 let prev = app.trust.mode;
-                app.trust.mode = new_mode;
                 app.wm.modals.trust_mode_picker_open = false;
-                app.save_ui_state();
                 if new_mode != prev {
-                    if let Some(sess) = app.session.as_ref() {
-                        sess.approval().set_auto_ceiling(new_mode.auto_ceiling());
+                    let mut trust = app.trust.clone();
+                    trust.mode = new_mode;
+                    if let Some(tx) = control_tx {
+                        let _ = tx.send(TuiControl::UpdateTrust(trust));
                     }
                     let display = app.trust.theme.display(new_mode);
                     if let Some(warning) = new_mode.warning(&display) {
@@ -872,9 +872,11 @@ pub(crate) fn handle_key(
         }
         KeyAction::Tab => {
             if app.trust.mode == atman_runtime::trust::TrustMode::Eager {
-                app.trust.outside = app.trust.outside.next();
-                app.mark_items_dirty();
-                app.save_ui_state();
+                let mut trust = app.trust.clone();
+                trust.escalation = trust.escalation.next();
+                if let Some(tx) = control_tx {
+                    let _ = tx.send(TuiControl::UpdateTrust(trust));
+                }
             } else if editor.expand_paste_at_cursor() {
                 edited = true;
             }

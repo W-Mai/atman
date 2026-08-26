@@ -559,13 +559,18 @@ impl PermissionBroker {
         let requirement = AuthorityRequirement::from_intent(&intent, shell);
         let identity = self.authenticate_requester(session_id, run_id, &requirement)?;
         let target = self.authenticate_target(&identity, target_authority)?;
-        if policy.execution_policy() == ExecutionPolicy::Unrestricted {
+        let (execution_policy, action) = identity.effective_authority.constrain_policy(
+            policy,
+            intent.tier,
+            intent.risks.iter().copied(),
+        );
+        if execution_policy == ExecutionPolicy::Unrestricted {
             return Ok(SubmissionOutcome::Immediate(Box::new(
                 ImmediateAuthorization::Unrestricted,
             )));
         }
 
-        match policy.resolve_policy(intent.tier, intent.risks.iter().copied()) {
+        match action {
             PolicyAction::Auto => Ok(SubmissionOutcome::Immediate(Box::new(
                 ImmediateAuthorization::Auto,
             ))),
@@ -1132,6 +1137,8 @@ mod tests {
                 RiskKind::ProcessSpawn,
                 RiskKind::RepositoryMutation,
             ]),
+            tier_ceiling: [PolicyAction::Auto; 5],
+            risk_ceiling: [PolicyAction::Auto; 7],
             shell: true,
             permission_management,
             workspace_root: None,
@@ -1298,7 +1305,7 @@ mod tests {
         let broker = PermissionBroker::new(flows);
         let policy = TrustConfig {
             mode: TrustMode::Eager,
-            escalation: Some(EscalationPolicy::Deny),
+            escalation: EscalationPolicy::Deny,
             ..TrustConfig::default()
         };
 
@@ -1326,13 +1333,13 @@ mod tests {
         let broker = PermissionBroker::new(flows);
         let auto = TrustConfig {
             mode: TrustMode::Eager,
-            escalation: Some(EscalationPolicy::Allow),
+            escalation: EscalationPolicy::Allow,
             ..TrustConfig::default()
         };
         let ask = ask_policy();
         let deny = TrustConfig {
             mode: TrustMode::Eager,
-            escalation: Some(EscalationPolicy::Deny),
+            escalation: EscalationPolicy::Deny,
             ..TrustConfig::default()
         };
         let unrestricted = TrustConfig {
@@ -1386,7 +1393,7 @@ mod tests {
                 false,
                 &unrestricted,
             ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Unrestricted)
+            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Auto)
         ));
         assert_eq!(broker.list().len(), 1);
 
@@ -1770,7 +1777,7 @@ mod tests {
                 true,
                 &policy,
             ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Unrestricted)
+            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Auto)
         ));
         assert!(submit_to_flow(&broker, &requester, Arc::clone(&requester)).is_err());
         assert!(broker.list().is_empty());

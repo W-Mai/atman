@@ -57,10 +57,14 @@ async fn spawn_test_setup(
             ),
         )
         .unwrap();
+    let broker = atman_runtime::permission::PermissionBroker::shared(Arc::clone(&registry));
     let mut ctx = ToolCtx::new()
         .with_registry(Arc::new(tools))
         .with_providers(Arc::new(providers))
-        .with_flow_registry(Arc::clone(&registry));
+        .with_flow_registry(Arc::clone(&registry))
+        .with_permission_broker(broker)
+        .with_approval(Arc::new(atman_runtime::session::ApprovalRegistry::new()))
+        .with_trust(atman_runtime::trust::TrustConfig::default());
     ctx.flow_run_id = Some(root_run_id);
     ctx.flow_identity = Some(root_identity);
 
