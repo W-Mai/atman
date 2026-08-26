@@ -73,6 +73,14 @@ impl Tool for GitRestore {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["paths"],"properties":{"paths":{"type":"array","items":{"type":"string"}},"mode":{"type":"string","enum":["worktree","staged","both"],"default":"worktree"},"source":{"type":"string"},"cwd":{"type":"string"}}})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let cwd = cwd_mut(&args, ctx, self.name()).await?;
@@ -144,6 +152,14 @@ impl Tool for GitRevert {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["revision"],"properties":{"revision":{"type":"string"},"cwd":{"type":"string"}}})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let revision = string_arg(&args, "revision")?;
@@ -208,6 +224,14 @@ impl Tool for GitTagCreate {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"},"revision":{"type":"string","default":"HEAD"},"cwd":{"type":"string"}}})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let name = string_arg(&args, "name")?;

@@ -6,10 +6,7 @@ use atman_runtime::tools;
 fn ctx_with_tools() -> ToolCtx {
     let reg = ToolRegistry::new();
     tools::register_tier_zero(&reg);
-    ToolCtx {
-        registry: Some(std::sync::Arc::new(reg)),
-        ..Default::default()
-    }
+    ToolCtx::default().with_registry(std::sync::Arc::new(reg))
 }
 
 fn ctx_empty() -> ToolCtx {

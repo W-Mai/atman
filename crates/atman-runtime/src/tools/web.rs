@@ -539,6 +539,14 @@ impl Tool for WebSearch {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        _args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx).with_network())
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let query = extract_string(&args, "query", 0)?;
@@ -590,6 +598,14 @@ impl Tool for WebFetch {
             },
             "required": ["url"]
         })
+    }
+
+    fn invocation_provenance(
+        &self,
+        _args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx).with_network())
     }
 
     fn call<'a>(&'a self, args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -678,6 +694,23 @@ mod tests {
     fn allowlist_empty_permits_any() {
         let cfg = WebConfig::default();
         assert!(cfg.url_allowed("https://anywhere.example/foo"));
+    }
+
+    #[test]
+    fn web_provenance_reports_network_not_a_path() {
+        let ctx = ToolCtx::default();
+        let fetch = WebFetch {
+            config: Arc::new(WebConfig::default()),
+            client: reqwest::Client::new(),
+        };
+        let args = ToolArgs {
+            named: vec![("url".into(), Value::Str("https://example.invalid/x".into()))],
+            ..ToolArgs::default()
+        };
+        let provenance = fetch.invocation_provenance(&args, &ctx).unwrap();
+        assert!(provenance.network);
+        assert_eq!(provenance.path, None);
+        assert!(provenance.risks.is_empty());
     }
 
     #[test]

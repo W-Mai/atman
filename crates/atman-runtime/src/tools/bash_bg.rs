@@ -1024,6 +1024,16 @@ instead, or use the sleep tool to pause the workflow.",
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        _args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_cwd(ctx, None)?
+            .with_risk(crate::trust::RiskKind::ProcessSpawn))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let cmd = extract_string(&args, "cmd", 0)?;
@@ -1324,6 +1334,24 @@ mod tests {
         ctx.session_dir = Some(dir.to_path_buf());
         ctx.session_id = Some("test-session".to_string());
         ctx
+    }
+
+    #[test]
+    fn spawn_provenance_ignores_cmd_as_path() {
+        let dir = TempDir::new().unwrap();
+        let ctx = ctx_with_registry(Arc::new(BgRegistry::new()), dir.path());
+        let args = ToolArgs {
+            named: vec![("cmd".into(), Value::Str("/bin/echo hi".into()))],
+            ..ToolArgs::default()
+        };
+        let provenance = BashSpawn.invocation_provenance(&args, &ctx).unwrap();
+        assert_eq!(provenance.path, None);
+        assert!(provenance.cwd.is_some());
+        assert!(
+            provenance
+                .risks
+                .contains(&crate::trust::RiskKind::ProcessSpawn)
+        );
     }
 
     #[test]

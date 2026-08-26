@@ -125,6 +125,9 @@ pub struct Session {
     pub watch: WatchHub,
     pub watch_hub: std::sync::Arc<crate::watch::WatchHub>,
     pub flow_registry: std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>,
+    /// Broker for the structured permission pipeline. Bound to `flow_registry`
+    /// so identity authentication and terminal cleanup observe the same runs.
+    pub permission_broker: std::sync::Arc<crate::permission::PermissionBroker>,
     /// Handle of the current root FlowRun; set per turn.
     current_root: std::sync::Mutex<Option<String>>,
     successful_flow_count: std::sync::atomic::AtomicU64,
@@ -379,12 +382,20 @@ pub struct ApprovalRegistry {
     entries: std::sync::Mutex<Vec<ApprovalEntry>>,
     auto_ceiling: std::sync::Mutex<crate::tool::ApprovalLevel>,
     watch_tx: watch::Sender<Vec<PendingApproval>>,
+    next_entry_id: std::sync::atomic::AtomicU64,
 }
 
 struct ApprovalEntry {
+    entry_id: u64,
     pending: PendingApproval,
     responder: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
+
+/// Identifies one queued approval entry. Providers can reuse a `tool_use_id`
+/// across concurrent runs, so cleanup must target the exact entry it created
+/// rather than the first entry that happens to share the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalTicket(u64);
 
 impl Default for ApprovalRegistry {
     fn default() -> Self {
@@ -399,11 +410,16 @@ impl ApprovalRegistry {
             entries: std::sync::Mutex::new(Vec::new()),
             auto_ceiling: std::sync::Mutex::new(crate::tool::ApprovalLevel::Approve),
             watch_tx,
+            next_entry_id: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Vec<PendingApproval>> {
         self.watch_tx.subscribe()
+    }
+
+    pub fn has_subscribers(&self) -> bool {
+        self.watch_tx.receiver_count() > 0
     }
 
     pub fn list_pending(&self) -> Vec<PendingApproval> {
@@ -423,20 +439,53 @@ impl ApprovalRegistry {
         &self,
         pending: PendingApproval,
     ) -> tokio::sync::oneshot::Receiver<ApprovalDecision> {
+        self.request_tracked(pending).1
+    }
+
+    /// Same as [`Self::request`], but also returns a ticket that identifies this
+    /// exact queue entry for later [`Self::cancel`]. `None` means the request was
+    /// auto-approved by the ceiling and never queued.
+    pub fn request_tracked(
+        &self,
+        pending: PendingApproval,
+    ) -> (
+        Option<ApprovalTicket>,
+        tokio::sync::oneshot::Receiver<ApprovalDecision>,
+    ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if !pending.bypass_auto_ceiling && pending.level <= *self.auto_ceiling.lock().unwrap() {
             let _ = tx.send(ApprovalDecision::Approve);
-            return rx;
+            return (None, rx);
         }
+        let entry_id = self
+            .next_entry_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
             let mut entries = self.entries.lock().unwrap();
             entries.push(ApprovalEntry {
+                entry_id,
                 pending,
                 responder: tx,
             });
         }
         self.broadcast_snapshot();
-        rx
+        (Some(ApprovalTicket(entry_id)), rx)
+    }
+
+    /// Removes one queued entry and denies it, so a request already settled
+    /// elsewhere (broker cancellation, flow terminal) cannot linger in the UI.
+    pub fn cancel(&self, ticket: ApprovalTicket, reason: impl Into<String>) -> bool {
+        let mut entries = self.entries.lock().unwrap();
+        let Some(pos) = entries.iter().position(|e| e.entry_id == ticket.0) else {
+            return false;
+        };
+        let entry = entries.remove(pos);
+        let _ = entry.responder.send(ApprovalDecision::Deny {
+            reason: reason.into(),
+        });
+        drop(entries);
+        self.broadcast_snapshot();
+        true
     }
 
     pub fn decide(&self, tool_use_id: &str, decision: ApprovalDecision) -> bool {
@@ -595,6 +644,18 @@ impl PersistedContextState {
     }
 }
 
+/// Builds the flow registry and its permission broker as one unit. The broker
+/// authenticates requesters against this exact registry, so both must be the
+/// same Arc for every session constructor.
+fn new_permission_pipeline() -> (
+    std::sync::Arc<crate::tools::agent_ctrl::FlowRegistry>,
+    std::sync::Arc<crate::permission::PermissionBroker>,
+) {
+    let flow_registry = std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new());
+    let broker = crate::permission::PermissionBroker::shared(std::sync::Arc::clone(&flow_registry));
+    (flow_registry, broker)
+}
+
 fn default_project_index(root: &Path) -> Option<std::sync::Arc<crate::index::AnchorIndex>> {
     match crate::index::AnchorIndex::open_project(root) {
         Ok(idx) => Some(std::sync::Arc::new(idx)),
@@ -655,6 +716,7 @@ impl Session {
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
+        let (flow_registry, permission_broker) = new_permission_pipeline();
         Ok(Self {
             id,
             dir,
@@ -674,7 +736,8 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
-            flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
+            flow_registry,
+            permission_broker,
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
@@ -757,6 +820,7 @@ impl Session {
         let (plans_watch, plans_rx) = watch::channel(Vec::new());
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::at(&dir));
+        let (flow_registry, permission_broker) = new_permission_pipeline();
         Ok(Self {
             id,
             dir,
@@ -780,7 +844,8 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
-            flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
+            flow_registry,
+            permission_broker,
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: {
@@ -816,6 +881,7 @@ impl Session {
         let sink = EventSink::new();
         let events_handle = sink.events_handle();
         let output_store = std::sync::Arc::new(crate::tools::tool_output::OutputStore::default());
+        let (flow_registry, permission_broker) = new_permission_pipeline();
         Self {
             id: SessionId::now(),
             dir: PathBuf::new(),
@@ -835,7 +901,8 @@ impl Session {
                 _keepalive: (context_rx, goal_rx, attach_rx, todos_rx, plans_rx),
             },
             watch_hub: std::sync::Arc::new(crate::watch::WatchHub::new()),
-            flow_registry: std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()),
+            flow_registry,
+            permission_broker,
             current_root: std::sync::Mutex::new(None),
             successful_flow_count: std::sync::atomic::AtomicU64::new(0),
             compaction: CompactionState::new(),
@@ -857,6 +924,10 @@ impl Session {
 
     pub fn approval(&self) -> std::sync::Arc<ApprovalRegistry> {
         self.interactions.approval.clone()
+    }
+
+    pub fn permission_broker(&self) -> std::sync::Arc<crate::permission::PermissionBroker> {
+        std::sync::Arc::clone(&self.permission_broker)
     }
 
     pub fn compact_reviews(&self) -> std::sync::Arc<CompactReviewRegistry> {

@@ -151,6 +151,14 @@ impl Tool for GitBranchCreate {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"},"start":{"type":"string"},"cwd":{"type":"string"}}})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (_, repository) = repo_mut(&args, ctx, self.name()).await?;
@@ -193,6 +201,14 @@ impl Tool for GitBranchSwitch {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"},"create":{"type":"boolean"},"start":{"type":"string"},"force":{"type":"boolean"},"cwd":{"type":"string"}}})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (cwd, repository) = repo_mut(&args, ctx, self.name()).await?;
@@ -234,6 +250,14 @@ impl Tool for GitBranchRename {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["old","new"],"properties":{"old":{"type":"string"},"new":{"type":"string"},"cwd":{"type":"string"}}})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (_, repository) = repo_mut(&args, ctx, self.name()).await?;
@@ -269,6 +293,14 @@ impl Tool for GitBranchDelete {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"},"force":{"type":"boolean"},"cwd":{"type":"string"}}})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (_, repository) = repo_mut(&args, ctx, self.name()).await?;

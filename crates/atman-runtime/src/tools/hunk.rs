@@ -246,6 +246,17 @@ impl Tool for HunkApply {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        let proposal = extract_proposal(args)?;
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_path(ctx, &proposal.path)?
+            .with_risk(crate::trust::RiskKind::FilesystemWrite))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let proposal = extract_proposal(&args)?;

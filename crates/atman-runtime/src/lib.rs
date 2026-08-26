@@ -42,6 +42,7 @@ pub mod nodegraph;
 pub mod notify;
 pub mod oauth;
 pub mod oauth_server;
+pub mod permission;
 pub mod projection;
 pub mod provider;
 pub mod providers;

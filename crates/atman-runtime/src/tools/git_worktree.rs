@@ -74,6 +74,29 @@ fn registered_worktree_path(cwd: &std::path::Path, requested: &std::path::Path) 
         .unwrap_or_else(|| requested.to_path_buf())
 }
 
+fn mutation_provenance(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+    registered: bool,
+) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+    let cwd = cwd(args, ctx)?;
+    let requested = worktree_path(args, ctx)?;
+    let path = if registered {
+        registered_worktree_path(&cwd, &requested)
+    } else {
+        requested
+    };
+    Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+        .with_cwd(
+            ctx,
+            args.named("cwd")
+                .and_then(string_value)
+                .map(std::path::Path::new),
+        )?
+        .with_extra_target(ctx, &path)?
+        .with_risk(crate::trust::RiskKind::RepositoryMutation))
+}
+
 fn bool_arg(args: &ToolArgs, key: &str, default: bool) -> bool {
     args.named(key).and_then(bool_value).unwrap_or(default)
 }
@@ -150,6 +173,14 @@ impl Tool for GitWorktreeAdd {
             "required":["path"]
         })
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        mutation_provenance(args, ctx, false)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (cwd, path) = mutation_paths(&args, ctx, self.name()).await?;
@@ -187,6 +218,14 @@ impl Tool for GitWorktreeRemove {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"force":{"type":"boolean","default":false},"cwd":{"type":"string"}},"required":["path"]})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        mutation_provenance(args, ctx, true)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let cwd = cwd_mut(&args, ctx, self.name()).await?;
@@ -224,6 +263,24 @@ impl Tool for GitWorktreePrune {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"cwd":{"type":"string"},"dry_run":{"type":"boolean","default":true}}})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        if bool_arg(args, "dry_run", true) {
+            return Ok(crate::permission::ResourceProvenance::for_ctx(ctx));
+        }
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_cwd(
+                ctx,
+                args.named("cwd")
+                    .and_then(string_value)
+                    .map(std::path::Path::new),
+            )?
+            .with_risk(crate::trust::RiskKind::RepositoryMutation))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let dry_run = bool_arg(&args, "dry_run", true);
@@ -256,6 +313,14 @@ impl Tool for GitWorktreeLock {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"reason":{"type":"string"},"cwd":{"type":"string"}},"required":["path"]})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        mutation_provenance(args, ctx, false)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (cwd, path) = mutation_paths(&args, ctx, self.name()).await?;
@@ -283,6 +348,14 @@ impl Tool for GitWorktreeUnlock {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"cwd":{"type":"string"}},"required":["path"]})
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        mutation_provenance(args, ctx, false)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let (cwd, path) = mutation_paths(&args, ctx, self.name()).await?;

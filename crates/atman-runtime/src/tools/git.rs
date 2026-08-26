@@ -32,6 +32,14 @@ impl Tool for GitInit {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::tools::git_ops::git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let explicit = match args.named("cwd") {

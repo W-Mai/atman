@@ -1,6 +1,24 @@
 use atman_dsl::parse::parse_file;
 use atman_runtime::{Executor, Value, tools};
 
+fn shell_executor() -> Executor {
+    let mut executor = Executor::new();
+    tools::register_tier_zero(&executor.tools);
+    let bg = tools::register_bash_bg(&executor.tools);
+    executor.tool_ctx = executor
+        .tool_ctx
+        .clone()
+        .with_bg_registry(bg)
+        .with_session_dir(
+            std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
+        )
+        .with_trust(atman_runtime::trust::TrustConfig {
+            mode: atman_runtime::trust::TrustMode::Reckless,
+            ..atman_runtime::trust::TrustConfig::default()
+        });
+    executor
+}
+
 fn contract_shell() -> &'static str {
     r#"contract { scope { read: [project_root] write: [project_root] } capabilities { shell: true } }"#
 }
@@ -21,12 +39,7 @@ async fn passes_immediately_on_first_iter_when_test_exits_zero() {
         contract = contract_shell()
     );
     let file = parse_file(&src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = shell_executor();
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(matches!(&out, Value::Str(s) if s == "passed"));
 }
@@ -47,12 +60,7 @@ async fn gives_up_after_max_iters_when_test_never_passes() {
         contract = contract_shell()
     );
     let file = parse_file(&src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = shell_executor();
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(matches!(&out, Value::Str(s) if s == "gave_up"));
 }
@@ -80,12 +88,7 @@ async fn recovers_after_two_failures_then_passes() {
         script = script.replace('"', "\\\"")
     );
     let file = parse_file(&src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = shell_executor();
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(matches!(&out, Value::Int(3)), "want 3 iters, got {out:?}");
 }
@@ -107,12 +110,7 @@ async fn on_giveup_runs_when_max_iters_exhausted() {
         contract = contract_shell()
     );
     let file = parse_file(&src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = shell_executor();
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(matches!(&out, Value::Str(s) if s == "fallback-triggered"));
 }
@@ -134,12 +132,7 @@ async fn iter_and_iters_variables_available_in_edit_and_giveup_scopes() {
         contract = contract_shell()
     );
     let file = parse_file(&src).unwrap();
-    let mut ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_fix_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = shell_executor();
     let out = ex.run(&file, "demo", vec![]).await.unwrap();
     assert!(
         matches!(&out, Value::Int(3)),

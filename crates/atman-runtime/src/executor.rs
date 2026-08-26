@@ -138,6 +138,22 @@ impl Executor {
             .map(|session| std::sync::Arc::clone(&session.flow_registry))
             .or_else(|| self.tool_ctx.flow_registry.clone())
             .unwrap_or_else(|| std::sync::Arc::new(crate::tools::agent_ctrl::FlowRegistry::new()));
+        // The broker authenticates against a specific registry, so an inherited
+        // broker is only reusable when it is bound to the registry resolved above.
+        // Otherwise mint one for this registry, keeping standalone runs (no session)
+        // on the same permission pipeline as session-backed runs.
+        let permission_broker = session
+            .as_ref()
+            .map(|session| session.permission_broker())
+            .or_else(|| {
+                self.tool_ctx
+                    .permission_broker
+                    .clone()
+                    .filter(|broker| broker.is_for_registry(&flow_registry))
+            })
+            .unwrap_or_else(|| {
+                crate::permission::PermissionBroker::shared(std::sync::Arc::clone(&flow_registry))
+            });
         let session_id = session
             .as_ref()
             .map(|session| session.id().to_string())
@@ -206,6 +222,8 @@ impl Executor {
         // tool_ctx.stream_tx uniformly.
         let mut tool_ctx = self.tool_ctx.clone();
         tool_ctx.flow_registry = Some(std::sync::Arc::clone(&flow_registry));
+        tool_ctx.permission_broker = Some(std::sync::Arc::clone(&permission_broker));
+        tool_ctx.trust = Some(trust);
         tool_ctx.flow_identity = Some(identity);
         tool_ctx.flow_run_id = Some(run_id.clone());
         tool_ctx.session_id = Some(session_id);

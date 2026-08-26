@@ -1,6 +1,19 @@
 use atman_dsl::parse::parse_file;
 use atman_runtime::{Executor, Value, tools};
 
+fn apply_executor() -> Executor {
+    let mut executor = Executor::new();
+    tools::register_tier_zero(&executor.tools);
+    executor.tool_ctx = executor
+        .tool_ctx
+        .clone()
+        .with_trust(atman_runtime::trust::TrustConfig {
+            mode: atman_runtime::trust::TrustMode::Reckless,
+            ..atman_runtime::trust::TrustConfig::default()
+        });
+    executor
+}
+
 fn base_flow() -> &'static str {
     r#"flow apply_all(file: path, new_content: string) -> HunkResult {
     contract { scope { read: [project_root] write: [project_root] } }
@@ -29,8 +42,7 @@ async fn hunk_all_writes_full_proposed() {
     std::fs::write(&path, "a\nb\nc\n").unwrap();
 
     let file = parse_file(base_flow()).unwrap();
-    let ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
+    let ex = apply_executor();
     let out = ex
         .run(
             &file,
@@ -57,8 +69,7 @@ async fn hunk_none_leaves_file_original() {
     std::fs::write(&path, "a\nb\nc\n").unwrap();
 
     let file = parse_file(base_flow()).unwrap();
-    let ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
+    let ex = apply_executor();
     ex.run(
         &file,
         "apply_none",
@@ -83,8 +94,7 @@ async fn hunk_list_selection_applies_only_id_1() {
     proposed = proposed.replace("l15\n", "L15\n");
 
     let file = parse_file(base_flow()).unwrap();
-    let ex = Executor::new();
-    tools::register_tier_zero(&ex.tools);
+    let ex = apply_executor();
     ex.run(
         &file,
         "apply_first_only",

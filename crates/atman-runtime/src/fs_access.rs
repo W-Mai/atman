@@ -71,62 +71,32 @@ impl FsAccessPolicy {
     }
 }
 
+// This consumes the central permit instead of opening a second approval channel.
 pub async fn authorize_write(
     ctx: &crate::tool::ToolCtx,
     target: &Path,
     operation: &str,
-    allow_approval: bool,
+    allow_permit: bool,
 ) -> Result<bool, crate::error::RuntimeError> {
     let Err(error) = ctx.fs_access.check_write(target) else {
         return Ok(false);
     };
-    if !allow_approval {
-        return Err(crate::error::RuntimeError::ToolFailed(format!(
-            "{operation}({}): {error}",
+    let blocked = |detail: &str| {
+        Err(crate::error::RuntimeError::ToolFailed(format!(
+            "{operation}({}): {error}{detail}",
             target.display()
-        )));
-    }
-    let (Some(approval), Some(run_id)) = (&ctx.approval, ctx.flow_run_id.clone()) else {
-        return Err(crate::error::RuntimeError::ToolFailed(format!(
-            "{operation}({}): {error}",
-            target.display()
-        )));
+        )))
     };
-    let id = format!("external_write_{}", uuid::Uuid::now_v7());
-    let reason = error.to_string();
-    let rx = approval.request(crate::session::PendingApproval {
-        tool_use_id: id.clone(),
-        tool_name: operation.to_string(),
-        args_preview: format!("path={}", target.display()),
-        preview: Some(reason.clone()),
-        level: crate::tool::ApprovalLevel::Dangerous,
-        run_id: run_id.clone(),
-        emitted_at: chrono::Utc::now(),
-        bypass_auto_ceiling: false,
-    });
-    if let Some(sink) = ctx.events.as_ref() {
-        sink.emit(crate::event::Event::ToolPendingApproval {
-            run_id,
-            tool_use_id: id,
-            tool_name: operation.to_string(),
-            args_preview: target.display().to_string(),
-            level: "dangerous".into(),
-            preview: Some(reason),
-        });
+    if !allow_permit {
+        return blocked("");
     }
-    match rx.await {
-        Ok(crate::session::ApprovalDecision::Approve) => Ok(true),
-        Ok(crate::session::ApprovalDecision::Deny { reason }) => {
-            Err(crate::error::RuntimeError::ToolFailed(format!(
-                "{operation}({}): user denied the write operation: {reason}",
-                target.display()
-            )))
-        }
-        Err(_) => Err(crate::error::RuntimeError::ToolFailed(format!(
-            "{operation}({}): approval channel dropped",
-            target.display()
-        ))),
+    let Some(permit) = ctx.invocation_authorization() else {
+        return blocked(" — no central authorization for this call");
+    };
+    if !permit.covers(operation, target) {
+        return blocked(" — central authorization does not cover this target");
     }
+    Ok(true)
 }
 
 #[derive(Debug, Error)]
@@ -221,6 +191,84 @@ pub(crate) fn canonicalize_stable(p: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn authorized_ctx(tool: &str, target: &Path) -> crate::tool::ToolCtx {
+        let permit = crate::permission::InvocationAuthorization::new(
+            "call-1",
+            tool,
+            crate::permission::ResourceProvenance::none()
+                .with_path(&crate::tool::ToolCtx::default(), target)
+                .unwrap(),
+            true,
+        );
+        crate::tool::ToolCtx::default()
+            .with_fs_access(FsAccessPolicy {
+                mode: FsAccessMode::ReadOnly,
+                workspace: None,
+            })
+            .authorized_for(permit)
+    }
+
+    #[tokio::test]
+    async fn central_permit_allows_exact_target_without_pending_approval() {
+        let target = PathBuf::from("/etc/atman-permit-test");
+        let approval = std::sync::Arc::new(crate::session::ApprovalRegistry::new());
+        let mut ctx = authorized_ctx("fs.write", &target).with_approval(approval.clone());
+        ctx.flow_run_id = Some(crate::event::FlowRunId::now());
+
+        assert!(
+            authorize_write(&ctx, &target, "fs.write", true)
+                .await
+                .unwrap()
+        );
+        assert!(approval.list_pending().is_empty());
+    }
+
+    #[tokio::test]
+    async fn central_permit_rejects_tool_and_target_mismatches() {
+        let target = PathBuf::from("/etc/atman-permit-test");
+        let ctx = authorized_ctx("fs.write", &target);
+
+        assert!(
+            authorize_write(&ctx, &target, "fs.edit", true)
+                .await
+                .is_err()
+        );
+        assert!(
+            authorize_write(&ctx, Path::new("/etc/atman-other-target"), "fs.write", true,)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn per_call_contexts_do_not_share_permits() {
+        let first = PathBuf::from("/etc/atman-first");
+        let second = PathBuf::from("/etc/atman-second");
+        let first_ctx = authorized_ctx("fs.write", &first);
+        let second_ctx = authorized_ctx("fs.write", &second);
+
+        assert!(
+            authorize_write(&first_ctx, &first, "fs.write", true)
+                .await
+                .is_ok()
+        );
+        assert!(
+            authorize_write(&first_ctx, &second, "fs.write", true)
+                .await
+                .is_err()
+        );
+        assert!(
+            authorize_write(&second_ctx, &second, "fs.write", true)
+                .await
+                .is_ok()
+        );
+        assert!(
+            authorize_write(&second_ctx, &first, "fs.write", true)
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn parse_canonical_forms() {

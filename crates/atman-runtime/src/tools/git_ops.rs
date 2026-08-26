@@ -245,6 +245,14 @@ impl Tool for GitAdd {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let paths = extract_string_list(&args, "paths")?;
@@ -296,6 +304,14 @@ impl Tool for GitCommit {
             },
             "required": ["message"]
         })
+    }
+
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        git_mutation_provenance(args, ctx)
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -350,6 +366,14 @@ impl Tool for GitBranch {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        git_mutation_provenance(args, ctx)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let name = extract_string(&args, "name", 0)?;
@@ -402,6 +426,15 @@ impl Tool for GitFetch {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{"remote":{"type":"string","default":"origin"},"prune":{"type":"boolean","default":false},"cwd":{"type":"string"}}})
     }
+
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        git_mutation_provenance(args, ctx).map(|p| p.with_network())
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let remote =
@@ -452,6 +485,14 @@ impl Tool for GitPush {
                 "cwd": {"type": "string", "description": "Optional working dir; defaults to current process directory."}
             }
         })
+    }
+
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        git_mutation_provenance(args, ctx).map(|p| p.with_network())
     }
 
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
@@ -506,6 +547,33 @@ impl Tool for GitPush {
                 ("output".into(), Value::Str(combined)),
             ]))
         })
+    }
+}
+
+/// Provenance for the git tools that mutate a repository. `cwd` is their only
+/// path-shaped argument (a sha, remote, branch, or pathspec is not a filesystem
+/// target the resolver can classify), and it resolves through the same resolver
+/// `extract_cwd` uses so the gate classifies the repository the command will
+/// actually run against.
+pub(crate) fn git_mutation_provenance(
+    args: &ToolArgs,
+    ctx: &ToolCtx,
+) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+    let explicit = cwd_path_arg(args)?;
+    Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+        .with_cwd(ctx, explicit.as_deref())?
+        .with_risk(crate::trust::RiskKind::RepositoryMutation))
+}
+
+fn cwd_path_arg(args: &ToolArgs) -> Result<Option<PathBuf>, RuntimeError> {
+    match args.named("cwd") {
+        Some(Value::Path(p)) => Ok(Some(p.clone())),
+        Some(Value::Str(s)) => Ok(Some(PathBuf::from(s))),
+        Some(Value::Unit) | None => Ok(None),
+        Some(other) => Err(RuntimeError::TypeMismatch {
+            expected: "string".into(),
+            actual: other.kind_name().into(),
+        }),
     }
 }
 
@@ -737,6 +805,39 @@ mod tests {
     use super::*;
     use crate::git::GitCli;
     use std::path::Path;
+
+    #[test]
+    fn mutation_provenance_uses_cwd_and_marks_repository_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::default();
+        let args = ToolArgs {
+            named: vec![
+                ("cwd".into(), Value::Str(dir.path().display().to_string())),
+                ("message".into(), Value::Str("wip".into())),
+            ],
+            ..ToolArgs::default()
+        };
+        let provenance = git_mutation_provenance(&args, &ctx).unwrap();
+        let cwd = provenance.cwd.expect("cwd recorded");
+        assert_eq!(
+            std::fs::canonicalize(&cwd).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+        assert_eq!(provenance.path, None);
+        assert!(
+            provenance
+                .risks
+                .contains(&crate::trust::RiskKind::RepositoryMutation)
+        );
+    }
+
+    #[test]
+    fn push_and_fetch_declare_network_reach() {
+        let ctx = ToolCtx::default();
+        let args = ToolArgs::default();
+        assert!(GitPush.invocation_provenance(&args, &ctx).unwrap().network);
+        assert!(GitFetch.invocation_provenance(&args, &ctx).unwrap().network);
+    }
 
     fn have_git() -> bool {
         GitCli::ensure_available().is_ok()

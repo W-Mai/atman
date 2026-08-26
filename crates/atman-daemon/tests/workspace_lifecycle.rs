@@ -17,6 +17,11 @@ async fn launcher_runs_child_flow_in_dirty_managed_workspace() {
     let data_dir = tmp.path().join("data");
     std::fs::create_dir_all(&project_root).unwrap();
     std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[trust]\nmode = \"reckless\"\n",
+    )
+    .unwrap();
     init_repo(&project_root);
 
     let child_path = project_root.join("child.at");

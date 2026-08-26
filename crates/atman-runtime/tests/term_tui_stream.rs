@@ -28,6 +28,10 @@ async fn term_spawn_in_flow_captures_terminal_output() {
         .with_fs_access(FsAccessPolicy {
             mode: FsAccessMode::WorkspaceWrite,
             workspace: Some(std::env::current_dir().unwrap()),
+        })
+        .with_trust(atman_runtime::trust::TrustConfig {
+            mode: atman_runtime::trust::TrustMode::Reckless,
+            ..atman_runtime::trust::TrustConfig::default()
         });
 
     let out = ex.run(&file, "t", vec![]).await.unwrap();

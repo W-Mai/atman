@@ -106,6 +106,16 @@ impl Tool for AnchorEdit {
             &["path", "operation"],
         )
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_path(ctx, &path(args)?)?
+            .with_risk(crate::trust::RiskKind::FilesystemWrite))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let p = ctx.resolve_path_with_origin(&path(&args)?)?.path;
@@ -147,6 +157,16 @@ impl Tool for AnchorWrite {
             &["path", "expected_file_hash", "content"],
         )
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_path(ctx, &path(args)?)?
+            .with_risk(crate::trust::RiskKind::FilesystemWrite))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let p = ctx.resolve_path_with_origin(&path(&args)?)?.path;
@@ -179,6 +199,16 @@ impl Tool for AnchorUndo {
             &["path"],
         )
     }
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_path(ctx, &path(args)?)?
+            .with_risk(crate::trust::RiskKind::FilesystemWrite))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let p = ctx.resolve_path_with_origin(&path(&args)?)?.path;

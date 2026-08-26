@@ -35,6 +35,16 @@ impl Tool for TestRun {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_cwd(ctx, extract_optional_path(args, "cwd").as_deref())?
+            .with_risk(crate::trust::RiskKind::ProcessSpawn))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let explicit_cwd = extract_optional_path(&args, "cwd");
@@ -183,6 +193,31 @@ fn extract_optional_path(args: &ToolArgs, name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provenance_uses_cwd_and_reports_process_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::default();
+        let args = ToolArgs {
+            named: vec![
+                ("cwd".into(), Value::Str(dir.path().display().to_string())),
+                ("scope".into(), Value::Str("integration".into())),
+            ],
+            ..ToolArgs::default()
+        };
+        let provenance = TestRun.invocation_provenance(&args, &ctx).unwrap();
+        let cwd = provenance.cwd.expect("cwd recorded");
+        assert_eq!(
+            std::fs::canonicalize(&cwd).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+        assert_eq!(provenance.path, None);
+        assert!(
+            provenance
+                .risks
+                .contains(&crate::trust::RiskKind::ProcessSpawn)
+        );
+    }
 
     #[test]
     fn detect_cargo_from_cargo_toml() {

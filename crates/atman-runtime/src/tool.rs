@@ -111,6 +111,8 @@ pub struct ToolCtx {
     pub read_files:
         Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>>,
     pub approval: Option<std::sync::Arc<crate::session::ApprovalRegistry>>,
+    pub permission_broker: Option<std::sync::Arc<crate::permission::PermissionBroker>>,
+    pub(crate) invocation_authorization: Option<crate::permission::InvocationAuthorization>,
     pub forms: Option<std::sync::Arc<crate::session::FormRegistry>>,
     pub providers: Option<std::sync::Arc<crate::provider::ProviderRegistry>>,
     pub session_dir: Option<std::path::PathBuf>,
@@ -269,6 +271,30 @@ impl ToolCtx {
     ) -> Self {
         self.approval = Some(approval);
         self
+    }
+
+    pub fn with_permission_broker(
+        mut self,
+        broker: std::sync::Arc<crate::permission::PermissionBroker>,
+    ) -> Self {
+        self.permission_broker = Some(broker);
+        self
+    }
+
+    // A per-call clone prevents concurrent dispatch entries from sharing permits.
+    pub(crate) fn authorized_for(
+        &self,
+        authorization: crate::permission::InvocationAuthorization,
+    ) -> Self {
+        let mut ctx = self.clone();
+        ctx.invocation_authorization = Some(authorization);
+        ctx
+    }
+
+    pub(crate) fn invocation_authorization(
+        &self,
+    ) -> Option<&crate::permission::InvocationAuthorization> {
+        self.invocation_authorization.as_ref()
     }
 
     pub fn with_fs_access(mut self, policy: crate::fs_access::FsAccessPolicy) -> Self {
@@ -496,6 +522,14 @@ pub trait Tool: Send + Sync {
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object"})
+    }
+    // Defaulting to none avoids treating arbitrary command or URL arguments as paths.
+    fn invocation_provenance(
+        &self,
+        _args: &ToolArgs,
+        _ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::none())
     }
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult>;
     fn preview_call<'a>(

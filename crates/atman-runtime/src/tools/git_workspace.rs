@@ -134,6 +134,29 @@ macro_rules! basic_tool {
             fn input_schema(&self) -> serde_json::Value {
                 $schema
             }
+            fn invocation_provenance(
+                &self,
+                args: &ToolArgs,
+                ctx: &ToolCtx,
+            ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+                let paths = manager_paths(args, ctx)?;
+                let mut provenance = crate::permission::ResourceProvenance::for_ctx(ctx)
+                    .with_cwd(ctx, optional_string(args, "cwd").map(std::path::Path::new))?;
+                let mutates = match self.name() {
+                    "git.workspace.create" | "git.workspace.release" | "git.workspace.retain" => {
+                        true
+                    }
+                    "git.workspace.prune" => !bool_arg(args, "dry_run", true),
+                    _ => false,
+                };
+                if mutates {
+                    provenance = provenance.with_risk(crate::trust::RiskKind::RepositoryMutation);
+                    if let Some(root) = paths.external_root {
+                        provenance = provenance.with_extra_target(ctx, &root)?;
+                    }
+                }
+                Ok(provenance)
+            }
             fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
                 Box::pin(async move {
                     let paths = manager_paths(&args, ctx)?;

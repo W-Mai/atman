@@ -6,6 +6,23 @@ use atman_dsl::parse::parse_file;
 use atman_runtime::providers::mock::MockProvider;
 use atman_runtime::{Executor, Value, tools};
 
+fn e2e_executor() -> Executor {
+    let mut executor = Executor::new();
+    let bg = tools::register_bash_bg(&executor.tools);
+    executor.tool_ctx = executor
+        .tool_ctx
+        .clone()
+        .with_bg_registry(bg)
+        .with_session_dir(
+            std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
+        )
+        .with_trust(atman_runtime::trust::TrustConfig {
+            mode: atman_runtime::trust::TrustMode::Reckless,
+            ..atman_runtime::trust::TrustConfig::default()
+        });
+    executor
+}
+
 #[test]
 fn examples_edit_and_verify_at_parses() {
     let src = std::fs::read_to_string("../../examples/edit_and_verify.at").unwrap();
@@ -70,11 +87,7 @@ async fn edit_and_verify_reverts_file_when_check_fails() {
     std::fs::write(&file_path, original).unwrap();
 
     let file = parse_file(EDIT_FLOW).unwrap();
-    let mut ex = Executor::new();
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = e2e_executor();
 
     let edit = Value::Struct(vec![
         ("new_content".into(), Value::Str("goodbye\n".into())),
@@ -144,11 +157,7 @@ async fn fix_until_test_passes_iterates_until_bash_check_passes() {
     );
 
     let file = parse_file(FIX_LOOP_FLOW).unwrap();
-    let mut ex = Executor::new();
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = e2e_executor();
     let edited_value = Value::Struct(vec![
         ("new_content".into(), Value::Str("edited\n".into())),
         ("rationale".into(), Value::Str("try again".into())),
@@ -191,11 +200,7 @@ async fn fix_until_test_passes_returns_gave_up_after_max_iters() {
     std::fs::write(&target, "original\n").unwrap();
 
     let file = parse_file(FIX_LOOP_FLOW).unwrap();
-    let mut ex = Executor::new();
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = e2e_executor();
     let edited_value = Value::Struct(vec![
         ("new_content".into(), Value::Str("attempt\n".into())),
         ("rationale".into(), Value::Str("hopeful".into())),
@@ -235,11 +240,7 @@ async fn edit_and_verify_keeps_edit_when_check_passes() {
     std::fs::write(&file_path, "hello\n").unwrap();
 
     let file = parse_file(EDIT_FLOW).unwrap();
-    let mut ex = Executor::new();
-    let bg = tools::register_bash_bg(&ex.tools);
-    ex.tool_ctx = ex.tool_ctx.clone().with_bg_registry(bg).with_session_dir(
-        std::env::temp_dir().join(format!("atman_edit_test_{}", uuid::Uuid::now_v7())),
-    );
+    let ex = e2e_executor();
 
     let edit = Value::Struct(vec![
         ("new_content".into(), Value::Str("goodbye\n".into())),

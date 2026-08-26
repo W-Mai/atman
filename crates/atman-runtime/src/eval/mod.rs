@@ -812,6 +812,7 @@ async fn dispatch_tool_call<'a>(
         let mut c = ctx_with_anchors
             .with_read_files(session.read_files())
             .with_approval(session.approval())
+            .with_permission_broker(session.permission_broker())
             .with_session_dir(session.dir().to_path_buf())
             .with_output_store(session.output_store())
             .with_session_id(session.id().to_string());
@@ -891,7 +892,10 @@ async fn dispatch_tool_call<'a>(
         crate::approval::ApprovalOutcome::Deny { reason } => Err(RuntimeError::ToolFailed(
             format!("tool `{name}` denied by user: {reason}"),
         )),
-        crate::approval::ApprovalOutcome::Approve => tool.call(call_args, &ctx_with_anchors).await,
+        crate::approval::ApprovalOutcome::Approve { authorization } => {
+            let call_ctx = ctx_with_anchors.authorized_for(*authorization);
+            tool.call(call_args, &call_ctx).await
+        }
     };
     if let Some(tx) = &stream_tx {
         let (ok, preview) = match &outcome {

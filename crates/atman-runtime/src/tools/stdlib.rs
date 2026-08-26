@@ -993,6 +993,7 @@ struct Approved {
     name: String,
     tool: std::sync::Arc<dyn Tool>,
     call_args: ToolArgs,
+    authorization: crate::permission::InvocationAuthorization,
 }
 
 async fn partition_and_gate(
@@ -1007,6 +1008,11 @@ async fn partition_and_gate(
         name: String,
         tool: std::sync::Arc<dyn Tool>,
         call_args: ToolArgs,
+        /// Classified once, before the gate. Re-deriving it after approval would
+        /// let a level that depends on ctx or args drift between the verdict and
+        /// the auto/serial routing, so a call could be gated as one level and run
+        /// as another.
+        level: crate::tool::ApprovalLevel,
     }
     let mut ready: Vec<ReadyEntry> = Vec::new();
     for entry in prepared {
@@ -1021,25 +1027,26 @@ async fn partition_and_gate(
                 tool,
                 call_args,
             } => {
+                let level = tool.approval_level(&call_args, ctx);
                 ready.push(ReadyEntry {
                     index,
                     id,
                     name,
                     tool,
                     call_args,
+                    level,
                 });
             }
         }
     }
     // Parallel: serial awaits hid all but the first pending node from the UI.
     let gates = ready.iter().map(|r| {
-        let level = r.tool.approval_level(&r.call_args, ctx);
         request_approval(
             ctx,
             &r.id,
             &r.name,
             &r.call_args,
-            level,
+            r.level,
             Some(r.tool.as_ref()),
         )
     });
@@ -1047,15 +1054,16 @@ async fn partition_and_gate(
     let mut auto_batch = Vec::new();
     let mut serial_batch = Vec::new();
     for (r, outcome) in ready.into_iter().zip(outcomes) {
-        let level = r.tool.approval_level(&r.call_args, ctx);
+        let level = r.level;
         match outcome {
-            ApprovalOutcome::Approve => {
+            ApprovalOutcome::Approve { authorization } => {
                 let a = Approved {
                     index: r.index,
                     id: r.id,
                     name: r.name.clone(),
                     tool: r.tool,
                     call_args: r.call_args,
+                    authorization: *authorization,
                 };
                 if level == crate::tool::ApprovalLevel::Auto {
                     auto_batch.push(a);
@@ -1082,7 +1090,8 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
     let mut pending = futures::stream::FuturesUnordered::new();
     for a in batch {
         pending.push(async move {
-            let result = a.tool.call(a.call_args, ctx).await;
+            let call_ctx = ctx.authorized_for(a.authorization);
+            let result = a.tool.call(a.call_args, &call_ctx).await;
             (a.index, a.id, a.name, result)
         });
     }
@@ -1093,7 +1102,8 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
 
 async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
     for a in batch {
-        let result = a.tool.call(a.call_args, ctx).await;
+        let call_ctx = ctx.authorized_for(a.authorization);
+        let result = a.tool.call(a.call_args, &call_ctx).await;
         out_slots[a.index] = Some(finish_dispatch(ctx, &a.id, &a.name, result));
     }
 }
@@ -1372,6 +1382,61 @@ mod tests {
         assert_eq!(shell_quote("It's fine"), "'It'\\''s fine'");
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a'b'c"), "'a'\\''b'\\''c'");
+    }
+
+    struct PermitProbeTool;
+
+    impl Tool for PermitProbeTool {
+        fn name(&self) -> &str {
+            "permit.probe"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async move {
+                let authorized = ctx
+                    .invocation_authorization()
+                    .is_some_and(|permit| permit.is_for_call("probe_id", "permit.probe"));
+                Ok(Value::Bool(authorized))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_parallel_call_receives_its_own_authorization() {
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(PermitProbeTool));
+        let ctx = ToolCtx::new().with_registry(std::sync::Arc::new(registry));
+        let uses = Value::List(vec![Value::Struct(vec![
+            ("id".into(), Value::Str("probe_id".into())),
+            ("name".into(), Value::Str("permit.probe".into())),
+            ("input".into(), Value::Struct(Vec::new())),
+        ])]);
+
+        let Value::List(results) = DispatchAll
+            .call(
+                ToolArgs {
+                    positional: vec![uses],
+                    named: Vec::new(),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("dispatch result list");
+        };
+        let Value::Message(message) = &results[0] else {
+            panic!("tool result message");
+        };
+        assert!(message.parts.iter().any(|part| matches!(
+            part,
+            crate::message::MessagePart::ToolResult { content, is_error: false, .. }
+                if content == "true"
+        )));
     }
 
     struct ControlledTool {

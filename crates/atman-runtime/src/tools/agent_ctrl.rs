@@ -145,10 +145,21 @@ impl crate::watch::Watchable for FlowEntry {
     }
 }
 
+/// Observes flow terminal transitions while the lifecycle arbitration is held, so
+/// subsystems keyed by run liveness can be updated inside the same linearization point.
+pub(crate) trait FlowTerminalObserver: Send + Sync {
+    fn flow_became_terminal(&self, session_id: &str, run_id: &FlowRunId);
+}
+
 #[derive(Default)]
 pub struct FlowRegistry {
     entries: Mutex<std::collections::HashMap<String, Arc<FlowEntry>>>,
     runs: Mutex<std::collections::HashMap<FlowRunId, Arc<crate::flow_authority::FlowIdentity>>>,
+    /// Serializes every identity/execution-state transition. Held around observer
+    /// notification so a run cannot go terminal between a liveness check and a
+    /// decision commit in another subsystem. Lock order: lifecycle -> runs -> identity.
+    lifecycle: Mutex<()>,
+    terminal_observers: Mutex<Vec<std::sync::Weak<dyn FlowTerminalObserver>>>,
 }
 
 pub struct DescendantBlockGuard {
@@ -180,7 +191,32 @@ impl FlowRegistry {
         Self::default()
     }
 
+    /// Runs `f` under the lifecycle arbitration. Callers must not already hold it,
+    /// and must not acquire it again from inside `f`.
+    pub(crate) fn with_lifecycle_arbitration<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+        f()
+    }
+
+    pub(crate) fn register_terminal_observer(
+        &self,
+        observer: std::sync::Weak<dyn FlowTerminalObserver>,
+    ) {
+        let mut observers = self.terminal_observers.lock().unwrap();
+        observers.retain(|existing| existing.strong_count() > 0);
+        observers.push(observer);
+    }
+
     pub fn register_root(
+        &self,
+        session_id: String,
+        run_id: FlowRunId,
+        authority: crate::flow_authority::EffectiveAuthority,
+    ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+        self.with_lifecycle_arbitration(|| self.register_root_locked(session_id, run_id, authority))
+    }
+
+    fn register_root_locked(
         &self,
         session_id: String,
         run_id: FlowRunId,
@@ -206,6 +242,25 @@ impl FlowRegistry {
     }
 
     pub fn register_child(
+        &self,
+        parent_run_id: &FlowRunId,
+        child_run_id: FlowRunId,
+        invocation: crate::flow_authority::InvocationKind,
+        contract_allows_shell: bool,
+        workspace: crate::flow_authority::ChildWorkspaceAuthority,
+    ) -> Result<Arc<crate::flow_authority::FlowIdentity>, RuntimeError> {
+        self.with_lifecycle_arbitration(|| {
+            self.register_child_locked(
+                parent_run_id,
+                child_run_id,
+                invocation,
+                contract_allows_shell,
+                workspace,
+            )
+        })
+    }
+
+    fn register_child_locked(
         &self,
         parent_run_id: &FlowRunId,
         child_run_id: FlowRunId,
@@ -330,9 +385,25 @@ impl FlowRegistry {
     }
 
     pub fn mark_terminal(&self, run_id: &FlowRunId) {
-        if let Some(identity) = self.lookup_run(run_id) {
-            *identity.execution_state.lock().unwrap() =
-                crate::flow_authority::FlowExecutionState::Terminal;
+        self.with_lifecycle_arbitration(|| self.mark_terminal_locked(run_id));
+    }
+
+    fn mark_terminal_locked(&self, run_id: &FlowRunId) {
+        let Some(identity) = self.lookup_run(run_id) else {
+            return;
+        };
+        *identity.execution_state.lock().unwrap() =
+            crate::flow_authority::FlowExecutionState::Terminal;
+        let observers: Vec<_> = {
+            let mut observers = self.terminal_observers.lock().unwrap();
+            observers.retain(|existing| existing.strong_count() > 0);
+            observers
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect()
+        };
+        for observer in observers {
+            observer.flow_became_terminal(&identity.session_id, run_id);
         }
     }
 
@@ -344,6 +415,16 @@ impl FlowRegistry {
     }
 
     pub fn block_on_descendant(
+        self: &Arc<Self>,
+        parent_run_id: &FlowRunId,
+        child_run_id: &FlowRunId,
+    ) -> Result<DescendantBlockGuard, RuntimeError> {
+        self.with_lifecycle_arbitration(|| {
+            self.block_on_descendant_locked(parent_run_id, child_run_id)
+        })
+    }
+
+    fn block_on_descendant_locked(
         self: &Arc<Self>,
         parent_run_id: &FlowRunId,
         child_run_id: &FlowRunId,
@@ -383,6 +464,12 @@ impl FlowRegistry {
     }
 
     fn unblock_descendant(&self, parent_run_id: &FlowRunId, child_run_id: &FlowRunId) {
+        self.with_lifecycle_arbitration(|| {
+            self.unblock_descendant_locked(parent_run_id, child_run_id)
+        });
+    }
+
+    fn unblock_descendant_locked(&self, parent_run_id: &FlowRunId, child_run_id: &FlowRunId) {
         let Some(parent) = self.lookup_run(parent_run_id) else {
             return;
         };

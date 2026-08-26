@@ -39,6 +39,15 @@ impl Tool for FsRead {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_path(ctx, &extract_path(args, "path", 0)?)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = ctx.resolve_path(&extract_path(&args, "path", 0)?)?;
@@ -264,6 +273,16 @@ impl Tool for FsWrite {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_path(ctx, &extract_path(args, "path", 0)?)?
+            .with_risk(crate::trust::RiskKind::FilesystemWrite))
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = ctx
@@ -357,6 +376,16 @@ impl Tool for FsEdit {
             },
             "required": ["path", "old_string", "new_string"]
         })
+    }
+
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_path(ctx, &extract_path(args, "path", 0)?)?
+            .with_risk(crate::trust::RiskKind::FilesystemWrite))
     }
 
     fn preview_call<'a>(
@@ -643,6 +672,15 @@ impl Tool for FsList {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_path(ctx, &extract_path(args, "path", 0)?)
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move {
             let path = ctx.resolve_path(&extract_path(&args, "path", 0)?)?;
@@ -746,8 +784,29 @@ impl Tool for FsGrep {
         })
     }
 
+    fn invocation_provenance(
+        &self,
+        args: &ToolArgs,
+        ctx: &ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_cwd(ctx, grep_root(args)?.as_deref())
+    }
+
     fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
         Box::pin(async move { fs_grep_impl(args, ctx).await })
+    }
+}
+
+fn grep_root(args: &ToolArgs) -> Result<Option<PathBuf>, RuntimeError> {
+    match args.named("path") {
+        Some(Value::Str(s)) => Ok(Some(PathBuf::from(s))),
+        Some(Value::Path(p)) => Ok(Some(p.clone())),
+        Some(other) => Err(RuntimeError::TypeMismatch {
+            expected: "path or string".into(),
+            actual: other.kind_name().into(),
+        }),
+        None => Ok(None),
     }
 }
 
@@ -756,18 +815,8 @@ async fn fs_grep_impl(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
     if pattern.is_empty() {
         return Err(RuntimeError::ToolFailed("fs.grep: empty pattern".into()));
     }
-    let explicit = match args.named("path") {
-        Some(Value::Str(s)) => Some(std::path::Path::new(s)),
-        Some(Value::Path(p)) => Some(p.as_path()),
-        Some(other) => {
-            return Err(RuntimeError::TypeMismatch {
-                expected: "path or string".into(),
-                actual: other.kind_name().into(),
-            });
-        }
-        None => None,
-    };
-    let base_path = ctx.resolve_cwd(explicit)?;
+    let explicit = grep_root(&args)?;
+    let base_path = ctx.resolve_cwd(explicit.as_deref())?;
     let context_lines: usize = match args.named("context_lines") {
         Some(Value::Int(n)) if *n >= 0 => (*n as usize).min(10),
         _ => 3,

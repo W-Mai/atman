@@ -636,6 +636,17 @@ impl Tool for TermSpawn {
             }
         })
     }
+    fn invocation_provenance(
+        &self,
+        args: &crate::tool::ToolArgs,
+        ctx: &crate::tool::ToolCtx,
+    ) -> Result<crate::permission::ResourceProvenance, RuntimeError> {
+        let explicit = extract_optional_string(args, "cwd").map(std::path::PathBuf::from);
+        Ok(crate::permission::ResourceProvenance::for_ctx(ctx)
+            .with_cwd(ctx, explicit.as_deref())?
+            .with_risk(crate::trust::RiskKind::ProcessSpawn))
+    }
+
     fn call<'a>(
         &'a self,
         args: crate::tool::ToolArgs,
@@ -714,11 +725,11 @@ async fn spawn_impl(
                         "term.spawn",
                         &args,
                         ApprovalLevel::Dangerous,
-                        None,
+                        Some(&TermSpawn),
                     )
                     .await;
                     match outcome {
-                        crate::approval::ApprovalOutcome::Approve => {
+                        crate::approval::ApprovalOutcome::Approve { authorization: _ } => {
                             sandbox
                                 .spawn_pty_relaxed(&cmd_args, &env_refs, &cwd, pty_size)
                                 .await?
@@ -1857,6 +1868,31 @@ mod tests {
     use super::*;
     use crate::tool::{ToolArgs, ToolCtx};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn spawn_provenance_uses_cwd_not_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::default();
+        let args = ToolArgs {
+            named: vec![
+                ("cmd".into(), Value::Str("/bin/echo hi".into())),
+                ("cwd".into(), Value::Str(dir.path().display().to_string())),
+            ],
+            ..ToolArgs::default()
+        };
+        let provenance = TermSpawn.invocation_provenance(&args, &ctx).unwrap();
+        let cwd = provenance.cwd.expect("cwd recorded");
+        assert_eq!(
+            std::fs::canonicalize(&cwd).unwrap(),
+            std::fs::canonicalize(dir.path()).unwrap()
+        );
+        assert_eq!(provenance.path, None);
+        assert!(
+            provenance
+                .risks
+                .contains(&crate::trust::RiskKind::ProcessSpawn)
+        );
+    }
 
     struct StrictRecordingSandbox {
         pty_calls: AtomicUsize,
