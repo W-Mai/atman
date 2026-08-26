@@ -70,7 +70,7 @@ fn top_line<'a>(inputs: &StatusInputs<'a>) -> Line<'a> {
         ));
     }
     // Status notes from notify system
-    for (_key, text) in inputs.status_notes.iter() {
+    for text in inputs.status_notes.values() {
         spans.push(Span::raw("  · "));
         spans.push(Span::styled(
             crate::width::truncate(text, 60),

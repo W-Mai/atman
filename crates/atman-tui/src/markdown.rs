@@ -463,10 +463,8 @@ impl Renderer {
             Tag::TableRow => {
                 self.table_row.clear();
             }
-            Tag::TableCell => {
-                if self.in_table {
-                    self.table_row.push(String::new());
-                }
+            Tag::TableCell if self.in_table => {
+                self.table_row.push(String::new());
             }
             _ => {}
         }
@@ -526,10 +524,8 @@ impl Renderer {
                 }
                 self.in_table_head = false;
             }
-            TagEnd::TableRow => {
-                if !self.table_row.is_empty() {
-                    self.table_body.push(std::mem::take(&mut self.table_row));
-                }
+            TagEnd::TableRow if !self.table_row.is_empty() => {
+                self.table_body.push(std::mem::take(&mut self.table_row));
             }
             _ => {}
         }
