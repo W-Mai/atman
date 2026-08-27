@@ -2484,7 +2484,13 @@ mod tests {
             matches!(&result, Value::Struct(fields) if fields.iter().any(|(key, value)| key == "status" && matches!(value, Value::Str(status) if status == "running"))),
             "flow.spawn did not execute: {result:?}"
         );
-        assert!(session.permission_broker.list().is_empty());
+        let requests = session.permission_broker.list();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].intent.tool_name, "flow.spawn");
+        assert!(matches!(
+            requests[0].state,
+            crate::permission::PermissionRequestState::Approved { .. }
+        ));
         assert!(session.approval().list_pending().is_empty());
     }
 

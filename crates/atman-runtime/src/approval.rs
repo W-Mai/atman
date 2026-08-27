@@ -58,6 +58,7 @@ fn submit_to_broker(
     ctx: &ToolCtx,
     intent: crate::permission::PermissionIntent,
     tier: crate::tool::Tier,
+    original_request_id: Option<crate::permission::PermissionRequestId>,
 ) -> Result<crate::permission::SubmissionOutcome, String> {
     let broker = ctx
         .permission_broker
@@ -81,19 +82,17 @@ fn submit_to_broker(
         return Err("permission broker and flow registry mismatch".into());
     }
     broker
-        .submit(
+        .submit_with_original_request_id(
             Some(identity.session_id.as_str()),
             Some(&identity.run_id),
             intent,
             tier == crate::tool::Tier::Four,
+            original_request_id,
             trust,
         )
         .map_err(|error| error.to_string())
 }
 
-/// Reports a queue decision back to the broker so its request leaves the pending
-/// set. Best-effort: the broker may already have settled it (terminal cleanup),
-/// in which case `AlreadyResolved` is the expected, harmless outcome.
 fn emit_approval_result(
     ctx: &ToolCtx,
     run_id: &crate::event::FlowRunId,
@@ -140,34 +139,45 @@ fn emit_approval_result(
 fn settle_broker_request(
     ctx: &ToolCtx,
     request_id: &crate::permission::PermissionRequestId,
-    decision: &crate::session::ApprovalDecision,
-) {
+    decision: crate::session::ApprovalDecision,
+) -> crate::session::ApprovalDecision {
     let (Some(broker), Some(identity)) =
         (ctx.permission_broker.as_ref(), ctx.flow_identity.as_ref())
     else {
-        return;
+        return crate::session::ApprovalDecision::Deny {
+            reason: "permission broker identity unavailable".into(),
+        };
     };
-    let (action, reason) = match decision {
-        crate::session::ApprovalDecision::Approve => {
-            (crate::permission::PermissionAction::Approve, None)
-        }
+    let (action, grant_scope, reason) = match &decision {
+        crate::session::ApprovalDecision::Approve => (
+            crate::permission::PermissionAction::Approve,
+            Some(crate::permission::GrantScope::CurrentCall),
+            None,
+        ),
         crate::session::ApprovalDecision::Deny { reason } => (
             crate::permission::PermissionAction::Deny,
+            None,
             Some(reason.clone()),
         ),
     };
     let authority = crate::permission::DecisionAuthority::User(
         broker.user_authority(identity.session_id.clone(), None),
     );
-    if let Err(error) = broker.resolve(
-        request_id,
-        &authority,
-        action,
-        Some(crate::permission::GrantScope::CurrentCall),
-        reason,
-    ) && error != crate::permission::PermissionError::AlreadyResolved
-    {
-        crate::notify!(warn, "permission resolve failed: {error}");
+    match broker.resolve(request_id, &authority, action, grant_scope, reason) {
+        Ok(crate::permission::ResolveOutcome::Resolved(resolved)) if resolved.action == action => {
+            decision
+        }
+        Ok(_) | Err(crate::permission::PermissionError::AlreadyResolved) => {
+            crate::session::ApprovalDecision::Deny {
+                reason: "permission request was already settled".into(),
+            }
+        }
+        Err(error) => {
+            crate::notify!(warn, "permission resolve failed: {error}");
+            crate::session::ApprovalDecision::Deny {
+                reason: format!("permission resolve failed: {error}"),
+            }
+        }
     }
 }
 
@@ -182,6 +192,11 @@ pub async fn request_approval(
     request_approval_with_additional_risks(ctx, id, name, call_args, level, tool, []).await
 }
 
+struct ApprovalSubmissionContext<I> {
+    additional_risks: I,
+    original_request_id: Option<crate::permission::PermissionRequestId>,
+}
+
 pub async fn request_approval_with_additional_risks(
     ctx: &ToolCtx,
     id: &str,
@@ -190,6 +205,63 @@ pub async fn request_approval_with_additional_risks(
     level: ApprovalLevel,
     tool: Option<&dyn crate::tool::Tool>,
     additional_risks: impl IntoIterator<Item = RiskKind>,
+) -> ApprovalOutcome {
+    request_approval_with_context(
+        ctx,
+        id,
+        name,
+        call_args,
+        level,
+        tool,
+        ApprovalSubmissionContext {
+            additional_risks,
+            original_request_id: None,
+        },
+    )
+    .await
+}
+
+pub async fn request_sandbox_relaxation_approval(
+    ctx: &ToolCtx,
+    id: &str,
+    name: &str,
+    call_args: &ToolArgs,
+    level: ApprovalLevel,
+    tool: Option<&dyn crate::tool::Tool>,
+) -> ApprovalOutcome {
+    let Some(authorization) = ctx.invocation_authorization() else {
+        return ApprovalOutcome::Deny {
+            reason: "sandbox relaxation requires the strict invocation authorization".into(),
+        };
+    };
+    if !authorization.is_for_call(id, name) {
+        return ApprovalOutcome::Deny {
+            reason: "sandbox relaxation authorization does not match this invocation".into(),
+        };
+    }
+    request_approval_with_context(
+        ctx,
+        id,
+        name,
+        call_args,
+        level,
+        tool,
+        ApprovalSubmissionContext {
+            additional_risks: [RiskKind::SandboxViolation],
+            original_request_id: Some(authorization.request_id().clone()),
+        },
+    )
+    .await
+}
+
+async fn request_approval_with_context(
+    ctx: &ToolCtx,
+    id: &str,
+    name: &str,
+    call_args: &ToolArgs,
+    level: ApprovalLevel,
+    tool: Option<&dyn crate::tool::Tool>,
+    submission: ApprovalSubmissionContext<impl IntoIterator<Item = RiskKind>>,
 ) -> ApprovalOutcome {
     let provenance = match resolve_provenance(ctx, tool, call_args) {
         Ok(provenance) => provenance,
@@ -203,8 +275,14 @@ pub async fn request_approval_with_additional_risks(
         }
     };
     let permit_provenance = provenance.clone();
-    let permit = |manual: bool| {
-        crate::permission::InvocationAuthorization::new(id, name, permit_provenance.clone(), manual)
+    let permit = |request_id, manual: bool| {
+        crate::permission::InvocationAuthorization::new(
+            request_id,
+            id,
+            name,
+            permit_provenance.clone(),
+            manual,
+        )
     };
     let Some(run_id) = ctx.flow_run_id.clone() else {
         return ApprovalOutcome::Deny {
@@ -226,7 +304,7 @@ pub async fn request_approval_with_additional_risks(
     };
     let tier = tool.map(|t| t.tier()).unwrap_or(crate::tool::Tier::Zero);
     let mut risks = intent_risks(tier, &provenance);
-    risks.extend(additional_risks);
+    risks.extend(submission.additional_risks);
     let intent = crate::permission::PermissionIntent {
         tool_use_id: id.to_string(),
         tool_name: name.to_string(),
@@ -238,7 +316,7 @@ pub async fn request_approval_with_additional_risks(
     };
     // The broker owns the policy decision; the legacy queue below is still the
     // only surface that renders a prompt, so a Pending outcome is handed to it.
-    let brokered = match submit_to_broker(ctx, intent, tier) {
+    let brokered = match submit_to_broker(ctx, intent, tier, submission.original_request_id) {
         Ok(outcome) => outcome,
         Err(error) => {
             return ApprovalOutcome::Deny {
@@ -246,10 +324,12 @@ pub async fn request_approval_with_additional_risks(
             };
         }
     };
+    let mut approved_request_id = None;
     let pending_permission = match brokered {
         crate::permission::SubmissionOutcome::Immediate(immediate) => {
             use crate::permission::ImmediateAuthorization;
-            match *immediate {
+            let request_id = immediate.request.request_id.clone();
+            match immediate.authorization {
                 ImmediateAuthorization::Unrestricted => {
                     emit_approval_result(
                         ctx,
@@ -259,7 +339,7 @@ pub async fn request_approval_with_additional_risks(
                         "unrestricted",
                     );
                     return ApprovalOutcome::Approve {
-                        authorization: Box::new(permit(false)),
+                        authorization: Box::new(permit(request_id.clone(), false)),
                     };
                 }
                 ImmediateAuthorization::Auto => {
@@ -271,7 +351,7 @@ pub async fn request_approval_with_additional_risks(
                         "policy",
                     );
                     return ApprovalOutcome::Approve {
-                        authorization: Box::new(permit(false)),
+                        authorization: Box::new(permit(request_id.clone(), false)),
                     };
                 }
                 ImmediateAuthorization::Granted { .. } => {
@@ -283,7 +363,7 @@ pub async fn request_approval_with_additional_risks(
                         "grant",
                     );
                     return ApprovalOutcome::Approve {
-                        authorization: Box::new(permit(false)),
+                        authorization: Box::new(permit(request_id.clone(), false)),
                     };
                 }
                 ImmediateAuthorization::Denied { reason } => {
@@ -367,9 +447,16 @@ pub async fn request_approval_with_additional_risks(
         // loser is cleaned up so no orphan prompt or unresolved request is left.
         Some(pending) => {
             let request_id = pending.request.request_id.clone();
+            approved_request_id = Some(request_id.clone());
             let mut resolution = pending.resolution;
             tokio::select! {
                 biased;
+                queued = rx => {
+                    let decision = queued.unwrap_or(crate::session::ApprovalDecision::Deny {
+                        reason: "approval channel dropped".into(),
+                    });
+                    settle_broker_request(ctx, &request_id, decision)
+                }
                 brokered = &mut resolution => match brokered {
                     Ok(crate::permission::PermissionResolution::Cancelled { reason }) => {
                         if let Some(ticket) = ticket {
@@ -402,13 +489,6 @@ pub async fn request_approval_with_additional_risks(
                         }
                     },
                 },
-                queued = rx => {
-                    let decision = queued.unwrap_or(crate::session::ApprovalDecision::Deny {
-                        reason: "approval channel dropped".into(),
-                    });
-                    settle_broker_request(ctx, &request_id, &decision);
-                    decision
-                }
             }
         }
         None => rx.await.unwrap_or(crate::session::ApprovalDecision::Deny {
@@ -418,7 +498,10 @@ pub async fn request_approval_with_additional_risks(
     emit_approval_result(ctx, &run_id, id, &decision, "user");
     match decision {
         crate::session::ApprovalDecision::Approve => ApprovalOutcome::Approve {
-            authorization: Box::new(permit(true)),
+            authorization: Box::new(permit(
+                approved_request_id.expect("approved broker request has an id"),
+                true,
+            )),
         },
         crate::session::ApprovalDecision::Deny { reason } => ApprovalOutcome::Deny { reason },
     }
@@ -434,7 +517,8 @@ mod tests {
     use crate::tool::{Tier, Tool};
     use crate::tools::agent_ctrl::FlowRegistry;
     use crate::trust::{
-        PolicyAction, TierPolicyConfig, TierPolicyOverrides, TrustConfig, TrustMode,
+        PolicyAction, RiskPolicyConfig, RiskPolicyOverrides, TierPolicyConfig, TierPolicyOverrides,
+        TrustConfig, TrustMode,
     };
     use std::sync::Arc;
 
@@ -595,6 +679,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sandbox_relaxation_requires_strict_invocation_authorization() {
+        let (ctx, _approval, _flows) = ctx_with_broker(TrustConfig::default());
+        let broker = ctx.permission_broker.clone().unwrap();
+        let outcome = request_sandbox_relaxation_approval(
+            &ctx,
+            "relaxed",
+            "probe.tool",
+            &ToolArgs::default(),
+            ApprovalLevel::Approve,
+            Some(&Tier2Tool),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            ApprovalOutcome::Deny { reason }
+                if reason.contains("strict invocation authorization")
+        ));
+        assert!(broker.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sandbox_relaxation_rejects_authorization_for_another_call() {
+        let (ctx, _approval, _flows) = ctx_with_broker(TrustConfig::default());
+        let broker = ctx.permission_broker.clone().unwrap();
+        let authorization = crate::permission::InvocationAuthorization::new(
+            crate::permission::PermissionRequestId::now(),
+            "other",
+            "probe.tool",
+            crate::permission::ResourceProvenance::none(),
+            false,
+        );
+        let outcome = request_sandbox_relaxation_approval(
+            &ctx.authorized_for(authorization),
+            "relaxed",
+            "probe.tool",
+            &ToolArgs::default(),
+            ApprovalLevel::Approve,
+            Some(&Tier2Tool),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            ApprovalOutcome::Deny { reason } if reason.contains("does not match")
+        ));
+        assert!(broker.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sandbox_relaxation_rejects_nonexistent_original_request() {
+        let (ctx, _approval, _flows) = ctx_with_broker(TrustConfig::default());
+        let broker = ctx.permission_broker.clone().unwrap();
+        let authorization = crate::permission::InvocationAuthorization::new(
+            crate::permission::PermissionRequestId::now(),
+            "relaxed",
+            "probe.tool",
+            crate::permission::ResourceProvenance::none(),
+            false,
+        );
+        let outcome = request_sandbox_relaxation_approval(
+            &ctx.authorized_for(authorization),
+            "relaxed",
+            "probe.tool",
+            &ToolArgs::default(),
+            ApprovalLevel::Approve,
+            Some(&Tier2Tool),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            ApprovalOutcome::Deny { reason } if reason.contains("not found")
+        ));
+        assert!(broker.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_explicit_sandbox_relaxation_records_request_lineage() {
+        let trust = TrustConfig {
+            mode: TrustMode::Eager,
+            tiers: TierPolicyConfig {
+                eager: TierPolicyOverrides {
+                    tier2: Some(PolicyAction::Auto),
+                    ..TierPolicyOverrides::default()
+                },
+            },
+            risks: RiskPolicyConfig {
+                eager: RiskPolicyOverrides {
+                    sandbox_violation: Some(PolicyAction::Auto),
+                    ..RiskPolicyOverrides::default()
+                },
+            },
+            ..TrustConfig::default()
+        };
+        let (ctx, _approval, _flows) = ctx_with_broker(trust);
+        let broker = ctx.permission_broker.clone().unwrap();
+        let parent = request_approval(
+            &ctx,
+            "relaxed",
+            "probe.tool",
+            &ToolArgs::default(),
+            ApprovalLevel::Approve,
+            Some(&Tier2Tool),
+        )
+        .await;
+        let ApprovalOutcome::Approve { authorization } = parent else {
+            panic!("expected parent approval");
+        };
+        let parent_request_id = authorization.request_id().clone();
+        let nested_ctx = ctx.authorized_for(*authorization);
+
+        let nested = request_approval(
+            &nested_ctx,
+            "nested",
+            "probe.tool",
+            &ToolArgs::default(),
+            ApprovalLevel::Approve,
+            Some(&Tier2Tool),
+        )
+        .await;
+        assert!(matches!(nested, ApprovalOutcome::Approve { .. }));
+        let relaxed = request_sandbox_relaxation_approval(
+            &nested_ctx,
+            "relaxed",
+            "probe.tool",
+            &ToolArgs::default(),
+            ApprovalLevel::Approve,
+            Some(&Tier2Tool),
+        )
+        .await;
+        assert!(matches!(relaxed, ApprovalOutcome::Approve { .. }));
+
+        let requests = broker.list();
+        let nested_request = requests
+            .iter()
+            .find(|request| request.intent.tool_use_id == "nested")
+            .expect("nested request record");
+        assert_eq!(nested_request.original_request_id, None);
+        let relaxed_request = requests
+            .iter()
+            .find(|request| request.original_request_id.is_some())
+            .expect("relaxed request record");
+        assert_eq!(
+            relaxed_request.original_request_id.as_ref(),
+            Some(&parent_request_id)
+        );
+    }
+
+    #[tokio::test]
     async fn broker_pending_without_approval_consumer_fails_closed() {
         let trust = TrustConfig {
             mode: TrustMode::Steady,
@@ -628,6 +859,92 @@ mod tests {
         assert!(matches!(
             broker.get(&request_id).map(|request| request.state),
             Some(crate::permission::PermissionRequestState::Cancelled { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn queued_approve_after_terminal_cancellation_fails_closed() {
+        let trust = TrustConfig {
+            mode: TrustMode::Steady,
+            ..TrustConfig::default()
+        };
+        let (ctx, _approval, flows) = ctx_with_broker(trust);
+        let broker = ctx.permission_broker.clone().unwrap();
+        let identity = ctx.flow_identity.as_ref().unwrap();
+        let outcome = broker
+            .submit(
+                Some(&identity.session_id),
+                Some(&identity.run_id),
+                crate::permission::PermissionIntent::minimal("race", "probe.tool", Tier::Two),
+                false,
+                ctx.trust.as_ref().unwrap(),
+            )
+            .unwrap();
+        let crate::permission::SubmissionOutcome::Pending(pending) = outcome else {
+            panic!("expected pending request");
+        };
+        let request_id = pending.request.request_id.clone();
+        flows.mark_terminal(&identity.run_id);
+
+        let decision =
+            settle_broker_request(&ctx, &request_id, crate::session::ApprovalDecision::Approve);
+
+        assert!(matches!(
+            decision,
+            crate::session::ApprovalDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            broker.get(&request_id).map(|request| request.state),
+            Some(crate::permission::PermissionRequestState::Cancelled { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn queued_denial_preserves_reason_and_settles_without_a_grant_scope() {
+        let trust = TrustConfig {
+            mode: TrustMode::Steady,
+            ..TrustConfig::default()
+        };
+        let (ctx, approval, _flows) = ctx_with_broker(trust);
+        let _approval_updates = approval.subscribe();
+        let broker = ctx.permission_broker.clone().unwrap();
+        let gate = tokio::spawn({
+            let ctx = ctx.clone();
+            async move {
+                request_approval(
+                    &ctx,
+                    "tu_deny",
+                    "probe.tool",
+                    &ToolArgs::default(),
+                    ApprovalLevel::Auto,
+                    Some(&Tier2Tool),
+                )
+                .await
+            }
+        });
+        let request_id = loop {
+            if let Some(req) = broker.list().first() {
+                break req.request_id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        while !approval.decide(
+            "tu_deny",
+            crate::session::ApprovalDecision::Deny {
+                reason: "operator denied".into(),
+            },
+        ) {
+            tokio::task::yield_now().await;
+        }
+
+        let outcome = gate.await.unwrap();
+        assert!(matches!(
+            outcome,
+            ApprovalOutcome::Deny { ref reason } if reason == "operator denied"
+        ));
+        assert!(matches!(
+            broker.get(&request_id).map(|request| request.state),
+            Some(crate::permission::PermissionRequestState::Denied { .. })
         ));
     }
 
@@ -667,7 +984,10 @@ mod tests {
             tokio::task::yield_now().await;
         }
         let outcome = gate.await.unwrap();
-        assert!(matches!(outcome, ApprovalOutcome::Approve { .. }));
+        let ApprovalOutcome::Approve { authorization } = outcome else {
+            panic!("expected approval");
+        };
+        assert_eq!(authorization.request_id(), &request_id);
         assert!(matches!(
             broker.get(&request_id).map(|r| r.state),
             Some(crate::permission::PermissionRequestState::Approved { .. })

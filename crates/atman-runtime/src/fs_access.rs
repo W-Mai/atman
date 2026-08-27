@@ -194,6 +194,7 @@ mod tests {
 
     fn authorized_ctx(tool: &str, target: &Path) -> crate::tool::ToolCtx {
         let permit = crate::permission::InvocationAuthorization::new(
+            crate::permission::PermissionRequestId::now(),
             "call-1",
             tool,
             crate::permission::ResourceProvenance::none()

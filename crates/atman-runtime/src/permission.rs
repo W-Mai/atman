@@ -253,6 +253,7 @@ pub struct PermissionRequest {
     pub root_run_id: FlowRunId,
     pub intent: PermissionIntent,
     pub requirement: AuthorityRequirement,
+    pub original_request_id: Option<PermissionRequestId>,
     pub state: PermissionRequestState,
     pub escalation_path: Vec<EscalationHop>,
     pub requested_at: DateTime<Utc>,
@@ -290,14 +291,21 @@ pub enum ImmediateAuthorization {
 }
 
 #[derive(Debug)]
+pub struct ImmediateSubmission {
+    pub request: PermissionRequest,
+    pub authorization: ImmediateAuthorization,
+}
+
+#[derive(Debug)]
 pub enum SubmissionOutcome {
-    Immediate(Box<ImmediateAuthorization>),
+    Immediate(Box<ImmediateSubmission>),
     Pending(Box<PendingPermission>),
 }
 
 /// Unforgeable authorization for one invocation and its exact resources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvocationAuthorization {
+    request_id: PermissionRequestId,
     tool_use_id: String,
     tool_name: String,
     provenance: ResourceProvenance,
@@ -308,17 +316,23 @@ pub struct InvocationAuthorization {
 
 impl InvocationAuthorization {
     pub(crate) fn new(
+        request_id: PermissionRequestId,
         tool_use_id: impl Into<String>,
         tool_name: impl Into<String>,
         provenance: ResourceProvenance,
         manual: bool,
     ) -> Self {
         Self {
+            request_id,
             tool_use_id: tool_use_id.into(),
             tool_name: tool_name.into(),
             provenance,
             manual,
         }
+    }
+
+    pub fn request_id(&self) -> &PermissionRequestId {
+        &self.request_id
     }
 
     pub fn tool_name(&self) -> &str {
@@ -406,6 +420,11 @@ impl std::error::Error for PermissionError {}
 struct RequestEntry {
     request: PermissionRequest,
     responder: Option<oneshot::Sender<PermissionResolution>>,
+}
+
+struct SubmissionContext {
+    target_authority: ApprovalAuthority,
+    original_request_id: Option<PermissionRequestId>,
 }
 
 #[derive(Default)]
@@ -525,9 +544,31 @@ impl PermissionBroker {
         shell: bool,
         policy: &TrustConfig,
     ) -> Result<SubmissionOutcome, PermissionError> {
+        self.submit_with_original_request_id(session_id, run_id, intent, shell, None, policy)
+    }
+
+    pub(crate) fn submit_with_original_request_id(
+        &self,
+        session_id: Option<&str>,
+        run_id: Option<&FlowRunId>,
+        intent: PermissionIntent,
+        shell: bool,
+        original_request_id: Option<PermissionRequestId>,
+        policy: &TrustConfig,
+    ) -> Result<SubmissionOutcome, PermissionError> {
         let session_id = session_id.ok_or(PermissionError::MissingIdentity)?;
         let target = ApprovalAuthority::User(self.user_authority(session_id, None));
-        self.submit_to(session_id.into(), run_id, intent, shell, target, policy)
+        self.submit_to_with_context(
+            Some(session_id),
+            run_id,
+            intent,
+            shell,
+            SubmissionContext {
+                target_authority: target,
+                original_request_id,
+            },
+            policy,
+        )
     }
 
     pub fn submit_to(
@@ -539,11 +580,33 @@ impl PermissionBroker {
         target_authority: ApprovalAuthority,
         policy: &TrustConfig,
     ) -> Result<SubmissionOutcome, PermissionError> {
+        self.submit_to_with_context(
+            session_id,
+            run_id,
+            intent,
+            shell,
+            SubmissionContext {
+                target_authority,
+                original_request_id: None,
+            },
+            policy,
+        )
+    }
+
+    fn submit_to_with_context(
+        &self,
+        session_id: Option<&str>,
+        run_id: Option<&FlowRunId>,
+        intent: PermissionIntent,
+        shell: bool,
+        context: SubmissionContext,
+        policy: &TrustConfig,
+    ) -> Result<SubmissionOutcome, PermissionError> {
         // Liveness checks and the pending insert must observe the same lifecycle
         // snapshot, otherwise a run could go terminal between them and leave an
         // orphan pending request that terminal cleanup already walked past.
         self.flows.with_lifecycle_arbitration(|| {
-            self.submit_to_locked(session_id, run_id, intent, shell, target_authority, policy)
+            self.submit_to_locked(session_id, run_id, intent, shell, context, policy)
         })
     }
 
@@ -553,77 +616,106 @@ impl PermissionBroker {
         run_id: Option<&FlowRunId>,
         intent: PermissionIntent,
         shell: bool,
-        target_authority: ApprovalAuthority,
+        context: SubmissionContext,
         policy: &TrustConfig,
     ) -> Result<SubmissionOutcome, PermissionError> {
         let requirement = AuthorityRequirement::from_intent(&intent, shell);
         let identity = self.authenticate_requester(session_id, run_id, &requirement)?;
-        let target = self.authenticate_target(&identity, target_authority)?;
+        let target = self.authenticate_target(&identity, context.target_authority)?;
         let (execution_policy, action) = identity.effective_authority.constrain_policy(
             policy,
             intent.tier,
             intent.risks.iter().copied(),
         );
-        if execution_policy == ExecutionPolicy::Unrestricted {
+        let mut state = self.state.lock().unwrap();
+        self.remove_terminal_grants(&mut state);
+        if let Some(original_request_id) = context.original_request_id.as_ref() {
+            let original = state
+                .requests
+                .get(original_request_id)
+                .ok_or(PermissionError::RequestNotFound)?;
+            if original.request.session_id != identity.session_id
+                || original.request.requesting_run_id != identity.run_id
+                || original.request.intent.tool_use_id != intent.tool_use_id
+                || original.request.intent.tool_name != intent.tool_name
+            {
+                return Err(PermissionError::IdentityMismatch);
+            }
+        }
+        let request_id = PermissionRequestId::now();
+        let now = Utc::now();
+        let immediate = if execution_policy == ExecutionPolicy::Unrestricted {
+            Some(ImmediateAuthorization::Unrestricted)
+        } else {
+            match action {
+                PolicyAction::Auto => Some(ImmediateAuthorization::Auto),
+                PolicyAction::Deny => Some(ImmediateAuthorization::Denied {
+                    reason: "permission policy denied the invocation".into(),
+                }),
+                PolicyAction::Ask => {
+                    matching_grant(&state.grants, &identity, &intent, &requirement)
+                        .map(|grant| ImmediateAuthorization::Granted { grant })
+                }
+            }
+        };
+        let request_state = match &immediate {
+            Some(ImmediateAuthorization::Denied { .. }) => PermissionRequestState::Denied {
+                decision_id: PermissionDecisionId::now(),
+            },
+            Some(_) => PermissionRequestState::Approved {
+                decision_id: PermissionDecisionId::now(),
+            },
+            None => PermissionRequestState::Pending {
+                target: target.clone(),
+            },
+        };
+        let request = PermissionRequest {
+            request_id: request_id.clone(),
+            session_id: identity.session_id.clone(),
+            requesting_run_id: identity.run_id.clone(),
+            parent_run_id: identity.parent_run_id.clone(),
+            root_run_id: identity.root_run_id.clone(),
+            intent,
+            requirement,
+            original_request_id: context.original_request_id,
+            state: request_state,
+            escalation_path: vec![EscalationHop {
+                target,
+                actor: None,
+                action: None,
+                reason: None,
+                at: now,
+            }],
+            requested_at: now,
+        };
+        if let Some(authorization) = immediate {
+            state.requests.insert(
+                request_id,
+                RequestEntry {
+                    request: request.clone(),
+                    responder: None,
+                },
+            );
             return Ok(SubmissionOutcome::Immediate(Box::new(
-                ImmediateAuthorization::Unrestricted,
+                ImmediateSubmission {
+                    request,
+                    authorization,
+                },
             )));
         }
 
-        match action {
-            PolicyAction::Auto => Ok(SubmissionOutcome::Immediate(Box::new(
-                ImmediateAuthorization::Auto,
-            ))),
-            PolicyAction::Deny => Ok(SubmissionOutcome::Immediate(Box::new(
-                ImmediateAuthorization::Denied {
-                    reason: "permission policy denied the invocation".into(),
-                },
-            ))),
-            PolicyAction::Ask => {
-                let mut state = self.state.lock().unwrap();
-                self.remove_terminal_grants(&mut state);
-                if let Some(grant) = matching_grant(&state.grants, &identity, &intent, &requirement)
-                {
-                    return Ok(SubmissionOutcome::Immediate(Box::new(
-                        ImmediateAuthorization::Granted { grant },
-                    )));
-                }
-                let request_id = PermissionRequestId::now();
-                let now = Utc::now();
-                let request = PermissionRequest {
-                    request_id: request_id.clone(),
-                    session_id: identity.session_id.clone(),
-                    requesting_run_id: identity.run_id.clone(),
-                    parent_run_id: identity.parent_run_id.clone(),
-                    root_run_id: identity.root_run_id.clone(),
-                    intent,
-                    requirement,
-                    state: PermissionRequestState::Pending {
-                        target: target.clone(),
-                    },
-                    escalation_path: vec![EscalationHop {
-                        target,
-                        actor: None,
-                        action: None,
-                        reason: None,
-                        at: now,
-                    }],
-                    requested_at: now,
-                };
-                let (responder, resolution) = oneshot::channel();
-                state.requests.insert(
-                    request_id,
-                    RequestEntry {
-                        request: request.clone(),
-                        responder: Some(responder),
-                    },
-                );
-                Ok(SubmissionOutcome::Pending(Box::new(PendingPermission {
-                    request,
-                    resolution,
-                })))
-            }
-        }
+        let (responder, resolution) = oneshot::channel();
+        state.requests.insert(
+            request_id,
+            RequestEntry {
+                request: request.clone(),
+                responder: Some(responder),
+            },
+        );
+        Ok(SubmissionOutcome::Pending(Box::new(PendingPermission {
+            request,
+            resolution,
+        })))
     }
 
     pub fn resolve(
@@ -1230,6 +1322,68 @@ mod tests {
         DecisionAuthority::User(broker.user_authority(session_id, None))
     }
 
+    fn assert_immediate_is_auditable(broker: &PermissionBroker, submission: &ImmediateSubmission) {
+        assert_eq!(
+            broker.get(&submission.request.request_id),
+            Some(submission.request.clone())
+        );
+        assert!(!matches!(
+            submission.request.state,
+            PermissionRequestState::Pending { .. }
+        ));
+    }
+
+    #[test]
+    fn sandbox_lineage_rejects_cross_run_and_cross_session_requests() {
+        let flows = Arc::new(FlowRegistry::default());
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let original_requester = register_root(&flows, "session", true);
+        let original = submit_user(&broker, &original_requester, intent());
+        let original_request_id = original.request.request_id.clone();
+        let same_session_other_run = child(&flows, &original_requester);
+        let other_session = register_root(&flows, "other", true);
+
+        for requester in [same_session_other_run, other_session] {
+            let before = broker.list().len();
+            assert!(matches!(
+                broker.submit_with_original_request_id(
+                    Some(&requester.session_id),
+                    Some(&requester.run_id),
+                    intent(),
+                    false,
+                    Some(original_request_id.clone()),
+                    &ask_policy(),
+                ),
+                Err(PermissionError::IdentityMismatch)
+            ));
+            assert_eq!(broker.list().len(), before);
+        }
+    }
+
+    #[test]
+    fn sandbox_lineage_rejects_another_tool_invocation() {
+        let flows = Arc::new(FlowRegistry::default());
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let requester = register_root(&flows, "session", true);
+        let original = submit_user(&broker, &requester, intent());
+        let mut unrelated = intent();
+        unrelated.tool_name = "term.spawn".into();
+        let before = broker.list().len();
+
+        assert!(matches!(
+            broker.submit_with_original_request_id(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                unrelated,
+                false,
+                Some(original.request.request_id.clone()),
+                &ask_policy(),
+            ),
+            Err(PermissionError::IdentityMismatch)
+        ));
+        assert_eq!(broker.list().len(), before);
+    }
+
     #[test]
     fn invalid_flow_targets_do_not_create_requests() {
         let cases = [
@@ -1299,7 +1453,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_is_immediate_and_allocates_no_request() {
+    fn deny_is_immediate_and_persists_terminal_request() {
         let flows = Arc::new(FlowRegistry::default());
         let requester = register_root(&flows, "session", false);
         let broker = PermissionBroker::new(flows);
@@ -1319,18 +1473,25 @@ mod tests {
             )
             .unwrap();
 
+        let SubmissionOutcome::Immediate(submission) = outcome else {
+            panic!("expected immediate denial");
+        };
         assert!(matches!(
-            outcome,
-            SubmissionOutcome::Immediate(value) if matches!(*value, ImmediateAuthorization::Denied { .. })
+            submission.authorization,
+            ImmediateAuthorization::Denied { .. }
         ));
-        assert!(broker.list().is_empty());
+        assert_immediate_is_auditable(&broker, &submission);
+        assert!(matches!(
+            submission.request.state,
+            PermissionRequestState::Denied { .. }
+        ));
     }
 
     #[test]
     fn submit_uses_each_policy_snapshot_without_cross_request_state() {
         let flows = Arc::new(FlowRegistry::default());
         let requester = register_root(&flows, "session", false);
-        let broker = PermissionBroker::new(flows);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
         let auto = TrustConfig {
             mode: TrustMode::Eager,
             escalation: EscalationPolicy::Allow,
@@ -1346,18 +1507,31 @@ mod tests {
             mode: TrustMode::Reckless,
             ..TrustConfig::default()
         };
+        let unrestricted_requester = flows
+            .register_root(
+                "session".into(),
+                FlowRunId::now(),
+                EffectiveAuthority::root(&unrestricted, true, None),
+            )
+            .unwrap();
 
-        assert!(matches!(
-            broker.submit(
+        let SubmissionOutcome::Immediate(auto_submission) = broker
+            .submit(
                 Some(&requester.session_id),
                 Some(&requester.run_id),
                 intent(),
                 false,
                 &auto,
-            ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Auto)
+            )
+            .unwrap()
+        else {
+            panic!("expected immediate auto authorization");
+        };
+        assert!(matches!(
+            auto_submission.authorization,
+            ImmediateAuthorization::Auto
         ));
-        assert!(broker.list().is_empty());
+        assert_immediate_is_auditable(&broker, &auto_submission);
 
         let SubmissionOutcome::Pending(pending) = broker
             .submit(
@@ -1371,31 +1545,51 @@ mod tests {
         else {
             panic!("expected pending request");
         };
-        assert_eq!(broker.list().len(), 1);
 
-        assert!(matches!(
-            broker.submit(
+        let SubmissionOutcome::Immediate(denied_submission) = broker
+            .submit(
                 Some(&requester.session_id),
                 Some(&requester.run_id),
                 intent(),
                 false,
                 &deny,
-            ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Denied { .. })
-        ));
-        assert_eq!(broker.list().len(), 1);
-
+            )
+            .unwrap()
+        else {
+            panic!("expected immediate denial");
+        };
         assert!(matches!(
-            broker.submit(
-                Some(&requester.session_id),
-                Some(&requester.run_id),
+            denied_submission.authorization,
+            ImmediateAuthorization::Denied { .. }
+        ));
+        assert_immediate_is_auditable(&broker, &denied_submission);
+
+        let SubmissionOutcome::Immediate(unrestricted_submission) = broker
+            .submit(
+                Some(&unrestricted_requester.session_id),
+                Some(&unrestricted_requester.run_id),
                 intent(),
                 false,
                 &unrestricted,
-            ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Auto)
+            )
+            .unwrap()
+        else {
+            panic!("expected immediate unrestricted authorization");
+        };
+        assert!(matches!(
+            unrestricted_submission.authorization,
+            ImmediateAuthorization::Unrestricted
         ));
-        assert_eq!(broker.list().len(), 1);
+        assert_immediate_is_auditable(&broker, &unrestricted_submission);
+        assert_eq!(broker.list().len(), 4);
+        assert_eq!(
+            broker
+                .list()
+                .into_iter()
+                .filter(|request| matches!(request.state, PermissionRequestState::Pending { .. }))
+                .count(),
+            1
+        );
 
         broker
             .cancel(&pending.request.request_id, "test cleanup")
@@ -1404,7 +1598,7 @@ mod tests {
             broker.get(&pending.request.request_id).unwrap().state,
             PermissionRequestState::Cancelled { .. }
         ));
-        assert_eq!(broker.list().len(), 1);
+        assert_eq!(broker.list().len(), 4);
     }
 
     #[test]
@@ -1507,16 +1701,23 @@ mod tests {
             )
             .unwrap();
 
-        assert!(matches!(
-            broker.submit(
+        let SubmissionOutcome::Immediate(granted_submission) = broker
+            .submit(
                 Some(&requester.session_id),
                 Some(&requester.run_id),
                 intent(),
                 false,
                 &ask_policy(),
-            ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Granted { .. })
+            )
+            .unwrap()
+        else {
+            panic!("expected immediate grant authorization");
+        };
+        assert!(matches!(
+            granted_submission.authorization,
+            ImmediateAuthorization::Granted { .. }
         ));
+        assert_immediate_is_auditable(&broker, &granted_submission);
         let mut escalated = intent();
         escalated.risks.insert(RiskKind::Network);
         escalated.risks.insert(RiskKind::Irreversible);
@@ -1582,7 +1783,7 @@ mod tests {
                 false,
                 &ask_policy(),
             ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Granted { .. })
+            Ok(SubmissionOutcome::Immediate(value)) if matches!(value.authorization, ImmediateAuthorization::Granted { .. })
         ));
         assert_eq!(broker.grants().len(), 1);
     }
@@ -1777,10 +1978,10 @@ mod tests {
                 true,
                 &policy,
             ),
-            Ok(SubmissionOutcome::Immediate(value)) if matches!(*value, ImmediateAuthorization::Auto)
+            Ok(SubmissionOutcome::Immediate(value)) if matches!(value.authorization, ImmediateAuthorization::Auto)
         ));
         assert!(submit_to_flow(&broker, &requester, Arc::clone(&requester)).is_err());
-        assert!(broker.list().is_empty());
+        assert_eq!(broker.list().len(), 1);
     }
 
     #[test]
