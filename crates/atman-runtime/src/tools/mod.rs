@@ -76,6 +76,7 @@ pub fn register_tier_zero_with_rules(reg: &ToolRegistry, rule_fetch: memory_stub
     reg.register(Arc::new(permission::PermissionApprove));
     reg.register(Arc::new(permission::PermissionDeny));
     reg.register(Arc::new(permission::PermissionDefer));
+    reg.register(Arc::new(permission::PermissionBatch));
     reg.register(Arc::new(stdlib::MessageUser));
     reg.register(Arc::new(stdlib::MessageAssistant));
     reg.register(Arc::new(stdlib::MessageSystem));

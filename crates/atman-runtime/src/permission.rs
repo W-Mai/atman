@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -428,6 +429,57 @@ pub enum ResolveOutcome {
     Deferred(PermissionDecision),
 }
 
+/// Stable projections used by batch permission controls. Selectors never carry
+/// authority; they are expanded and checked against the authenticated actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionSelector {
+    RequestIds(Vec<PermissionRequestId>),
+    Group(PermissionGroupId),
+    DescendantRun(FlowRunId),
+    ChildRun,
+    Tool(String),
+    Tier(Tier),
+    Risk(RiskKind),
+    PathPrefix(PathBuf),
+    Target(ApprovalTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchMode {
+    BestEffort,
+    Atomic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchRequestOutcome {
+    Approved(PermissionDecision),
+    Denied(PermissionDecision),
+    Deferred(PermissionDecision),
+    SkippedAlreadyResolved,
+    RejectedNotAncestor,
+    RejectedOverAuthority,
+    RejectedStale,
+    RejectedNotFound,
+    RejectedNotRunning,
+    RejectedPermissionManagementRequired,
+    RejectedUnsupportedGrantScope,
+    RejectedNoEscalationTarget,
+    Rejected(PermissionError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchResolution {
+    pub request_id: PermissionRequestId,
+    pub outcome: BatchRequestOutcome,
+}
+
+struct PreparedResolution {
+    request: PermissionRequest,
+    actor: DecisionActor,
+    target: ApprovalTarget,
+    next_target: Option<ApprovalTarget>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionError {
     MissingIdentity,
@@ -443,6 +495,7 @@ pub enum PermissionError {
     GroupNotFound,
     GroupNotEmpty,
     GroupNotOwner,
+    GroupRevisionConflict,
     EmptyGroup,
 }
 
@@ -464,6 +517,7 @@ impl std::fmt::Display for PermissionError {
             Self::GroupNotFound => "permission group was not found",
             Self::GroupNotEmpty => "permission group must be empty before deletion",
             Self::GroupNotOwner => "permission group is not owned by this actor",
+            Self::GroupRevisionConflict => "permission group revision is stale",
             Self::EmptyGroup => "permission group cannot be empty",
         };
         f.write_str(message)
@@ -793,6 +847,179 @@ impl PermissionBroker {
         reason: Option<String>,
     ) -> Result<ResolveOutcome, PermissionError> {
         let mut state = self.state.lock().unwrap();
+        self.resolve_locked_state(
+            &mut state,
+            request_id,
+            authority,
+            action,
+            grant_scope,
+            reason,
+        )
+    }
+
+    fn prepare_resolution(
+        &self,
+        state: &BrokerState,
+        request_id: &PermissionRequestId,
+        authority: &DecisionAuthority,
+        action: PermissionAction,
+        grant_scope: Option<&GrantScope>,
+    ) -> Result<PreparedResolution, PermissionError> {
+        let request = state
+            .requests
+            .get(request_id)
+            .ok_or(PermissionError::RequestNotFound)?
+            .request
+            .clone();
+        if request.state.is_terminal() {
+            return Err(PermissionError::AlreadyResolved);
+        }
+        let requester = self
+            .flows
+            .lookup_run(&request.requesting_run_id)
+            .filter(|identity| !matches!(identity.execution_state(), FlowExecutionState::Terminal))
+            .ok_or(PermissionError::ActorNotRunning)?;
+        let actor = self.validate_authority(&request, authority, action, grant_scope)?;
+        let target = match &request.state {
+            PermissionRequestState::Pending { target } => target.clone(),
+            PermissionRequestState::Evaluating => {
+                return Err(PermissionError::ActorNotAuthorized);
+            }
+            _ => return Err(PermissionError::AlreadyResolved),
+        };
+        if !actor_matches_target(&actor, &target) {
+            return Err(PermissionError::ActorNotAuthorized);
+        }
+        let next_target = (action == PermissionAction::Defer
+            && !matches!(target, ApprovalTarget::User))
+        .then(|| {
+            self.next_eligible_target(
+                &requester,
+                &request.requirement,
+                &request.intent.provenance,
+                match &target {
+                    ApprovalTarget::Flow(run_id) => Some(run_id),
+                    ApprovalTarget::User => None,
+                },
+            )
+        });
+        Ok(PreparedResolution {
+            request,
+            actor,
+            target,
+            next_target,
+        })
+    }
+
+    fn commit_prepared_resolution(
+        &self,
+        state: &mut BrokerState,
+        prepared: PreparedResolution,
+        action: PermissionAction,
+        grant_scope: Option<GrantScope>,
+        reason: Option<String>,
+    ) -> ResolveOutcome {
+        let request_id = prepared.request.request_id.clone();
+        let decision = PermissionDecision {
+            decision_id: PermissionDecisionId::now(),
+            request_id: request_id.clone(),
+            actor: prepared.actor.clone(),
+            action,
+            grant_scope: grant_scope.clone(),
+            reason: reason.clone(),
+            decided_at: Utc::now(),
+        };
+        let entry = state
+            .requests
+            .get_mut(&request_id)
+            .expect("prepared request exists");
+        entry.request.escalation_path.push(EscalationHop {
+            target: prepared.target.clone(),
+            actor: Some(prepared.actor.clone()),
+            action: Some(action),
+            reason: reason.clone(),
+            at: decision.decided_at,
+        });
+        if action == PermissionAction::Defer {
+            if matches!(prepared.target, ApprovalTarget::User) {
+                cancel_entry(
+                    entry,
+                    reason.unwrap_or_else(|| "user deferred without a fallback".into()),
+                );
+            } else {
+                let next_target = prepared
+                    .next_target
+                    .expect("flow-target defer has a prepared next target");
+                entry.request.state = PermissionRequestState::Pending {
+                    target: next_target.clone(),
+                };
+                if let Some(target_tx) = &entry.target_tx {
+                    let _ = target_tx.send(next_target.clone());
+                }
+                entry.request.escalation_path.push(EscalationHop {
+                    target: next_target,
+                    actor: None,
+                    action: None,
+                    reason: None,
+                    at: Utc::now(),
+                });
+            }
+            return ResolveOutcome::Deferred(decision);
+        }
+        let persistent_grant = if action == PermissionAction::Approve {
+            grant_scope
+                .clone()
+                .filter(|scope| !matches!(scope, GrantScope::CurrentCall))
+                .map(|scope| PermissionGrant {
+                    grant_id: PermissionGrantId::now(),
+                    request_id: request_id.clone(),
+                    session_id: prepared.request.session_id,
+                    requesting_run_id: prepared.request.requesting_run_id,
+                    requirement: prepared.request.requirement,
+                    scope,
+                    actor: prepared.actor,
+                    granted_at: decision.decided_at,
+                })
+        } else {
+            None
+        };
+        let entry = state
+            .requests
+            .get_mut(&request_id)
+            .expect("prepared request exists");
+        entry.request.state = if action == PermissionAction::Approve {
+            PermissionRequestState::Approved {
+                decision_id: decision.decision_id.clone(),
+            }
+        } else {
+            PermissionRequestState::Denied {
+                decision_id: decision.decision_id.clone(),
+            }
+        };
+        let responder = entry.responder.take();
+        if let Some(grant) = persistent_grant
+            && !state
+                .grants
+                .iter()
+                .any(|existing| equivalent_grant(existing, &grant))
+        {
+            state.grants.push(grant);
+        }
+        if let Some(responder) = responder {
+            let _ = responder.send(PermissionResolution::Decision(decision.clone()));
+        }
+        ResolveOutcome::Resolved(decision)
+    }
+
+    fn resolve_locked_state(
+        &self,
+        state: &mut BrokerState,
+        request_id: &PermissionRequestId,
+        authority: &DecisionAuthority,
+        action: PermissionAction,
+        grant_scope: Option<GrantScope>,
+        reason: Option<String>,
+    ) -> Result<ResolveOutcome, PermissionError> {
         let request = state
             .requests
             .get(request_id)
@@ -1263,6 +1490,167 @@ impl PermissionBroker {
         Ok(group.clone())
     }
 
+    fn expand_selector(
+        &self,
+        state: &BrokerState,
+        actor: &FlowIdentity,
+        selector: &PermissionSelector,
+        expected_group_revision: Option<u64>,
+    ) -> Result<Vec<PermissionRequestId>, PermissionError> {
+        let mut ids = BTreeSet::new();
+        match selector {
+            PermissionSelector::RequestIds(request_ids) => ids.extend(request_ids.iter().cloned()),
+            PermissionSelector::Group(group_id) => {
+                let group = state
+                    .groups
+                    .get(group_id)
+                    .ok_or(PermissionError::GroupNotFound)?;
+                if group.owner != GroupOwner::Flow(actor.run_id.clone()) {
+                    return Err(PermissionError::GroupNotOwner);
+                }
+                if expected_group_revision.is_some_and(|revision| revision != group.revision) {
+                    return Err(PermissionError::GroupRevisionConflict);
+                }
+                ids.extend(group.request_ids.iter().cloned());
+            }
+            PermissionSelector::DescendantRun(run_id) => {
+                ids.extend(
+                    state
+                        .requests
+                        .values()
+                        .filter(|entry| {
+                            let request = &entry.request;
+                            request.session_id == actor.session_id
+                                && request.requesting_run_id == *run_id
+                                && self.flows.is_strict_ancestor(&actor.run_id, run_id)
+                        })
+                        .map(|entry| entry.request.request_id.clone()),
+                );
+            }
+            selector => {
+                ids.extend(state.requests.values().filter(|entry| {
+                    let request = &entry.request;
+                    if request.session_id != actor.session_id || !self.visible_to(actor, request) {
+                        return false;
+                    }
+                    match selector {
+                        PermissionSelector::ChildRun => request.parent_run_id.as_ref() == Some(&actor.run_id),
+                        PermissionSelector::Tool(tool) => &request.intent.tool_name == tool,
+                        PermissionSelector::Tier(tier) => request.intent.tier == *tier,
+                        PermissionSelector::Risk(risk) => request.intent.risks.contains(risk),
+                        PermissionSelector::PathPrefix(prefix) => request
+                            .intent
+                            .provenance
+                            .authorized_targets()
+                            .any(|path| path.starts_with(prefix)),
+                        PermissionSelector::Target(target) => matches!(&request.state, PermissionRequestState::Pending { target: current } if current == target),
+                        _ => false,
+                    }
+                }).map(|entry| entry.request.request_id.clone()));
+            }
+        }
+        Ok(ids.into_iter().collect())
+    }
+
+    /// Resolve a stable selector, deduplicating request IDs deterministically.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_batch(
+        &self,
+        actor: &Arc<FlowIdentity>,
+        selector: PermissionSelector,
+        action: PermissionAction,
+        grant_scope: Option<GrantScope>,
+        reason: Option<String>,
+        mode: BatchMode,
+        expected_group_revision: Option<u64>,
+    ) -> Result<Vec<BatchResolution>, PermissionError> {
+        if mode == BatchMode::Atomic {
+            return self.flows.with_lifecycle_arbitration(|| {
+                self.authenticate_control_actor(actor)?;
+                let authority = DecisionAuthority::Flow(self.flow_authority(Arc::clone(actor))?);
+                let mut state = self.state.lock().unwrap();
+                let ids =
+                    self.expand_selector(&state, actor, &selector, expected_group_revision)?;
+                let prepared = ids
+                    .iter()
+                    .map(|id| {
+                        self.prepare_resolution(
+                            &state,
+                            id,
+                            &authority,
+                            action,
+                            grant_scope.as_ref(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(ids
+                    .into_iter()
+                    .zip(prepared)
+                    .map(|(request_id, prepared)| {
+                        let outcome = self.commit_prepared_resolution(
+                            &mut state,
+                            prepared,
+                            action,
+                            grant_scope.clone(),
+                            reason.clone(),
+                        );
+                        BatchResolution {
+                            request_id,
+                            outcome: batch_outcome(action, outcome),
+                        }
+                    })
+                    .collect())
+            });
+        }
+        self.authenticate_control_actor(actor)?;
+        let authority = DecisionAuthority::Flow(self.flow_authority(Arc::clone(actor))?);
+        let ids = {
+            let state = self.state.lock().unwrap();
+            self.expand_selector(&state, actor, &selector, expected_group_revision)?
+        };
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let outcome =
+                match self.resolve(&id, &authority, action, grant_scope.clone(), reason.clone()) {
+                    Ok(ResolveOutcome::Resolved(decision))
+                    | Ok(ResolveOutcome::Deferred(decision)) => match action {
+                        PermissionAction::Approve => BatchRequestOutcome::Approved(decision),
+                        PermissionAction::Deny => BatchRequestOutcome::Denied(decision),
+                        PermissionAction::Defer => BatchRequestOutcome::Deferred(decision),
+                    },
+                    Err(PermissionError::AlreadyResolved) => {
+                        BatchRequestOutcome::SkippedAlreadyResolved
+                    }
+                    Err(PermissionError::ActorNotAuthorized) => {
+                        BatchRequestOutcome::RejectedNotAncestor
+                    }
+                    Err(PermissionError::GrantExceedsAuthority) => {
+                        BatchRequestOutcome::RejectedOverAuthority
+                    }
+                    Err(PermissionError::RequestNotFound) => BatchRequestOutcome::RejectedNotFound,
+                    Err(PermissionError::ActorNotRunning) => {
+                        BatchRequestOutcome::RejectedNotRunning
+                    }
+                    Err(PermissionError::IdentityMismatch) => BatchRequestOutcome::RejectedStale,
+                    Err(PermissionError::PermissionManagementRequired) => {
+                        BatchRequestOutcome::RejectedPermissionManagementRequired
+                    }
+                    Err(PermissionError::UnsupportedGrantScope) => {
+                        BatchRequestOutcome::RejectedUnsupportedGrantScope
+                    }
+                    Err(PermissionError::NoEscalationTarget) => {
+                        BatchRequestOutcome::RejectedNoEscalationTarget
+                    }
+                    Err(error) => BatchRequestOutcome::Rejected(error),
+                };
+            results.push(BatchResolution {
+                request_id: id,
+                outcome,
+            });
+        }
+        Ok(results)
+    }
+
     pub fn delete_empty_group(
         &self,
         actor: &Arc<FlowIdentity>,
@@ -1386,10 +1774,6 @@ impl PermissionBroker {
             }
             if ancestor.session_id == requester.session_id
                 && matches!(ancestor.execution_state(), FlowExecutionState::Running)
-                && !matches!(
-                    ancestor.invocation,
-                    crate::flow_authority::InvocationKind::SpawnSync
-                )
                 && ancestor.effective_authority.permission_management
                 && authority_contains(&ancestor.effective_authority, requirement, provenance)
             {
@@ -1504,6 +1888,17 @@ impl PermissionBroker {
                 None | Some(FlowExecutionState::Terminal)
             )
         });
+    }
+}
+
+fn batch_outcome(action: PermissionAction, outcome: ResolveOutcome) -> BatchRequestOutcome {
+    let decision = match outcome {
+        ResolveOutcome::Resolved(decision) | ResolveOutcome::Deferred(decision) => decision,
+    };
+    match action {
+        PermissionAction::Approve => BatchRequestOutcome::Approved(decision),
+        PermissionAction::Deny => BatchRequestOutcome::Denied(decision),
+        PermissionAction::Defer => BatchRequestOutcome::Deferred(decision),
     }
 }
 
@@ -1741,15 +2136,30 @@ mod tests {
         requester: &FlowIdentity,
         target: Arc<FlowIdentity>,
     ) -> Result<SubmissionOutcome, PermissionError> {
+        submit_to_flow_with_intent(broker, requester, target, intent())
+    }
+
+    fn submit_to_flow_with_intent(
+        broker: &PermissionBroker,
+        requester: &FlowIdentity,
+        target: Arc<FlowIdentity>,
+        intent: PermissionIntent,
+    ) -> Result<SubmissionOutcome, PermissionError> {
         let target = ApprovalAuthority::Flow(broker.flow_authority(target)?);
         broker.submit_to(
             Some(&requester.session_id),
             Some(&requester.run_id),
-            intent(),
+            intent,
             false,
             target,
             &ask_policy(),
         )
+    }
+
+    fn set_blocked_on_child(parent: &FlowIdentity, child: &FlowIdentity) {
+        *parent.execution_state.lock().unwrap() = FlowExecutionState::BlockedOnDescendants {
+            child_run_counts: HashMap::from([(child.run_id.clone(), 1)]),
+        };
     }
 
     fn submit_user(
@@ -1763,6 +2173,24 @@ mod tests {
                 Some(&requester.run_id),
                 intent,
                 false,
+                &ask_policy(),
+            )
+            .unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        *pending
+    }
+
+    fn submit_to_user(broker: &PermissionBroker, requester: &FlowIdentity) -> PendingPermission {
+        let target = ApprovalAuthority::User(broker.user_authority(&requester.session_id, None));
+        let SubmissionOutcome::Pending(pending) = broker
+            .submit_to(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                intent(),
+                false,
+                target,
                 &ask_policy(),
             )
             .unwrap()
@@ -1842,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_sync_parent_is_skipped_during_escalation() {
+    fn running_sync_parent_remains_an_escalation_target() {
         let flows = Arc::new(FlowRegistry::default());
         let root = register_root(&flows, "session", true);
         let sync_parent = flows
@@ -1857,11 +2285,33 @@ mod tests {
         let requester = child(&flows, &sync_parent);
         let broker = PermissionBroker::new(Arc::clone(&flows));
 
-        let SubmissionOutcome::Pending(pending) =
-            submit_to_flow(&broker, &requester, sync_parent.clone()).unwrap()
-        else {
-            panic!("expected pending request");
-        };
+        let pending = submit_user(&broker, &requester, intent());
+        assert!(matches!(
+            pending.request.state,
+            PermissionRequestState::Pending {
+                target: ApprovalTarget::Flow(ref run_id)
+            } if run_id == &sync_parent.run_id
+        ));
+    }
+
+    #[test]
+    fn blocked_sync_parent_is_skipped_during_escalation() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let sync_parent = flows
+            .register_child(
+                &root.run_id,
+                FlowRunId::now(),
+                InvocationKind::SpawnSync,
+                true,
+                ChildWorkspaceAuthority::Inherit,
+            )
+            .unwrap();
+        let requester = child(&flows, &sync_parent);
+        set_blocked_on_child(&sync_parent, &requester);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+
+        let pending = submit_user(&broker, &requester, intent());
         assert!(matches!(
             pending.request.state,
             PermissionRequestState::Pending {
@@ -1870,6 +2320,8 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn unrestricted_still_requires_authenticated_identity() {
         let broker = PermissionBroker::new(Arc::new(FlowRegistry::default()));
         let policy = TrustConfig {
             mode: TrustMode::Reckless,
@@ -3193,6 +3645,445 @@ mod tests {
             .inherited_child(true, ChildWorkspaceAuthority::Inherit)
             .unwrap();
         assert!(child.permission_management);
+    }
+
+    #[test]
+    fn built_in_batch_selectors_match_stable_request_identity() {
+        for case in 0..6 {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("nested/file.txt");
+            let flows = Arc::new(FlowRegistry::default());
+            let root = register_root(&flows, "session", true);
+            let requester = child(&flows, &root);
+            let broker = PermissionBroker::new(flows);
+            let selected_intent = PermissionIntent {
+                risks: BTreeSet::from([RiskKind::Network]),
+                provenance: ResourceProvenance {
+                    path: Some(path),
+                    ..ResourceProvenance::default()
+                },
+                ..intent()
+            };
+            let SubmissionOutcome::Pending(pending) =
+                submit_to_flow_with_intent(&broker, &requester, Arc::clone(&root), selected_intent)
+                    .unwrap()
+            else {
+                panic!("expected pending request");
+            };
+            let selector = match case {
+                0 => PermissionSelector::ChildRun,
+                1 => PermissionSelector::Tool("bash.spawn".into()),
+                2 => PermissionSelector::Tier(Tier::Two),
+                3 => PermissionSelector::Risk(RiskKind::Network),
+                4 => PermissionSelector::PathPrefix(temp.path().join("nested")),
+                5 => PermissionSelector::Target(ApprovalTarget::Flow(root.run_id.clone())),
+                _ => unreachable!(),
+            };
+            let results = broker
+                .resolve_batch(
+                    &root,
+                    selector,
+                    PermissionAction::Approve,
+                    None,
+                    None,
+                    BatchMode::BestEffort,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].request_id, pending.request.request_id);
+            assert!(matches!(
+                results[0].outcome,
+                BatchRequestOutcome::Approved(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn path_prefix_selector_matches_every_authorized_provenance_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = crate::fs_access::canonicalize_stable(temp.path());
+        for (case, prefix) in [
+            (0, root_path.join("primary")),
+            (1, root_path.join("cwd")),
+            (2, root_path.join("extra")),
+            (3, root_path.join("missing")),
+        ] {
+            let flows = Arc::new(FlowRegistry::default());
+            let root = register_root(&flows, "session", true);
+            let requester = child(&flows, &root);
+            let broker = PermissionBroker::new(flows);
+            let SubmissionOutcome::Pending(pending) = submit_to_flow_with_intent(
+                &broker,
+                &requester,
+                Arc::clone(&root),
+                PermissionIntent {
+                    provenance: ResourceProvenance {
+                        path: Some(root_path.join("primary/file.txt")),
+                        cwd: Some(root_path.join("cwd/work")),
+                        extra_targets: vec![root_path.join("extra/other.txt")],
+                        ..ResourceProvenance::default()
+                    },
+                    ..intent()
+                },
+            )
+            .unwrap() else {
+                panic!("expected pending request");
+            };
+
+            let results = broker
+                .resolve_batch(
+                    &root,
+                    PermissionSelector::PathPrefix(prefix),
+                    PermissionAction::Approve,
+                    None,
+                    None,
+                    BatchMode::BestEffort,
+                    None,
+                )
+                .unwrap();
+            if case == 3 {
+                assert!(results.is_empty());
+                assert!(matches!(
+                    broker.get(&pending.request.request_id).unwrap().state,
+                    PermissionRequestState::Pending { .. }
+                ));
+            } else {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].request_id, pending.request.request_id);
+                assert!(matches!(
+                    results[0].outcome,
+                    BatchRequestOutcome::Approved(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn best_effort_batch_preserves_prior_success_before_later_member_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = crate::fs_access::canonicalize_stable(temp.path());
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(flows);
+        let SubmissionOutcome::Pending(first) = submit_to_flow_with_intent(
+            &broker,
+            &requester,
+            Arc::clone(&root),
+            PermissionIntent {
+                provenance: ResourceProvenance {
+                    path: Some(root_path.join("first.txt")),
+                    path_origin: Some(PathOrigin::ExplicitInside),
+                    workspace_root: Some(root_path),
+                    ..ResourceProvenance::default()
+                },
+                ..intent()
+            },
+        )
+        .unwrap() else {
+            panic!("expected pending request");
+        };
+        let SubmissionOutcome::Pending(second) =
+            submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        let scope = GrantScope::ChildRunSamePathRule {
+            run_id: requester.run_id.clone(),
+            tool_name: "bash.spawn".into(),
+            workspace_relative_path: "first.txt".into(),
+        };
+
+        let results = broker
+            .resolve_batch(
+                &root,
+                PermissionSelector::RequestIds(vec![
+                    first.request.request_id.clone(),
+                    second.request.request_id.clone(),
+                ]),
+                PermissionAction::Approve,
+                Some(scope),
+                None,
+                BatchMode::BestEffort,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].request_id, first.request.request_id);
+        assert!(matches!(
+            results[0].outcome,
+            BatchRequestOutcome::Approved(_)
+        ));
+        assert_eq!(results[1].request_id, second.request.request_id);
+        assert!(matches!(
+            results[1].outcome,
+            BatchRequestOutcome::RejectedUnsupportedGrantScope
+        ));
+        assert!(matches!(
+            broker.get(&first.request.request_id).unwrap().state,
+            PermissionRequestState::Approved { .. }
+        ));
+        assert!(matches!(
+            broker.get(&second.request.request_id).unwrap().state,
+            PermissionRequestState::Pending { .. }
+        ));
+    }
+
+    #[test]
+    fn best_effort_batch_reports_mixed_outcomes_and_independent_decisions() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requesters = [child(&flows, &root), child(&flows, &root)];
+        let broker = PermissionBroker::new(flows);
+        let pending = requesters.map(|requester| {
+            let SubmissionOutcome::Pending(pending) =
+                submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+            else {
+                panic!("expected pending request");
+            };
+            *pending
+        });
+        broker
+            .resolve(
+                &pending[0].request.request_id,
+                &DecisionAuthority::Flow(broker.flow_authority(Arc::clone(&root)).unwrap()),
+                PermissionAction::Approve,
+                None,
+                None,
+            )
+            .unwrap();
+        let missing = PermissionRequestId::now();
+        let results = broker
+            .resolve_batch(
+                &root,
+                PermissionSelector::RequestIds(vec![
+                    pending[0].request.request_id.clone(),
+                    pending[1].request.request_id.clone(),
+                    missing.clone(),
+                ]),
+                PermissionAction::Approve,
+                None,
+                None,
+                BatchMode::BestEffort,
+                None,
+            )
+            .unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|result| result.request_id == pending[0].request.request_id
+                    && matches!(result.outcome, BatchRequestOutcome::SkippedAlreadyResolved))
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.request_id == pending[1].request.request_id
+                    && matches!(result.outcome, BatchRequestOutcome::Approved(_)))
+        );
+        assert!(results.iter().any(|result| result.request_id == missing
+            && matches!(result.outcome, BatchRequestOutcome::RejectedNotFound)));
+        let decision_id =
+            |request_id: &PermissionRequestId| match broker.get(request_id).unwrap().state {
+                PermissionRequestState::Approved { decision_id, .. } => decision_id,
+                state => panic!("unexpected state: {state:?}"),
+            };
+        assert_ne!(
+            decision_id(&pending[0].request.request_id),
+            decision_id(&pending[1].request.request_id)
+        );
+    }
+
+    #[test]
+    fn atomic_batch_rolls_back_and_group_revision_is_checked() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(flows);
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        let request_id = pending.request.request_id.clone();
+        assert!(matches!(
+            broker.resolve_batch(
+                &root,
+                PermissionSelector::RequestIds(vec![
+                    request_id.clone(),
+                    PermissionRequestId::now()
+                ]),
+                PermissionAction::Approve,
+                None,
+                None,
+                BatchMode::Atomic,
+                None,
+            ),
+            Err(PermissionError::RequestNotFound)
+        ));
+        assert!(matches!(
+            broker.get(&request_id).unwrap().state,
+            PermissionRequestState::Pending { .. }
+        ));
+        let group = broker
+            .create_group(&root, BTreeSet::from([request_id]), "batch".into())
+            .unwrap();
+        assert!(matches!(
+            broker.resolve_batch(
+                &root,
+                PermissionSelector::Group(group.group_id),
+                PermissionAction::Approve,
+                None,
+                None,
+                BatchMode::Atomic,
+                Some(group.revision + 1),
+            ),
+            Err(PermissionError::GroupRevisionConflict)
+        ));
+    }
+
+    #[test]
+    fn group_selector_expands_membership_and_revision_from_the_same_state() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(flows);
+        let SubmissionOutcome::Pending(first) =
+            submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        let SubmissionOutcome::Pending(second) =
+            submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        let group = broker
+            .create_group(
+                &root,
+                BTreeSet::from([first.request.request_id.clone()]),
+                "atomic".into(),
+            )
+            .unwrap();
+        let mut state = broker.state.lock().unwrap();
+        let current = state.groups.get_mut(&group.group_id).unwrap();
+        current
+            .request_ids
+            .insert(second.request.request_id.clone());
+        current.revision += 1;
+        assert!(matches!(
+            broker.expand_selector(
+                &state,
+                &root,
+                &PermissionSelector::Group(group.group_id.clone()),
+                Some(group.revision)
+            ),
+            Err(PermissionError::GroupRevisionConflict)
+        ));
+        let expected = BTreeSet::from([first.request.request_id, second.request.request_id])
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            broker
+                .expand_selector(
+                    &state,
+                    &root,
+                    &PermissionSelector::Group(group.group_id),
+                    Some(group.revision + 1)
+                )
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn atomic_batch_invalid_target_member_leaves_every_request_unchanged() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requesters = [child(&flows, &root), child(&flows, &root)];
+        let broker = PermissionBroker::new(flows);
+        let SubmissionOutcome::Pending(flow_pending) =
+            submit_to_flow(&broker, &requesters[0], Arc::clone(&root)).unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        let user_pending = submit_to_user(&broker, &requesters[1]);
+        let ids = [
+            flow_pending.request.request_id.clone(),
+            user_pending.request.request_id.clone(),
+        ];
+        let result = broker.resolve_batch(
+            &root,
+            PermissionSelector::RequestIds(ids.to_vec()),
+            PermissionAction::Approve,
+            None,
+            None,
+            BatchMode::Atomic,
+            None,
+        );
+        assert!(
+            matches!(result, Err(PermissionError::ActorNotAuthorized)),
+            "unexpected result: {result:?}"
+        );
+        for id in ids {
+            let request = broker.get(&id).unwrap();
+            assert!(matches!(
+                request.state,
+                PermissionRequestState::Pending { .. }
+            ));
+            assert!(
+                request
+                    .escalation_path
+                    .iter()
+                    .all(|hop| hop.actor.is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_batch_terminal_requester_member_leaves_every_request_unchanged() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requesters = [child(&flows, &root), child(&flows, &root)];
+        let broker = PermissionBroker::new(flows);
+        let pending = requesters.each_ref().map(|requester| {
+            let SubmissionOutcome::Pending(pending) =
+                submit_to_flow(&broker, requester, Arc::clone(&root)).unwrap()
+            else {
+                panic!("expected pending request");
+            };
+            *pending
+        });
+        *requesters[1].execution_state.lock().unwrap() = FlowExecutionState::Terminal;
+        let ids = pending
+            .each_ref()
+            .map(|pending| pending.request.request_id.clone());
+        assert!(matches!(
+            broker.resolve_batch(
+                &root,
+                PermissionSelector::RequestIds(ids.to_vec()),
+                PermissionAction::Approve,
+                None,
+                None,
+                BatchMode::Atomic,
+                None
+            ),
+            Err(PermissionError::ActorNotRunning)
+        ));
+        for id in ids {
+            let request = broker.get(&id).unwrap();
+            assert!(matches!(
+                request.state,
+                PermissionRequestState::Pending { .. }
+            ));
+            assert!(
+                request
+                    .escalation_path
+                    .iter()
+                    .all(|hop| hop.actor.is_none())
+            );
+        }
     }
 
     #[test]

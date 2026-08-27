@@ -5,10 +5,12 @@ use uuid::Uuid;
 
 use crate::error::RuntimeError;
 use crate::permission::{
-    DecisionAuthority, GrantScope, GroupOwner, PermissionAction, PermissionBroker, PermissionGroup,
-    PermissionGroupId, PermissionRequest, PermissionRequestId, ResolveOutcome,
+    ApprovalTarget, BatchMode, DecisionAuthority, GrantScope, GroupOwner, PermissionAction,
+    PermissionBroker, PermissionGroup, PermissionGroupId, PermissionRequest, PermissionRequestId,
+    PermissionSelector, ResolveOutcome,
 };
 use crate::tool::{BoxFut, InvocationPlane, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
+use crate::trust::RiskKind;
 use crate::value::Value;
 
 pub struct PermissionList;
@@ -18,6 +20,7 @@ pub struct PermissionUngroup;
 pub struct PermissionApprove;
 pub struct PermissionDeny;
 pub struct PermissionDefer;
+pub struct PermissionBatch;
 
 fn broker_and_actor<'a>(
     ctx: &'a ToolCtx,
@@ -206,6 +209,237 @@ fn decision_value(outcome: ResolveOutcome) -> Value {
 
 fn control_tool_defaults() -> (Tier, InvocationPlane) {
     (Tier::Zero, InvocationPlane::PermissionControl)
+}
+
+fn batch_value(result: crate::permission::BatchResolution) -> Value {
+    let (status, decision) = match result.outcome {
+        crate::permission::BatchRequestOutcome::Approved(decision) => ("approved", Some(decision)),
+        crate::permission::BatchRequestOutcome::Denied(decision) => ("denied", Some(decision)),
+        crate::permission::BatchRequestOutcome::Deferred(decision) => ("deferred", Some(decision)),
+        crate::permission::BatchRequestOutcome::SkippedAlreadyResolved => {
+            ("skipped_already_resolved", None)
+        }
+        crate::permission::BatchRequestOutcome::RejectedNotAncestor => {
+            ("rejected_not_ancestor", None)
+        }
+        crate::permission::BatchRequestOutcome::RejectedOverAuthority => {
+            ("rejected_over_authority", None)
+        }
+        crate::permission::BatchRequestOutcome::RejectedStale => ("rejected_stale", None),
+        crate::permission::BatchRequestOutcome::RejectedNotFound => ("rejected_not_found", None),
+        crate::permission::BatchRequestOutcome::RejectedNotRunning => {
+            ("rejected_not_running", None)
+        }
+        crate::permission::BatchRequestOutcome::RejectedPermissionManagementRequired => {
+            ("rejected_permission_management_required", None)
+        }
+        crate::permission::BatchRequestOutcome::RejectedUnsupportedGrantScope => {
+            ("rejected_unsupported_grant_scope", None)
+        }
+        crate::permission::BatchRequestOutcome::RejectedNoEscalationTarget => {
+            ("rejected_no_escalation_target", None)
+        }
+        crate::permission::BatchRequestOutcome::Rejected(_) => ("rejected", None),
+    };
+    let mut fields = vec![
+        (
+            "request_id".into(),
+            Value::Str(result.request_id.to_string()),
+        ),
+        ("status".into(), Value::Str(status.into())),
+    ];
+    if let Some(decision) = decision {
+        fields.push((
+            "decision_id".into(),
+            Value::Str(decision.decision_id.to_string()),
+        ));
+    }
+    Value::Struct(fields)
+}
+
+impl Tool for PermissionBatch {
+    fn name(&self) -> &str {
+        "permission.batch"
+    }
+    fn tier(&self) -> Tier {
+        control_tool_defaults().0
+    }
+    fn invocation_plane(&self) -> InvocationPlane {
+        control_tool_defaults().1
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":"object",
+            "properties":{
+                "request_ids":{"type":"array","items":{"type":"string"}},
+                "group_id":{"type":"string"},
+                "descendant_run_id":{"type":"string"},
+                "selector":{"type":"string","enum":["child","tool","tier","risk","path","target"]},
+                "selector_value":{"type":"string"},
+                "action":{"type":"string","enum":["approve","deny","defer"]},
+                "atomic":{"type":"boolean"},
+                "group_revision":{"type":"integer","minimum":0},
+                "reason":{"type":"string"}
+            },
+            "required":["action"],
+            "oneOf":[
+                {"required":["request_ids"]},
+                {"required":["group_id"]},
+                {"required":["descendant_run_id"]},
+                {"required":["selector"]}
+            ],
+            "additionalProperties":false
+        })
+    }
+    fn call<'a>(&'a self, args: ToolArgs, ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+        Box::pin(async move {
+            let (broker, actor) = broker_and_actor(ctx, self.name())?;
+            for field in [
+                "session_id",
+                "actor",
+                "actor_run_id",
+                "run_id",
+                "requester_run_id",
+            ] {
+                if args.named(field).is_some() {
+                    return Err(failed(
+                        self.name(),
+                        format!("caller-supplied {field} is not allowed"),
+                    ));
+                }
+            }
+            let selector_count = [
+                args.named("request_ids").is_some(),
+                args.named("group_id").is_some(),
+                args.named("descendant_run_id").is_some(),
+                args.named("selector").is_some(),
+            ]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+            if selector_count != 1 {
+                return Err(failed(
+                    self.name(),
+                    "exactly one of request_ids, group_id, descendant_run_id, or selector is required",
+                ));
+            }
+            let selector = if args.named("request_ids").is_some() {
+                PermissionSelector::RequestIds(request_ids(&args, true)?.into_iter().collect())
+            } else if args.named("group_id").is_some() {
+                PermissionSelector::Group(group_id(&args)?)
+            } else if args.named("descendant_run_id").is_some() {
+                let value = string_arg(&args, "descendant_run_id", 0)?;
+                PermissionSelector::DescendantRun(crate::event::FlowRunId(
+                    Uuid::parse_str(&value).map_err(|_| {
+                        failed(self.name(), "descendant_run_id is not a valid UUID")
+                    })?,
+                ))
+            } else {
+                let kind = string_arg(&args, "selector", 0)?;
+                let value = optional_string(&args, "selector_value")?;
+                match kind.as_str() {
+                    "child" if value.is_none() => PermissionSelector::ChildRun,
+                    "tool" => PermissionSelector::Tool(value.ok_or_else(|| {
+                        failed(self.name(), "tool selector requires selector_value")
+                    })?),
+                    "tier" => PermissionSelector::Tier(match value.as_deref() {
+                        Some("zero") | Some("0") => Tier::Zero,
+                        Some("one") | Some("1") => Tier::One,
+                        Some("two") | Some("2") => Tier::Two,
+                        Some("three") | Some("3") => Tier::Three,
+                        Some("four") | Some("4") => Tier::Four,
+                        _ => {
+                            return Err(failed(
+                                self.name(),
+                                "tier selector_value must be zero through four",
+                            ));
+                        }
+                    }),
+                    "risk" => PermissionSelector::Risk(match value.as_deref() {
+                        Some("workspace_external") => RiskKind::WorkspaceExternal,
+                        Some("network") => RiskKind::Network,
+                        Some("irreversible") => RiskKind::Irreversible,
+                        Some("filesystem_write") => RiskKind::FilesystemWrite,
+                        Some("process_spawn") => RiskKind::ProcessSpawn,
+                        Some("repository_mutation") => RiskKind::RepositoryMutation,
+                        _ => return Err(failed(self.name(), "unknown risk selector_value")),
+                    }),
+                    "path" => {
+                        PermissionSelector::PathPrefix(crate::fs_access::canonicalize_stable(
+                            std::path::Path::new(&value.ok_or_else(|| {
+                                failed(self.name(), "path selector requires selector_value")
+                            })?),
+                        ))
+                    }
+                    "target" => PermissionSelector::Target(match value.as_deref() {
+                        Some("flow") => ApprovalTarget::Flow(actor.run_id.clone()),
+                        _ => {
+                            return Err(failed(self.name(), "target selector_value must be flow"));
+                        }
+                    }),
+                    "child" => {
+                        return Err(failed(
+                            self.name(),
+                            "child selector does not accept selector_value",
+                        ));
+                    }
+                    _ => return Err(failed(self.name(), "unknown selector")),
+                }
+            };
+            let action = match string_arg(&args, "action", 1)?.as_str() {
+                "approve" => PermissionAction::Approve,
+                "deny" => PermissionAction::Deny,
+                "defer" => PermissionAction::Defer,
+                _ => {
+                    return Err(failed(
+                        self.name(),
+                        "action must be approve, deny, or defer",
+                    ));
+                }
+            };
+            let mode = match args.named("atomic") {
+                Some(Value::Bool(true)) => BatchMode::Atomic,
+                Some(Value::Bool(false)) | None => BatchMode::BestEffort,
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "bool".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            };
+            let revision = match args.named("group_revision") {
+                Some(Value::Int(value)) if *value >= 0 => Some(*value as u64),
+                Some(Value::Int(_)) => {
+                    return Err(failed(self.name(), "group_revision must be non-negative"));
+                }
+                None => None,
+                Some(other) => {
+                    return Err(RuntimeError::TypeMismatch {
+                        expected: "int".into(),
+                        actual: other.kind_name().into(),
+                    });
+                }
+            };
+            if revision.is_some() && !matches!(selector, PermissionSelector::Group(_)) {
+                return Err(failed(
+                    self.name(),
+                    "group_revision requires the group_id selector",
+                ));
+            }
+            let results = broker
+                .resolve_batch(
+                    actor,
+                    selector,
+                    action,
+                    None,
+                    optional_string(&args, "reason")?,
+                    mode,
+                    revision,
+                )
+                .map_err(|e| failed(self.name(), e))?;
+            Ok(Value::List(results.into_iter().map(batch_value).collect()))
+        })
+    }
 }
 
 impl Tool for PermissionList {
@@ -590,6 +824,7 @@ mod tests {
             "permission.approve",
             "permission.deny",
             "permission.defer",
+            "permission.batch",
         ] {
             let tool = registry
                 .get(name)
@@ -691,6 +926,101 @@ mod tests {
             RuntimeError::TypeMismatch { expected, actual }
                 if expected == "string" && actual == "int"
         ));
+    }
+
+    #[tokio::test]
+    async fn batch_target_selector_does_not_expose_invisible_user_requests() {
+        let (ctx, broker, requester) = managed_ctx();
+        let pending = submit_pending(&broker, &requester);
+        let args = ToolArgs {
+            positional: Vec::new(),
+            named: vec![
+                ("selector".into(), Value::Str("target".into())),
+                ("selector_value".into(), Value::Str("user".into())),
+                ("action".into(), Value::Str("approve".into())),
+            ],
+        };
+
+        let error = PermissionBatch.call(args, &ctx).await.unwrap_err();
+        assert!(error.to_string().contains("must be flow"));
+        assert!(matches!(
+            broker.get(&pending.request.request_id).unwrap().state,
+            PermissionRequestState::Pending { .. }
+        ));
+    }
+
+    #[test]
+    fn batch_schema_rejects_unknown_fields() {
+        assert_eq!(
+            PermissionBatch.input_schema()["additionalProperties"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_malformed_controls_without_mutating_the_broker() {
+        let cases = [
+            ("atomic", Value::Int(1)),
+            ("atomic", Value::Str("true".into())),
+            ("atomic", Value::Unit),
+            ("group_revision", Value::Int(-1)),
+            ("group_revision", Value::Str("0".into())),
+            ("group_revision", Value::Unit),
+            ("group_revision", Value::Int(0)),
+        ];
+        for (field, value) in cases {
+            let (ctx, broker, requester) = managed_ctx();
+            let pending = submit_pending(&broker, &requester);
+            let args = ToolArgs {
+                positional: Vec::new(),
+                named: vec![
+                    (
+                        "request_ids".into(),
+                        Value::List(vec![Value::Str(pending.request.request_id.to_string())]),
+                    ),
+                    ("action".into(), Value::Str("approve".into())),
+                    (field.into(), value),
+                ],
+            };
+
+            PermissionBatch.call(args, &ctx).await.unwrap_err();
+            assert!(matches!(
+                broker.get(&pending.request.request_id).unwrap().state,
+                PermissionRequestState::Pending { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_caller_identity_fields_without_mutating_the_broker() {
+        for field in [
+            "session_id",
+            "actor",
+            "actor_run_id",
+            "run_id",
+            "requester_run_id",
+        ] {
+            let (ctx, broker, requester) = managed_ctx();
+            let pending = submit_pending(&broker, &requester);
+            let args = ToolArgs {
+                positional: Vec::new(),
+                named: vec![
+                    (
+                        "request_ids".into(),
+                        Value::List(vec![Value::Str(pending.request.request_id.to_string())]),
+                    ),
+                    ("action".into(), Value::Str("approve".into())),
+                    (field.into(), Value::Str("forged".into())),
+                ],
+            };
+
+            let error = PermissionBatch.call(args, &ctx).await.unwrap_err();
+            assert!(error.to_string().contains("caller-supplied"));
+            assert!(matches!(
+                broker.get(&pending.request.request_id).unwrap().state,
+                PermissionRequestState::Pending { .. }
+            ));
+        }
     }
 
     #[tokio::test]
