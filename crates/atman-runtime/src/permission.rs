@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
 use crate::event::FlowRunId;
@@ -12,9 +12,11 @@ use crate::tool::{PathOrigin, Tier};
 use crate::tools::agent_ctrl::FlowRegistry;
 use crate::trust::{ExecutionPolicy, PolicyAction, RiskKind, TrustConfig};
 
+pub const ANCESTOR_OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 macro_rules! permission_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
         pub struct $name(pub Uuid);
 
@@ -35,6 +37,24 @@ macro_rules! permission_id {
 permission_id!(PermissionRequestId);
 permission_id!(PermissionDecisionId);
 permission_id!(PermissionGrantId);
+permission_id!(PermissionGroupId);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupOwner {
+    Flow(FlowRunId),
+    User,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionGroup {
+    pub group_id: PermissionGroupId,
+    pub owner: GroupOwner,
+    pub label: String,
+    pub request_ids: BTreeSet<PermissionRequestId>,
+    pub created_at: DateTime<Utc>,
+    pub revision: u64,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceProvenance {
@@ -126,6 +146,25 @@ impl ResourceProvenance {
 
     pub fn is_unbound(&self) -> bool {
         matches!(self.path_origin, Some(PathOrigin::Unbound))
+    }
+
+    pub fn workspace_relative_path(&self) -> Option<String> {
+        if self.is_external() || self.is_unbound() || self.authorized_targets().count() != 1 {
+            return None;
+        }
+        let root = self.workspace_root.as_deref()?;
+        let relative = self.authorized_targets().next()?.strip_prefix(root).ok()?;
+        if relative.as_os_str().is_empty()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::RootDir
+                )
+            })
+        {
+            return None;
+        }
+        relative.to_str().map(str::to_owned)
     }
 }
 
@@ -232,7 +271,11 @@ pub enum GrantScope {
         run_id: FlowRunId,
         tool_name: String,
     },
-    SamePathRuleUnsupported,
+    ChildRunSamePathRule {
+        run_id: FlowRunId,
+        tool_name: String,
+        workspace_relative_path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,7 +329,7 @@ pub enum ImmediateAuthorization {
     Unrestricted,
     Auto,
     Denied { reason: String },
-    Granted { grant: PermissionGrant },
+    Granted { grant: Box<PermissionGrant> },
 }
 
 #[derive(Debug)]
@@ -376,6 +419,7 @@ pub enum PermissionResolution {
 pub struct PendingPermission {
     pub request: PermissionRequest,
     pub resolution: oneshot::Receiver<PermissionResolution>,
+    pub target_changes: watch::Receiver<ApprovalTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +440,10 @@ pub enum PermissionError {
     GrantExceedsAuthority,
     UnsupportedGrantScope,
     NoEscalationTarget,
+    GroupNotFound,
+    GroupNotEmpty,
+    GroupNotOwner,
+    EmptyGroup,
 }
 
 impl std::fmt::Display for PermissionError {
@@ -413,6 +461,10 @@ impl std::fmt::Display for PermissionError {
             Self::GrantExceedsAuthority => "requested grant exceeds actor authority",
             Self::UnsupportedGrantScope => "path-rule grants require structured provenance",
             Self::NoEscalationTarget => "permission request has no remaining escalation target",
+            Self::GroupNotFound => "permission group was not found",
+            Self::GroupNotEmpty => "permission group must be empty before deletion",
+            Self::GroupNotOwner => "permission group is not owned by this actor",
+            Self::EmptyGroup => "permission group cannot be empty",
         };
         f.write_str(message)
     }
@@ -423,16 +475,18 @@ impl std::error::Error for PermissionError {}
 struct RequestEntry {
     request: PermissionRequest,
     responder: Option<oneshot::Sender<PermissionResolution>>,
+    target_tx: Option<watch::Sender<ApprovalTarget>>,
 }
 
 struct SubmissionContext {
-    target_authority: ApprovalAuthority,
+    target_authority: Option<ApprovalAuthority>,
 }
 
 #[derive(Default)]
 struct BrokerState {
     requests: HashMap<PermissionRequestId, RequestEntry>,
     grants: Vec<PermissionGrant>,
+    groups: HashMap<PermissionGroupId, PermissionGroup>,
 }
 
 #[derive(Debug, Clone)]
@@ -476,7 +530,7 @@ struct TerminalCleanup {
 impl crate::tools::agent_ctrl::FlowTerminalObserver for TerminalCleanup {
     fn flow_became_terminal(&self, session_id: &str, run_id: &FlowRunId) {
         if let Some(broker) = self.broker.upgrade() {
-            broker.cancel_for_run_locked(session_id, run_id, "requesting flow is terminal");
+            broker.handle_terminal_locked(session_id, run_id);
         }
     }
 }
@@ -546,15 +600,13 @@ impl PermissionBroker {
         shell: bool,
         policy: &TrustConfig,
     ) -> Result<SubmissionOutcome, PermissionError> {
-        let session_id = session_id.ok_or(PermissionError::MissingIdentity)?;
-        let target = ApprovalAuthority::User(self.user_authority(session_id, None));
         self.submit_to_with_context(
-            Some(session_id),
+            session_id,
             run_id,
             intent,
             shell,
             SubmissionContext {
-                target_authority: target,
+                target_authority: None,
             },
             policy,
         )
@@ -574,7 +626,9 @@ impl PermissionBroker {
             run_id,
             intent,
             shell,
-            SubmissionContext { target_authority },
+            SubmissionContext {
+                target_authority: Some(target_authority),
+            },
             policy,
         )
     }
@@ -606,8 +660,14 @@ impl PermissionBroker {
         policy: &TrustConfig,
     ) -> Result<SubmissionOutcome, PermissionError> {
         let requirement = AuthorityRequirement::from_intent(&intent, shell);
-        let identity = self.authenticate_requester(session_id, run_id, &requirement)?;
-        let target = self.authenticate_target(&identity, context.target_authority)?;
+        let identity =
+            self.authenticate_requester(session_id, run_id, &requirement, &intent.provenance)?;
+        let explicit_target = context
+            .target_authority
+            .map(|target| {
+                self.authenticate_target(&identity, &requirement, &intent.provenance, target)
+            })
+            .transpose()?;
         let (execution_policy, action) = identity.effective_authority.constrain_policy(
             policy,
             intent.tier,
@@ -626,11 +686,21 @@ impl PermissionBroker {
                     reason: "permission policy denied the invocation".into(),
                 }),
                 PolicyAction::Ask => {
-                    matching_grant(&state.grants, &identity, &intent, &requirement)
-                        .map(|grant| ImmediateAuthorization::Granted { grant })
+                    matching_grant(&state.grants, &identity, &intent, &requirement).map(|grant| {
+                        ImmediateAuthorization::Granted {
+                            grant: Box::new(grant),
+                        }
+                    })
                 }
             }
         };
+        let target = explicit_target.unwrap_or_else(|| {
+            if immediate.is_none() {
+                self.next_eligible_target(&identity, &requirement, &intent.provenance, None)
+            } else {
+                ApprovalTarget::User
+            }
+        });
         let request_state = match &immediate {
             Some(ImmediateAuthorization::Denied { .. }) => PermissionRequestState::Denied {
                 decision_id: PermissionDecisionId::now(),
@@ -666,6 +736,7 @@ impl PermissionBroker {
                 RequestEntry {
                     request: request.clone(),
                     responder: None,
+                    target_tx: None,
                 },
             );
             return Ok(SubmissionOutcome::Immediate(Box::new(
@@ -677,16 +748,22 @@ impl PermissionBroker {
         }
 
         let (responder, resolution) = oneshot::channel();
+        let (target_tx, target_changes) = watch::channel(match &request.state {
+            PermissionRequestState::Pending { target } => target.clone(),
+            _ => unreachable!("pending submission must have a target"),
+        });
         state.requests.insert(
             request_id,
             RequestEntry {
                 request: request.clone(),
                 responder: Some(responder),
+                target_tx: Some(target_tx),
             },
         );
         Ok(SubmissionOutcome::Pending(Box::new(PendingPermission {
             request,
             resolution,
+            target_changes,
         })))
     }
 
@@ -759,7 +836,7 @@ impl PermissionBroker {
         };
         let entry = state.requests.get_mut(request_id).unwrap();
         entry.request.escalation_path.push(EscalationHop {
-            target,
+            target: target.clone(),
             actor: Some(actor.clone()),
             action: Some(action),
             reason: reason.clone(),
@@ -777,10 +854,25 @@ impl PermissionBroker {
                 cancel_entry(entry, reason);
                 return Ok(ResolveOutcome::Deferred(decision));
             }
-            let next_target = ApprovalTarget::User;
+            let requester = self
+                .flows
+                .lookup_run(&entry.request.requesting_run_id)
+                .ok_or(PermissionError::RequestNotFound)?;
+            let next_target = self.next_eligible_target(
+                &requester,
+                &entry.request.requirement,
+                &entry.request.intent.provenance,
+                match &target {
+                    ApprovalTarget::Flow(run_id) => Some(run_id),
+                    ApprovalTarget::User => None,
+                },
+            );
             entry.request.state = PermissionRequestState::Pending {
                 target: next_target.clone(),
             };
+            if let Some(target_tx) = &entry.target_tx {
+                let _ = target_tx.send(next_target.clone());
+            }
             entry.request.escalation_path.push(EscalationHop {
                 target: next_target,
                 actor: None,
@@ -833,6 +925,76 @@ impl PermissionBroker {
         Ok(ResolveOutcome::Resolved(decision))
     }
 
+    pub fn defer_timed_out_target(
+        &self,
+        request_id: &PermissionRequestId,
+        expected_target: &FlowRunId,
+    ) -> Result<bool, PermissionError> {
+        self.flows.with_lifecycle_arbitration(|| {
+            self.defer_unavailable_target_locked(
+                request_id,
+                expected_target,
+                "permission.parent_timeout",
+                "ancestor offer timed out",
+            )
+        })
+    }
+
+    fn defer_unavailable_target_locked(
+        &self,
+        request_id: &PermissionRequestId,
+        expected_target: &FlowRunId,
+        component: &str,
+        reason: &str,
+    ) -> Result<bool, PermissionError> {
+        let mut state = self.state.lock().unwrap();
+        let entry = state
+            .requests
+            .get_mut(request_id)
+            .ok_or(PermissionError::RequestNotFound)?;
+        if !matches!(
+            &entry.request.state,
+            PermissionRequestState::Pending { target: ApprovalTarget::Flow(run_id) }
+                if run_id == expected_target
+        ) {
+            return Ok(false);
+        }
+        let requester = self
+            .flows
+            .lookup_run(&entry.request.requesting_run_id)
+            .ok_or(PermissionError::RequestNotFound)?;
+        let now = Utc::now();
+        entry.request.escalation_path.push(EscalationHop {
+            target: ApprovalTarget::Flow(expected_target.clone()),
+            actor: Some(DecisionActor::System {
+                component: component.into(),
+            }),
+            action: Some(PermissionAction::Defer),
+            reason: Some(reason.into()),
+            at: now,
+        });
+        let next_target = self.next_eligible_target(
+            &requester,
+            &entry.request.requirement,
+            &entry.request.intent.provenance,
+            Some(expected_target),
+        );
+        entry.request.state = PermissionRequestState::Pending {
+            target: next_target.clone(),
+        };
+        entry.request.escalation_path.push(EscalationHop {
+            target: next_target.clone(),
+            actor: None,
+            action: None,
+            reason: None,
+            at: now,
+        });
+        if let Some(target_tx) = &entry.target_tx {
+            let _ = target_tx.send(next_target);
+        }
+        Ok(true)
+    }
+
     pub fn cancel(
         &self,
         request_id: &PermissionRequestId,
@@ -853,6 +1015,33 @@ impl PermissionBroker {
     pub fn cancel_for_run(&self, session_id: &str, run_id: &FlowRunId, reason: &str) -> usize {
         self.flows
             .with_lifecycle_arbitration(|| self.cancel_for_run_locked(session_id, run_id, reason))
+    }
+
+    fn handle_terminal_locked(&self, session_id: &str, run_id: &FlowRunId) {
+        self.cancel_for_run_locked(session_id, run_id, "requesting flow is terminal");
+        let request_ids: Vec<_> = self
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    &entry.request.state,
+                    PermissionRequestState::Pending { target: ApprovalTarget::Flow(target) }
+                        if target == run_id
+                )
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        for request_id in request_ids {
+            let _ = self.defer_unavailable_target_locked(
+                &request_id,
+                run_id,
+                "permission.target_terminal",
+                "target flow became terminal",
+            );
+        }
     }
 
     /// Cancels a run's pending requests and revokes its grants. Callers must already
@@ -945,6 +1134,183 @@ impl PermissionBroker {
         requests
     }
 
+    pub fn visible_get(
+        &self,
+        actor: &Arc<FlowIdentity>,
+        request_id: &PermissionRequestId,
+    ) -> Result<Option<PermissionRequest>, PermissionError> {
+        self.authenticate_visibility_actor(actor)?;
+        let request = self
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .get(request_id)
+            .map(|entry| entry.request.clone());
+        Ok(request.filter(|request| self.visible_to(actor, request)))
+    }
+
+    pub fn visible_list(
+        &self,
+        actor: &Arc<FlowIdentity>,
+    ) -> Result<Vec<PermissionRequest>, PermissionError> {
+        self.authenticate_visibility_actor(actor)?;
+        let mut requests: Vec<_> = self
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .values()
+            .map(|entry| entry.request.clone())
+            .filter(|request| self.visible_to(actor, request))
+            .collect();
+        requests.sort_by_key(|request| request.requested_at);
+        Ok(requests)
+    }
+
+    pub fn authenticate_control_actor(
+        &self,
+        actor: &Arc<FlowIdentity>,
+    ) -> Result<(), PermissionError> {
+        self.authenticate_visibility_actor(actor)
+    }
+
+    pub fn create_group(
+        &self,
+        actor: &Arc<FlowIdentity>,
+        request_ids: BTreeSet<PermissionRequestId>,
+        label: String,
+    ) -> Result<PermissionGroup, PermissionError> {
+        self.authenticate_visibility_actor(actor)?;
+        if request_ids.is_empty() {
+            return Err(PermissionError::EmptyGroup);
+        }
+        let mut state = self.state.lock().unwrap();
+        if request_ids.iter().any(|request_id| {
+            state
+                .requests
+                .get(request_id)
+                .is_none_or(|entry| !self.visible_to(actor, &entry.request))
+        }) {
+            return Err(PermissionError::ActorNotAuthorized);
+        }
+        let group = PermissionGroup {
+            group_id: PermissionGroupId::now(),
+            owner: GroupOwner::Flow(actor.run_id.clone()),
+            label,
+            request_ids,
+            created_at: Utc::now(),
+            revision: 0,
+        };
+        state.groups.insert(group.group_id.clone(), group.clone());
+        Ok(group)
+    }
+
+    pub fn visible_group_get(
+        &self,
+        actor: &Arc<FlowIdentity>,
+        group_id: &PermissionGroupId,
+    ) -> Result<Option<PermissionGroup>, PermissionError> {
+        self.authenticate_visibility_actor(actor)?;
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .groups
+            .get(group_id)
+            .filter(|group| group.owner == GroupOwner::Flow(actor.run_id.clone()))
+            .cloned())
+    }
+
+    pub fn visible_group_list(
+        &self,
+        actor: &Arc<FlowIdentity>,
+    ) -> Result<Vec<PermissionGroup>, PermissionError> {
+        self.authenticate_visibility_actor(actor)?;
+        let mut groups: Vec<_> = self
+            .state
+            .lock()
+            .unwrap()
+            .groups
+            .values()
+            .filter(|group| group.owner == GroupOwner::Flow(actor.run_id.clone()))
+            .cloned()
+            .collect();
+        groups.sort_by_key(|group| group.created_at);
+        Ok(groups)
+    }
+
+    pub fn ungroup_requests(
+        &self,
+        actor: &Arc<FlowIdentity>,
+        group_id: &PermissionGroupId,
+        request_ids: &BTreeSet<PermissionRequestId>,
+    ) -> Result<PermissionGroup, PermissionError> {
+        self.authenticate_visibility_actor(actor)?;
+        let mut state = self.state.lock().unwrap();
+        let group = state
+            .groups
+            .get_mut(group_id)
+            .ok_or(PermissionError::GroupNotFound)?;
+        if group.owner != GroupOwner::Flow(actor.run_id.clone()) {
+            return Err(PermissionError::GroupNotOwner);
+        }
+        let previous_len = group.request_ids.len();
+        group.request_ids.retain(|id| !request_ids.contains(id));
+        if group.request_ids.len() != previous_len {
+            group.revision += 1;
+        }
+        Ok(group.clone())
+    }
+
+    pub fn delete_empty_group(
+        &self,
+        actor: &Arc<FlowIdentity>,
+        group_id: &PermissionGroupId,
+    ) -> Result<PermissionGroup, PermissionError> {
+        self.authenticate_visibility_actor(actor)?;
+        let mut state = self.state.lock().unwrap();
+        let group = state
+            .groups
+            .get(group_id)
+            .ok_or(PermissionError::GroupNotFound)?;
+        if group.owner != GroupOwner::Flow(actor.run_id.clone()) {
+            return Err(PermissionError::GroupNotOwner);
+        }
+        if !group.request_ids.is_empty() {
+            return Err(PermissionError::GroupNotEmpty);
+        }
+        Ok(state.groups.remove(group_id).expect("group exists"))
+    }
+
+    fn authenticate_visibility_actor(
+        &self,
+        actor: &Arc<FlowIdentity>,
+    ) -> Result<(), PermissionError> {
+        self.authenticate_registered_identity(actor)?;
+        if !matches!(actor.execution_state(), FlowExecutionState::Running) {
+            return Err(PermissionError::ActorNotRunning);
+        }
+        if !actor.effective_authority.permission_management {
+            return Err(PermissionError::PermissionManagementRequired);
+        }
+        Ok(())
+    }
+
+    fn visible_to(&self, actor: &FlowIdentity, request: &PermissionRequest) -> bool {
+        request.session_id == actor.session_id
+            && !request.state.is_terminal()
+            && matches!(
+                &request.state,
+                PermissionRequestState::Pending {
+                    target: ApprovalTarget::Flow(target),
+                } if target == &actor.run_id
+            )
+            && self
+                .flows
+                .is_strict_ancestor(&actor.run_id, &request.requesting_run_id)
+    }
+
     pub fn grants(&self) -> Vec<PermissionGrant> {
         self.state.lock().unwrap().grants.clone()
     }
@@ -968,6 +1334,7 @@ impl PermissionBroker {
         session_id: Option<&str>,
         run_id: Option<&FlowRunId>,
         requirement: &AuthorityRequirement,
+        provenance: &ResourceProvenance,
     ) -> Result<Arc<FlowIdentity>, PermissionError> {
         let session_id = session_id.ok_or(PermissionError::MissingIdentity)?;
         let run_id = run_id.ok_or(PermissionError::MissingIdentity)?;
@@ -982,7 +1349,7 @@ impl PermissionBroker {
         if !matches!(identity.execution_state(), FlowExecutionState::Running) {
             return Err(PermissionError::ActorNotRunning);
         }
-        if !authority_contains(&identity.effective_authority, requirement) {
+        if !authority_contains(&identity.effective_authority, requirement, provenance) {
             return Err(PermissionError::GrantExceedsAuthority);
         }
         Ok(identity)
@@ -1002,9 +1369,41 @@ impl PermissionBroker {
         Ok(())
     }
 
+    fn next_eligible_target(
+        &self,
+        requester: &FlowIdentity,
+        requirement: &AuthorityRequirement,
+        provenance: &ResourceProvenance,
+        after: Option<&FlowRunId>,
+    ) -> ApprovalTarget {
+        let mut past_current = after.is_none();
+        for ancestor in self.flows.strict_ancestors(&requester.run_id) {
+            if !past_current {
+                if after == Some(&ancestor.run_id) {
+                    past_current = true;
+                }
+                continue;
+            }
+            if ancestor.session_id == requester.session_id
+                && matches!(ancestor.execution_state(), FlowExecutionState::Running)
+                && !matches!(
+                    ancestor.invocation,
+                    crate::flow_authority::InvocationKind::SpawnSync
+                )
+                && ancestor.effective_authority.permission_management
+                && authority_contains(&ancestor.effective_authority, requirement, provenance)
+            {
+                return ApprovalTarget::Flow(ancestor.run_id.clone());
+            }
+        }
+        ApprovalTarget::User
+    }
+
     fn authenticate_target(
         &self,
         requester: &FlowIdentity,
+        requirement: &AuthorityRequirement,
+        provenance: &ResourceProvenance,
         authority: ApprovalAuthority,
     ) -> Result<ApprovalTarget, PermissionError> {
         match authority {
@@ -1023,6 +1422,9 @@ impl PermissionBroker {
                 }
                 if !target.effective_authority.permission_management {
                     return Err(PermissionError::PermissionManagementRequired);
+                }
+                if !authority_contains(&target.effective_authority, requirement, provenance) {
+                    return Err(PermissionError::GrantExceedsAuthority);
                 }
                 Ok(ApprovalTarget::Flow(target.run_id.clone()))
             }
@@ -1047,8 +1449,8 @@ impl PermissionBroker {
         if action != PermissionAction::Approve && scope.is_some() {
             return Err(PermissionError::ActorNotAuthorized);
         }
-        if matches!(scope, Some(GrantScope::SamePathRuleUnsupported)) {
-            return Err(PermissionError::UnsupportedGrantScope);
+        if let Some(GrantScope::ChildRunSamePathRule { .. }) = scope {
+            validate_same_path_scope(request, scope)?;
         }
         match authority {
             DecisionAuthority::Flow(authority) => {
@@ -1067,7 +1469,11 @@ impl PermissionBroker {
                 if !identity.effective_authority.permission_management {
                     return Err(PermissionError::PermissionManagementRequired);
                 }
-                if !authority_contains(&identity.effective_authority, &request.requirement) {
+                if !authority_contains(
+                    &identity.effective_authority,
+                    &request.requirement,
+                    &request.intent.provenance,
+                ) {
                     return Err(PermissionError::GrantExceedsAuthority);
                 }
                 validate_same_tool_scope(request, scope)?;
@@ -1134,13 +1540,82 @@ fn matching_grant(
             grant.session_id == identity.session_id
                 && grant.requesting_run_id == identity.run_id
                 && requirement_contains(&grant.requirement, requirement)
-                && matches!(
-                    &grant.scope,
-                    GrantScope::ChildRunSameTool { run_id, tool_name }
-                        if run_id == &identity.run_id && tool_name == &intent.tool_name
-                )
+                && match &grant.scope {
+                    GrantScope::ChildRunSameTool { run_id, tool_name } => {
+                        run_id == &identity.run_id && tool_name == &intent.tool_name
+                    }
+                    GrantScope::ChildRunSamePathRule {
+                        run_id,
+                        tool_name,
+                        workspace_relative_path,
+                    } => {
+                        run_id == &identity.run_id
+                            && tool_name == &intent.tool_name
+                            && intent.provenance.authorized_targets().count() == 1
+                            && intent
+                                .provenance
+                                .workspace_root
+                                .as_deref()
+                                .and_then(|root| {
+                                    intent
+                                        .provenance
+                                        .authorized_targets()
+                                        .next()
+                                        .and_then(|path| path.strip_prefix(root).ok())
+                                })
+                                .is_some_and(|path| {
+                                    path.to_str() == Some(workspace_relative_path.as_str())
+                                })
+                    }
+                    GrantScope::CurrentCall => false,
+                }
         })
         .cloned()
+}
+
+fn validate_same_path_scope(
+    request: &PermissionRequest,
+    scope: Option<&GrantScope>,
+) -> Result<(), PermissionError> {
+    let Some(GrantScope::ChildRunSamePathRule {
+        run_id,
+        tool_name,
+        workspace_relative_path,
+    }) = scope
+    else {
+        return Ok(());
+    };
+    if run_id != &request.requesting_run_id || tool_name != &request.intent.tool_name {
+        return Err(PermissionError::GrantExceedsAuthority);
+    }
+    let provenance = &request.intent.provenance;
+    if provenance.is_external()
+        || provenance.is_unbound()
+        || provenance.authorized_targets().count() != 1
+        || workspace_relative_path.is_empty()
+    {
+        return Err(PermissionError::UnsupportedGrantScope);
+    }
+    let Some(root) = provenance.workspace_root.as_deref() else {
+        return Err(PermissionError::UnsupportedGrantScope);
+    };
+    let Some(path) = provenance.authorized_targets().next() else {
+        return Err(PermissionError::UnsupportedGrantScope);
+    };
+    let Ok(relative) = path.strip_prefix(root) else {
+        return Err(PermissionError::GrantExceedsAuthority);
+    };
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
+    }) || relative.as_os_str().is_empty()
+        || relative.to_str() != Some(workspace_relative_path.as_str())
+    {
+        return Err(PermissionError::UnsupportedGrantScope);
+    }
+    Ok(())
 }
 
 fn equivalent_grant(left: &PermissionGrant, right: &PermissionGrant) -> bool {
@@ -1169,6 +1644,7 @@ fn actor_matches_target(actor: &DecisionActor, target: &ApprovalTarget) -> bool 
 fn authority_contains(
     authority: &crate::flow_authority::EffectiveAuthority,
     requirement: &AuthorityRequirement,
+    provenance: &ResourceProvenance,
 ) -> bool {
     let tier_index = match requirement.tier {
         Tier::Zero => 0,
@@ -1180,6 +1656,13 @@ fn authority_contains(
     authority.allowed_tiers[tier_index]
         && requirement.risks.is_subset(&authority.allowed_risks)
         && (!requirement.shell || authority.shell)
+        && provenance.authorized_targets().all(|target| {
+            authority.workspace_root.as_deref().is_none_or(|root| {
+                crate::fs_access::canonicalize_stable(target)
+                    .strip_prefix(root)
+                    .is_ok()
+            })
+        })
 }
 
 #[cfg(test)]
@@ -1359,7 +1842,34 @@ mod tests {
     }
 
     #[test]
-    fn unrestricted_still_requires_authenticated_identity() {
+    fn blocked_sync_parent_is_skipped_during_escalation() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let sync_parent = flows
+            .register_child(
+                &root.run_id,
+                FlowRunId::now(),
+                InvocationKind::SpawnSync,
+                true,
+                ChildWorkspaceAuthority::Inherit,
+            )
+            .unwrap();
+        let requester = child(&flows, &sync_parent);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, sync_parent.clone()).unwrap()
+        else {
+            panic!("expected pending request");
+        };
+        assert!(matches!(
+            pending.request.state,
+            PermissionRequestState::Pending {
+                target: ApprovalTarget::Flow(ref run_id)
+            } if run_id == &root.run_id
+        ));
+    }
+
         let broker = PermissionBroker::new(Arc::new(FlowRegistry::default()));
         let policy = TrustConfig {
             mode: TrustMode::Reckless,
@@ -1935,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn same_path_grant_scope_stays_unsupported() {
+    fn same_path_grant_scope_stays_unsupported_for_unbound_resources() {
         let flows = Arc::new(FlowRegistry::default());
         let requester = register_root(&flows, "session", false);
         let broker = PermissionBroker::new(flows);
@@ -1946,7 +2456,11 @@ mod tests {
                 &pending.request.request_id,
                 &user_decision(&broker, "session"),
                 PermissionAction::Approve,
-                Some(GrantScope::SamePathRuleUnsupported),
+                Some(GrantScope::ChildRunSamePathRule {
+                    run_id: requester.run_id.clone(),
+                    tool_name: "bash.spawn".into(),
+                    workspace_relative_path: "src/lib.rs".into(),
+                }),
                 None,
             ),
             Err(PermissionError::UnsupportedGrantScope)
@@ -2022,5 +2536,688 @@ mod tests {
             pending.resolution.blocking_recv().unwrap(),
             PermissionResolution::Decision(_)
         ));
+    }
+    #[test]
+    fn root_capability_does_not_amplify_child_authority() {
+        let trust = TrustConfig::default();
+        let root = EffectiveAuthority::root(&trust, false, None);
+        assert!(root.permission_management);
+        let restricted = EffectiveAuthority {
+            permission_management: false,
+            ..root.clone()
+        };
+        let child = root.for_child(&restricted, false, None).unwrap();
+        assert!(!child.permission_management);
+    }
+
+    #[test]
+    fn nearest_target_skips_terminal_ancestor() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let middle = child(&flows, &root);
+        let requester = child(&flows, &middle);
+        flows.mark_terminal(&middle.run_id);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let requirement = AuthorityRequirement::from_intent(&intent(), false);
+        assert_eq!(
+            broker.next_eligible_target(&requester, &requirement, &intent().provenance, None,),
+            ApprovalTarget::Flow(root.run_id.clone())
+        );
+    }
+
+    #[test]
+    fn defer_records_flow_actor_and_moves_to_next_hop() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, root.clone()).unwrap()
+        else {
+            panic!("expected pending");
+        };
+        let authority = DecisionAuthority::Flow(broker.flow_authority(root.clone()).unwrap());
+        assert!(matches!(
+            broker.resolve(
+                &pending.request.request_id,
+                &authority,
+                PermissionAction::Defer,
+                None,
+                Some("not mine".into())
+            ),
+            Ok(ResolveOutcome::Deferred(_))
+        ));
+        let request = broker.get(&pending.request.request_id).unwrap();
+        assert!(
+            matches!(request.escalation_path[1].actor, Some(DecisionActor::Flow { ref run_id, .. }) if run_id == &root.run_id)
+        );
+        assert!(matches!(
+            request.state,
+            PermissionRequestState::Pending {
+                target: ApprovalTarget::User
+            }
+        ));
+    }
+
+    #[test]
+    fn stale_timeout_cannot_retarget_resolved_request() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, root.clone()).unwrap()
+        else {
+            panic!("expected pending");
+        };
+        broker
+            .resolve(
+                &pending.request.request_id,
+                &DecisionAuthority::Flow(broker.flow_authority(root).unwrap()),
+                PermissionAction::Approve,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(
+            !broker
+                .defer_timed_out_target(&pending.request.request_id, &requester.run_id)
+                .unwrap()
+        );
+        assert!(matches!(
+            broker.get(&pending.request.request_id).unwrap().state,
+            PermissionRequestState::Approved { .. }
+        ));
+    }
+
+    #[test]
+    fn terminal_target_retargets_pending_request() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let middle = child(&flows, &root);
+        let requester = child(&flows, &middle);
+        let broker = PermissionBroker::shared(Arc::clone(&flows));
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, middle.clone()).unwrap()
+        else {
+            panic!("expected pending");
+        };
+        flows.mark_terminal(&middle.run_id);
+        assert_eq!(
+            pending.target_changes.borrow().clone(),
+            ApprovalTarget::Flow(root.run_id.clone())
+        );
+        assert_eq!(
+            broker.get(&pending.request.request_id).unwrap().state,
+            PermissionRequestState::Pending {
+                target: ApprovalTarget::Flow(root.run_id.clone())
+            }
+        );
+    }
+
+    #[test]
+    fn visible_apis_reject_unknown_forged_terminal_blocked_and_unprivileged_actors() {
+        let cases = ["unknown", "forged", "terminal", "blocked", "unprivileged"];
+        for case in cases {
+            let flows = Arc::new(FlowRegistry::default());
+            let actor = register_root(&flows, "session", case != "unprivileged");
+            let requester = child(&flows, &actor);
+            let broker = PermissionBroker::new(Arc::clone(&flows));
+            let pending = if case == "unprivileged" {
+                submit_user(&broker, &requester, intent())
+            } else {
+                let SubmissionOutcome::Pending(pending) =
+                    submit_to_flow(&broker, &requester, Arc::clone(&actor)).unwrap()
+                else {
+                    panic!("expected pending");
+                };
+                *pending
+            };
+            let tested_actor = match case {
+                "unknown" => Arc::new(FlowIdentity {
+                    session_id: actor.session_id.clone(),
+                    run_id: FlowRunId::now(),
+                    parent_run_id: None,
+                    root_run_id: actor.root_run_id.clone(),
+                    invocation: InvocationKind::Root,
+                    effective_authority: authority(true),
+                    execution_state: Mutex::new(FlowExecutionState::Running),
+                }),
+                "forged" => Arc::new(FlowIdentity {
+                    session_id: actor.session_id.clone(),
+                    run_id: actor.run_id.clone(),
+                    parent_run_id: actor.parent_run_id.clone(),
+                    root_run_id: actor.root_run_id.clone(),
+                    invocation: actor.invocation,
+                    effective_authority: actor.effective_authority.clone(),
+                    execution_state: Mutex::new(FlowExecutionState::Running),
+                }),
+                "terminal" => {
+                    flows.mark_terminal(&actor.run_id);
+                    Arc::clone(&actor)
+                }
+                "blocked" => {
+                    *actor.execution_state.lock().unwrap() =
+                        FlowExecutionState::BlockedOnDescendants {
+                            child_run_counts: std::collections::HashMap::from([(
+                                requester.run_id.clone(),
+                                1,
+                            )]),
+                        };
+                    Arc::clone(&actor)
+                }
+                "unprivileged" => Arc::clone(&actor),
+                _ => unreachable!(),
+            };
+
+            assert!(broker.visible_list(&tested_actor).is_err(), "{case}");
+            assert!(
+                broker
+                    .visible_get(&tested_actor, &pending.request.request_id)
+                    .is_err(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn visible_apis_only_return_pending_requests_targeted_to_the_actor() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let middle = child(&flows, &root);
+        let requester = child(&flows, &middle);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, Arc::clone(&middle)).unwrap()
+        else {
+            panic!("expected pending");
+        };
+
+        assert_eq!(broker.visible_list(&middle).unwrap().len(), 1);
+        assert!(
+            broker
+                .visible_get(&root, &pending.request.request_id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn flow_groups_are_owner_scoped_and_delete_only_when_empty() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let sibling_owner = child(&flows, &root);
+        let requester = child(&flows, &root);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, Arc::clone(&root)).unwrap()
+        else {
+            panic!("expected pending");
+        };
+        let request_id = pending.request.request_id.clone();
+        let group = broker
+            .create_group(&root, BTreeSet::from([request_id.clone()]), "review".into())
+            .unwrap();
+
+        assert_eq!(
+            broker.visible_group_list(&root).unwrap(),
+            vec![group.clone()]
+        );
+        assert!(
+            broker
+                .visible_group_get(&sibling_owner, &group.group_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            broker.delete_empty_group(&root, &group.group_id),
+            Err(PermissionError::GroupNotEmpty)
+        ));
+        let emptied = broker
+            .ungroup_requests(&root, &group.group_id, &BTreeSet::from([request_id]))
+            .unwrap();
+        assert!(emptied.request_ids.is_empty());
+        assert_eq!(emptied.revision, 1);
+        broker.delete_empty_group(&root, &group.group_id).unwrap();
+        assert!(broker.visible_group_list(&root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn group_creation_rejects_hidden_and_unknown_request_ids() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let middle = child(&flows, &root);
+        let requester = child(&flows, &middle);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let SubmissionOutcome::Pending(pending) =
+            submit_to_flow(&broker, &requester, Arc::clone(&middle)).unwrap()
+        else {
+            panic!("expected pending");
+        };
+
+        for request_id in [pending.request.request_id, PermissionRequestId::now()] {
+            assert!(matches!(
+                broker.create_group(&root, BTreeSet::from([request_id]), "hidden".into()),
+                Err(PermissionError::ActorNotAuthorized)
+            ));
+        }
+        assert!(broker.visible_group_list(&root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delegated_workspace_ancestor_is_skipped_when_resource_is_outside_its_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = temp.path().join("root");
+        let delegated_path = temp.path().join("delegated");
+        std::fs::create_dir_all(&root_path).unwrap();
+        std::fs::create_dir_all(&delegated_path).unwrap();
+        let flows = Arc::new(FlowRegistry::default());
+        let root = flows
+            .register_root(
+                "session".into(),
+                FlowRunId::now(),
+                EffectiveAuthority {
+                    workspace_root: Some(crate::fs_access::canonicalize_stable(&root_path)),
+                    ..authority(true)
+                },
+            )
+            .unwrap();
+        let middle = flows
+            .register_child(
+                &root.run_id,
+                FlowRunId::now(),
+                InvocationKind::InlineSubflow,
+                true,
+                ChildWorkspaceAuthority::TrustedDelegation(delegated_path.clone()),
+            )
+            .unwrap();
+        let requester = child(&flows, &middle);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let delegated_intent = PermissionIntent {
+            provenance: ResourceProvenance {
+                path: Some(delegated_path.join("file.txt")),
+                path_origin: Some(PathOrigin::ExplicitInside),
+                workspace_root: Some(delegated_path),
+                ..ResourceProvenance::default()
+            },
+            ..intent()
+        };
+        let SubmissionOutcome::Pending(pending) = broker
+            .submit(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                delegated_intent,
+                false,
+                &ask_policy(),
+            )
+            .unwrap()
+        else {
+            panic!("expected pending");
+        };
+        assert_eq!(
+            pending.request.state,
+            PermissionRequestState::Pending {
+                target: ApprovalTarget::Flow(middle.run_id.clone())
+            }
+        );
+        broker
+            .resolve(
+                &pending.request.request_id,
+                &DecisionAuthority::Flow(broker.flow_authority(middle).unwrap()),
+                PermissionAction::Defer,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            broker.get(&pending.request.request_id).unwrap().state,
+            PermissionRequestState::Pending {
+                target: ApprovalTarget::User
+            }
+        );
+    }
+
+    #[test]
+    fn delegated_requester_cannot_submit_resource_outside_delegated_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent_path = temp.path().join("parent");
+        let delegated_path = temp.path().join("delegated");
+        std::fs::create_dir_all(&parent_path).unwrap();
+        std::fs::create_dir_all(&delegated_path).unwrap();
+        let parent_root = crate::fs_access::canonicalize_stable(&parent_path);
+        let delegated_root = crate::fs_access::canonicalize_stable(&delegated_path);
+        let flows = Arc::new(FlowRegistry::default());
+        let parent = flows
+            .register_root(
+                "session".into(),
+                FlowRunId::now(),
+                EffectiveAuthority {
+                    workspace_root: Some(parent_root.clone()),
+                    ..authority(true)
+                },
+            )
+            .unwrap();
+        let delegated = flows
+            .register_child(
+                &parent.run_id,
+                FlowRunId::now(),
+                InvocationKind::InlineSubflow,
+                true,
+                ChildWorkspaceAuthority::TrustedDelegation(delegated_root.clone()),
+            )
+            .unwrap();
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let outside_intent = PermissionIntent {
+            provenance: ResourceProvenance {
+                path: Some(parent_root.join("parent.txt")),
+                path_origin: Some(PathOrigin::ExplicitInside),
+                workspace_root: Some(parent_root),
+                ..ResourceProvenance::default()
+            },
+            ..intent()
+        };
+        let policies = [
+            ask_policy(),
+            TrustConfig {
+                mode: TrustMode::Eager,
+                escalation: EscalationPolicy::Allow,
+                ..TrustConfig::default()
+            },
+            TrustConfig {
+                mode: TrustMode::Reckless,
+                ..TrustConfig::default()
+            },
+        ];
+        for policy in policies {
+            assert!(matches!(
+                broker.submit(
+                    Some(&delegated.session_id),
+                    Some(&delegated.run_id),
+                    outside_intent.clone(),
+                    false,
+                    &policy,
+                ),
+                Err(PermissionError::GrantExceedsAuthority)
+            ));
+        }
+        assert!(broker.list().is_empty());
+        assert!(broker.grants().is_empty());
+    }
+
+    #[test]
+    fn automatic_and_denied_submissions_do_not_require_approval_target_selection() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let requester = child(&flows, &root);
+        flows.mark_terminal(&root.run_id);
+        let broker = PermissionBroker::new(flows);
+        for policy in [
+            TrustConfig {
+                mode: TrustMode::Eager,
+                escalation: EscalationPolicy::Allow,
+                ..TrustConfig::default()
+            },
+            TrustConfig {
+                mode: TrustMode::Eager,
+                escalation: EscalationPolicy::Deny,
+                ..TrustConfig::default()
+            },
+        ] {
+            assert!(matches!(
+                broker.submit(
+                    Some(&requester.session_id),
+                    Some(&requester.run_id),
+                    intent(),
+                    false,
+                    &policy,
+                ),
+                Ok(SubmissionOutcome::Immediate(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn ask_target_selection_is_lifecycle_arbitrated_with_terminal_transition() {
+        for _ in 0..64 {
+            let flows = Arc::new(FlowRegistry::default());
+            let root = register_root(&flows, "session", true);
+            let requester = child(&flows, &root);
+            let broker = PermissionBroker::shared(Arc::clone(&flows));
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let submitter = {
+                let broker = Arc::clone(&broker);
+                let barrier = Arc::clone(&barrier);
+                let requester = Arc::clone(&requester);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    broker.submit(
+                        Some(&requester.session_id),
+                        Some(&requester.run_id),
+                        intent(),
+                        false,
+                        &ask_policy(),
+                    )
+                })
+            };
+            let terminator = {
+                let flows = Arc::clone(&flows);
+                let barrier = Arc::clone(&barrier);
+                let root_run_id = root.run_id.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    flows.mark_terminal(&root_run_id);
+                })
+            };
+
+            let outcome = submitter.join().unwrap().unwrap();
+            terminator.join().unwrap();
+            let SubmissionOutcome::Pending(pending) = outcome else {
+                panic!("Ask must remain pending");
+            };
+            assert_eq!(
+                broker.get(&pending.request.request_id).unwrap().state,
+                PermissionRequestState::Pending {
+                    target: ApprovalTarget::User
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_is_per_hop_stale_safe_and_user_is_terminal_fallback() {
+        let flows = Arc::new(FlowRegistry::default());
+        let root = register_root(&flows, "session", true);
+        let middle = child(&flows, &root);
+        let requester = child(&flows, &middle);
+        let broker = PermissionBroker::new(Arc::clone(&flows));
+        let pending = match broker
+            .submit(
+                Some(&requester.session_id),
+                Some(&requester.run_id),
+                intent(),
+                false,
+                &ask_policy(),
+            )
+            .unwrap()
+        {
+            SubmissionOutcome::Pending(pending) => pending,
+            _ => panic!("expected pending"),
+        };
+        assert!(
+            broker
+                .defer_timed_out_target(&pending.request.request_id, &middle.run_id)
+                .unwrap()
+        );
+        assert_eq!(
+            pending.target_changes.borrow().clone(),
+            ApprovalTarget::Flow(root.run_id.clone())
+        );
+        assert!(
+            !broker
+                .defer_timed_out_target(&pending.request.request_id, &middle.run_id)
+                .unwrap()
+        );
+        assert!(
+            broker
+                .defer_timed_out_target(&pending.request.request_id, &root.run_id)
+                .unwrap()
+        );
+        assert_eq!(
+            pending.target_changes.borrow().clone(),
+            ApprovalTarget::User
+        );
+        assert!(
+            !broker
+                .defer_timed_out_target(&pending.request.request_id, &root.run_id)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn persistent_same_path_grant_matches_only_same_run_tool_path_and_narrower_risk() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = crate::fs_access::canonicalize_stable(temp.path());
+        let file = root_path.join("file.txt");
+        let other = root_path.join("other.txt");
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let other_run = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let approved_intent = PermissionIntent {
+            risks: BTreeSet::from([RiskKind::FilesystemWrite]),
+            provenance: ResourceProvenance {
+                path: Some(file.clone()),
+                path_origin: Some(PathOrigin::ExplicitInside),
+                workspace_root: Some(root_path.clone()),
+                risks: BTreeSet::from([RiskKind::FilesystemWrite]),
+                ..ResourceProvenance::default()
+            },
+            ..intent()
+        };
+        let pending = submit_user(&broker, &requester, approved_intent.clone());
+        broker
+            .resolve(
+                &pending.request.request_id,
+                &user_decision(&broker, "session"),
+                PermissionAction::Approve,
+                Some(GrantScope::ChildRunSamePathRule {
+                    run_id: requester.run_id.clone(),
+                    tool_name: "bash.spawn".into(),
+                    workspace_relative_path: "file.txt".into(),
+                }),
+                None,
+            )
+            .unwrap();
+
+        let mut narrower = approved_intent.clone();
+        narrower.risks.clear();
+        narrower.provenance.risks.clear();
+        assert!(
+            broker
+                .find_matching_grant(&requester, &narrower, false)
+                .is_some()
+        );
+        let mut wrong_tool = narrower.clone();
+        wrong_tool.tool_name = "fs.write".into();
+        assert!(
+            broker
+                .find_matching_grant(&requester, &wrong_tool, false)
+                .is_none()
+        );
+        let mut wrong_path = narrower.clone();
+        wrong_path.provenance.path = Some(other);
+        assert!(
+            broker
+                .find_matching_grant(&requester, &wrong_path, false)
+                .is_none()
+        );
+        assert!(
+            broker
+                .find_matching_grant(&other_run, &narrower, false)
+                .is_none()
+        );
+        let mut escalated = approved_intent;
+        escalated.risks.insert(RiskKind::Irreversible);
+        assert!(
+            broker
+                .find_matching_grant(&requester, &escalated, false)
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_same_path_grant_rejects_non_utf8_relative_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root_path = crate::fs_access::canonicalize_stable(temp.path());
+        let path = root_path.join(std::ffi::OsString::from_vec(vec![0xff]));
+        let flows = Arc::new(FlowRegistry::default());
+        let requester = register_root(&flows, "session", false);
+        let broker = PermissionBroker::new(flows);
+        let pending = submit_user(
+            &broker,
+            &requester,
+            PermissionIntent {
+                provenance: ResourceProvenance {
+                    path: Some(path),
+                    path_origin: Some(PathOrigin::ExplicitInside),
+                    workspace_root: Some(root_path),
+                    ..ResourceProvenance::default()
+                },
+                ..intent()
+            },
+        );
+        assert!(matches!(
+            broker.resolve(
+                &pending.request.request_id,
+                &user_decision(&broker, "session"),
+                PermissionAction::Approve,
+                Some(GrantScope::ChildRunSamePathRule {
+                    run_id: requester.run_id.clone(),
+                    tool_name: "bash.spawn".into(),
+                    workspace_relative_path: "�".into(),
+                }),
+                None,
+            ),
+            Err(PermissionError::UnsupportedGrantScope)
+        ));
+    }
+
+    #[test]
+    fn root_authority_retains_permission_management_capability() {
+        let root = EffectiveAuthority::root(&TrustConfig::default(), true, None);
+        assert!(root.permission_management);
+        let child = root
+            .inherited_child(true, ChildWorkspaceAuthority::Inherit)
+            .unwrap();
+        assert!(child.permission_management);
+    }
+
+    #[test]
+    fn exact_path_authorization_rejects_sibling_path() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file.txt");
+        let sibling = root.path().join("file.txt.bak");
+        let other = root.path().join("other.txt");
+        std::fs::write(&file, "content").unwrap();
+        std::fs::write(&sibling, "content").unwrap();
+        std::fs::write(&other, "content").unwrap();
+        let authorization = InvocationAuthorization::new(
+            PermissionRequestId::now(),
+            "call-1",
+            "fs.write",
+            ResourceProvenance {
+                path: Some(crate::fs_access::canonicalize_stable(&file)),
+                path_origin: Some(PathOrigin::ExplicitInside),
+                workspace_root: Some(crate::fs_access::canonicalize_stable(root.path())),
+                ..ResourceProvenance::default()
+            },
+            true,
+        );
+        assert!(authorization.covers("fs.write", &file));
+        assert!(!authorization.covers("fs.write", &sibling));
+        assert!(!authorization.covers("fs.write", &other));
     }
 }

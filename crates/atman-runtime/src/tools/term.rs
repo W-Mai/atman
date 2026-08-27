@@ -2400,11 +2400,7 @@ mod tests {
             .register_root(
                 "r4".into(),
                 crate::event::FlowRunId::now(),
-                crate::flow_authority::EffectiveAuthority::root(
-                    &trust,
-                    true,
-                    Some(workspace.to_path_buf()),
-                ),
+                crate::flow_authority::EffectiveAuthority::root(&trust, true, None),
             )
             .unwrap();
         let broker = crate::permission::PermissionBroker::shared(Arc::clone(&flows));

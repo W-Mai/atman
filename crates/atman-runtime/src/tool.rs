@@ -49,6 +49,12 @@ pub enum CancelBehavior {
     Irreversible,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationPlane {
+    Ordinary,
+    PermissionControl,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ToolArgs {
     pub positional: Vec<Value>,
@@ -541,6 +547,9 @@ impl ToolCtx {
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn tier(&self) -> Tier;
+    fn invocation_plane(&self) -> InvocationPlane {
+        InvocationPlane::Ordinary
+    }
     fn approval_level(&self, _args: &ToolArgs, _ctx: &ToolCtx) -> ApprovalLevel {
         ApprovalLevel::from_tier(self.tier())
     }

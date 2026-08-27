@@ -1,4 +1,4 @@
-use crate::approval::{ApprovalOutcome, request_approval};
+use crate::approval::authorize_tool_invocation;
 use crate::error::RuntimeError;
 use crate::tool::{BoxFut, Tier, Tool, ToolArgs, ToolCtx, ToolResult};
 use crate::value::Value;
@@ -993,8 +993,7 @@ struct Approved {
     name: String,
     tool: std::sync::Arc<dyn Tool>,
     call_args: ToolArgs,
-    invocation_ctx: ToolCtx,
-    authorization: crate::permission::InvocationAuthorization,
+    call_ctx: ToolCtx,
 }
 
 async fn partition_and_gate(
@@ -1043,45 +1042,42 @@ async fn partition_and_gate(
             }
         }
     }
-    // Parallel: serial awaits hid all but the first pending node from the UI.
+    // Parallel gating exposes every pending ordinary request to the UI before
+    // execution begins; permission-control calls authenticate without queuing.
     let gates = ready.iter().map(|r| {
-        request_approval(
+        authorize_tool_invocation(
             &r.invocation_ctx,
             &r.id,
             &r.name,
             &r.call_args,
-            r.level,
-            Some(r.tool.as_ref()),
+            r.tool.as_ref(),
         )
     });
     let outcomes = futures::future::join_all(gates).await;
     let mut auto_batch = Vec::new();
     let mut serial_batch = Vec::new();
     for (r, outcome) in ready.into_iter().zip(outcomes) {
-        let level = r.level;
         match outcome {
-            ApprovalOutcome::Approve { authorization } => {
+            Ok(call_ctx) => {
+                let is_control =
+                    r.tool.invocation_plane() == crate::tool::InvocationPlane::PermissionControl;
                 let a = Approved {
                     index: r.index,
                     id: r.id,
                     name: r.name.clone(),
                     tool: r.tool,
                     call_args: r.call_args,
-                    invocation_ctx: r.invocation_ctx,
-                    authorization: *authorization,
+                    call_ctx,
                 };
-                if level == crate::tool::ApprovalLevel::Auto {
+                if r.level == crate::tool::ApprovalLevel::Auto && !is_control {
                     auto_batch.push(a);
                 } else {
                     serial_batch.push(a);
                 }
             }
-            ApprovalOutcome::Deny { reason } => {
-                let msg = build_error_result(
-                    ctx,
-                    &r.id,
-                    &format!("tool `{}` denied by user: {reason}", r.name),
-                );
+            Err(reason) => {
+                let msg =
+                    build_error_result(ctx, &r.id, &format!("tool `{}` denied: {reason}", r.name));
                 out_slots[r.index] = Some(Value::Message(emit_tool_result(ctx, &msg)));
             }
         }
@@ -1095,8 +1091,7 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
     let mut pending = futures::stream::FuturesUnordered::new();
     for a in batch {
         pending.push(async move {
-            let call_ctx = a.invocation_ctx.authorized_for(a.authorization);
-            let result = a.tool.call(a.call_args, &call_ctx).await;
+            let result = a.tool.call(a.call_args, &a.call_ctx).await;
             (a.index, a.id, a.name, result)
         });
     }
@@ -1107,8 +1102,7 @@ async fn run_auto_parallel(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut 
 
 async fn run_serial(batch: Vec<Approved>, ctx: &ToolCtx, out_slots: &mut [Option<Value>]) {
     for a in batch {
-        let call_ctx = a.invocation_ctx.authorized_for(a.authorization);
-        let result = a.tool.call(a.call_args, &call_ctx).await;
+        let result = a.tool.call(a.call_args, &a.call_ctx).await;
         out_slots[a.index] = Some(finish_dispatch(ctx, &a.id, &a.name, result));
     }
 }
@@ -1433,6 +1427,52 @@ mod tests {
                 Ok(Value::Bool(authorized))
             })
         }
+    }
+
+    struct ControlProbeTool;
+
+    impl Tool for ControlProbeTool {
+        fn name(&self) -> &str {
+            "permission.probe"
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Zero
+        }
+
+        fn invocation_plane(&self) -> crate::tool::InvocationPlane {
+            crate::tool::InvocationPlane::PermissionControl
+        }
+
+        fn call<'a>(&'a self, _args: ToolArgs, _ctx: &'a ToolCtx) -> BoxFut<'a, ToolResult> {
+            Box::pin(async { Ok(Value::Unit) })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_routes_permission_control_calls_to_serial_without_recursive_requests() {
+        let registry = crate::tool::ToolRegistry::new();
+        registry.register(std::sync::Arc::new(ControlProbeTool));
+        let ctx = authorized_ctx(std::sync::Arc::new(registry));
+        let before = ctx.permission_broker.as_ref().unwrap().list().len();
+        let uses = vec![
+            Value::Struct(vec![
+                ("id".into(), Value::Str("control-1".into())),
+                ("name".into(), Value::Str("permission.probe".into())),
+                ("input".into(), Value::Struct(Vec::new())),
+            ]),
+            Value::Struct(vec![
+                ("id".into(), Value::Str("control-2".into())),
+                ("name".into(), Value::Str("permission.probe".into())),
+                ("input".into(), Value::Struct(Vec::new())),
+            ]),
+        ];
+        let prepared = prepare_dispatch(&uses, ctx.registry.as_ref().unwrap(), &ctx).unwrap();
+        let (parallel, serial, _) = partition_and_gate(prepared, &ctx).await;
+
+        assert!(parallel.is_empty());
+        assert_eq!(serial.len(), 2);
+        assert_eq!(ctx.permission_broker.as_ref().unwrap().list().len(), before);
     }
 
     #[tokio::test]

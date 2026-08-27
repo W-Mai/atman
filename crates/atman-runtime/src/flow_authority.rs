@@ -68,7 +68,9 @@ impl EffectiveAuthority {
             tier_ceiling,
             risk_ceiling,
             shell,
-            permission_management: false,
+            // The session root is the trust boundary for permission decisions.
+            // Child authorities can only retain this bit through intersection.
+            permission_management: true,
             workspace_root,
         }
     }

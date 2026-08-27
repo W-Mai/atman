@@ -872,24 +872,19 @@ async fn dispatch_tool_call<'a>(
     }
     let call_args = ToolArgs { positional, named };
     let diff_preview = prepare_diff_preview(&name, &call_args);
-    let level = tool.approval_level(&call_args, &ctx_with_anchors);
-    let gate = crate::approval::request_approval(
+    let outcome = match crate::approval::authorize_tool_invocation(
         &ctx_with_anchors,
         &tool_call_id,
         &name,
         &call_args,
-        level,
-        Some(tool.as_ref()),
+        tool.as_ref(),
     )
-    .await;
-    let outcome = match gate {
-        crate::approval::ApprovalOutcome::Deny { reason } => Err(RuntimeError::ToolFailed(
-            format!("tool `{name}` denied by user: {reason}"),
-        )),
-        crate::approval::ApprovalOutcome::Approve { authorization } => {
-            let call_ctx = ctx_with_anchors.authorized_for(*authorization);
-            tool.call(call_args, &call_ctx).await
-        }
+    .await
+    {
+        Err(reason) => Err(RuntimeError::ToolFailed(format!(
+            "tool `{name}` denied: {reason}"
+        ))),
+        Ok(call_ctx) => tool.call(call_args, &call_ctx).await,
     };
     if let Some(tx) = &stream_tx {
         let (ok, preview) = match &outcome {
