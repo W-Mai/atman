@@ -303,6 +303,13 @@ pub struct ModeDisplay {
     pub description: &'static str,
 }
 
+#[derive(Debug, Clone)]
+pub struct EscalationDisplay {
+    pub name: &'static str,
+    pub emoji: &'static str,
+    pub color: ModeColor,
+}
+
 impl Theme {
     pub fn display(&self, mode: TrustMode) -> ModeDisplay {
         match (self, mode) {
@@ -429,6 +436,86 @@ impl Theme {
                 emoji: "🧪",
                 color: ModeColor::Red,
                 description: "drink it and it's gone",
+            },
+        }
+    }
+
+    pub fn escalation_display(&self, escalation: EscalationPolicy) -> EscalationDisplay {
+        match (self, escalation) {
+            (Theme::Default, EscalationPolicy::Deny) => EscalationDisplay {
+                name: "deny",
+                emoji: "🔒",
+                color: ModeColor::Orange,
+            },
+            (Theme::Default, EscalationPolicy::Ask) => EscalationDisplay {
+                name: "ask",
+                emoji: "⚠️",
+                color: ModeColor::Yellow,
+            },
+            (Theme::Default, EscalationPolicy::Allow) => EscalationDisplay {
+                name: "allow",
+                emoji: "✅",
+                color: ModeColor::Green,
+            },
+            (Theme::Wuxia, EscalationPolicy::Deny) => EscalationDisplay {
+                name: "画地为牢",
+                emoji: "⛩️",
+                color: ModeColor::Orange,
+            },
+            (Theme::Wuxia, EscalationPolicy::Ask) => EscalationDisplay {
+                name: "请示",
+                emoji: "📜",
+                color: ModeColor::Yellow,
+            },
+            (Theme::Wuxia, EscalationPolicy::Allow) => EscalationDisplay {
+                name: "放行",
+                emoji: "🎋",
+                color: ModeColor::Green,
+            },
+            (Theme::Animal, EscalationPolicy::Deny) => EscalationDisplay {
+                name: "turtle",
+                emoji: "🐢",
+                color: ModeColor::Orange,
+            },
+            (Theme::Animal, EscalationPolicy::Ask) => EscalationDisplay {
+                name: "owl",
+                emoji: "🦉",
+                color: ModeColor::Yellow,
+            },
+            (Theme::Animal, EscalationPolicy::Allow) => EscalationDisplay {
+                name: "bird",
+                emoji: "🐦",
+                color: ModeColor::Green,
+            },
+            (Theme::Weather, EscalationPolicy::Deny) => EscalationDisplay {
+                name: "fog",
+                emoji: "🌫",
+                color: ModeColor::Orange,
+            },
+            (Theme::Weather, EscalationPolicy::Ask) => EscalationDisplay {
+                name: "cloud",
+                emoji: "☁️",
+                color: ModeColor::Yellow,
+            },
+            (Theme::Weather, EscalationPolicy::Allow) => EscalationDisplay {
+                name: "clear",
+                emoji: "☀️",
+                color: ModeColor::Green,
+            },
+            (Theme::Drink, EscalationPolicy::Deny) => EscalationDisplay {
+                name: "lock-in",
+                emoji: "🍺",
+                color: ModeColor::Orange,
+            },
+            (Theme::Drink, EscalationPolicy::Ask) => EscalationDisplay {
+                name: "card",
+                emoji: "💳",
+                color: ModeColor::Yellow,
+            },
+            (Theme::Drink, EscalationPolicy::Allow) => EscalationDisplay {
+                name: "open-tab",
+                emoji: "🧾",
+                color: ModeColor::Green,
             },
         }
     }
@@ -571,6 +658,24 @@ mod tests {
         let display2 = cfg2.display();
         let warning2 = TrustMode::Reckless.warning(&display2).unwrap();
         assert!(warning2.contains("honey-badger"));
+    }
+
+    #[test]
+    fn wuxia_escalation_display_preserves_localized_labels() {
+        assert_eq!(
+            Theme::Wuxia.escalation_display(EscalationPolicy::Deny).name,
+            "画地为牢"
+        );
+        assert_eq!(
+            Theme::Wuxia.escalation_display(EscalationPolicy::Ask).name,
+            "请示"
+        );
+        assert_eq!(
+            Theme::Wuxia
+                .escalation_display(EscalationPolicy::Allow)
+                .name,
+            "放行"
+        );
     }
 
     #[test]

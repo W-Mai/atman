@@ -31,7 +31,11 @@ pub fn input_paragraph<'a>(
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     );
     let hint_right = if trust.mode == atman_runtime::trust::TrustMode::Eager {
-        format!(" escalation: {} · Tab to cycle ", trust.escalation.label())
+        let display = trust.theme.escalation_display(trust.escalation);
+        format!(
+            " escalation: {} {} · Tab to cycle ",
+            display.emoji, display.name
+        )
     } else {
         " shift+enter · newline · enter · send ".to_string()
     };
