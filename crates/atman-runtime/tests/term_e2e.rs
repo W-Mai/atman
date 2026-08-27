@@ -2,7 +2,8 @@ use atman_runtime::fs_access::{FsAccessMode, FsAccessPolicy};
 use atman_runtime::stream::StreamFrame;
 use atman_runtime::tool::{Tool, ToolArgs};
 use atman_runtime::tools::{self, term::TermSpawn};
-use atman_runtime::{Executor, Value};
+use atman_runtime::trust::{TrustConfig, TrustMode};
+use atman_runtime::{Executor, Tier, Value};
 use tokio::sync::broadcast;
 
 #[tokio::test]
@@ -17,6 +18,10 @@ async fn term_spawn_emits_terminal_chunk_to_stream() {
         .clone()
         .with_term_registry(term_reg)
         .with_session_dir(dir)
+        .with_trust(TrustConfig {
+            mode: TrustMode::Reckless,
+            ..TrustConfig::default()
+        })
         .with_fs_access(FsAccessPolicy {
             mode: FsAccessMode::WorkspaceWrite,
             workspace: Some(std::env::current_dir().unwrap()),
@@ -31,7 +36,8 @@ async fn term_spawn_emits_terminal_chunk_to_stream() {
             ("cols".into(), Value::Int(40)),
         ],
     };
-    let v = TermSpawn.call(args, &ex.tool_ctx).await.unwrap();
+    let call_ctx = ex.tool_ctx.clone().for_tool_invocation(Tier::Four);
+    let v = TermSpawn.call(args, &call_ctx).await.unwrap();
     let Value::Struct(_) = v else {
         panic!("expected struct")
     };

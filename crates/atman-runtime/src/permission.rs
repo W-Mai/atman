@@ -253,7 +253,6 @@ pub struct PermissionRequest {
     pub root_run_id: FlowRunId,
     pub intent: PermissionIntent,
     pub requirement: AuthorityRequirement,
-    pub original_request_id: Option<PermissionRequestId>,
     pub state: PermissionRequestState,
     pub escalation_path: Vec<EscalationHop>,
     pub requested_at: DateTime<Utc>,
@@ -347,6 +346,10 @@ impl InvocationAuthorization {
         self.manual
     }
 
+    pub(crate) fn provenance(&self) -> &ResourceProvenance {
+        &self.provenance
+    }
+
     // Prefix matching would turn a directory permit into blanket subtree access.
     pub fn covers(&self, operation: &str, target: &std::path::Path) -> bool {
         if self.tool_name != operation {
@@ -424,7 +427,6 @@ struct RequestEntry {
 
 struct SubmissionContext {
     target_authority: ApprovalAuthority,
-    original_request_id: Option<PermissionRequestId>,
 }
 
 #[derive(Default)]
@@ -544,18 +546,6 @@ impl PermissionBroker {
         shell: bool,
         policy: &TrustConfig,
     ) -> Result<SubmissionOutcome, PermissionError> {
-        self.submit_with_original_request_id(session_id, run_id, intent, shell, None, policy)
-    }
-
-    pub(crate) fn submit_with_original_request_id(
-        &self,
-        session_id: Option<&str>,
-        run_id: Option<&FlowRunId>,
-        intent: PermissionIntent,
-        shell: bool,
-        original_request_id: Option<PermissionRequestId>,
-        policy: &TrustConfig,
-    ) -> Result<SubmissionOutcome, PermissionError> {
         let session_id = session_id.ok_or(PermissionError::MissingIdentity)?;
         let target = ApprovalAuthority::User(self.user_authority(session_id, None));
         self.submit_to_with_context(
@@ -565,7 +555,6 @@ impl PermissionBroker {
             shell,
             SubmissionContext {
                 target_authority: target,
-                original_request_id,
             },
             policy,
         )
@@ -585,10 +574,7 @@ impl PermissionBroker {
             run_id,
             intent,
             shell,
-            SubmissionContext {
-                target_authority,
-                original_request_id: None,
-            },
+            SubmissionContext { target_authority },
             policy,
         )
     }
@@ -629,19 +615,6 @@ impl PermissionBroker {
         );
         let mut state = self.state.lock().unwrap();
         self.remove_terminal_grants(&mut state);
-        if let Some(original_request_id) = context.original_request_id.as_ref() {
-            let original = state
-                .requests
-                .get(original_request_id)
-                .ok_or(PermissionError::RequestNotFound)?;
-            if original.request.session_id != identity.session_id
-                || original.request.requesting_run_id != identity.run_id
-                || original.request.intent.tool_use_id != intent.tool_use_id
-                || original.request.intent.tool_name != intent.tool_name
-            {
-                return Err(PermissionError::IdentityMismatch);
-            }
-        }
         let request_id = PermissionRequestId::now();
         let now = Utc::now();
         let immediate = if execution_policy == ExecutionPolicy::Unrestricted {
@@ -677,7 +650,6 @@ impl PermissionBroker {
             root_run_id: identity.root_run_id.clone(),
             intent,
             requirement,
-            original_request_id: context.original_request_id,
             state: request_state,
             escalation_path: vec![EscalationHop {
                 target,
@@ -1222,7 +1194,6 @@ mod tests {
             allowed_tiers: [true; 5],
             allowed_risks: BTreeSet::from([
                 RiskKind::WorkspaceExternal,
-                RiskKind::SandboxViolation,
                 RiskKind::Network,
                 RiskKind::Irreversible,
                 RiskKind::FilesystemWrite,
@@ -1230,7 +1201,7 @@ mod tests {
                 RiskKind::RepositoryMutation,
             ]),
             tier_ceiling: [PolicyAction::Auto; 5],
-            risk_ceiling: [PolicyAction::Auto; 7],
+            risk_ceiling: [PolicyAction::Auto; 6],
             shell: true,
             permission_management,
             workspace_root: None,
@@ -1331,57 +1302,6 @@ mod tests {
             submission.request.state,
             PermissionRequestState::Pending { .. }
         ));
-    }
-
-    #[test]
-    fn sandbox_lineage_rejects_cross_run_and_cross_session_requests() {
-        let flows = Arc::new(FlowRegistry::default());
-        let broker = PermissionBroker::new(Arc::clone(&flows));
-        let original_requester = register_root(&flows, "session", true);
-        let original = submit_user(&broker, &original_requester, intent());
-        let original_request_id = original.request.request_id.clone();
-        let same_session_other_run = child(&flows, &original_requester);
-        let other_session = register_root(&flows, "other", true);
-
-        for requester in [same_session_other_run, other_session] {
-            let before = broker.list().len();
-            assert!(matches!(
-                broker.submit_with_original_request_id(
-                    Some(&requester.session_id),
-                    Some(&requester.run_id),
-                    intent(),
-                    false,
-                    Some(original_request_id.clone()),
-                    &ask_policy(),
-                ),
-                Err(PermissionError::IdentityMismatch)
-            ));
-            assert_eq!(broker.list().len(), before);
-        }
-    }
-
-    #[test]
-    fn sandbox_lineage_rejects_another_tool_invocation() {
-        let flows = Arc::new(FlowRegistry::default());
-        let broker = PermissionBroker::new(Arc::clone(&flows));
-        let requester = register_root(&flows, "session", true);
-        let original = submit_user(&broker, &requester, intent());
-        let mut unrelated = intent();
-        unrelated.tool_name = "term.spawn".into();
-        let before = broker.list().len();
-
-        assert!(matches!(
-            broker.submit_with_original_request_id(
-                Some(&requester.session_id),
-                Some(&requester.run_id),
-                unrelated,
-                false,
-                Some(original.request.request_id.clone()),
-                &ask_policy(),
-            ),
-            Err(PermissionError::IdentityMismatch)
-        ));
-        assert_eq!(broker.list().len(), before);
     }
 
     #[test]

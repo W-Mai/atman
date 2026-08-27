@@ -1994,13 +1994,17 @@ max_results = 6
             &hub,
             "[trust]\nmode = \"eager\"\nescalation = \"allow\"\n\
              [trust.tiers.eager]\ntier4 = \"deny\"\n\
-             [trust.risks.eager]\nnetwork = \"deny\"\nfilesystem_write = \"auto\"\n",
+             [trust.risks.eager]\nnetwork = \"deny\"\nfilesystem_write = \"auto\"\noutside_workspace = \"auto\"\n",
         );
 
         let config = hub.trust_config().unwrap();
         assert_eq!(config.escalation, EscalationPolicy::Allow);
         assert_eq!(config.resolve_tier(Tier::Four), PolicyAction::Deny);
         assert_eq!(config.resolve_risk(RiskKind::Network), PolicyAction::Deny);
+        assert_eq!(
+            config.resolve_risk(RiskKind::WorkspaceExternal),
+            PolicyAction::Auto
+        );
         assert_eq!(
             config.resolve_risk(RiskKind::FilesystemWrite),
             PolicyAction::Auto
@@ -2021,6 +2025,22 @@ max_results = 6
             hub.trust_config(),
             Err(ConfigError::Invalid(message))
                 if message.contains("parse trust config") && message.contains("outside")
+        ));
+    }
+
+    #[test]
+    fn config_hub_rejects_obsolete_nested_trust_risk() {
+        let (_dir, hub) = temp_hub();
+        write_config(
+            &hub,
+            "[trust.risks.eager]\nsandbox_violation = \"deny\"\noutside_workspace = \"deny\"\n",
+        );
+
+        assert!(matches!(
+            hub.trust_config(),
+            Err(ConfigError::Invalid(message))
+                if message.contains("parse trust config")
+                    && message.contains("sandbox_violation")
         ));
     }
 

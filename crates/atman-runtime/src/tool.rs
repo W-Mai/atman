@@ -99,6 +99,7 @@ pub struct ToolCtx {
     pub prompt_resolver: Option<std::sync::Arc<dyn crate::rendezvous::PromptResolver>>,
     pub registry: Option<std::sync::Arc<ToolRegistry>>,
     pub sandbox: Option<std::sync::Arc<dyn crate::sandbox::Sandbox>>,
+    execution_policy: Option<crate::trust::ExecutionPolicy>,
     pub events: Option<crate::event::EventSink>,
     pub stdout_broadcast: Option<tokio::sync::broadcast::Sender<String>>,
     pub session_messages: Option<std::sync::Arc<Vec<crate::message::Message>>>,
@@ -440,12 +441,15 @@ impl ToolCtx {
                     .0
             })
             .unwrap_or_else(|| trust.execution_policy());
-        let controlled_tier4 =
-            tier == Tier::Four && execution_policy == crate::trust::ExecutionPolicy::Controlled;
-        if !controlled_tier4 {
+        self.execution_policy = Some(execution_policy);
+        if tier != Tier::Four || execution_policy == crate::trust::ExecutionPolicy::Unrestricted {
             self.sandbox = None;
         }
         self
+    }
+
+    pub(crate) fn execution_policy(&self) -> Option<crate::trust::ExecutionPolicy> {
+        self.execution_policy
     }
 
     pub fn with_safety(mut self, safety: crate::safety::SafetyConfig) -> Self {

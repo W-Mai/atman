@@ -58,7 +58,6 @@ fn submit_to_broker(
     ctx: &ToolCtx,
     intent: crate::permission::PermissionIntent,
     tier: crate::tool::Tier,
-    original_request_id: Option<crate::permission::PermissionRequestId>,
 ) -> Result<crate::permission::SubmissionOutcome, String> {
     let broker = ctx
         .permission_broker
@@ -82,12 +81,11 @@ fn submit_to_broker(
         return Err("permission broker and flow registry mismatch".into());
     }
     broker
-        .submit_with_original_request_id(
+        .submit(
             Some(identity.session_id.as_str()),
             Some(&identity.run_id),
             intent,
             tier == crate::tool::Tier::Four,
-            original_request_id,
             trust,
         )
         .map_err(|error| error.to_string())
@@ -192,11 +190,6 @@ pub async fn request_approval(
     request_approval_with_additional_risks(ctx, id, name, call_args, level, tool, []).await
 }
 
-struct ApprovalSubmissionContext<I> {
-    additional_risks: I,
-    original_request_id: Option<crate::permission::PermissionRequestId>,
-}
-
 pub async fn request_approval_with_additional_risks(
     ctx: &ToolCtx,
     id: &str,
@@ -205,63 +198,6 @@ pub async fn request_approval_with_additional_risks(
     level: ApprovalLevel,
     tool: Option<&dyn crate::tool::Tool>,
     additional_risks: impl IntoIterator<Item = RiskKind>,
-) -> ApprovalOutcome {
-    request_approval_with_context(
-        ctx,
-        id,
-        name,
-        call_args,
-        level,
-        tool,
-        ApprovalSubmissionContext {
-            additional_risks,
-            original_request_id: None,
-        },
-    )
-    .await
-}
-
-pub async fn request_sandbox_relaxation_approval(
-    ctx: &ToolCtx,
-    id: &str,
-    name: &str,
-    call_args: &ToolArgs,
-    level: ApprovalLevel,
-    tool: Option<&dyn crate::tool::Tool>,
-) -> ApprovalOutcome {
-    let Some(authorization) = ctx.invocation_authorization() else {
-        return ApprovalOutcome::Deny {
-            reason: "sandbox relaxation requires the strict invocation authorization".into(),
-        };
-    };
-    if !authorization.is_for_call(id, name) {
-        return ApprovalOutcome::Deny {
-            reason: "sandbox relaxation authorization does not match this invocation".into(),
-        };
-    }
-    request_approval_with_context(
-        ctx,
-        id,
-        name,
-        call_args,
-        level,
-        tool,
-        ApprovalSubmissionContext {
-            additional_risks: [RiskKind::SandboxViolation],
-            original_request_id: Some(authorization.request_id().clone()),
-        },
-    )
-    .await
-}
-
-async fn request_approval_with_context(
-    ctx: &ToolCtx,
-    id: &str,
-    name: &str,
-    call_args: &ToolArgs,
-    level: ApprovalLevel,
-    tool: Option<&dyn crate::tool::Tool>,
-    submission: ApprovalSubmissionContext<impl IntoIterator<Item = RiskKind>>,
 ) -> ApprovalOutcome {
     let provenance = match resolve_provenance(ctx, tool, call_args) {
         Ok(provenance) => provenance,
@@ -304,7 +240,7 @@ async fn request_approval_with_context(
     };
     let tier = tool.map(|t| t.tier()).unwrap_or(crate::tool::Tier::Zero);
     let mut risks = intent_risks(tier, &provenance);
-    risks.extend(submission.additional_risks);
+    risks.extend(additional_risks);
     let intent = crate::permission::PermissionIntent {
         tool_use_id: id.to_string(),
         tool_name: name.to_string(),
@@ -316,7 +252,7 @@ async fn request_approval_with_context(
     };
     // The broker owns the policy decision; the legacy queue below is still the
     // only surface that renders a prompt, so a Pending outcome is handed to it.
-    let brokered = match submit_to_broker(ctx, intent, tier, submission.original_request_id) {
+    let brokered = match submit_to_broker(ctx, intent, tier) {
         Ok(outcome) => outcome,
         Err(error) => {
             return ApprovalOutcome::Deny {
@@ -517,8 +453,7 @@ mod tests {
     use crate::tool::{Tier, Tool};
     use crate::tools::agent_ctrl::FlowRegistry;
     use crate::trust::{
-        PolicyAction, RiskPolicyConfig, RiskPolicyOverrides, TierPolicyConfig, TierPolicyOverrides,
-        TrustConfig, TrustMode,
+        PolicyAction, TierPolicyConfig, TierPolicyOverrides, TrustConfig, TrustMode,
     };
     use std::sync::Arc;
 
@@ -676,153 +611,6 @@ mod tests {
         .await;
         assert!(matches!(outcome, ApprovalOutcome::Approve { .. }));
         assert!(approval.list_pending().is_empty());
-    }
-
-    #[tokio::test]
-    async fn sandbox_relaxation_requires_strict_invocation_authorization() {
-        let (ctx, _approval, _flows) = ctx_with_broker(TrustConfig::default());
-        let broker = ctx.permission_broker.clone().unwrap();
-        let outcome = request_sandbox_relaxation_approval(
-            &ctx,
-            "relaxed",
-            "probe.tool",
-            &ToolArgs::default(),
-            ApprovalLevel::Approve,
-            Some(&Tier2Tool),
-        )
-        .await;
-        assert!(matches!(
-            outcome,
-            ApprovalOutcome::Deny { reason }
-                if reason.contains("strict invocation authorization")
-        ));
-        assert!(broker.list().is_empty());
-    }
-
-    #[tokio::test]
-    async fn sandbox_relaxation_rejects_authorization_for_another_call() {
-        let (ctx, _approval, _flows) = ctx_with_broker(TrustConfig::default());
-        let broker = ctx.permission_broker.clone().unwrap();
-        let authorization = crate::permission::InvocationAuthorization::new(
-            crate::permission::PermissionRequestId::now(),
-            "other",
-            "probe.tool",
-            crate::permission::ResourceProvenance::none(),
-            false,
-        );
-        let outcome = request_sandbox_relaxation_approval(
-            &ctx.authorized_for(authorization),
-            "relaxed",
-            "probe.tool",
-            &ToolArgs::default(),
-            ApprovalLevel::Approve,
-            Some(&Tier2Tool),
-        )
-        .await;
-        assert!(matches!(
-            outcome,
-            ApprovalOutcome::Deny { reason } if reason.contains("does not match")
-        ));
-        assert!(broker.list().is_empty());
-    }
-
-    #[tokio::test]
-    async fn sandbox_relaxation_rejects_nonexistent_original_request() {
-        let (ctx, _approval, _flows) = ctx_with_broker(TrustConfig::default());
-        let broker = ctx.permission_broker.clone().unwrap();
-        let authorization = crate::permission::InvocationAuthorization::new(
-            crate::permission::PermissionRequestId::now(),
-            "relaxed",
-            "probe.tool",
-            crate::permission::ResourceProvenance::none(),
-            false,
-        );
-        let outcome = request_sandbox_relaxation_approval(
-            &ctx.authorized_for(authorization),
-            "relaxed",
-            "probe.tool",
-            &ToolArgs::default(),
-            ApprovalLevel::Approve,
-            Some(&Tier2Tool),
-        )
-        .await;
-        assert!(matches!(
-            outcome,
-            ApprovalOutcome::Deny { reason } if reason.contains("not found")
-        ));
-        assert!(broker.list().is_empty());
-    }
-
-    #[tokio::test]
-    async fn only_explicit_sandbox_relaxation_records_request_lineage() {
-        let trust = TrustConfig {
-            mode: TrustMode::Eager,
-            tiers: TierPolicyConfig {
-                eager: TierPolicyOverrides {
-                    tier2: Some(PolicyAction::Auto),
-                    ..TierPolicyOverrides::default()
-                },
-            },
-            risks: RiskPolicyConfig {
-                eager: RiskPolicyOverrides {
-                    sandbox_violation: Some(PolicyAction::Auto),
-                    ..RiskPolicyOverrides::default()
-                },
-            },
-            ..TrustConfig::default()
-        };
-        let (ctx, _approval, _flows) = ctx_with_broker(trust);
-        let broker = ctx.permission_broker.clone().unwrap();
-        let parent = request_approval(
-            &ctx,
-            "relaxed",
-            "probe.tool",
-            &ToolArgs::default(),
-            ApprovalLevel::Approve,
-            Some(&Tier2Tool),
-        )
-        .await;
-        let ApprovalOutcome::Approve { authorization } = parent else {
-            panic!("expected parent approval");
-        };
-        let parent_request_id = authorization.request_id().clone();
-        let nested_ctx = ctx.authorized_for(*authorization);
-
-        let nested = request_approval(
-            &nested_ctx,
-            "nested",
-            "probe.tool",
-            &ToolArgs::default(),
-            ApprovalLevel::Approve,
-            Some(&Tier2Tool),
-        )
-        .await;
-        assert!(matches!(nested, ApprovalOutcome::Approve { .. }));
-        let relaxed = request_sandbox_relaxation_approval(
-            &nested_ctx,
-            "relaxed",
-            "probe.tool",
-            &ToolArgs::default(),
-            ApprovalLevel::Approve,
-            Some(&Tier2Tool),
-        )
-        .await;
-        assert!(matches!(relaxed, ApprovalOutcome::Approve { .. }));
-
-        let requests = broker.list();
-        let nested_request = requests
-            .iter()
-            .find(|request| request.intent.tool_use_id == "nested")
-            .expect("nested request record");
-        assert_eq!(nested_request.original_request_id, None);
-        let relaxed_request = requests
-            .iter()
-            .find(|request| request.original_request_id.is_some())
-            .expect("relaxed request record");
-        assert_eq!(
-            relaxed_request.original_request_id.as_ref(),
-            Some(&parent_request_id)
-        );
     }
 
     #[tokio::test]

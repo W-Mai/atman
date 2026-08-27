@@ -9,6 +9,7 @@ All notable changes to atman are documented in this file.
 ### ✨ Features
 
 - **Central tool authorization** — tool calls use trusted flow identity, structured resource provenance, and per-invocation approval before filesystem, repository, process, terminal, task, or network side effects.
+- **Strict process sandboxing** — controlled background and terminal processes fail closed on sandbox denial, preserve process and log lifecycle guarantees, and never retry with reduced restrictions.
 - **Managed child workspaces** — `flow.spawn` can opt into automatic or retained Git worktrees, with child Git, filesystem, shell, and terminal operations using the managed directory by default while the parent working directory remains unchanged.
 - **Workspace lifecycle visibility** — flow status, task snapshots, and session events expose optional workspace identity, path, state, and cleanup diagnostics for spawned children.
 

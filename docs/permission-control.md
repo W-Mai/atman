@@ -80,7 +80,6 @@ It can also override structured risks:
 network = "deny"
 filesystem_write = "ask"
 repository_mutation = "ask"
-sandbox_violation = "deny"
 ```
 
 The effective controlled decision is the most restrictive result from the Tier and every declared risk:
@@ -92,7 +91,6 @@ auto < ask < deny
 A tool's provenance may include these risks:
 
 - `workspace_external` — the resource is outside the managed workspace.
-- `sandbox_violation` — the operation requests relaxed execution after a sandbox denial.
 - `network` — the operation accesses a network resource.
 - `irreversible` — the operation is difficult or impossible to undo.
 - `filesystem_write` — the operation changes filesystem contents.
@@ -165,7 +163,7 @@ This prevents a running Flow from creating a broad authority and then widening i
 
 Controlled execution requires a complete trusted invocation context. Missing broker, Flow identity, registry binding, trust snapshot, or run identity causes denial. The runtime does not fall back to an older automatic-approval path.
 
-A sandbox relaxed retry is also a new permission decision. It carries the `sandbox_violation` risk and must use the authorization returned for that retry. A strict sandbox denial is therefore not silently converted into an unrestricted execution.
+A strict sandbox denial is final for that invocation. The runtime never converts it into an unrestricted retry.
 
 ## Configuration reference
 
@@ -185,7 +183,6 @@ tier4 = "deny"
 network = "deny"
 filesystem_write = "ask"
 repository_mutation = "ask"
-sandbox_violation = "deny"
 ```
 
 Use `deny` for operations that must never run automatically, `ask` when the TUI should mediate the decision, and `allow` only when the resulting risk is acceptable for the Session. The central broker and the Flow authority ceiling remain in force for every setting.

@@ -2208,6 +2208,51 @@ mod tests {
     }
 
     #[test]
+    fn open_existing_rejects_obsolete_nested_risk_in_trust_snapshot() {
+        let root = TempDir::new().unwrap();
+        let created = Session::open(root.path()).unwrap();
+        let sid = created.id().to_string();
+        let session_dir = created.dir().to_path_buf();
+        drop(created);
+        std::fs::write(
+            trust_path(&session_dir),
+            br#"{"mode":"eager","risks":{"eager":{"outside_workspace":"deny"}}}"#,
+        )
+        .unwrap();
+        let valid = Session::open_existing_with_trust(
+            root.path(),
+            &sid,
+            crate::trust::TrustConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            valid
+                .trust_config()
+                .resolve_risk(crate::trust::RiskKind::WorkspaceExternal),
+            crate::trust::PolicyAction::Deny
+        );
+        drop(valid);
+
+        std::fs::write(
+            trust_path(&session_dir),
+            br#"{"mode":"eager","risks":{"eager":{"sandbox_violation":"deny","outside_workspace":"deny"}}}"#,
+        )
+        .unwrap();
+        let error = match Session::open_existing_with_trust(
+            root.path(),
+            &sid,
+            crate::trust::TrustConfig::default(),
+        ) {
+            Ok(_) => panic!("obsolete sandbox_violation risk was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(error, SessionOpenError::Trust { source, .. } if source.to_string().contains("sandbox_violation"))
+        );
+    }
+
+    #[test]
     fn session_permission_pipeline_a_b_binds_each_broker_to_only_its_registry() {
         let root = TempDir::new().unwrap();
         let session_a = Session::open(root.path()).unwrap();

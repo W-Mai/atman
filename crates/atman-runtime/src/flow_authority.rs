@@ -36,7 +36,7 @@ pub struct EffectiveAuthority {
     pub allowed_tiers: [bool; 5],
     pub allowed_risks: BTreeSet<RiskKind>,
     pub tier_ceiling: [PolicyAction; 5],
-    pub risk_ceiling: [PolicyAction; 7],
+    pub risk_ceiling: [PolicyAction; 6],
     pub shell: bool,
     pub permission_management: bool,
     pub workspace_root: Option<PathBuf>,
@@ -225,19 +225,17 @@ fn narrowed_workspace(
 fn risk_index(risk: RiskKind) -> usize {
     match risk {
         RiskKind::WorkspaceExternal => 0,
-        RiskKind::SandboxViolation => 1,
-        RiskKind::Network => 2,
-        RiskKind::Irreversible => 3,
-        RiskKind::FilesystemWrite => 4,
-        RiskKind::ProcessSpawn => 5,
-        RiskKind::RepositoryMutation => 6,
+        RiskKind::Network => 1,
+        RiskKind::Irreversible => 2,
+        RiskKind::FilesystemWrite => 3,
+        RiskKind::ProcessSpawn => 4,
+        RiskKind::RepositoryMutation => 5,
     }
 }
 
-fn all_risks() -> [RiskKind; 7] {
+fn all_risks() -> [RiskKind; 6] {
     [
         RiskKind::WorkspaceExternal,
-        RiskKind::SandboxViolation,
         RiskKind::Network,
         RiskKind::Irreversible,
         RiskKind::FilesystemWrite,
@@ -257,7 +255,7 @@ mod tests {
             allowed_tiers: [true, false, true, false, true],
             allowed_risks: BTreeSet::from([RiskKind::Network, RiskKind::FilesystemWrite]),
             tier_ceiling: [PolicyAction::Auto; 5],
-            risk_ceiling: [PolicyAction::Auto; 7],
+            risk_ceiling: [PolicyAction::Auto; 6],
             shell: true,
             permission_management: false,
             workspace_root: None,
@@ -267,7 +265,7 @@ mod tests {
             allowed_tiers: [false, true, true, true, false],
             allowed_risks: BTreeSet::from([RiskKind::Network, RiskKind::ProcessSpawn]),
             tier_ceiling: [PolicyAction::Auto; 5],
-            risk_ceiling: [PolicyAction::Auto; 7],
+            risk_ceiling: [PolicyAction::Auto; 6],
             shell: false,
             permission_management: true,
             workspace_root: None,

@@ -140,7 +140,6 @@ pub enum ExecutionPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum RiskKind {
     WorkspaceExternal,
-    SandboxViolation,
     Network,
     Irreversible,
     FilesystemWrite,
@@ -185,11 +184,10 @@ pub struct TierPolicyConfig {
 
 /// Optional Eager-mode overrides for structured resource risks.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskPolicyOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outside_workspace: Option<PolicyAction>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox_violation: Option<PolicyAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<PolicyAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,7 +204,6 @@ impl RiskPolicyOverrides {
     fn resolve(&self, risk: RiskKind) -> PolicyAction {
         match risk {
             RiskKind::WorkspaceExternal => self.outside_workspace,
-            RiskKind::SandboxViolation => self.sandbox_violation,
             RiskKind::Network => self.network,
             RiskKind::Irreversible => self.irreversible,
             RiskKind::FilesystemWrite => self.filesystem_write,
@@ -219,6 +216,7 @@ impl RiskPolicyOverrides {
 
 /// Mode-specific risk overrides. Calm and Steady retain fixed safety floors.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RiskPolicyConfig {
     #[serde(default)]
     pub eager: RiskPolicyOverrides,
@@ -850,10 +848,6 @@ mod tests {
                 ..TrustConfig::default()
             };
             assert_eq!(config.resolve_tier(Tier::Four), PolicyAction::Ask);
-            assert_eq!(
-                config.resolve_risk(RiskKind::SandboxViolation),
-                PolicyAction::Ask
-            );
         }
     }
 
@@ -910,7 +904,6 @@ mod tests {
     fn every_risk_defaults_to_ask_in_controlled_modes() {
         let risks = [
             RiskKind::WorkspaceExternal,
-            RiskKind::SandboxViolation,
             RiskKind::Network,
             RiskKind::Irreversible,
             RiskKind::FilesystemWrite,
@@ -939,7 +932,7 @@ mod tests {
         };
         assert_eq!(config.execution_policy(), ExecutionPolicy::Unrestricted);
         assert_eq!(
-            config.resolve_policy(Tier::Four, [RiskKind::SandboxViolation]),
+            config.resolve_policy(Tier::Four, [RiskKind::Network]),
             PolicyAction::Auto
         );
     }

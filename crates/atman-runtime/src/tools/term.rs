@@ -235,6 +235,7 @@ pub struct TermEntry {
     pub reader_task: Mutex<Option<JoinHandle<()>>>,
     pub child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
     pub master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
+    profile: Arc<Mutex<Option<crate::sandbox::TempProfile>>>,
     pub started_at: Instant,
     pub task_id: Mutex<Option<crate::task_registry::TaskId>>,
 }
@@ -316,6 +317,7 @@ impl TermRegistry {
             if let Some(child) = child.as_mut() {
                 let _ = child.kill();
             }
+            entry.profile.lock().expect("profile poisoned").take();
         }
     }
 
@@ -357,6 +359,13 @@ fn now_ms() -> u64 {
 
 const READ_BUF_SIZE: usize = 4096;
 
+fn open_term_log(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+}
+
 impl TermRegistry {
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_entry(
@@ -372,12 +381,56 @@ impl TermRegistry {
         events: Option<crate::event::EventSink>,
         flow_run_id: Option<String>,
     ) -> Result<(TermHandle, Arc<TermEntry>), RuntimeError> {
+        self.spawn_entry_with_log_opener(
+            rows,
+            cols,
+            session_id,
+            session_dir,
+            pty_result,
+            tui_stream_tx,
+            label,
+            cancel,
+            events,
+            flow_run_id,
+            open_term_log,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_entry_with_log_opener<F>(
+        self: &Arc<Self>,
+        rows: u16,
+        cols: u16,
+        session_id: String,
+        session_dir: PathBuf,
+        pty_result: crate::sandbox::PtySpawnResult,
+        tui_stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
+        label: String,
+        cancel: tokio_util::sync::CancellationToken,
+        events: Option<crate::event::EventSink>,
+        flow_run_id: Option<String>,
+        open_log: F,
+    ) -> Result<(TermHandle, Arc<TermEntry>), RuntimeError>
+    where
+        F: FnOnce(&Path) -> std::io::Result<std::fs::File>,
+    {
         let handle = self.next_handle(&session_id);
         let handle_str = handle.to_string();
 
-        std::fs::create_dir_all(&session_dir).map_err(|e| {
-            RuntimeError::ToolFailed(format!("term.spawn: create session_dir: {e}"))
-        })?;
+        let crate::sandbox::PtySpawnResult {
+            mut child,
+            reader,
+            writer,
+            master,
+            profile,
+        } = pty_result;
+
+        if let Err(error) = std::fs::create_dir_all(&session_dir) {
+            crate::sandbox::terminate_pty_child(child.as_mut());
+            return Err(RuntimeError::ToolFailed(format!(
+                "term.spawn: create session_dir: {error}"
+            )));
+        }
         let log_path = session_dir.join(format!("term_{}.log", handle_str));
 
         let parser = vt100::Parser::new(rows, cols, 0);
@@ -387,13 +440,17 @@ impl TermRegistry {
             started_at: now_ms(),
         }));
         let (stream_tx, _stream_rx) = broadcast::channel(STREAM_CHANNEL_CAPACITY);
+        let log_file = match open_log(&log_path) {
+            Ok(file) => file,
+            Err(error) => {
+                crate::sandbox::terminate_pty_child(child.as_mut());
+                return Err(RuntimeError::ToolFailed(format!(
+                    "term.spawn: open log: {error}"
+                )));
+            }
+        };
 
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map_err(|e| RuntimeError::ToolFailed(format!("term.spawn: open log: {e}")))?;
-
+        let profile = Arc::new(Mutex::new(profile));
         let entry = Arc::new(TermEntry {
             handle: handle.clone(),
             session_id: session_id.clone(),
@@ -404,13 +461,14 @@ impl TermRegistry {
                 pixel_height: 0,
             },
             parser: parser.clone(),
-            writer: Mutex::new(pty_result.writer),
+            writer: Mutex::new(writer),
             state: state.clone(),
             stream_tx: stream_tx.clone(),
             log_path: log_path.clone(),
             reader_task: Mutex::new(None),
-            child: Mutex::new(Some(pty_result.child)),
-            master: Mutex::new(Some(pty_result.master)),
+            child: Mutex::new(Some(child)),
+            master: Mutex::new(Some(master)),
+            profile: profile.clone(),
             started_at: Instant::now(),
             task_id: Mutex::new(None),
         });
@@ -422,6 +480,7 @@ impl TermRegistry {
                 if let Some(child) = child.as_mut() {
                     let _ = child.kill();
                 }
+                kill_entry.profile.lock().expect("profile poisoned").take();
             });
             tr.register_with_kill_hook(
                 crate::task_registry::TaskKind::Terminal,
@@ -434,7 +493,6 @@ impl TermRegistry {
         });
         *entry.task_id.lock().unwrap() = task_id.clone();
 
-        let reader = pty_result.reader;
         let handle_for_loop = handle_str.clone();
         let task_registry = self.task_registry.clone();
         let join = tokio::task::spawn_blocking(move || {
@@ -450,6 +508,7 @@ impl TermRegistry {
                 task_id,
                 events,
                 flow_run_id,
+                profile,
             );
         });
         *entry.reader_task.lock().expect("reader_task poisoned") = Some(join);
@@ -478,6 +537,7 @@ fn run_reader_loop(
     task_id: Option<crate::task_registry::TaskId>,
     events_sink: Option<crate::event::EventSink>,
     flow_run_id: Option<String>,
+    profile: Arc<Mutex<Option<crate::sandbox::TempProfile>>>,
 ) {
     let mut buf = [0u8; READ_BUF_SIZE];
     let mut last_screen: Option<TerminalScreen> = None;
@@ -558,6 +618,7 @@ fn run_reader_loop(
         });
     }
 
+    profile.lock().expect("profile poisoned").take();
     if let (Some(tr), Some(tid)) = (task_registry, task_id) {
         tr.finish(&tid, crate::task_registry::TaskStatus::Ok);
     }
@@ -568,7 +629,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::sandbox::PtySpawnResult;
-use crate::tool::{ApprovalLevel, Tier, Tool};
+use crate::tool::{Tier, Tool};
 use crate::value::Value;
 
 fn extract_string(
@@ -710,51 +771,27 @@ async fn spawn_impl(
     };
     let env_refs: Vec<(String, String)> = env.clone();
 
-    let pty_result = if let Some(sandbox) = &ctx.sandbox {
-        match sandbox
-            .spawn_pty(&cmd_args, &env_refs, &cwd, pty_size)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("Operation not permitted") || msg.contains("denied") {
-                    let outcome = crate::approval::request_approval_with_additional_risks(
-                        ctx,
-                        "term.spawn",
-                        "term.spawn",
-                        &args,
-                        ApprovalLevel::Dangerous,
-                        Some(&TermSpawn),
-                        [crate::trust::RiskKind::SandboxViolation],
-                    )
-                    .await;
-                    match outcome {
-                        crate::approval::ApprovalOutcome::Approve { authorization } => {
-                            sandbox
-                                .spawn_pty_relaxed(
-                                    &cmd_args,
-                                    &env_refs,
-                                    &cwd,
-                                    pty_size,
-                                    &authorization,
-                                )
-                                .await?
-                        }
-                        crate::approval::ApprovalOutcome::Deny { reason } => {
-                            return Err(RuntimeError::ToolFailed(format!(
-                                "term.spawn denied: {reason}"
-                            )));
-                        }
-                    }
-                } else {
-                    return Err(e);
-                }
-            }
+    let execution_policy = ctx.execution_policy().ok_or_else(|| {
+        RuntimeError::ToolFailed("term.spawn: missing execution policy snapshot".into())
+    })?;
+    let pty_result = match execution_policy {
+        crate::trust::ExecutionPolicy::Controlled => {
+            let sandbox = ctx.sandbox.as_ref().ok_or_else(|| {
+                RuntimeError::ToolFailed(
+                    "term.spawn: sandbox unavailable for controlled execution".into(),
+                )
+            })?;
+            let authorization = ctx.invocation_authorization().ok_or_else(|| {
+                RuntimeError::ToolFailed("term.spawn: missing invocation authorization".into())
+            })?;
+            sandbox
+                .spawn_pty(&cmd_args, &env_refs, &cwd, pty_size, authorization)
+                .await
+                .map_err(|error| error.into_runtime("term.spawn"))?
         }
-    } else {
-        crate::fs_access::authorize_write(ctx, &cwd, "term.spawn", false).await?;
-        spawn_pty_direct(&cmd_args, &env_refs, &cwd, pty_size)?
+        crate::trust::ExecutionPolicy::Unrestricted => {
+            spawn_pty_direct(&cmd_args, &env_refs, &cwd, pty_size)?
+        }
     };
 
     let (handle, entry) = registry.spawn_entry(
@@ -809,20 +846,7 @@ fn spawn_pty_direct(
         .slave
         .spawn_command(builder)
         .map_err(|e| RuntimeError::ToolFailed(format!("pty spawn: {e}")))?;
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| RuntimeError::ToolFailed(format!("pty reader: {e}")))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| RuntimeError::ToolFailed(format!("pty writer: {e}")))?;
-    Ok(PtySpawnResult {
-        child,
-        reader,
-        writer,
-        master: pair.master,
-    })
+    crate::sandbox::complete_pty_spawn(child, pair.master, None)
 }
 
 fn cell_text(screen: &TerminalScreen, row: u16, col: u16) -> String {
@@ -1802,6 +1826,7 @@ impl Tool for TermKill {
                     let _ = child.kill();
                 }
             }
+            entry.profile.lock().expect("profile poisoned").take();
             {
                 let mut state = entry.state.lock().expect("state poisoned");
                 *state = TermState::Killed { ended_at: now_ms() };
@@ -1876,6 +1901,325 @@ mod tests {
     use crate::tool::{ToolArgs, ToolCtx};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[derive(Debug)]
+    struct RecordingChild {
+        kill_calls: Arc<AtomicUsize>,
+        wait_calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct RecordingKiller(Arc<AtomicUsize>);
+
+    impl portable_pty::ChildKiller for RecordingKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self(self.0.clone()))
+        }
+    }
+
+    impl portable_pty::ChildKiller for RecordingChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.kill_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(RecordingKiller(self.kill_calls.clone()))
+        }
+    }
+
+    impl portable_pty::Child for RecordingChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            self.wait_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(42)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum PtyIoFailure {
+        Reader,
+        Writer,
+        Never,
+    }
+
+    struct FailingMaster(PtyIoFailure);
+
+    impl portable_pty::MasterPty for FailingMaster {
+        fn resize(&self, _size: portable_pty::PtySize) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn get_size(&self) -> anyhow::Result<portable_pty::PtySize> {
+            Ok(portable_pty::PtySize::default())
+        }
+
+        fn try_clone_reader(&self) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
+            if matches!(self.0, PtyIoFailure::Reader) {
+                anyhow::bail!("reader sentinel")
+            }
+            Ok(Box::new(std::io::empty()))
+        }
+
+        fn take_writer(&self) -> anyhow::Result<Box<dyn std::io::Write + Send>> {
+            if matches!(self.0, PtyIoFailure::Writer) {
+                anyhow::bail!("writer sentinel")
+            }
+            Ok(Box::new(std::io::sink()))
+        }
+
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<i32> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn tty_name(&self) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    fn recording_child() -> (RecordingChild, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let kill_calls = Arc::new(AtomicUsize::new(0));
+        let wait_calls = Arc::new(AtomicUsize::new(0));
+        (
+            RecordingChild {
+                kill_calls: kill_calls.clone(),
+                wait_calls: wait_calls.clone(),
+            },
+            kill_calls,
+            wait_calls,
+        )
+    }
+
+    struct ChannelReader {
+        chunks: std::sync::mpsc::Receiver<Vec<u8>>,
+        pending: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl std::io::Read for ChannelReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pending.position() < self.pending.get_ref().len() as u64 {
+                return self.pending.read(buf);
+            }
+            match self.chunks.recv() {
+                Ok(chunk) => {
+                    self.pending = std::io::Cursor::new(chunk);
+                    self.pending.read(buf)
+                }
+                Err(_) => Ok(0),
+            }
+        }
+    }
+
+    fn recording_pty_result(
+        profile: crate::sandbox::TempProfile,
+    ) -> (PtySpawnResult, Arc<AtomicUsize>, Arc<AtomicUsize>, PathBuf) {
+        let profile_path = profile.path().to_path_buf();
+        let (child, kill_calls, wait_calls) = recording_child();
+        (
+            PtySpawnResult {
+                child: Box::new(child),
+                reader: Box::new(std::io::empty()),
+                writer: Box::new(std::io::sink()),
+                master: Box::new(FailingMaster(PtyIoFailure::Never)),
+                profile: Some(profile),
+            },
+            kill_calls,
+            wait_calls,
+            profile_path,
+        )
+    }
+
+    #[tokio::test]
+    async fn successful_pty_releases_profile_after_exit_and_preserves_history() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = crate::sandbox::TempProfile::create("live profile").unwrap();
+        let profile_path = profile.path().to_path_buf();
+        let (child, _, _) = recording_child();
+        let (chunks_tx, chunks_rx) = std::sync::mpsc::channel();
+        let pty_result = PtySpawnResult {
+            child: Box::new(child),
+            reader: Box::new(ChannelReader {
+                chunks: chunks_rx,
+                pending: std::io::Cursor::new(Vec::new()),
+            }),
+            writer: Box::new(std::io::sink()),
+            master: Box::new(FailingMaster(PtyIoFailure::Never)),
+            profile: Some(profile),
+        };
+        let registry = Arc::new(TermRegistry::new());
+        let (handle, entry) = registry
+            .spawn_entry(
+                24,
+                80,
+                "success".into(),
+                root.path().to_path_buf(),
+                pty_result,
+                None,
+                "success".into(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(profile_path.exists());
+        chunks_tx.send(b"completed output".to_vec()).unwrap();
+        drop(chunks_tx);
+        let reader_task = entry
+            .reader_task
+            .lock()
+            .expect("reader_task poisoned")
+            .take()
+            .unwrap();
+        reader_task.await.unwrap();
+
+        assert!(!profile_path.exists());
+        assert!(matches!(entry.current_state(), TermState::Exited { .. }));
+        let historical = registry.lookup(&handle.to_string(), "success").unwrap();
+        let screen = historical.snapshot();
+        let first_row = screen.cells[..usize::from(screen.cols)]
+            .iter()
+            .map(|cell| cell.chars.as_str())
+            .collect::<String>();
+        assert!(first_row.contains("completed output"));
+    }
+
+    #[test]
+    fn pty_reader_failure_terminates_child_and_drops_profile() {
+        let profile = crate::sandbox::TempProfile::create("reader profile").unwrap();
+        let profile_path = profile.path().to_path_buf();
+        let (child, kill_calls, wait_calls) = recording_child();
+        let error = crate::sandbox::complete_pty_spawn(
+            Box::new(child),
+            Box::new(FailingMaster(PtyIoFailure::Reader)),
+            Some(profile),
+        )
+        .err()
+        .expect("reader acquisition must fail");
+        assert!(error.to_string().contains("reader sentinel"));
+        assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+        assert!(!profile_path.exists());
+    }
+
+    #[test]
+    fn pty_writer_failure_terminates_child_and_drops_profile() {
+        let profile = crate::sandbox::TempProfile::create("writer profile").unwrap();
+        let profile_path = profile.path().to_path_buf();
+        let (child, kill_calls, wait_calls) = recording_child();
+        let error = crate::sandbox::complete_pty_spawn(
+            Box::new(child),
+            Box::new(FailingMaster(PtyIoFailure::Writer)),
+            Some(profile),
+        )
+        .err()
+        .expect("writer acquisition must fail");
+        assert!(error.to_string().contains("writer sentinel"));
+        assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+        assert!(!profile_path.exists());
+    }
+
+    #[test]
+    fn session_directory_failure_leaves_no_terminal_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let blocker = root.path().join("not-a-directory");
+        let session_dir = blocker.join("session");
+        std::fs::write(&blocker, "block directory creation").unwrap();
+        let profile = crate::sandbox::TempProfile::create("directory profile").unwrap();
+        let (pty_result, kill_calls, wait_calls, profile_path) = recording_pty_result(profile);
+        let tasks = crate::task_registry::TaskRegistry::new();
+        let registry = Arc::new(TermRegistry::new().with_task_registry(tasks.clone()));
+        let error = registry
+            .spawn_entry(
+                24,
+                80,
+                "dir-failure".into(),
+                session_dir.clone(),
+                pty_result,
+                None,
+                "terminal".into(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+                None,
+            )
+            .err()
+            .expect("session directory creation must fail");
+        assert!(error.to_string().contains("create session_dir"));
+        assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+        assert!(!profile_path.exists());
+        assert!(registry.list("dir-failure").is_empty());
+        assert!(
+            tasks
+                .list(&crate::task_registry::TaskFilter::all())
+                .is_empty()
+        );
+        assert!(!session_dir.exists());
+    }
+
+    #[test]
+    fn log_open_failure_after_directory_creation_leaves_no_terminal_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        let profile = crate::sandbox::TempProfile::create("log profile").unwrap();
+        let (pty_result, kill_calls, wait_calls, profile_path) = recording_pty_result(profile);
+        let tasks = crate::task_registry::TaskRegistry::new();
+        let registry = Arc::new(TermRegistry::new().with_task_registry(tasks.clone()));
+        let opener_calls = AtomicUsize::new(0);
+        let error = registry
+            .spawn_entry_with_log_opener(
+                24,
+                80,
+                "log-failure".into(),
+                session_dir.clone(),
+                pty_result,
+                None,
+                "terminal".into(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+                None,
+                |path| {
+                    opener_calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(session_dir.is_dir());
+                    assert!(path.starts_with(&session_dir));
+                    Err(std::io::Error::other("log sentinel"))
+                },
+            )
+            .err()
+            .expect("log opening must fail");
+        assert!(error.to_string().contains("log sentinel"));
+        assert_eq!(opener_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+        assert!(!profile_path.exists());
+        assert!(registry.list("log-failure").is_empty());
+        assert!(
+            tasks
+                .list(&crate::task_registry::TaskFilter::all())
+                .is_empty()
+        );
+        assert!(std::fs::read_dir(&session_dir).unwrap().next().is_none());
+    }
+
     #[test]
     fn spawn_provenance_uses_cwd_not_cmd() {
         let dir = tempfile::tempdir().unwrap();
@@ -1905,12 +2249,11 @@ mod tests {
         pty_calls: AtomicUsize,
     }
 
-    struct FallbackSandbox {
+    struct DenyingSandbox {
         strict_calls: AtomicUsize,
-        relaxed_calls: AtomicUsize,
     }
 
-    impl crate::sandbox::Sandbox for FallbackSandbox {
+    impl crate::sandbox::Sandbox for DenyingSandbox {
         fn spawn<'a>(
             &'a self,
             _cmd: &'a [&'a str],
@@ -1920,31 +2263,37 @@ mod tests {
             Box::pin(async { Err(RuntimeError::ToolFailed("Operation not permitted".into())) })
         }
 
+        fn prepare_background(
+            &self,
+            _cmd: &[&str],
+            _env: &[(String, String)],
+            _cwd: &Path,
+            _authorization: &crate::permission::InvocationAuthorization,
+        ) -> Result<Box<dyn crate::sandbox::BackgroundLauncher>, crate::sandbox::SandboxLaunchError>
+        {
+            Err(crate::sandbox::SandboxLaunchError::Runtime(
+                RuntimeError::ToolFailed("background unsupported".into()),
+            ))
+        }
+
         fn spawn_pty<'a>(
             &'a self,
             _cmd: &'a [&'a str],
             _env: &'a [(String, String)],
             _cwd: &'a Path,
             _pty_size: portable_pty::PtySize,
-        ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
-            self.strict_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Err(RuntimeError::ToolFailed("Operation not permitted".into())) })
-        }
-
-        fn spawn_pty_relaxed<'a>(
-            &'a self,
-            cmd: &'a [&'a str],
-            env: &'a [(String, String)],
-            cwd: &'a Path,
-            pty_size: portable_pty::PtySize,
             authorization: &'a crate::permission::InvocationAuthorization,
-        ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
-            self.relaxed_calls.fetch_add(1, Ordering::SeqCst);
+        ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, crate::sandbox::SandboxLaunchError>>
+        {
+            self.strict_calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
-                if !authorization.is_for_call("term.spawn", "term.spawn") {
-                    return Err(RuntimeError::ToolFailed("invalid authorization".into()));
-                }
-                spawn_pty_direct(cmd, env, cwd, pty_size)
+                Err(crate::sandbox::SandboxLaunchError::Denied(Box::new(
+                    crate::sandbox::SandboxDenial {
+                        operation: crate::sandbox::SandboxOperation::PtySpawn,
+                        reason: "Operation not permitted".into(),
+                        provenance: authorization.provenance().clone(),
+                    },
+                )))
             })
         }
 
@@ -1953,7 +2302,7 @@ mod tests {
         }
 
         fn kind(&self) -> &'static str {
-            "test-fallback"
+            "test-denial"
         }
     }
 
@@ -1967,15 +2316,34 @@ mod tests {
             Box::pin(async { Err(RuntimeError::ToolFailed("strict sentinel".into())) })
         }
 
+        fn prepare_background(
+            &self,
+            _cmd: &[&str],
+            _env: &[(String, String)],
+            _cwd: &Path,
+            _authorization: &crate::permission::InvocationAuthorization,
+        ) -> Result<Box<dyn crate::sandbox::BackgroundLauncher>, crate::sandbox::SandboxLaunchError>
+        {
+            Err(crate::sandbox::SandboxLaunchError::Runtime(
+                RuntimeError::ToolFailed("background unsupported".into()),
+            ))
+        }
+
         fn spawn_pty<'a>(
             &'a self,
             _cmd: &'a [&'a str],
             _env: &'a [(String, String)],
             _cwd: &'a Path,
             _pty_size: portable_pty::PtySize,
-        ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, RuntimeError>> {
+            _authorization: &'a crate::permission::InvocationAuthorization,
+        ) -> crate::tool::BoxFut<'a, Result<PtySpawnResult, crate::sandbox::SandboxLaunchError>>
+        {
             self.pty_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Err(RuntimeError::ToolFailed("strict sentinel".into())) })
+            Box::pin(async {
+                Err(crate::sandbox::SandboxLaunchError::Runtime(
+                    RuntimeError::ToolFailed("strict sentinel".into()),
+                ))
+            })
         }
 
         fn is_available(&self) -> bool {
@@ -1992,6 +2360,10 @@ mod tests {
         session_dir: &Path,
     ) -> ToolCtx {
         let mut ctx = ToolCtx::new()
+            .with_trust(crate::trust::TrustConfig {
+                mode: crate::trust::TrustMode::Reckless,
+                ..crate::trust::TrustConfig::default()
+            })
             .with_term_registry(registry)
             .with_session_dir(session_dir.to_path_buf())
             .with_fs_access(crate::fs_access::FsAccessPolicy::workspace_write(
@@ -2004,7 +2376,7 @@ mod tests {
                 branch: None,
             });
         ctx.session_id = Some("r4".into());
-        ctx
+        ctx.for_tool_invocation(crate::tool::Tier::Four)
     }
 
     fn term_args(cwd: &Path) -> ToolArgs {
@@ -2043,7 +2415,7 @@ mod tests {
             .with_approval(Arc::new(crate::session::ApprovalRegistry::new()))
             .with_anchors(None, Some(identity.run_id.clone()), None);
         ctx.flow_identity = Some(identity);
-        ctx
+        ctx.for_tool_invocation(crate::tool::Tier::Four)
     }
 
     #[tokio::test]
@@ -2054,16 +2426,41 @@ mod tests {
         let sandbox = Arc::new(StrictRecordingSandbox {
             pty_calls: AtomicUsize::new(0),
         });
-        let ctx = managed_term_ctx(workspace.path(), registry, session_dir.path())
-            .with_sandbox(sandbox.clone());
-        let error = spawn_impl(term_args(Path::new(env!("CARGO_MANIFEST_DIR"))), &ctx)
-            .await
-            .unwrap_err();
+        let args = term_args(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let ctx = brokered_term_ctx(
+            workspace.path(),
+            registry,
+            session_dir.path(),
+            eager_spawn_policy(),
+        )
+        .with_sandbox(sandbox.clone());
+        let ctx = authorize_term_spawn(ctx, &args).await;
+        let error = spawn_impl(args, &ctx).await.unwrap_err();
         assert!(error.to_string().contains("strict sentinel"));
         assert_eq!(sandbox.pty_calls.load(Ordering::SeqCst), 1);
     }
 
-    fn eager_relaxed_policy(action: crate::trust::PolicyAction) -> crate::trust::TrustConfig {
+    async fn authorize_term_spawn(ctx: ToolCtx, args: &ToolArgs) -> ToolCtx {
+        match crate::approval::request_approval(
+            &ctx,
+            "term.spawn",
+            "term.spawn",
+            args,
+            crate::tool::ApprovalLevel::Dangerous,
+            Some(&TermSpawn),
+        )
+        .await
+        {
+            crate::approval::ApprovalOutcome::Approve { authorization } => {
+                ctx.authorized_for(*authorization)
+            }
+            crate::approval::ApprovalOutcome::Deny { reason } => {
+                panic!("strict term spawn authorization denied: {reason}")
+            }
+        }
+    }
+
+    fn eager_spawn_policy() -> crate::trust::TrustConfig {
         crate::trust::TrustConfig {
             mode: crate::trust::TrustMode::Eager,
             tiers: crate::trust::TierPolicyConfig {
@@ -2074,8 +2471,8 @@ mod tests {
             },
             risks: crate::trust::RiskPolicyConfig {
                 eager: crate::trust::RiskPolicyOverrides {
+                    outside_workspace: Some(crate::trust::PolicyAction::Auto),
                     process_spawn: Some(crate::trust::PolicyAction::Auto),
-                    sandbox_violation: Some(action),
                     ..crate::trust::RiskPolicyOverrides::default()
                 },
             },
@@ -2084,146 +2481,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relaxed_fallback_auto_policy_passes_authorization_to_execution() {
-        let workspace = tempfile::tempdir().unwrap();
-        let session_dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(TermRegistry::new());
-        let sandbox = Arc::new(FallbackSandbox {
-            strict_calls: AtomicUsize::new(0),
-            relaxed_calls: AtomicUsize::new(0),
-        });
-        let ctx = brokered_term_ctx(
-            workspace.path(),
-            registry.clone(),
-            session_dir.path(),
-            eager_relaxed_policy(crate::trust::PolicyAction::Auto),
-        )
-        .with_sandbox(sandbox.clone());
-
-        spawn_impl(term_args(workspace.path()), &ctx).await.unwrap();
-
-        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(registry.list("r4").len(), 1);
-        registry.kill_all();
-    }
-
-    #[tokio::test]
-    async fn relaxed_fallback_ask_policy_requires_manual_authorization() {
-        let workspace = tempfile::tempdir().unwrap();
-        let session_dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(TermRegistry::new());
-        let sandbox = Arc::new(FallbackSandbox {
-            strict_calls: AtomicUsize::new(0),
-            relaxed_calls: AtomicUsize::new(0),
-        });
-        let ctx = brokered_term_ctx(
-            workspace.path(),
-            registry.clone(),
-            session_dir.path(),
-            eager_relaxed_policy(crate::trust::PolicyAction::Ask),
-        )
-        .with_sandbox(sandbox.clone());
-        let approval = ctx.approval.clone().unwrap();
-        let mut pending = approval.subscribe();
-
-        let (result, ()) = tokio::join!(spawn_impl(term_args(workspace.path()), &ctx), async {
-            pending.changed().await.unwrap();
-            let requests = approval.list_pending();
-            assert_eq!(requests.len(), 1);
-            assert!(approval.decide(
-                &requests[0].tool_use_id,
-                crate::session::ApprovalDecision::Approve,
-            ));
-        });
-        result.unwrap();
-
-        assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(registry.list("r4").len(), 1);
-        registry.kill_all();
-    }
-
-    #[tokio::test]
-    async fn relaxed_fallback_deny_policy_never_executes_relaxed() {
-        let workspace = tempfile::tempdir().unwrap();
-        let session_dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(TermRegistry::new());
-        let sandbox = Arc::new(FallbackSandbox {
-            strict_calls: AtomicUsize::new(0),
-            relaxed_calls: AtomicUsize::new(0),
-        });
-        let ctx = brokered_term_ctx(
-            workspace.path(),
-            registry.clone(),
-            session_dir.path(),
-            eager_relaxed_policy(crate::trust::PolicyAction::Deny),
-        )
-        .with_sandbox(sandbox.clone());
-
-        let error = spawn_impl(term_args(workspace.path()), &ctx)
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("denied"));
-        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 0);
-        assert!(registry.list("r4").is_empty());
-    }
-
-    #[tokio::test]
-    async fn relaxed_fallback_denial_leaves_terminal_and_task_registries_unchanged() {
+    async fn sandbox_denial_never_relaunches_or_registers_resources() {
         let workspace = tempfile::tempdir().unwrap();
         let session_dir = tempfile::tempdir().unwrap();
         let tasks = crate::task_registry::TaskRegistry::new();
         let registry = Arc::new(TermRegistry::new().with_task_registry(tasks.clone()));
-        let sandbox = Arc::new(FallbackSandbox {
+        let sandbox = Arc::new(DenyingSandbox {
             strict_calls: AtomicUsize::new(0),
-            relaxed_calls: AtomicUsize::new(0),
         });
         let ctx = brokered_term_ctx(
             workspace.path(),
             registry.clone(),
             session_dir.path(),
-            eager_relaxed_policy(crate::trust::PolicyAction::Ask),
+            eager_spawn_policy(),
         )
         .with_sandbox(sandbox.clone())
         .with_task_registry(tasks.clone());
-        let approval = ctx.approval.as_ref().unwrap().clone();
-        let mut pending = approval.subscribe();
+        let args = term_args(workspace.path());
+        let ctx = authorize_term_spawn(ctx, &args).await;
 
-        let (result, ()) = tokio::join!(spawn_impl(term_args(workspace.path()), &ctx), async {
-            pending.changed().await.unwrap();
-            assert_eq!(approval.list_pending().len(), 1);
-            assert_eq!(
-                approval.decide_all(crate::session::ApprovalDecision::Deny {
-                    reason: "test denial".into(),
-                }),
-                1
-            );
-        });
+        let error = spawn_impl(args, &ctx).await.unwrap_err();
 
-        assert!(result.unwrap_err().to_string().contains("test denial"));
+        assert!(error.to_string().contains("Operation not permitted"));
         assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(sandbox.relaxed_calls.load(Ordering::SeqCst), 0);
         assert!(registry.list("r4").is_empty());
         assert!(
             tasks
                 .list(&crate::task_registry::TaskFilter::all())
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn direct_spawn_rejects_external_cwd_without_registering_terminal() {
-        let workspace = tempfile::tempdir().unwrap();
-        let session_dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(TermRegistry::new());
-        let ctx = managed_term_ctx(workspace.path(), registry.clone(), session_dir.path());
-        let error = spawn_impl(term_args(Path::new(env!("CARGO_MANIFEST_DIR"))), &ctx)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("outside workspace"));
-        assert!(registry.list("r4").is_empty());
     }
 
     #[tokio::test]
@@ -2318,6 +2604,7 @@ mod tests {
             reader_task: Mutex::new(None),
             child: Mutex::new(None),
             master: Mutex::new(None),
+            profile: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             task_id: Mutex::new(None),
         });
@@ -2495,6 +2782,7 @@ mod tests {
             reader_task: Mutex::new(None),
             child: Mutex::new(None),
             master: Mutex::new(None),
+            profile: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             task_id: Mutex::new(None),
         });

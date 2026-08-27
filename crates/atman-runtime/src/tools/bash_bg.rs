@@ -258,6 +258,27 @@ impl crate::watch::Watchable for BgEntry {
     }
 }
 
+struct DirectBackgroundLauncher {
+    command: tokio::process::Command,
+}
+
+impl crate::sandbox::BackgroundLauncher for DirectBackgroundLauncher {
+    fn launch(
+        mut self: Box<Self>,
+    ) -> Result<crate::sandbox::BackgroundSpawnResult, crate::sandbox::SandboxLaunchError> {
+        self.command
+            .group()
+            .kill_on_drop(true)
+            .spawn()
+            .map(crate::sandbox::BackgroundSpawnResult::direct)
+            .map_err(|error| {
+                crate::sandbox::SandboxLaunchError::Runtime(RuntimeError::ToolFailed(format!(
+                    "spawn: {error}"
+                )))
+            })
+    }
+}
+
 #[derive(Default)]
 pub struct BgRegistry {
     entries: Mutex<HashMap<String, Arc<BgEntry>>>,
@@ -283,12 +304,12 @@ impl BgRegistry {
 
     pub fn spawn(
         self: &Arc<Self>,
+        launcher: Box<dyn crate::sandbox::BackgroundLauncher>,
         cmd: String,
         timeout_ms: Option<u64>,
         max_output_bytes: u64,
         ctx: &ToolCtx,
     ) -> Result<Value, RuntimeError> {
-        let cwd = ctx.resolve_cwd(None)?;
         let session_id = ctx.session_id.clone().unwrap_or_else(|| "anon".to_string());
         let local_id = uuid::Uuid::now_v7().as_u64_pair().0;
         let handle = BgHandle {
@@ -314,8 +335,18 @@ impl BgRegistry {
         };
 
         let (control_tx, control_rx) = mpsc::channel::<BgControl>(8);
+        let spawn_result = match launcher.launch() {
+            Ok(result) => result,
+            Err(error) => {
+                drop(log_file);
+                let _ = std::fs::remove_file(&log_path);
+                return Err(error.into_runtime("bash.spawn"));
+            }
+        };
+        let crate::sandbox::BackgroundSpawnResult { child, profile } = spawn_result;
+        let pid = child.id().unwrap_or(0);
         let status = Arc::new(Mutex::new(BgStatus::Running {
-            pid: 0,
+            pid,
             started_at: now_ms(),
         }));
         let output = Arc::new(Mutex::new(BgOutput::default()));
@@ -345,8 +376,6 @@ impl BgRegistry {
             entries.insert(handle_str.clone(), entry.clone());
         }
 
-        let registry = Arc::clone(self);
-        let handle_str_for_task = handle_str.clone();
         let status_for_task = status.clone();
         let log_path_for_return = log_path.clone();
         let stream_tx = ctx.stream_tx.clone();
@@ -356,8 +385,8 @@ impl BgRegistry {
         let flow_run_id = ctx.flow_run_id.as_ref().map(|r| r.0.to_string());
         tokio::spawn(async move {
             run_bg_process(
-                handle_str_for_task,
-                cmd,
+                child,
+                profile,
                 timeout,
                 max_output_bytes,
                 log_file,
@@ -365,25 +394,14 @@ impl BgRegistry {
                 output,
                 control_rx,
                 task_cancel,
-                registry,
                 stream_tx,
                 handle_for_task,
                 task_registry,
                 task_id_for_spawn,
                 flow_run_id,
-                cwd,
             )
             .await;
         });
-
-        let pid = {
-            let s = status.lock().unwrap();
-            if let BgStatus::Running { pid, .. } = &*s {
-                *pid
-            } else {
-                0
-            }
-        };
 
         Ok(Value::Struct(vec![
             ("handle".into(), Value::Str(handle_str)),
@@ -618,10 +636,6 @@ impl BgRegistry {
         ]))
     }
 
-    fn remove(&self, handle_str: &str) {
-        self.entries.lock().unwrap().remove(handle_str);
-    }
-
     #[doc(hidden)]
     pub fn clear_for_test(&self) {
         self.entries.lock().unwrap().clear();
@@ -705,8 +719,8 @@ impl Drop for BgRegistry {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_bg_process(
-    handle_str: String,
-    cmd: String,
+    mut child: AsyncGroupChild,
+    _profile: Option<crate::sandbox::TempProfile>,
     timeout: Option<Duration>,
     max_output_bytes: u64,
     log_file: File,
@@ -714,41 +728,12 @@ async fn run_bg_process(
     output: Arc<Mutex<BgOutput>>,
     mut control_rx: mpsc::Receiver<BgControl>,
     cancel: CancellationToken,
-    registry: Arc<BgRegistry>,
     stream_tx: Option<tokio::sync::broadcast::Sender<crate::stream::StreamFrame>>,
     handle_for_stream: String,
     task_registry: Option<TaskRegistry>,
     task_id: Option<crate::task_registry::TaskId>,
     flow_run_id: Option<String>,
-    cwd: std::path::PathBuf,
 ) {
-    let started_at = now_ms();
-    let mut command = tokio::process::Command::new("sh");
-    command
-        .arg("-c")
-        .arg(&cmd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(cwd);
-    let mut child: AsyncGroupChild = match command.group().kill_on_drop(true).spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            *status.lock().unwrap() = BgStatus::Failed {
-                error: format!("spawn: {e}"),
-                started_at,
-                ended_at: now_ms(),
-            };
-            registry.remove(&handle_str);
-            return;
-        }
-    };
-    let pid = child.id();
-    *status.lock().unwrap() = BgStatus::Running {
-        pid: pid.unwrap_or(0),
-        started_at,
-    };
-
     let stdout = child.inner().stdout.take();
     let stderr = child.inner().stderr.take();
     let (log_tx, log_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -798,6 +783,7 @@ async fn run_bg_process(
         s = child.wait() => ExitReason::Exited(s),
     };
 
+    let started_at = status.lock().unwrap().started_at();
     let ended_at = now_ms();
     let mut final_status = match &exit_reason {
         ExitReason::Exited(Ok(s)) => BgStatus::Exited {
@@ -1057,7 +1043,39 @@ instead, or use the sleep tool to pause the workflow.",
             let registry = ctx.bg_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("bash.spawn: registry not available".into())
             })?;
-            let handle_str = registry.spawn(cmd, timeout_ms, max_output, ctx)?;
+            let cwd = ctx.resolve_cwd(None)?;
+            let execution_policy = ctx.execution_policy().ok_or_else(|| {
+                RuntimeError::ToolFailed("bash.spawn: missing execution policy snapshot".into())
+            })?;
+            let launcher: Box<dyn crate::sandbox::BackgroundLauncher> = match execution_policy {
+                crate::trust::ExecutionPolicy::Controlled => {
+                    let sandbox = ctx.sandbox.as_ref().ok_or_else(|| {
+                        RuntimeError::ToolFailed(
+                            "bash.spawn: sandbox unavailable for controlled execution".into(),
+                        )
+                    })?;
+                    let authorization = ctx.invocation_authorization().ok_or_else(|| {
+                        RuntimeError::ToolFailed(
+                            "bash.spawn: missing invocation authorization".into(),
+                        )
+                    })?;
+                    sandbox
+                        .prepare_background(&["sh", "-c", cmd.as_str()], &[], &cwd, authorization)
+                        .map_err(|error| error.into_runtime("bash.spawn"))?
+                }
+                crate::trust::ExecutionPolicy::Unrestricted => {
+                    let mut command = tokio::process::Command::new("sh");
+                    command
+                        .arg("-c")
+                        .arg(&cmd)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .current_dir(&cwd);
+                    Box::new(DirectBackgroundLauncher { command })
+                }
+            };
+            let handle_str = registry.spawn(launcher, cmd, timeout_ms, max_output, ctx)?;
 
             if !block {
                 return Ok(handle_str);
@@ -1326,14 +1344,240 @@ mod tests {
     use crate::tool::{ToolArgs, ToolCtx};
     use crate::value::Value;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
+    #[derive(Clone, Copy)]
+    enum StrictLaunch {
+        Success,
+        Denied,
+        RuntimeError,
+    }
+
+    struct TestBackgroundLauncher;
+
+    #[derive(Clone, Copy)]
+    enum LauncherFailure {
+        Denied,
+        Runtime,
+    }
+
+    struct CountingFailingLauncher {
+        launch_calls: Arc<AtomicUsize>,
+        provisional_logs_seen: Arc<AtomicUsize>,
+        session_dir: std::path::PathBuf,
+        failure: LauncherFailure,
+    }
+
+    impl crate::sandbox::BackgroundLauncher for CountingFailingLauncher {
+        fn launch(
+            self: Box<Self>,
+        ) -> Result<crate::sandbox::BackgroundSpawnResult, crate::sandbox::SandboxLaunchError>
+        {
+            self.launch_calls.fetch_add(1, Ordering::SeqCst);
+            self.provisional_logs_seen
+                .store(background_log_count(&self.session_dir), Ordering::SeqCst);
+            match self.failure {
+                LauncherFailure::Denied => Err(crate::sandbox::SandboxLaunchError::Denied(
+                    Box::new(crate::sandbox::SandboxDenial {
+                        operation: crate::sandbox::SandboxOperation::BackgroundSpawn,
+                        reason: "launcher denied sentinel".into(),
+                        provenance: crate::permission::ResourceProvenance::none(),
+                    }),
+                )),
+                LauncherFailure::Runtime => Err(crate::sandbox::SandboxLaunchError::Runtime(
+                    RuntimeError::ToolFailed("launcher runtime sentinel".into()),
+                )),
+            }
+        }
+    }
+
+    impl crate::sandbox::BackgroundLauncher for TestBackgroundLauncher {
+        fn launch(
+            self: Box<Self>,
+        ) -> Result<crate::sandbox::BackgroundSpawnResult, crate::sandbox::SandboxLaunchError>
+        {
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .arg("-c")
+                .arg("exit 0")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let child = command
+                .group()
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|error| {
+                    crate::sandbox::SandboxLaunchError::Runtime(RuntimeError::ToolFailed(format!(
+                        "test spawn: {error}"
+                    )))
+                })?;
+            Ok(crate::sandbox::BackgroundSpawnResult::direct(child))
+        }
+    }
+
+    struct RecordingBackgroundSandbox {
+        strict: StrictLaunch,
+        strict_calls: AtomicUsize,
+    }
+
+    impl crate::sandbox::Sandbox for RecordingBackgroundSandbox {
+        fn spawn<'a>(
+            &'a self,
+            _cmd: &'a [&'a str],
+            _env: &'a [(String, String)],
+            _cwd: &'a std::path::Path,
+        ) -> crate::tool::BoxFut<'a, Result<std::process::Output, RuntimeError>> {
+            Box::pin(async { Err(RuntimeError::ToolFailed("unsupported".into())) })
+        }
+
+        fn prepare_background(
+            &self,
+            _cmd: &[&str],
+            _env: &[(String, String)],
+            _cwd: &std::path::Path,
+            authorization: &crate::permission::InvocationAuthorization,
+        ) -> Result<Box<dyn crate::sandbox::BackgroundLauncher>, crate::sandbox::SandboxLaunchError>
+        {
+            self.strict_calls.fetch_add(1, Ordering::SeqCst);
+            match self.strict {
+                StrictLaunch::Success => Ok(Box::new(TestBackgroundLauncher)),
+                StrictLaunch::Denied => Err(crate::sandbox::SandboxLaunchError::Denied(Box::new(
+                    crate::sandbox::SandboxDenial {
+                        operation: crate::sandbox::SandboxOperation::BackgroundSpawn,
+                        reason: "strict denied".into(),
+                        provenance: authorization.provenance().clone(),
+                    },
+                ))),
+                StrictLaunch::RuntimeError => Err(crate::sandbox::SandboxLaunchError::Runtime(
+                    RuntimeError::ToolFailed("strict runtime sentinel".into()),
+                )),
+            }
+        }
+
+        fn spawn_pty<'a>(
+            &'a self,
+            _cmd: &'a [&'a str],
+            _env: &'a [(String, String)],
+            _cwd: &'a std::path::Path,
+            _pty_size: portable_pty::PtySize,
+            _authorization: &'a crate::permission::InvocationAuthorization,
+        ) -> crate::tool::BoxFut<
+            'a,
+            Result<crate::sandbox::PtySpawnResult, crate::sandbox::SandboxLaunchError>,
+        > {
+            Box::pin(async {
+                Err(crate::sandbox::SandboxLaunchError::Runtime(
+                    RuntimeError::ToolFailed("unsupported".into()),
+                ))
+            })
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn kind(&self) -> &'static str {
+            "test-background"
+        }
+    }
+
     fn ctx_with_registry(registry: Arc<BgRegistry>, dir: &std::path::Path) -> ToolCtx {
-        let mut ctx = ToolCtx::new();
+        let mut ctx = ToolCtx::new().with_trust(crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Reckless,
+            ..crate::trust::TrustConfig::default()
+        });
         ctx.bg_registry = Some(registry);
         ctx.session_dir = Some(dir.to_path_buf());
         ctx.session_id = Some("test-session".to_string());
-        ctx
+        ctx.for_tool_invocation(crate::tool::Tier::Four)
+    }
+
+    fn brokered_spawn_ctx(
+        registry: Arc<BgRegistry>,
+        dir: &std::path::Path,
+        trust: crate::trust::TrustConfig,
+    ) -> ToolCtx {
+        let flows = Arc::new(crate::tools::agent_ctrl::FlowRegistry::new());
+        let broker = crate::permission::PermissionBroker::shared(Arc::clone(&flows));
+        let run_id = crate::event::FlowRunId::now();
+        let identity = flows
+            .register_root(
+                "test-session".into(),
+                run_id.clone(),
+                crate::flow_authority::EffectiveAuthority::root(&trust, true, None),
+            )
+            .unwrap();
+        let mut ctx = ctx_with_registry(registry, dir);
+        ctx.approval = Some(Arc::new(crate::session::ApprovalRegistry::new()));
+        ctx.permission_broker = Some(broker);
+        ctx.flow_registry = Some(flows);
+        ctx.flow_identity = Some(identity);
+        ctx.flow_run_id = Some(run_id);
+        ctx.with_trust(trust)
+            .for_tool_invocation(crate::tool::Tier::Four)
+    }
+
+    async fn authorize_bash_spawn(ctx: ToolCtx, args: &ToolArgs) -> ToolCtx {
+        match crate::approval::request_approval(
+            &ctx,
+            "bash.spawn",
+            "bash.spawn",
+            args,
+            crate::tool::ApprovalLevel::Dangerous,
+            Some(&BashSpawn),
+        )
+        .await
+        {
+            crate::approval::ApprovalOutcome::Approve { authorization } => {
+                ctx.authorized_for(*authorization)
+            }
+            crate::approval::ApprovalOutcome::Deny { reason } => {
+                panic!("strict bash spawn authorization denied: {reason}")
+            }
+        }
+    }
+
+    fn eager_sandbox_policy() -> crate::trust::TrustConfig {
+        crate::trust::TrustConfig {
+            mode: crate::trust::TrustMode::Eager,
+            tiers: crate::trust::TierPolicyConfig {
+                eager: crate::trust::TierPolicyOverrides {
+                    tier4: Some(crate::trust::PolicyAction::Auto),
+                    ..crate::trust::TierPolicyOverrides::default()
+                },
+            },
+            risks: crate::trust::RiskPolicyConfig {
+                eager: crate::trust::RiskPolicyOverrides {
+                    process_spawn: Some(crate::trust::PolicyAction::Auto),
+                    ..crate::trust::RiskPolicyOverrides::default()
+                },
+            },
+            ..crate::trust::TrustConfig::default()
+        }
+    }
+
+    fn background_entries(registry: &BgRegistry, dir: &std::path::Path) -> usize {
+        match registry.list("test-session", Some(dir), false) {
+            Value::List(items) => items.len(),
+            other => panic!("expected background list, got {other:?}"),
+        }
+    }
+
+    fn background_log_count(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        name.starts_with("bg_") && name.ends_with(".log")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     #[test]
@@ -1639,6 +1883,186 @@ mod tests {
 
         let error = open_log_file(&log_path).unwrap_err();
         assert!(error.contains("open log"));
+    }
+
+    #[test]
+    fn bg_registry_pre_launch_session_dir_failure_does_not_call_launcher() {
+        let registry = Arc::new(BgRegistry::new());
+        let dir = TempDir::new().unwrap();
+        let session_path = dir.path().join("not-a-directory");
+        std::fs::write(&session_path, b"occupied").unwrap();
+        let launch_calls = Arc::new(AtomicUsize::new(0));
+        let launcher = Box::new(CountingFailingLauncher {
+            launch_calls: launch_calls.clone(),
+            provisional_logs_seen: Arc::new(AtomicUsize::new(0)),
+            session_dir: session_path.clone(),
+            failure: LauncherFailure::Runtime,
+        });
+        let ctx = ctx_with_registry(registry.clone(), &session_path);
+
+        let error = registry
+            .spawn(launcher, "ignored".into(), None, 1024, &ctx)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("create session_dir"));
+        assert_eq!(launch_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(background_entries(&registry, &session_path), 0);
+    }
+
+    #[test]
+    fn bg_registry_launcher_denied_removes_provisional_log_and_registry_entry() {
+        let task_registry = crate::task_registry::TaskRegistry::new();
+        let registry = Arc::new(BgRegistry::new().with_task_registry(task_registry.clone()));
+        let dir = TempDir::new().unwrap();
+        let launch_calls = Arc::new(AtomicUsize::new(0));
+        let provisional_logs_seen = Arc::new(AtomicUsize::new(0));
+        let launcher = Box::new(CountingFailingLauncher {
+            launch_calls: launch_calls.clone(),
+            provisional_logs_seen: provisional_logs_seen.clone(),
+            session_dir: dir.path().to_path_buf(),
+            failure: LauncherFailure::Denied,
+        });
+        let ctx = ctx_with_registry(registry.clone(), dir.path());
+
+        let error = registry
+            .spawn(launcher, "ignored".into(), None, 1024, &ctx)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("launcher denied sentinel"));
+        assert_eq!(launch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provisional_logs_seen.load(Ordering::SeqCst), 1);
+        assert_eq!(background_log_count(dir.path()), 0);
+        assert_eq!(background_entries(&registry, dir.path()), 0);
+        assert_eq!(task_registry.running_count(), 0);
+        assert!(
+            task_registry
+                .list(&crate::task_registry::TaskFilter::all())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn bg_registry_launcher_runtime_error_removes_provisional_log_and_registry_entry() {
+        let task_registry = crate::task_registry::TaskRegistry::new();
+        let registry = Arc::new(BgRegistry::new().with_task_registry(task_registry.clone()));
+        let dir = TempDir::new().unwrap();
+        let launch_calls = Arc::new(AtomicUsize::new(0));
+        let provisional_logs_seen = Arc::new(AtomicUsize::new(0));
+        let launcher = Box::new(CountingFailingLauncher {
+            launch_calls: launch_calls.clone(),
+            provisional_logs_seen: provisional_logs_seen.clone(),
+            session_dir: dir.path().to_path_buf(),
+            failure: LauncherFailure::Runtime,
+        });
+        let ctx = ctx_with_registry(registry.clone(), dir.path());
+
+        let error = registry
+            .spawn(launcher, "ignored".into(), None, 1024, &ctx)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("launcher runtime sentinel"));
+        assert_eq!(launch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provisional_logs_seen.load(Ordering::SeqCst), 1);
+        assert_eq!(background_log_count(dir.path()), 0);
+        assert_eq!(background_entries(&registry, dir.path()), 0);
+        assert_eq!(task_registry.running_count(), 0);
+        assert!(
+            task_registry
+                .list(&crate::task_registry::TaskFilter::all())
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_background_strict_success_registers_process() {
+        let registry = Arc::new(BgRegistry::new());
+        let dir = TempDir::new().unwrap();
+        let sandbox = Arc::new(RecordingBackgroundSandbox {
+            strict: StrictLaunch::Success,
+            strict_calls: AtomicUsize::new(0),
+        });
+        let args = ToolArgs {
+            positional: vec![Value::Str("ignored".into())],
+            named: vec![],
+        };
+        let ctx = brokered_spawn_ctx(registry.clone(), dir.path(), eager_sandbox_policy())
+            .with_sandbox(sandbox.clone());
+        let ctx = authorize_bash_spawn(ctx, &args).await;
+
+        BashSpawn.call(args, &ctx).await.unwrap();
+
+        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(background_entries(&registry, dir.path()), 1);
+        registry.kill_all();
+    }
+
+    #[tokio::test]
+    async fn sandbox_background_typed_denial_never_relaunches() {
+        let registry = Arc::new(BgRegistry::new());
+        let dir = TempDir::new().unwrap();
+        let sandbox = Arc::new(RecordingBackgroundSandbox {
+            strict: StrictLaunch::Denied,
+            strict_calls: AtomicUsize::new(0),
+        });
+        let args = ToolArgs {
+            positional: vec![Value::Str("ignored".into())],
+            named: vec![],
+        };
+        let ctx = brokered_spawn_ctx(registry.clone(), dir.path(), eager_sandbox_policy())
+            .with_sandbox(sandbox.clone());
+        let ctx = authorize_bash_spawn(ctx, &args).await;
+
+        let error = BashSpawn.call(args, &ctx).await.unwrap_err();
+
+        assert!(error.to_string().contains("strict denied"));
+        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(background_entries(&registry, dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn sandbox_background_runtime_error_never_falls_back_or_registers() {
+        let registry = Arc::new(BgRegistry::new());
+        let dir = TempDir::new().unwrap();
+        let sandbox = Arc::new(RecordingBackgroundSandbox {
+            strict: StrictLaunch::RuntimeError,
+            strict_calls: AtomicUsize::new(0),
+        });
+        let args = ToolArgs {
+            positional: vec![Value::Str("ignored".into())],
+            named: vec![],
+        };
+        let ctx = brokered_spawn_ctx(registry.clone(), dir.path(), eager_sandbox_policy())
+            .with_sandbox(sandbox.clone());
+        let ctx = authorize_bash_spawn(ctx, &args).await;
+
+        let error = BashSpawn.call(args, &ctx).await.unwrap_err();
+
+        assert!(error.to_string().contains("strict runtime sentinel"));
+        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(background_entries(&registry, dir.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn sandbox_background_denial_leaves_registry_unchanged() {
+        let registry = Arc::new(BgRegistry::new());
+        let dir = TempDir::new().unwrap();
+        let sandbox = Arc::new(RecordingBackgroundSandbox {
+            strict: StrictLaunch::Denied,
+            strict_calls: AtomicUsize::new(0),
+        });
+        let args = ToolArgs {
+            positional: vec![Value::Str("ignored".into())],
+            named: vec![],
+        };
+        let ctx = brokered_spawn_ctx(registry.clone(), dir.path(), eager_sandbox_policy())
+            .with_sandbox(sandbox.clone());
+        let ctx = authorize_bash_spawn(ctx, &args).await;
+
+        let error = BashSpawn.call(args, &ctx).await.unwrap_err();
+
+        assert!(error.to_string().contains("denied"));
+        assert_eq!(sandbox.strict_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(background_entries(&registry, dir.path()), 0);
     }
 
     #[tokio::test]
