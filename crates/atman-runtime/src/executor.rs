@@ -180,8 +180,7 @@ impl Executor {
             ),
         )?;
         let task_id = self.tool_ctx.task_registry.as_ref().map(|tr| {
-            tr.register(
-                crate::task_registry::TaskKind::Flow,
+            tr.register_flow_with_run_id(
                 flow.name.name.clone(),
                 run_id.0.to_string(),
                 self.tool_ctx
@@ -189,6 +188,8 @@ impl Executor {
                     .clone()
                     .unwrap_or_else(|| "anon".into()),
                 flow_cancel.clone(),
+                None,
+                run_id.clone(),
             )
         });
         let _lifecycle_guard = flow_registry.lifecycle_guard(&run_id);
@@ -266,6 +267,22 @@ impl Executor {
             _ = flow_cancel.cancelled() => Err(RuntimeError::Cancelled("flow cancelled by user".into())),
             r = exec_fut => r,
         };
+        let result = if let Err(RuntimeError::Cancelled(_)) = &result {
+            let suicide = task_id.as_ref().and_then(|id| {
+                self.tool_ctx
+                    .task_registry
+                    .as_ref()
+                    .and_then(|tr| tr.lookup(id))
+                    .and_then(|snap| snap.termination)
+            }) == Some(crate::task_registry::TaskTermination::Suicide);
+            if suicide {
+                Err(RuntimeError::Cancelled("flow terminated by suicide".into()))
+            } else {
+                result
+            }
+        } else {
+            result
+        };
         let status = match &result {
             Ok(v) => {
                 if let Value::Err(e) = v
@@ -287,6 +304,13 @@ impl Executor {
             }
         };
         let cancelled = matches!(status, FlowStatus::Cancelled);
+        let suicide = task_id.as_ref().and_then(|id| {
+            self.tool_ctx
+                .task_registry
+                .as_ref()
+                .and_then(|tr| tr.lookup(id))
+                .and_then(|snap| snap.termination)
+        }) == Some(crate::task_registry::TaskTermination::Suicide);
         if let (Some(tr), Some(tid)) = (self.tool_ctx.task_registry.as_ref(), &task_id) {
             let ts = match &status {
                 FlowStatus::Ok => crate::task_registry::TaskStatus::Ok,
@@ -307,6 +331,7 @@ impl Executor {
                 flow_name: flow.name.name.clone(),
                 ok: matches!(status, FlowStatus::Ok),
                 cancelled,
+                suicide,
             });
         }
         result

@@ -1117,9 +1117,15 @@ impl AppState {
                 self.task_snapshots.push(snap);
                 self.items_version = self.items_version.wrapping_add(1);
             }
-            atman_runtime::TaskEvent::StatusChanged { id, new, .. } => {
+            atman_runtime::TaskEvent::StatusChanged {
+                id,
+                new,
+                termination,
+                ..
+            } => {
                 if let Some(s) = self.task_snapshots.iter_mut().find(|s| s.id == id) {
                     s.status = new;
+                    s.termination = termination;
                     s.ended_at = Some(std::time::Instant::now());
                     self.items_version = self.items_version.wrapping_add(1);
                 }
@@ -1415,8 +1421,11 @@ impl AppState {
                 }
                 let (is_done, cancelled, done_run_id) = match &frame {
                     StreamFrame::FlowDone {
-                        cancelled, run_id, ..
-                    } => (true, *cancelled, Some(run_id.as_str())),
+                        cancelled,
+                        suicide,
+                        run_id,
+                        ..
+                    } => (true, *cancelled || *suicide, Some(run_id.as_str())),
                     _ => (false, false, None),
                 };
                 self.ensure_workflow_panel_and_apply(&frame);
@@ -2794,6 +2803,7 @@ mod tests {
             flow_name: "test".into(),
             ok: !cancelled,
             cancelled,
+            suicide: false,
         }
     }
 
@@ -3065,6 +3075,7 @@ mod tests {
             flow_name: "agent_loop".into(),
             ok: true,
             cancelled: false,
+            suicide: false,
         });
 
         // L1 nudge 2: another internal restart.
@@ -3074,6 +3085,7 @@ mod tests {
             flow_name: "agent_loop".into(),
             ok: true,
             cancelled: false,
+            suicide: false,
         });
 
         let panels = workflow_panels(&app);
@@ -3549,6 +3561,8 @@ mod terminal_e2e_tests {
                 source_handle: src.to_string(),
                 session_id: "s".to_string(),
                 workspace_id: None,
+                flow_run_id: None,
+                termination: None,
             }
         }
     }

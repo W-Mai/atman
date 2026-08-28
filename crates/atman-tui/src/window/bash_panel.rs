@@ -186,6 +186,8 @@ mod tests {
             source_handle: src.to_string(),
             session_id: "s".to_string(),
             workspace_id: None,
+            flow_run_id: None,
+            termination: None,
         }
     }
 

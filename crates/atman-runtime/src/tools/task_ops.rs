@@ -76,6 +76,10 @@ impl Tool for TaskList {
                         "status": status_to_str(s.status),
                         "elapsed_ms": s.elapsed_ms(),
                         "source_handle": s.source_handle,
+                        "termination": s.termination.map(|termination| match termination {
+                            crate::task_registry::TaskTermination::Killed => "killed",
+                            crate::task_registry::TaskTermination::Suicide => "suicide",
+                        }),
                     }))
                 })
                 .collect();
@@ -96,14 +100,17 @@ impl Tool for TaskKill {
     }
 
     fn description(&self) -> Option<&str> {
-        Some("Kill a background task by id. Returns {killed: true/false}.")
+        Some(
+            "Kill a background task by id. A Flow killing its own task must pass suicide=true. Returns {killed, termination}.",
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "Task id to kill"}
+                "id": {"type": "string", "description": "Task id to kill"},
+                "suicide": {"type": "boolean", "description": "Required when a Flow targets its own task id (default false)"}
             },
             "required": ["id"]
         })
@@ -121,8 +128,29 @@ impl Tool for TaskKill {
             let registry = ctx.task_registry.clone().ok_or_else(|| {
                 RuntimeError::ToolFailed("task.kill: registry not available".into())
             })?;
-            let killed = registry.kill(&id);
-            Ok(Value::from_json(serde_json::json!({"killed": killed})))
+            let suicide = extract_optional_bool(&args, "suicide").unwrap_or(false);
+            let outcome = registry.kill_from(&id, ctx.flow_run_id.as_ref(), suicide);
+            match outcome {
+                crate::task_registry::KillOutcome::Killed { termination } => {
+                    Ok(Value::from_json(serde_json::json!({
+                        "killed": true,
+                        "termination": match termination {
+                            crate::task_registry::TaskTermination::Killed => "killed",
+                            crate::task_registry::TaskTermination::Suicide => "suicide",
+                        }
+                    })))
+                }
+                crate::task_registry::KillOutcome::SelfKillRejected => {
+                    Err(RuntimeError::ToolFailed(
+                        "task.kill: this Flow is killing itself; pass suicide=true to confirm self-termination"
+                            .into(),
+                    ))
+                }
+                crate::task_registry::KillOutcome::NotFound
+                | crate::task_registry::KillOutcome::NotRunning => Ok(Value::from_json(
+                    serde_json::json!({"killed": false, "termination": null}),
+                )),
+            }
         })
     }
 }

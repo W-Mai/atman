@@ -110,6 +110,8 @@ pub enum StreamFrame {
         ok: bool,
         #[serde(default)]
         cancelled: bool,
+        #[serde(default)]
+        suicide: bool,
     },
     ToolNode {
         run_id: String,

@@ -51,6 +51,21 @@ pub enum TaskStatus {
     Killed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskTermination {
+    Killed,
+    Suicide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillOutcome {
+    Killed { termination: TaskTermination },
+    NotFound,
+    NotRunning,
+    SelfKillRejected,
+}
+
 impl TaskStatus {
     pub fn is_terminal(self) -> bool {
         matches!(self, TaskStatus::Ok | TaskStatus::Err | TaskStatus::Killed)
@@ -72,6 +87,8 @@ pub struct TaskSnapshot {
     pub source_handle: String,
     pub session_id: String,
     pub workspace_id: Option<String>,
+    pub flow_run_id: Option<crate::event::FlowRunId>,
+    pub termination: Option<TaskTermination>,
 }
 
 impl TaskSnapshot {
@@ -95,6 +112,7 @@ pub enum TaskEvent {
         kind: TaskKind,
         old: TaskStatus,
         new: TaskStatus,
+        termination: Option<TaskTermination>,
     },
     Reaped {
         id: TaskId,
@@ -174,6 +192,7 @@ fn running_snapshot(
     source_handle: String,
     session_id: String,
     workspace_id: Option<String>,
+    flow_run_id: Option<crate::event::FlowRunId>,
 ) -> TaskSnapshot {
     TaskSnapshot {
         id: TaskId::now(),
@@ -185,6 +204,8 @@ fn running_snapshot(
         source_handle,
         session_id,
         workspace_id,
+        flow_run_id,
+        termination: None,
     }
 }
 
@@ -202,7 +223,7 @@ impl TaskRegistry {
         cancel: CancellationToken,
     ) -> TaskId {
         self.register_snapshot(
-            running_snapshot(kind, label, source_handle, session_id, None),
+            running_snapshot(kind, label, source_handle, session_id, None, None),
             cancel,
             None,
         )
@@ -223,6 +244,30 @@ impl TaskRegistry {
                 source_handle,
                 session_id,
                 workspace_id,
+                None,
+            ),
+            cancel,
+            None,
+        )
+    }
+
+    pub fn register_flow_with_run_id(
+        &self,
+        label: String,
+        source_handle: String,
+        session_id: String,
+        cancel: CancellationToken,
+        workspace_id: Option<String>,
+        flow_run_id: crate::event::FlowRunId,
+    ) -> TaskId {
+        self.register_snapshot(
+            running_snapshot(
+                TaskKind::Flow,
+                label,
+                source_handle,
+                session_id,
+                workspace_id,
+                Some(flow_run_id),
             ),
             cancel,
             None,
@@ -239,7 +284,7 @@ impl TaskRegistry {
         kill_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     ) -> TaskId {
         self.register_snapshot(
-            running_snapshot(kind, label, source_handle, session_id, None),
+            running_snapshot(kind, label, source_handle, session_id, None, None),
             cancel,
             kill_hook,
         )
@@ -291,17 +336,46 @@ impl TaskRegistry {
         out
     }
 
+    /// Kill a task at the request of an external operator, such as the TUI.
+    ///
+    /// Operator actions have no Flow identity, so they can never be mistaken
+    /// for a Flow killing itself.
+    pub fn kill_from_operator(&self, id: &TaskId) -> KillOutcome {
+        self.kill_from(id, None, false)
+    }
+
+    /// Compatibility wrapper for callers that only need a boolean result.
     pub fn kill(&self, id: &TaskId) -> bool {
+        matches!(self.kill_from_operator(id), KillOutcome::Killed { .. })
+    }
+
+    pub fn kill_from(
+        &self,
+        id: &TaskId,
+        caller_flow_run_id: Option<&crate::event::FlowRunId>,
+        suicide: bool,
+    ) -> KillOutcome {
         let mut inner = self.inner.lock().unwrap();
         let Some(entry) = inner.get_mut(id) else {
-            return false;
+            return KillOutcome::NotFound;
         };
         if entry.snapshot.status.is_terminal() {
-            return false;
+            return KillOutcome::NotRunning;
         }
+        let self_targeting = caller_flow_run_id.is_some()
+            && entry.snapshot.flow_run_id.as_ref() == caller_flow_run_id;
+        if self_targeting && !suicide {
+            return KillOutcome::SelfKillRejected;
+        }
+        let termination = if self_targeting {
+            TaskTermination::Suicide
+        } else {
+            TaskTermination::Killed
+        };
         let old_status = entry.snapshot.status;
         let kind = entry.snapshot.kind;
         entry.snapshot.status = TaskStatus::Killing;
+        entry.snapshot.termination = Some(termination);
         let cancel = entry.cancel.clone();
         let hook = entry.kill_hook.clone();
         drop(inner);
@@ -314,8 +388,9 @@ impl TaskRegistry {
             kind,
             old: old_status,
             new: TaskStatus::Killing,
+            termination: Some(termination),
         });
-        true
+        KillOutcome::Killed { termination }
     }
 
     /// Transition a task to a terminal status. Called by the owning
@@ -332,12 +407,14 @@ impl TaskRegistry {
         entry.snapshot.status = status;
         entry.snapshot.ended_at = Some(Instant::now());
         let kind = entry.snapshot.kind;
+        let termination = entry.snapshot.termination;
         drop(inner);
         let _ = self.event_tx.send(TaskEvent::StatusChanged {
             id: id.clone(),
             kind,
             old,
             new: status,
+            termination,
         });
     }
 
@@ -459,6 +536,102 @@ mod tests {
     }
 
     #[test]
+    fn self_kill_requires_suicide_confirmation() {
+        let reg = TaskRegistry::new();
+        let run_id = crate::event::FlowRunId::now();
+        let token = cancel();
+        let id = reg.register_flow_with_run_id(
+            "flow".into(),
+            "agent".into(),
+            "s".into(),
+            token.clone(),
+            None,
+            run_id.clone(),
+        );
+
+        assert_eq!(
+            reg.kill_from(&id, Some(&run_id), false),
+            KillOutcome::SelfKillRejected
+        );
+        assert!(!token.is_cancelled());
+        assert_eq!(reg.lookup(&id).unwrap().status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn confirmed_self_kill_records_suicide_cause() {
+        let reg = TaskRegistry::new();
+        let run_id = crate::event::FlowRunId::now();
+        let token = cancel();
+        let id = reg.register_flow_with_run_id(
+            "flow".into(),
+            "agent".into(),
+            "s".into(),
+            token.clone(),
+            None,
+            run_id.clone(),
+        );
+
+        assert_eq!(
+            reg.kill_from(&id, Some(&run_id), true),
+            KillOutcome::Killed {
+                termination: TaskTermination::Suicide
+            }
+        );
+        assert!(token.is_cancelled());
+        assert_eq!(
+            reg.lookup(&id).unwrap().termination,
+            Some(TaskTermination::Suicide)
+        );
+    }
+
+    #[test]
+    fn operator_kill_is_not_classified_as_suicide() {
+        let reg = TaskRegistry::new();
+        let target_run_id = crate::event::FlowRunId::now();
+        let id = reg.register_flow_with_run_id(
+            "flow".into(),
+            "agent".into(),
+            "s".into(),
+            cancel(),
+            None,
+            target_run_id,
+        );
+
+        assert_eq!(
+            reg.kill_from_operator(&id),
+            KillOutcome::Killed {
+                termination: TaskTermination::Killed
+            }
+        );
+        assert_eq!(
+            reg.lookup(&id).unwrap().termination,
+            Some(TaskTermination::Killed)
+        );
+    }
+
+    #[test]
+    fn another_flow_can_kill_without_suicide_confirmation() {
+        let reg = TaskRegistry::new();
+        let target_run_id = crate::event::FlowRunId::now();
+        let caller_run_id = crate::event::FlowRunId::now();
+        let id = reg.register_flow_with_run_id(
+            "flow".into(),
+            "agent".into(),
+            "s".into(),
+            cancel(),
+            None,
+            target_run_id,
+        );
+
+        assert_eq!(
+            reg.kill_from(&id, Some(&caller_run_id), false),
+            KillOutcome::Killed {
+                termination: TaskTermination::Killed
+            }
+        );
+    }
+
+    #[test]
     fn kill_returns_false_for_terminal() {
         let reg = TaskRegistry::new();
         let id = reg.register(
@@ -555,6 +728,8 @@ mod tests {
             source_handle: "term_1".into(),
             session_id: "sess_a".into(),
             workspace_id: None,
+            flow_run_id: None,
+            termination: None,
         };
         let f = TaskFilter {
             kind: Some(TaskKind::Terminal),

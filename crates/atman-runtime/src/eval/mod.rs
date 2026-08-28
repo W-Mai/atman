@@ -1532,6 +1532,7 @@ async fn eval_node<'a>(node: &'a Node, env: &'a Env, ctx: &'a EvalCtx<'a>) -> Va
                     flow_name: name.name.clone(),
                     ok,
                     cancelled,
+                    suicide: false,
                 });
             }
             result

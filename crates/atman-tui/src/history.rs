@@ -146,11 +146,12 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
             graph.apply_stream_frame_at(frame, ts);
             if let StreamFrame::FlowDone {
                 cancelled: flow_cancelled,
+                suicide,
                 ..
             } = frame
             {
                 *ended_at = Some(Instant::now());
-                *cancelled = *flow_cancelled;
+                *cancelled = *flow_cancelled || *suicide;
             }
         }
     };
@@ -434,6 +435,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                         flow_name: String::new(),
                         ok: *ok,
                         cancelled: *cancelled,
+                        suicide: false,
                     },
                     *ts,
                 );
@@ -664,6 +666,7 @@ pub fn flatten_transcript(entries: &[TranscriptEntry]) -> Vec<OutputItem> {
                             flow_name: String::new(),
                             ok: *ok,
                             cancelled: *cancelled,
+                            suicide: false,
                         },
                         *ts,
                     ),

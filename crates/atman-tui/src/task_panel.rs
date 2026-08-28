@@ -76,7 +76,15 @@ pub fn compute_task_panel_rect(area: Rect, show: bool, collapsed: bool) -> Optio
     })
 }
 
-fn status_icon(status: TaskStatus) -> &'static str {
+fn status_icon(
+    status: TaskStatus,
+    termination: Option<atman_runtime::task_registry::TaskTermination>,
+) -> &'static str {
+    if status == TaskStatus::Killed
+        && termination == Some(atman_runtime::task_registry::TaskTermination::Suicide)
+    {
+        return "↯";
+    }
     match status {
         TaskStatus::Running => "◐",
         TaskStatus::Killing => "◑",
@@ -366,7 +374,7 @@ pub fn render(
             let bar_color: Color = t.subtle_fg.into();
             let bar = if is_task_hovered { "▌" } else { "▎" };
 
-            let icon = status_icon(snap.status);
+            let icon = status_icon(snap.status, snap.termination);
             let elapsed = fmt_elapsed(snap.elapsed_ms());
             let elapsed_w = crate::width::width(&elapsed);
             // layout: bar(1) sp(1) icon(1) sp(1) label(...) pad sp(2) elapsed sp(1) insert(1) sp(1) kill(1) sp(1)
@@ -1075,6 +1083,8 @@ mod tests {
                 source_handle: "term_0".into(),
                 session_id: "s".into(),
                 workspace_id: None,
+                flow_run_id: None,
+                termination: None,
             },
             TaskSnapshot {
                 id: TaskId::default(),
@@ -1086,6 +1096,8 @@ mod tests {
                 source_handle: "flow_0".into(),
                 session_id: "s".into(),
                 workspace_id: None,
+                flow_run_id: None,
+                termination: None,
             },
         ];
         let items = vec![crate::app::OutputItem::Terminal {

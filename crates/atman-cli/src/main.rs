@@ -5200,6 +5200,7 @@ async fn preview_scene_workflow(session: std::sync::Arc<Session>, cancel_midway:
             flow_name: "demo".into(),
             ok: false,
             cancelled: false,
+            suicide: false,
         });
     }
 }

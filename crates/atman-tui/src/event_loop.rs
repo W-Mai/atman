@@ -405,7 +405,7 @@ pub(crate) async fn run_frames(
                                             .find(|s| s.source_handle == close_label)
                                             .map(|s| s.id.clone());
                                         if let (Some(tr), Some(tid)) = (&app.app.task_registry, tid) {
-                                            tr.kill(&tid);
+                                            let _ = tr.kill_from_operator(&tid);
                                         }
                                         app.wm.clear_panel_close_arm();
                                     } else {
@@ -647,7 +647,7 @@ pub(crate) async fn run_frames(
                                             && !app.app.kill_arm_expired()
                                         {
                                             if let Some(tr) = &app.app.task_registry {
-                                                tr.kill(&tid);
+                                                let _ = tr.kill_from_operator(&tid);
                                             }
                                             app.app.clear_kill_arm();
                                         } else {

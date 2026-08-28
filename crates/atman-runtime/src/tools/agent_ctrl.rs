@@ -972,7 +972,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
 
     let task_registry = ctx.task_registry.clone();
     let task_id = task_registry.as_ref().map(|tr| {
-        tr.register_flow(
+        tr.register_flow_with_run_id(
             entry.goal.clone(),
             handle.clone(),
             session_id.clone().unwrap_or_default(),
@@ -980,6 +980,7 @@ async fn run_sub_agent_async(args: ToolArgs, ctx: &ToolCtx) -> ToolResult {
             workspace
                 .as_ref()
                 .map(|binding| binding.workspace_id.clone()),
+            child_run_id.clone(),
         )
     });
 
@@ -1529,6 +1530,15 @@ fn emit_flow_agent_start(ctx: &ToolCtx, run_id: &FlowRunId, flow_name: &str) {
 }
 
 fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
+    let suicide = ctx.task_registry.as_ref().is_some_and(|registry| {
+        registry
+            .list(&crate::task_registry::TaskFilter::default())
+            .iter()
+            .any(|snapshot| {
+                snapshot.flow_run_id.as_ref() == Some(run_id)
+                    && snapshot.termination == Some(crate::task_registry::TaskTermination::Suicide)
+            })
+    });
     if let Some(sink) = &ctx.events {
         sink.emit(Event::FlowEnd {
             run_id: run_id.clone(),
@@ -1541,7 +1551,8 @@ fn emit_child_flow_end(ctx: &ToolCtx, run_id: &FlowRunId, status: &FlowStatus) {
             run_id: run_id.0.to_string(),
             flow_name: "agent.sub".into(),
             ok: matches!(status, FlowStatus::Ok),
-            cancelled: false,
+            cancelled: matches!(status, FlowStatus::Cancelled),
+            suicide,
         });
     }
 }
